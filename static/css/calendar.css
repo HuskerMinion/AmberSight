@@ -1,0 +1,37 @@
+/* The timeline's day picker (calendar.js): a small month grid over the dock. */
+.cal { position: fixed; z-index: 130; width: min(300px, calc(100vw - 16px)); box-sizing: border-box; background: var(--raised); color: var(--text); border: 1px solid var(--line2); border-radius: var(--r2); box-shadow: var(--shadow); padding: 8px; font-size: var(--fs-s); }
+.calhd { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.caltitle { flex: 1; text-align: center; font-weight: 600; font-size: var(--fs); text-transform: capitalize; }
+.calnav { width: 36px; height: 36px; border-radius: var(--r1); border: 1px solid transparent; background: none; color: var(--text); font-size: 22px; line-height: 1; cursor: pointer; }
+.calnav:hover:not(:disabled) { background: var(--surface2); border-color: var(--line2); }
+.calnav:disabled { opacity: .3; cursor: default; }
+.calrow { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.calrow > span { display: flex; justify-content: center; }
+.calwd { margin-bottom: 2px; color: var(--muted); font-size: 11px; text-align: center; text-transform: uppercase; }
+.calwd > span { display: block; }
+.calday { width: 100%; max-width: 40px; height: 36px; min-width: 0; position: relative; border: 1px solid transparent; border-radius: var(--r1); background: none; color: var(--muted); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; padding: 0; opacity: .55; }
+.calday.out { opacity: .3; }
+.calday.rec { background: var(--accent-soft); color: var(--text); opacity: 1; font-weight: 600; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.calday.rec.out { opacity: .6; }
+.calday.future { opacity: .25; cursor: default; }
+.calday:hover:not(.future) { border-color: var(--muted); opacity: 1; }
+.calday.today { border-color: var(--text); }
+.calday.sel { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); opacity: 1; font-weight: 700; box-shadow: none; }
+.calday.alert::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 5px; height: 5px; margin-left: -2.5px; border-radius: 50%; background: var(--person); }
+.calday.sel.alert::after { background: var(--accent-ink); }
+.calday:focus-visible, .calnav:focus-visible, .calnow:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.calft { display: flex; align-items: center; gap: 12px; margin-top: 8px; color: var(--muted); }
+.calkey { display: inline-flex; align-items: center; gap: 5px; }
+.calsw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.calsw.rec { background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.caldot { width: 6px; height: 6px; border-radius: 50%; background: var(--person); display: inline-block; }
+.calnow { margin-left: auto; min-height: 36px; padding: 0 12px; border-radius: var(--r1); border: 1px solid var(--field-line); background: var(--surface2); color: var(--text); font: inherit; cursor: pointer; }
+.calnow:hover { border-color: var(--muted); background: var(--surface); }
+.cal[aria-busy="true"] .caltitle::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); opacity: .7; }
+/* The Go to row: the calendar button sits at the end of the date field. */
+.tlgoto #tlCal { flex: none; }
+@media (prefers-reduced-motion: no-preference) { .calday { transition: background .12s, border-color .12s; } }
+
+/* One calendar: the timeline's own button, not the browser's picker icon as well
+   (the box still takes a typed date and time). */
+#tlGoto::-webkit-calendar-picker-indicator { display: none; }

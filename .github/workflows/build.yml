@@ -1,0 +1,28 @@
+name: build
+# Builds and tests on Linux, macOS and Windows for every push and pull request
+# in the public repository. Copies of the repository elsewhere skip the job
+# (it can still be started by hand from the Actions tab). Release packages are
+# not built here: they are built and signed on the maintainer's machines.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  build:
+    if: github.repository == 'HuskerMinion/AmberSight' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked

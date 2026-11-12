@@ -1,0 +1,97 @@
+[package]
+name = "ambersight"
+version = "0.7.1"
+edition = "2021"
+description = "AmberSight - a self-hosted camera security and recording server"
+license = "PolyForm-Noncommercial-1.0.0"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "io-util", "process"] }
+# Capture helper control channel (TLS is set up by us, pinned to the server CA).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde", "iana-time-zone", "clock"] }
+image = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+tower-http = { version = "0.5", features = ["fs"] }
+tower = { version = "0.4", features = ["util"] }
+subtle = "2"
+percent-encoding = "2"
+retina = "0.4"
+url = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+# AES-256-GCM and HMAC for off-site backups (already used by rustls).
+ring = "0.17"
+zeroize = "1"
+rumqttc = { version = "0.24", default-features = false }
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "ring", "hostname"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "http1", "http2"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+roxmltree = "0.21.2"
+sha1 = "0.11.0"
+md-5 = "0.11.0"
+fs4 = "0.13"
+socket2 = { version = "0.5", features = ["all"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+rust-embed = { version = "8", default-features = false }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system", "network"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+rml_rtmp = "0.8.0"
+http-body-util = "0.1.5"
+tokio-util = { version = "0.7.20", features = ["io"] }
+# Browser notifications (Web Push): message encryption and the server key.
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+hkdf = "0.12"
+aes-gcm = "0.10"
+# Baichuan (battery Reolink Argus) message encryption: AES-128-CFB, pure Rust.
+aes = "0.8"
+cfb-mode = "0.8"
+# Decoding camera audio (AAC) for the loud-sound trigger: pure Rust, AAC only.
+symphonia-core = { version = "0.6", default-features = false }
+symphonia-codec-aac = { version = "0.6", default-features = false }
+# Unpacking the ffmpeg download on Mac/Windows: reading deflate zips only, pure Rust.
+zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2"] }
+# Unpacking an update package on Mac/Linux (.tar.gz): pure Rust, no extended attributes.
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# Built-in AI (ONNX Runtime): no prebuilt runtime exists for Intel Macs, where
+# only an external AI server is available.
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "api-31", "tls-rustls"] }
+ndarray = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+# The graphics card for AI (DirectML: any DirectX 12 GPU); the Windows
+# runtime ort downloads already includes it.
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["directml"] }
+# Listing the graphics cards (DXGI) to choose one for AI.
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance"] }
+windows-service = "0.7"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_RemoteDesktop", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_UI_HiDpi"] }
+
+[profile.release]
+opt-level = 3
+strip = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+
+# retina 0.4.21 with local patches: OPTIONS before DESCRIBE, framing-error recovery (see vendor/retina/AMBERSIGHT-PATCH.md)
+[patch.crates-io]
+retina = { path = "vendor/retina" }

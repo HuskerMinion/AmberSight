@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14181e">
+<title>AmberSight</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AmberSight">
+<link rel="icon" href="/static/icons/favicon.svg" type="image/svg+xml" id="favicon">
+<link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="stylesheet" href="/static/css/tiles.css">
+<link rel="stylesheet" href="/static/css/timeline.css">
+<link rel="stylesheet" href="/static/css/calendar.css">
+<link rel="stylesheet" href="/static/css/review.css">
+<link rel="stylesheet" href="/static/css/follow.css">
+<link rel="stylesheet" href="/static/css/a11y.css">
+<script src="/static/js/prepaint.js"></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 1-1 1.7M12 17h.01"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+  <symbol id="i-rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></symbol>
+  <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></symbol>
+  <symbol id="i-vol-low" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM16 9.5a3 3 0 0 1 0 5"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM17 9l5 6M22 9l-5 6"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4"/></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+  <symbol id="i-timeline" viewBox="0 0 24 24"><path d="M3 12h18M7 8v8M12 5v14M17 9v6"/></symbol>
+  <symbol id="i-person" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.4"/><path d="M12 8.5v6M12 10.5l-4.5 3M12 10.5l4.5 3M12 14.5l-3.2 6M12 14.5l3.2 6"/></symbol>
+  <symbol id="i-car" viewBox="0 0 24 24"><path d="M4 17v-5l2-5h12l2 5v5zM4 12h16"/><circle cx="8" cy="17" r="1.7"/><circle cx="16" cy="17" r="1.7"/></symbol>
+  <symbol id="i-paw" viewBox="0 0 24 24"><path d="M8 17.5c0-2.6 1.8-4.2 4-4.2s4 1.6 4 4.2c0 1.6-1.4 2.3-4 2.3s-4-.7-4-2.3z"/><circle cx="5.8" cy="12" r="1.5"/><circle cx="9.5" cy="7.8" r="1.5"/><circle cx="14.5" cy="7.8" r="1.5"/><circle cx="18.2" cy="12" r="1.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5l8.5 8.5-8.5 8.5L3.5 12z"/><path d="M12 8.5v4M12 15.5h.01"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M18.4 6.6a9 9 0 1 1-12.8 0M12 2v10"/></symbol>
+  <symbol id="i-belloff" viewBox="0 0 24 24"><path d="M8.7 3.7A6 6 0 0 1 18 9c0 2.2.4 3.8 1 5M6 9c0 4-1.5 6-3 7h13M10 20a2 2 0 0 0 4 0M3 3l18 18"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+  <symbol id="i-prevalert" viewBox="0 0 24 24"><path d="M5 5v14M19 5l-10 7 10 7z"/></symbol>
+  <symbol id="i-nextalert" viewBox="0 0 24 24"><path d="M19 5v14M5 5l10 7-10 7z"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="18.5" cy="12" r="1.5" fill="currentColor"/></symbol>
+  <symbol id="i-keys" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17" /><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <!-- The AmberSight mark: a camera aperture opening into an eye (scripts/make-icons.py draws the same). -->
+  <mask id="logoCut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#fff"/><path d="M14 32s7.5-10 18-10 18 10 18 10-7.5 10-18 10-18-10-18-10z" fill="#000"/></mask>
+  <symbol id="i-logo" viewBox="6 6 52 52"><g fill="currentColor" stroke="none"><g mask="url(#logoCut)"><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="0.55" transform="rotate(0 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="1" transform="rotate(60 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="0.55" transform="rotate(120 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="1" transform="rotate(180 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="0.55" transform="rotate(240 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="1" transform="rotate(300 32 32)"/></g><circle cx="32" cy="32" r="5.5"/></g></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-live" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M6.3 6.3a8 8 0 0 0 0 11.4M17.7 6.3a8 8 0 0 1 0 11.4"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-aim" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.5 4.5v15"/></symbol>
+  <symbol id="i-arrange" viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 17h6M17 14v6"/></symbol>
+  <symbol id="i-zone" viewBox="0 0 24 24"><path d="M4 4h16v16H4z" stroke-dasharray="3 2.5"/></symbol>
+  <symbol id="i-v-grid" viewBox="0 0 24 24"><path d="M4 4h7v5H4zM13 4h7v5h-7zM4 11h7v5H4zM13 11h7v5h-7zM4 19.5h7M13 19.5h7"/></symbol>
+  <symbol id="i-v-fit" viewBox="0 0 24 24"><path d="M3 5h18v14H3zM9 5v14M15 5v14M3 12h18"/></symbol>
+  <symbol id="i-v-focus" viewBox="0 0 24 24"><path d="M3 4h18v16H3zM15 4v16M15 9.3h6M15 14.7h6M3 14.7h12M9 14.7v5.3"/></symbol>
+  <symbol id="i-v-focus2" viewBox="0 0 24 24"><path d="M3 4h18v16H3zM12 4v10M3 14h18M9 14v6M15 14v6"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h14l-3-3M20 16H6l3 3"/></symbol>
+</defs></svg>
+<header>
+  <div class="logo" role="link" tabindex="0" title="Go to your start page"><svg class="ic mark"><use href="#i-logo"/></svg><span class="lt"><b>Amber</b>Sight</span></div>
+  <nav id="nav" aria-label="Sections"></nav>
+  <div class="hdr-right">
+    <div id="status"><span class="lamp" id="lamp"></span><button type="button" id="healthChip" class="healthchip" hidden><svg class="ic"><use href="#i-alert"/></svg><span class="hctext"></span></button><span id="statusText">connecting...</span><span class="clock" id="clock"></span></div>
+    <button id="hdrShield" class="btn shieldbtn" title="Arm or disarm motion detection on all cameras (S)"><svg class="ic"><use href="#i-shield"/></svg><span id="shieldLbl">&hellip;</span></button>
+    <button id="themeBtn" class="btn icon" title="Theme: Auto" aria-label="Change theme"><svg class="ic"><use id="themeUse" href="#i-sun"/></svg></button>
+    <button id="keysBtn" class="btn icon" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><svg class="ic"><use href="#i-keys"/></svg></button>
+    <div id="userMenu" class="usermenu">
+      <button id="userBtn" class="btn" aria-haspopup="true" aria-expanded="false" aria-label="Menu" title="Menu"><svg class="ic ic-user"><use href="#i-user"/></svg><span id="userName"></span><svg class="ic ic-dots"><use href="#i-dots"/></svg></button>
+      <div id="userDrop" class="userdrop" hidden>
+        <div id="acctInfo" class="acctinfo"></div>
+        <div class="themeseg" role="group" aria-label="Theme"><span>Theme</span><button type="button" data-mode="auto">Auto</button><button type="button" data-mode="light">Light</button><button type="button" data-mode="dark">Dark</button></div>
+        <div class="phoneonly">
+          <button id="menuTl" role="menuitem">Time-lapse</button>
+          <button id="menuHelp" role="menuitem">Help</button>
+          <button id="menuKeys" role="menuitem">Keyboard shortcuts</button>
+          <hr>
+        </div>
+        <button id="menuPopups" role="menuitemcheckbox" aria-checked="false">Alert pop-ups: Off</button>
+        <button id="menuAwake" role="menuitemcheckbox" aria-checked="true" title="While AmberSight is open and showing, this computer's screen stays on and it does not go to sleep">Keep screen awake: On</button>
+        <button id="menuText" role="menuitem" title="Make all text in AmberSight larger on this device">Text size: Normal</button>
+        <button id="menuTlCtl" role="menuitem" title="Docked: the timeline controls sit under the cameras. Auto-hide: they float over the cameras and fade out while playing; tap to bring them back">Timeline controls: Docked</button>
+        <button id="menuData" role="menuitem" title="Use less data on this device: smaller live and playback video (the cameras' sub streams)">Data saver: Auto</button>
+        <button id="menuStart">Start page…</button>
+        <button id="menuDbl">Double-click opens…</button>
+        <button id="menuPush">Notifications on this device…</button>
+        <button id="menuAcct">Your account…</button>
+        <button id="menuPw">Change password</button>
+        <button id="menuTrust">Trust this server (HTTPS)…</button>
+        <button id="menuOut">Sign out</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div id="loginGate" role="dialog" aria-label="Sign in">
+  <form id="loginForm" class="gcard" autocomplete="on" novalidate>
+    <h2><span>Amber</span>Sight</h2>
+    <p class="hint">Sign in first. Your access level controls which settings you can see and change.</p>
+    <div id="credStep1">
+      <label>Username <input id="credUser" name="username" autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+      <label>Password <input id="credPass" name="password" type="password" autocomplete="current-password"></label>
+    </div>
+    <div id="credStep2" hidden>
+      <label id="credCodeBox">Code from your authenticator app <input id="credCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" pattern="[0-9 ]*"></label>
+      <label id="credRecBox" hidden>Recovery code <input id="credRec" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+    </div>
+    <button class="primary" id="credGo" type="submit">Sign in</button>
+    <div id="credLinks" class="gate-links" hidden>
+      <button type="button" class="gate-link" id="credUseRec">Use a recovery code</button>
+      <button type="button" class="gate-link" id="credBack">Start over</button>
+    </div>
+    <p class="hint" id="credMsg" role="alert"></p>
+  </form>
+</div>
+
+<div class="livewrap" id="liveWrap" data-side="left">
+<aside id="dock" class="dock" aria-label="View"></aside>
+<main>
+  <section id="tab-live">
+      <div class="livemain">
+        <div class="livebar">
+          <button id="dockOpen" class="btn dockopen" title="Open the sidebar: profile, picture, camera controls" aria-label="View"><svg class="ic"><use href="#i-panel"/></svg><span>View</span></button>
+          <div id="layoutChips" class="chips" aria-label="Saved layouts"></div>
+          <button id="layoutEdit" class="btn" data-menu="1" aria-haspopup="menu" title="Saved layouts: edit them, or arrange the cameras"><svg class="ic"><use href="#i-grid"/></svg><span>Layouts</span><svg class="ic lm-caret"><use href="#i-down"/></svg></button>
+          <div id="viewStyle" class="seg vstyle" role="group" aria-label="View style (V)">
+            <button type="button" data-style="grid" title="Grid: equal tiles, scroll for more (V cycles the styles)"><svg class="ic"><use href="#i-v-grid"/></svg><span>Grid</span></button>
+            <button type="button" data-style="fit" title="Fit: every camera fills the window, no scrolling"><svg class="ic"><use href="#i-v-fit"/></svg><span>Fit</span></button>
+            <button type="button" data-style="focus" title="Focus: the first camera large, the rest around it (Arrange picks which)"><svg class="ic"><use href="#i-v-focus"/></svg><span>Focus</span></button>
+            <button type="button" data-style="focus2" title="Focus 2: the first two cameras large, the rest below"><svg class="ic"><use href="#i-v-focus2"/></svg><span>Focus 2</span></button>
+          </div>
+          <div id="pager" class="pager" hidden><button id="pagePrev" class="btn icon" aria-label="Previous page"><svg class="ic"><use href="#i-left"/></svg></button><span id="pageLbl">1 / 1</span><button id="pageNext" class="btn icon" aria-label="Next page"><svg class="ic"><use href="#i-right"/></svg></button></div>
+          <button id="fsBtn" class="btn" title="Full screen: the cameras fill the screen (F)"><svg class="ic"><use href="#i-expand"/></svg><span>Full screen</span></button>
+          <button id="tlToggle" class="btn" aria-pressed="false" title="Timeline: play back recordings with alerts (T)"><svg class="ic"><use href="#i-timeline"/></svg><span>Timeline</span></button>
+          <button id="arrangeBtn" class="btn" hidden aria-pressed="false" title="Drag the tiles into the order you want"><svg class="ic"><use href="#i-arrange"/></svg><span>Done</span></button>
+          <button id="splitBtn" class="btn" hidden title="Two servers side by side (or one above the other)"><svg class="ic"><use href="#i-v-focus2"/></svg><span>Split view</span></button>
+          <button id="arrangeCancel" class="btn" hidden title="Discard the new order (Esc)"><span>Cancel</span></button>
+          <span class="cyc"><label class="sw" title="Step through the pages of cameras by itself"><input type="checkbox" role="switch" id="cycleOn"><span class="sw-track" aria-hidden="true"></span><span class="sw-text">Cycle</span></label> <select id="cycleSec" aria-label="Seconds per page" hidden><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></span>
+        </div>
+        <div class="grid" id="camGrid"></div>
+        <div id="tlDock" class="tldock" hidden></div>
+      </div>
+    <div id="dockScrim" class="dockscrim" hidden></div>
+  </section>
+  <section id="tab-events" hidden>
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+      <symbol id="i-pkg" viewBox="0 0 24 24"><path d="M3.5 7.5L12 3l8.5 4.5v9L12 21l-8.5-4.5zM3.5 7.5L12 12l8.5-4.5M12 12v9"/></symbol>
+      <symbol id="i-face" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 10v1M15 10v1M8.8 14.5c1.7 1.8 4.7 1.8 6.4 0"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="18.5" cy="12" r="1.2" fill="currentColor"/></symbol>
+      <symbol id="i-cal" viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="14.5" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></symbol>
+      <symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></symbol>
+      <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 13v6.5h14V13"/></symbol>
+      <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="currentColor"/></symbol>
+    </defs></svg>
+    <div id="searchBar" class="evbar">
+      <div class="evchips" id="evChips">
+        <button type="button" id="fCam" class="chip evchip" aria-haspopup="true" title="Choose cameras"><span>All cameras</span> <svg class="ic"><use href="#i-down"/></svg></button>
+        <span class="evsep" aria-hidden="true"></span>
+        <button type="button" class="chip evchip" data-obj="person" style="--c:var(--person)"><svg class="ic"><use href="#i-person"/></svg>Person</button>
+        <button type="button" class="chip evchip" data-obj="vehicle" style="--c:var(--vehicle)"><svg class="ic"><use href="#i-car"/></svg>Vehicle</button>
+        <button type="button" class="chip evchip" data-obj="animal" style="--c:var(--animal)"><svg class="ic"><use href="#i-paw"/></svg>Animal</button>
+        <button type="button" class="chip evchip" data-obj="package" style="--c:var(--package)"><svg class="ic"><use href="#i-pkg"/></svg>Package</button>
+        <button type="button" class="chip evchip" data-obj="face" style="--c:var(--face)"><svg class="ic"><use href="#i-face"/></svg>Face</button>
+        <button type="button" class="chip evchip" data-obj="unusual" style="--c:var(--warn)" title="Events out of this camera's usual pattern"><svg class="ic"><use href="#i-alert"/></svg>Unusual</button>
+        <button type="button" class="chip evchip" data-obj="other" style="--c:var(--muted)">Other</button>
+        <span class="evsep" aria-hidden="true"></span>
+        <button type="button" class="chip evchip" data-range="all">Any time</button>
+        <button type="button" class="chip evchip" data-range="today">Today</button>
+        <button type="button" class="chip evchip" data-range="7d">7 days</button>
+        <button type="button" class="chip evchip" data-range="30d">30 days</button>
+        <button type="button" class="chip evchip" data-range="custom" id="evCustom"><span>Custom</span></button>
+        <span class="evsep" aria-hidden="true"></span>
+        <button type="button" class="chip evchip" id="evProt" aria-pressed="false" title="Only events you chose to keep forever"><svg class="ic"><use href="#i-lock"/></svg>Kept</button>
+        <label class="sw evhfa" title="Leave out events marked as not a real alert (X marks one)"><input type="checkbox" role="switch" id="evHideFA"><span class="sw-track" aria-hidden="true"></span><span class="sw-text"><b>Hide false alarms</b></span></label>
+      </div>
+      <label id="fSmartL" class="evsmart" hidden title="Smart search: describe what you are looking for, then press Enter"><svg class="ic"><use href="#i-search"/></svg><input id="fSmart" type="search" placeholder="Describe..." enterkeyhint="search" maxlength="200" aria-label="Describe what to find"></label>
+      <button type="button" id="clearFilter" class="btn" hidden>Clear</button>
+      <div class="evview" id="evView" role="group" aria-label="View"><button type="button" class="chip" data-view="list" aria-pressed="true">List</button><button type="button" class="chip" data-view="grid" aria-pressed="false">Grid</button></div>
+      <button type="button" id="evMore" class="btn icon" aria-haspopup="true" aria-label="More" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
+    </div>
+    <div id="smartResults" class="smq-res" hidden></div>
+    <div id="eventTable" class="evsplit">
+      <div class="evlist" id="evListWrap">
+        <div class="evnote" id="evAiOff" hidden><span>Smart alerts are off, so every motion is listed.</span><a class="btn" href="#settings/detection/objects">Turn on</a></div>
+        <div class="evbulk" id="evBulk" hidden></div>
+        <div class="evscroll" id="evList" tabindex="-1"><div id="eventRows" role="listbox" aria-label="Events"></div><div id="evMoreRow" class="evmorerow" hidden><button type="button" class="btn" id="evLoadMore">Load more</button></div></div>
+      </div>
+      <div class="evplayer" id="evPlayer"><p class="empty evnone">Select an event to see it here.</p></div>
+    </div>
+  </section>
+  <section id="tab-admin" hidden>
+    <div id="adminNav" class="chips"></div>
+    <div id="adminBody"></div>
+  </section>
+  <section id="tab-help" hidden></section>
+</main>
+</div>
+
+<div class="big" id="lightbox">
+  <div class="lbtop">
+    <span id="fullName" class="fullname" hidden></span>
+    <div class="lbtools" id="fullTools">
+      <button class="btn glass" id="fullSnap" title="Save snapshot (P)"><svg class="ic"><use href="#i-camera"/></svg><span>Snapshot</span></button>
+      <button class="btn glass" id="fullTl" title="Play back this camera's recordings (L)"><svg class="ic"><use href="#i-timeline"/></svg><span>Timeline</span></button>
+      <button class="btn glass" id="fullClips" title="Clips from this camera"><svg class="ic"><use href="#i-play"/></svg><span>Clips</span></button>
+      <button class="btn glass" id="fullClip" title="Record a 20 s clip now (C)"><svg class="ic"><use href="#i-rec"/></svg><span>Clip</span></button>
+      <button class="btn glass" id="fullFs" title="Full screen: only this camera, nothing else on the screen (F)"><svg class="ic"><use href="#i-expand"/></svg><span>Full screen</span></button>
+      <button class="btn glass" id="fullMenu" title="More for this camera (or right-click the picture)"><svg class="ic"><use href="#i-gear"/></svg><span>Camera</span></button>
+      <button class="btn glass fullpanel" id="fullPanel" title="Camera controls: PTZ, talk, profile" aria-label="View"><svg class="ic"><use href="#i-panel"/></svg><span>View</span></button>
+    </div>
+    <button id="closeLight" class="btn glass lbclose" title="Close (Esc)"><svg class="ic"><use href="#i-x"/></svg><span>Close</span></button>
+  </div>
+  <button id="fullPrev" class="btn glass lbnav prev" aria-label="Previous camera"><svg class="ic"><use href="#i-left"/></svg></button>
+  <button id="fullNext" class="btn glass lbnav next" aria-label="Next camera"><svg class="ic"><use href="#i-right"/></svg></button>
+  <div id="lightContent"></div>
+</div>
+<noscript><p style="padding:20px">AmberSight needs JavaScript.</p></noscript>
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

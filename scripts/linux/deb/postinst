@@ -1,0 +1,31 @@
+#!/bin/sh
+# AmberSight .deb: create the service user, give it the settings and data
+# folders (it saves settings changed in the web page), start the service.
+set -e
+if [ "$1" = configure ]; then
+  if ! getent passwd ambersight >/dev/null; then
+    useradd --system --user-group --home-dir /var/lib/ambersight --no-create-home \
+      --shell /usr/sbin/nologin --comment "AmberSight camera recorder" ambersight
+  fi
+  # USB cameras and hardware video decoding need these groups.
+  for g in video render; do
+    if getent group "$g" >/dev/null; then usermod -a -G "$g" ambersight; fi
+  done
+  mkdir -p /var/lib/ambersight /etc/ambersight
+  # First install: the settings file from the template (never replaced later).
+  if [ ! -e /etc/ambersight/config.toml ]; then
+    cp /usr/share/ambersight/config.toml /etc/ambersight/config.toml
+  fi
+  chown ambersight:ambersight /var/lib/ambersight /etc/ambersight /etc/ambersight/config.toml
+  chmod 750 /var/lib/ambersight /etc/ambersight
+  chmod 640 /etc/ambersight/config.toml
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable ambersight.service
+    systemctl restart ambersight.service
+  elif command -v systemctl >/dev/null 2>&1; then
+    # No running systemd (a container, an image being built): enable only.
+    systemctl enable ambersight.service || true
+  fi
+fi
+exit 0

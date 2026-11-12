@@ -1,0 +1,276 @@
+/* Settings page: left rail of sections (phones: one "Settings - Section" button and a full-screen list), content on the right.
+   One save model: switches save when flipped; text / number / select fields use the sticky bar (.ac-bar). (Loaded from main.js.) */
+#tab-settings { --sp-rail: 220px; }
+.sp { display: grid; grid-template-columns: var(--sp-rail) minmax(0, 1fr); gap: var(--s5); align-items: start; max-width: 1240px; margin: 0 auto; }
+.sp-rail { position: sticky; top: calc(var(--sp-top, 52px) + var(--s4)); display: flex; flex-direction: column; gap: 2px; max-height: calc(100dvh - var(--sp-top, 52px) - var(--s5)); overflow: auto; align-self: start; }
+.sp-group { padding: 12px 12px 4px; font-size: var(--fs-s); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.sp-group:first-child { padding-top: 0; }
+.sp-item { display: block; padding: 8px 12px; border-radius: var(--r1); color: var(--muted); font-weight: 500; text-decoration: none; border-left: 3px solid transparent; white-space: nowrap; }
+.sp-item:hover { color: var(--text); background: var(--surface2); text-decoration: none; }
+.sp-item.on { color: var(--text); background: var(--surface2); border-left-color: var(--accent); }
+.sp-main { min-width: 0; }
+.sp-head { margin-bottom: var(--s3); }
+.sp-title { display: flex; align-items: center; gap: var(--s3); }
+.sp-title h2 { margin: 0; color: var(--text); font-size: calc(20px * var(--ts)); font-weight: 600; }
+.sp-title .helpq { position: relative; margin-left: 0; width: auto; height: auto; border-radius: 999px; padding: 2px 11px; font-size: var(--fs-s); font-weight: 500; }
+.sp-desc { margin: 2px 0 var(--s3); }
+.sp-main:has(.sp-body .sp-lead) .sp-desc { display: none; }   /* the page's own one-line lead replaces the section description */
+.sp-subs { margin: 0 0 var(--s2); }
+.sp-body { max-width: 760px; padding-bottom: calc(var(--s6) + 72px); }
+.sp-body.wide { max-width: 1180px; }
+.sp-head { max-width: 760px; }
+/* A focused field is never hidden behind the sticky bar (or the phone's bottom tab bar). */
+:root:has(body[data-tab="settings"]) { scroll-padding-bottom: calc(96px + var(--bottom-bar-h, 0px)); }
+
+/* Form controls (the dialog styles, now on the page) */
+.sp-body label:not(.fld) { display: block; margin: var(--s2) 0; font-size: var(--fs-s); color: var(--muted); }
+.sp-body label:not(.fld):not(.sw):not(.asys-chk):not(.ac-switch):not(.ac-inl) input:not([type=checkbox]):not([type=radio]):not([type=range]), .sp-body label:not(.fld):not(.sw) select { width: 100%; max-width: 520px; margin-top: 3px; display: block; }
+.sp-body label input[type=range] { width: 100%; max-width: 520px; display: block; }
+.sp-body label.fld input[type=range] { max-width: none; }
+.sp-body label.sw, .sp-body label.asys-chk { display: flex; font-size: var(--fs); }
+.sp-body .sec { font-weight: 600; color: var(--text); font-size: var(--fs); margin: var(--s5) 0 var(--s1); }
+.sp-body .sec:first-child { margin-top: 0; }
+.sp-body .rv { color: var(--accent); font-variant-numeric: tabular-nums; }
+.sp-body .row { margin-top: var(--s3); display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+.sp-body .row button:not(.primary) { display: inline-flex; align-items: center; background: var(--surface2); border: 1px solid var(--field-line); color: var(--text); border-radius: var(--r1); padding: 6px 12px; cursor: pointer; }
+.sp-body .row button:not(.primary):hover { border-color: var(--muted); background: var(--raised); }
+.sp-body .row button.danger, .sp-body button.danger { color: var(--fault); }
+.sp-body .hint.bad { color: var(--fault); }
+.sp-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 var(--s3); max-width: 640px; }
+.sp-lead { margin: 0 0 var(--s3); max-width: 70ch; }
+
+/* One field: label above, the input with its unit after it on the same line, hint below. */
+.fld { display: block; margin: var(--s3) 0 var(--s1); font-size: var(--fs-s); color: var(--muted); }
+.fld-l { display: block; margin-bottom: 3px; }
+.fld-in { display: flex; align-items: center; gap: var(--s2); }
+.fld-in input:not([type=checkbox]):not([type=range]):not([type=number]):not([type=time]), .fld > select, .fld > input:not([type=checkbox]):not([type=range]):not([type=number]):not([type=time]) { width: 100%; margin: 0; display: block; }
+.fld-in input[type=number], .fld-in input[type=time], .fld > input[type=time], .fld > input[type=number] { width: 8.5em; flex: none; margin: 0; display: block; }
+.fld .unit { color: var(--muted); white-space: nowrap; font-size: var(--fs); }
+.fld > input[type=range] { width: 100%; }
+.fld-h { margin: 2px 0 var(--s2); }
+.sp-body .ac-grid3 .fld { margin-top: 0; }
+.sp-body .ac-grid3, .sp-body .ac-grid4 { align-items: end; }
+.ac-more { margin: var(--s4) 0 0; border-top: 1px solid var(--line); padding-top: var(--s2); }
+.ac-more > summary { cursor: pointer; font-weight: 600; color: var(--text); padding: 4px 0; }
+.ac-path-i { font-family: var(--mono); word-break: break-all; color: var(--text); }
+
+/* The one save bar: only there while a text / number / select field has an unsaved change. */
+.ac-bar[hidden] { display: none; }
+.sp-body .ac-bar { bottom: calc(var(--bottom-bar-h, 0px) + var(--s2)); max-width: 760px; }
+.sp-body.wide .ac-bar { max-width: 1180px; }
+
+/* Confirmation dialogs (core.js confirmDialog) */
+.cfm-body { margin: 0; line-height: 1.5; }
+.cfm-row { justify-content: flex-end; }
+
+/* Time window control */
+.tr { margin: var(--s2) 0; }
+.tr-fields { display: flex; align-items: center; gap: var(--s2); margin: 2px 0 0 46px; flex-wrap: wrap; }
+.tr-fields input[type=time] { width: auto; padding: 5px 8px; }
+.tr-raw { margin: 4px 0 0 46px; }
+.tr-raw input { max-width: 260px; }
+.tr-note { margin: 0; }
+.tr-err { color: var(--fault); font-size: var(--fs-s); margin-left: 46px; min-height: 0; }
+.tr-err:empty { display: none; }
+
+/* Notification service cards */
+.sv-list { display: flex; flex-direction: column; gap: var(--s2); }
+.sv-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r2); }
+.sv-card.open { border-color: var(--line2); }
+.sv-head { border-radius: var(--r2); display: flex; align-items: center; gap: var(--s3); width: 100%; padding: 12px var(--s4); background: none; border: 0; text-align: left; cursor: pointer; color: var(--text); font-size: var(--fs); }
+.sv-head:hover { background: var(--surface2); }
+.sv-head b { font-weight: 600; flex: none; min-width: 130px; }
+.sv-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--field-line); }
+.sv-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.sv-sum { flex: 1; min-width: 0; color: var(--muted); font-size: var(--fs-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-state { font-size: var(--fs-s); color: var(--muted); flex: none; }
+.sv-card .sv-dot.on ~ .sv-state { color: var(--ok); }
+.sv-chev .ic { transition: transform var(--ease); color: var(--muted); }
+.sv-card.open .sv-chev .ic { transform: rotate(180deg); }
+.sv-body { padding: 0 var(--s4) var(--s4); border-top: 1px solid var(--line); }
+.sv-body .row { margin-top: var(--s3); }
+.sv-out { margin: var(--s2) 0 0; }
+.sv-body .ac-card { border: 0; padding: var(--s2) 0 0; margin: 0; background: none; }
+.sv-form .fld:first-child { margin-top: var(--s3); }
+
+/* Pages that used to sit on a full-width Admin tab */
+.sp-body .asys, .sp-body .ac { padding-top: 0; }
+
+/* Phone section picker: a full-width button, then a full-screen list of the sections. */
+.sp-sectbtn { display: none; }
+.sp-picker { position: fixed; inset: 0; z-index: 95; background: var(--bg); display: flex; flex-direction: column; }
+.sp-pbar { display: flex; align-items: center; justify-content: space-between; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); font-size: var(--fs-l); }
+.sp-plist { overflow: auto; padding: var(--s2) var(--s3) var(--s6); }
+.sp-plist .sp-group { padding-left: var(--s2); }
+.sp-prow { display: flex; align-items: center; gap: var(--s3); min-height: 64px; padding: var(--s3) var(--s4); margin: 4px 0; border: 1px solid var(--line); border-radius: var(--r2); background: var(--surface); color: var(--text); text-decoration: none; }
+.sp-prow:hover { text-decoration: none; border-color: var(--line2); }
+.sp-prow.on { border-color: var(--accent); background: var(--accent-soft); }
+.sp-prow > span:first-child { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sp-prow b { font-size: var(--fs-l); font-weight: 600; }
+.sp-prow small { color: var(--muted); font-size: var(--fs-s); line-height: 1.35; }
+.sp-pchev .ic { transform: rotate(-90deg); color: var(--muted); }
+
+/* System > Status inner tabs: the same pills as every other sub-page row */
+.chips.st-tabs { border-bottom: 0; gap: 6px; margin-bottom: var(--s3); }
+.st-tabs.chips .chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; margin-bottom: 0; background: transparent; color: var(--muted); font-size: var(--fs-s); }
+.st-tabs.chips .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+@media (max-width: 760px) {
+  .sp { grid-template-columns: minmax(0, 1fr); gap: var(--s3); }
+  .sp-rail { display: none; }
+  .sp-sectbtn { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; margin: 0 0 var(--s3); padding: 0 var(--s4); border: 1px solid var(--line2); border-radius: var(--r2); background: var(--surface); color: var(--text); font-size: var(--fs); cursor: pointer; }
+  .sp-sectbtn b { font-weight: 600; flex: 1; text-align: left; margin-left: 4px; }
+  .sp-subs { flex-wrap: wrap; }
+  .sp-title h2 { font-size: calc(18px * var(--ts)); }
+  .sp-grid3 { grid-template-columns: 1fr; }
+  .sp-body .ac-grid3, .sp-body .ac-grid4 { grid-template-columns: 1fr; }
+  .sv-head { flex-wrap: wrap; row-gap: 2px; }
+  .sv-head b { min-width: 0; }
+  .sv-sum { order: 5; flex-basis: 100%; padding-left: 21px; }
+  .sv-state { margin-left: auto; }
+  .tr-fields, .tr-raw, .tr-err { margin-left: 0; }
+}
+@media (pointer: coarse) {
+  .sp-subs .chip, .st-tabs.chips .chip { min-height: 44px; padding: 8px 14px; }
+  .sp-body label.sw { min-height: 44px; }
+}
+
+/* The Live side panel (profile, camera controls, server pod) is for watching; Settings needs the width. */
+body[data-tab="settings"] #dock { display: none; }
+
+/* Settings > Users & security > HTTPS */
+.hs-status { margin: 0 0 var(--s3); }
+.hs-status .tlsnames { margin-top: 4px; }
+.hs-status .tlsfp { max-width: 640px; }
+.hs-banner { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; padding: var(--s3) var(--s4); margin: 0 0 var(--s3); border: 1px solid var(--accent); border-radius: var(--r2); background: var(--accent-soft); }
+.hs-banner > span { flex: 1; min-width: 220px; }
+.hs-names { margin: var(--s2) 0 0; }
+.hs-names span { display: inline-flex; align-items: center; color: var(--text); }
+.hs-names .hs-none { color: var(--muted); border-style: dashed; }
+.sp-body .hs .row input { flex: 1; max-width: 360px; }
+.hs-adv { margin-top: var(--s4); border-top: 1px solid var(--line); padding-top: var(--s2); }
+.hs-adv summary { cursor: pointer; font-weight: 600; color: var(--text); }
+
+/* ---- Page openers, disclosures, notices, segmented control (sp_kit.js) ---- */
+.sp-one { font-size: var(--fs); color: var(--text); margin: 0 0 var(--s2); max-width: 70ch; }
+.sp-rec { margin: 0 0 var(--s3); color: var(--muted); font-size: var(--fs-s); max-width: 70ch; }
+.sp-rec b { color: var(--accent); font-weight: 600; }
+.sp-more { margin: var(--s4) 0 0; }
+.sp-how { margin: var(--s2) 0 0; max-width: 70ch; }
+.sp-note { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; padding: var(--s3) var(--s4); margin: 0 0 var(--s3); border: 1px solid var(--line2); border-left-width: 4px; border-radius: var(--r2); background: var(--surface); }
+.sp-note-t { flex: 1; min-width: 220px; line-height: 1.45; }
+.sp-note.warn { border-color: var(--warn); }
+.sp-note.bad { border-color: var(--fault); }
+.sp-note.ok { border-color: var(--ok); }
+.sp-note.info { border-color: var(--accent); }
+.sp-note .ic { vertical-align: -3px; margin-right: 4px; }
+.segc { display: inline-flex; border: 1px solid var(--field-line); border-radius: var(--r2); overflow: hidden; margin: var(--s2) 0; max-width: 100%; }
+.sp-body .segc label.segc-o { margin: 0; display: block; position: relative; font-size: var(--fs); color: var(--text); }
+.segc-o + .segc-o { border-left: 1px solid var(--field-line); }
+.sp-body .segc-o input[type=radio] { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; width: 100%; height: 100%; }
+.segc-o span { display: block; padding: 8px 22px; min-width: 88px; text-align: center; color: var(--text); background: var(--surface); }
+.segc-o input:checked + span { background: var(--accent-soft); color: var(--accent); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+.segc-o input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+.hs-status .hs-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 11px; border-radius: 999px; font-size: var(--fs-s); font-weight: 600; border: 1px solid var(--line2); color: var(--muted); }
+.hs-status .hs-pill.ok { color: var(--ok); border-color: var(--ok); }
+.hs-status .hs-pill.warn { color: var(--warn); border-color: var(--warn); }
+.hs-status .hs-pill.bad { color: var(--fault); border-color: var(--fault); }
+.sp-empty { text-align: center; padding: var(--s6) var(--s4); border: 1px dashed var(--line2); border-radius: var(--r2); background: var(--surface); }
+.sp-empty h3 { margin: 0 0 var(--s2); font-size: var(--fs-l); color: var(--text); }
+.sp-empty p { margin: 0 auto var(--s3); max-width: 52ch; color: var(--muted); }
+.sp-empty .row { justify-content: center; }
+.sp-grp { margin: var(--s5) 0 var(--s2); display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
+.sp-grp b { font-size: var(--fs); color: var(--text); font-weight: 600; }
+.sp-grp small { color: var(--muted); font-size: var(--fs-s); }
+.sv-gloss { color: var(--muted); font-size: var(--fs-s); }
+.sv-badge { font-size: calc(11px * var(--ts)); font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); flex: none; }
+.pmt-l { margin: 0 0 var(--s3); }
+@media (max-width: 760px) { .segc { display: flex; width: 100%; } .segc-o { flex: 1; } .segc-o span { min-width: 0; padding: 12px 6px; } }
+/* Objects (AI): the whole model card is the choice; the extra radio dot is not drawn (it stays for keyboards and screen readers). */
+.ai-opt { position: relative; }
+.ai-opt > input[type=radio] { position: absolute; opacity: 0; width: 100%; height: 100%; inset: 0; margin: 0; cursor: pointer; }
+.ai-opt:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Share streams: compact rows */
+.sh-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r2); background: var(--surface); }
+.sh-row { padding: 6px var(--s4); }
+.sh-row + .sh-row { border-top: 1px solid var(--line); }
+.sh-main { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; justify-content: space-between; }
+.sh-main .sw { flex: 1; min-width: 200px; margin: 4px 0; }
+.sh-copy { flex: none; display: inline-flex; align-items: center; gap: 6px; }
+.sh-more { margin: 0 0 var(--s2); }
+.sh-more > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-s); padding: 2px 0; }
+.us-legend { margin: 0 0 var(--s3); }
+.us-why { margin-top: 4px; }
+
+/* System > Status: the banner and the word on each card */
+.st-banner { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; padding: var(--s3) var(--s4); margin: 0 0 var(--s3); border: 1px solid var(--line2); border-left-width: 4px; border-radius: var(--r2); background: var(--surface); font-size: var(--fs-l); }
+.st-banner.ok { border-color: var(--ok); }
+.st-banner.ok .ic { color: var(--ok); }
+.st-banner.bad { border-color: var(--fault); flex-direction: column; align-items: stretch; gap: var(--s2); }
+.st-banner-h { display: flex; align-items: center; gap: var(--s2); }
+.st-banner.bad .ic { color: var(--fault); }
+.st-banner.warn { border-color: var(--warn); flex-direction: column; align-items: stretch; gap: var(--s2); }
+.st-banner.warn .ic { color: var(--warn); }
+.st-prob { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; justify-content: space-between; font-size: var(--fs); padding: 6px 0; border-top: 1px solid var(--line); }
+.st-prob > span { flex: 1; min-width: 200px; }
+.st-lvl { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; font-size: calc(11px * var(--ts)); font-weight: 600; color: var(--ok); }
+.st-card.warn .st-lvl { color: var(--warn); }
+.st-card.bad .st-lvl { color: var(--fault); }
+
+/* Suggestion card: a camera that sent far too many notifications. */
+.st-noisy { margin: 0 0 var(--s3); padding: var(--s3) var(--s4); border: 1px solid var(--line2); border-left: 4px solid var(--motion, var(--accent)); border-radius: var(--r2); background: var(--surface); }
+.st-noisy p { margin: var(--s2) 0; }
+.st-noisy-h { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-l); }
+.st-noisy-pics { display: flex; gap: var(--s2); flex-wrap: wrap; margin: var(--s2) 0; }
+.st-noisy-pics img { height: 72px; width: auto; max-width: 30%; border-radius: var(--r1, 6px); object-fit: cover; background: var(--surface2, var(--surface)); }
+.st-noisy-act { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s2); }
+.st-noisy-snap { position: relative; margin: var(--s2) 0; line-height: 0; }
+.st-noisy-snap img { width: 100%; border-radius: var(--r1, 6px); background: #000; min-height: 120px; }
+.st-noisy-snap svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.st-noisy-snap polygon { fill: rgba(227, 198, 80, .3); stroke: #e3c650; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-dasharray: 6 4; }
+@media (pointer: coarse) { .st-noisy-act .btn, .st-noisy-act .primary { min-height: 44px; } }
+
+/* Linked servers (Connections > Servers): a row on wide screens, a stacked card on phones. */
+.lk-item { display: flex; align-items: center; gap: var(--s2); padding: 8px 10px; border-top: 1px solid var(--line); }
+.lk-item:first-child { border-top: 0; }
+.lk-item .cs-name { flex: 1; min-width: 0; }
+.lk-item .cs-name b { display: block; overflow-wrap: anywhere; }
+.lk-item .cs-url { color: var(--muted); font-size: calc(12px * var(--ts)); overflow-wrap: anywhere; }
+.lk-item .badge { flex: none; }
+.lk-acts { display: flex; flex-wrap: wrap; gap: var(--s2); }
+@media (max-width: 760px) {
+  .lk-item { flex-direction: column; align-items: stretch; gap: var(--s3); padding: var(--s3); }
+  .lk-item .badge { align-self: flex-start; }
+  .lk-acts .btn { flex: 1 1 auto; }
+  .lk-item .srv-opt { flex-wrap: wrap; }
+  .lk-item .srv-opt select { max-width: 100%; }
+}
+
+/* Users: camera chips wrap and fold; on phones each user is a card with every button in view. */
+.us-more { display: inline; }
+.us-more > summary { display: inline; cursor: pointer; color: var(--muted); font-size: var(--fs-s); }
+.us-more[open] > summary { display: block; margin: 2px 0; }
+@media (max-width: 760px) {
+  .asys-scroll > .us-tbl { min-width: 0; }
+  .us-tbl, .us-tbl tbody { display: block; width: 100%; }
+  .us-tbl thead { display: none; }
+  .us-tbl tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px var(--s2); padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r2); margin-bottom: var(--s2); background: var(--surface); }
+  .us-tbl td { display: block; padding: 0; border: 0; min-width: 0; max-width: none; }
+  .us-tbl td.us-name { grid-column: 1; }
+  .us-tbl td:nth-child(2) { grid-column: 2; justify-self: end; }
+  .us-tbl td.asys-cams { grid-column: 1 / -1; max-width: none; }
+  .us-tbl td.asys-act { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--s2); text-align: left; white-space: normal; }
+  .us-tbl td.asys-act .btn { flex: 1 1 auto; }
+  .us-tbl td.asys-act .us-why { flex-basis: 100%; }
+}
+
+/* AI review: the long "Alerts for" and "Minimum" columns are left out on phones. */
+@media (max-width: 760px) { .ar-opt { display: none; } }
+
+/* A long unit ("restarts or power cycles per camera per day") wraps beside its field instead of widening the page. */
+.fld-in .unit { min-width: 0; }
+@media (max-width: 560px) { .fld .unit { white-space: normal; overflow-wrap: anywhere; } }
+
+/* A disabled account: its row is dimmed, its buttons stay usable. */
+.us-off .us-name b, .us-off .asys-cams { opacity: .55; }

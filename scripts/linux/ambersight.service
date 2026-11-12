@@ -1,0 +1,20 @@
+# AmberSight as installed by the .deb / .rpm package.
+[Unit]
+Description=AmberSight NVR
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ambersight
+Group=ambersight
+ExecStart=/usr/bin/ambersight run --config /etc/ambersight/config.toml
+WorkingDirectory=/var/lib/ambersight
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AmberSight
+GenericName=Camera recorder
+Comment=Open AmberSight in the web browser
+Exec=xdg-open http://localhost:8090
+Icon=ambersight
+Terminal=false
+Categories=AudioVideo;Video;Network;
+Keywords=camera;nvr;cctv;recorder;

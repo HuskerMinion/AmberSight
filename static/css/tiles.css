@@ -1,0 +1,310 @@
+/* Live tiles (2026-11-03, design B2): corner pills over the picture, state edges, reconnecting
+   and offline covers, real picture ratios. Loaded after app.css; owned by live.js. */
+
+/* On-picture colors do not follow the theme (the picture is always the picture): the dark values of the state tokens. */
+.frame, #lightContent {
+  --e-motion: #e3c650; --e-person: #ff7a45; --e-vehicle: #6ea8ff; --e-animal: #4cc38a;
+  --e-package: #b78cff; --e-face: #ff8fc7; --e-fault: #f0475a; --e-ok: #4cc38a; --e-gray: #8a95a3;
+  --c: var(--e-person);
+}
+:is(.frame, #lightContent)[data-cls="person"], .dchip[data-cls="person"] { --c: var(--e-person); }
+:is(.frame, #lightContent)[data-cls="vehicle"], .dchip[data-cls="vehicle"] { --c: var(--e-vehicle); }
+:is(.frame, #lightContent)[data-cls="animal"], .dchip[data-cls="animal"] { --c: var(--e-animal); }
+:is(.frame, #lightContent)[data-cls="package"], .dchip[data-cls="package"] { --c: var(--e-package); }
+:is(.frame, #lightContent)[data-cls="face"], .dchip[data-cls="face"] { --c: var(--e-face); }
+
+/* ---- selection: a white-ish ring, not amber ---- */
+.tile.sel { border-color: var(--line); box-shadow: none; outline: 2px solid var(--sel); outline-offset: 2px; }
+.grid.fill .tile.sel { outline: 0; position: relative; }
+/* (Fit/Focus tiles sit in a 6px gap and the grid clips: the ring is drawn inside, above the picture.) */
+.grid.fill .tile.sel::before { content: ""; position: absolute; inset: 0; z-index: 6; border: 2px solid var(--sel); border-radius: inherit; pointer-events: none; }
+
+/* ---- the old strip under the picture is gone (timeline mode too: it has name and time pills) ---- */
+.tile .meta { display: none; }
+
+/* ---- real picture ratio ---- */
+/* Grid style: the picture box has the camera's own ratio (very wide ones capped at 2.2:1, set as --arc),
+   and the tiles of one grid row share the tallest height (the others letterbox), so rows stay tidy. */
+.grid:not(.fill):not(.tlmode) { align-items: stretch; }
+.grid:not(.fill):not(.tlmode) .tile { display: flex; flex-direction: column; }
+.grid:not(.fill):not(.tlmode) .frame { flex: 1 1 auto; aspect-ratio: var(--arc, 1.7778); }
+.grid:not(.tlmode) .frame { container-type: inline-size; }
+.grid:not(.tlmode) .frame > video.livevid, .grid:not(.tlmode) .frame > img.livevid, .grid:not(.tlmode) .frame > .tileph {
+  position: absolute; inset: 0; width: 100%; height: 100%; aspect-ratio: auto; object-fit: contain; }
+.tileph.lastpic { background: #000; }
+.tileph .lastcv { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+
+/* ---- pills ---- */
+.ptop, .pbot { position: absolute; left: 6px; right: 6px; z-index: 4; display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; pointer-events: none; }
+.ptop { top: 6px; }
+.pbot { bottom: 6px; align-items: flex-end; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; max-width: 100%; min-width: 0;
+  background: rgba(12,15,19,.62); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  color: #fff; font-size: calc(12.5px * var(--ts, 1)); line-height: 1.3; white-space: nowrap; }
+.pill[hidden], .cover[hidden], .pz[hidden] { display: none !important; }
+.ptl { pointer-events: auto; flex: 0 1 auto; }
+.ptl .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pz { display: inline-flex; align-items: center; gap: 4px; color: #aeb7c3; flex: 0 100 auto; min-width: 0; font-size: 11px; }
+.pz .pzt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pz .ic { width: 13px; height: 13px; }
+.sdot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--e-gray); box-shadow: 0 0 0 1.5px rgba(0,0,0,.45); }
+.sdot.s-ok { background: var(--e-ok); }
+.sdot.s-motion { background: var(--e-motion); }
+.sdot.s-ai { background: var(--c); }
+.sdot.s-fault { background: var(--e-fault); }
+.sdot.s-gray { background: var(--e-gray); }
+.pbl { font-size: var(--fs-s); font-weight: 700; letter-spacing: .04em; gap: 5px; pointer-events: auto; }
+.rdot { width: 7px; height: 7px; border-radius: 50%; background: #ff4d5e; flex: none; }
+.pbr { margin-left: auto; font-size: var(--fs-s); font-variant-numeric: tabular-nums; }
+
+/* top right: the detection chip, or the buttons */
+.ptr { display: flex; gap: 4px; align-items: center; margin-left: auto; flex: none; pointer-events: none; }
+.ptr .dchip { background: var(--c); color: #0b0d10; font-weight: 700; padding: 3px 8px 3px 6px; gap: 5px; -webkit-backdrop-filter: none; backdrop-filter: none; text-transform: capitalize; }
+.ptr .dchip .ic { width: 13px; height: 13px; }
+.ptr .tileact { position: static; z-index: auto; opacity: 0; pointer-events: auto; transition: opacity var(--ease); }
+.ptr .tileact .btn { width: 28px; height: 28px; min-height: 0; padding: 0; }
+.frame:hover .ptr .tileact, .ptr .tileact:focus-within { opacity: 1; }
+.ptr.has-chip .tileact { display: none; }
+@media (hover: hover) {
+  .frame:hover .ptr.has-chip .dchip { display: none; }
+  .frame:hover .ptr.has-chip .tileact { display: flex; }
+}
+.grid:not(.tlmode) .ptr .tileact { display: flex; }
+.grid:not(.tlmode) .ptr.has-chip .tileact { display: none; }
+@media (hover: hover) { .grid:not(.tlmode) .frame:hover .ptr.has-chip .tileact { display: flex; } }
+@media (pointer: coarse) {
+  .ptr .tileact { opacity: 1; }
+  .ptr .tileact .btn { width: 34px; height: 34px; }
+}
+/* Phones: the buttons would cover the picture of every tile. A tap opens the camera, which has them all. */
+@media (pointer: coarse) and (max-width: 700px) {
+  .grid:not(.tlmode) .tile .ptr .tileact { display: none; }
+}
+
+/* the speaker control moves up out of the REC / clock pills */
+.frame .spk, .frame .spk.above, #lightContent .spk { bottom: 36px; left: 6px; }
+/* the camera's own overlay text keeps clear of the pills */
+.frame .ovltext.pos-top-left { top: 36px; left: 6px; }
+.frame .ovltext.pos-top-right { top: 40px; right: 6px; }
+.frame .ovltext.pos-bottom-left { bottom: 36px; left: 6px; }
+.frame .ovltext.pos-bottom-right { bottom: 36px; right: 6px; }
+#lightContent .ovltext.big.pos-top-right { top: 40px; right: 6px; }
+#lightContent .ovltext.big.pos-bottom-left, #lightContent .ovltext.big.pos-bottom-right { bottom: 38px; }
+
+/* narrow tiles (many cameras, phones): fewer pills */
+@container (max-width: 250px) {
+  .pbr { display: none; }
+  .ptr .tileact .btn:not([data-menu]) { display: none; }
+  .pill { font-size: var(--fs-s); padding: 2px 6px; }
+  .cover .cv-small { display: none; }
+}
+@container (max-width: 170px) {
+  .ptr .tileact { display: none !important; }
+  .pbl { font-size: 0; gap: 0; padding: 4px; }
+}
+
+/* ---- the edge: drawn over the picture, never covering it ---- */
+:is(.frame, #lightContent)::after { content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none; box-sizing: border-box; opacity: 0; border: 0 solid transparent;
+  transition: opacity .9s ease; }
+:is(.frame, #lightContent)[data-edge]:not([data-edge=""])::after { opacity: 1; transition-duration: .25s; }
+:is(.frame, #lightContent)[data-last="motion"]::after { box-shadow: inset 0 0 0 2px var(--e-motion); }
+:is(.frame, #lightContent)[data-last="ai"]::after { box-shadow: inset 0 0 0 3px var(--c), inset 0 0 26px color-mix(in srgb, var(--c) 45%, transparent); }
+:is(.frame, #lightContent)[data-last="offline"]::after { box-shadow: inset 0 0 0 2px var(--e-fault); }
+:is(.frame, #lightContent)[data-last="recon"]::after { border: 1px dashed var(--e-gray); }
+/* (while a state fades out its last look stays; a recon edge never shows a stale box-shadow) */
+:is(.frame, #lightContent)[data-edge="recon"]::after { box-shadow: none; }
+
+/* ---- dropped stream: last picture stays, dimmed, with a cover ---- */
+.frame > video.livevid, .frame > img.livevid, #fullVid, #fullImg { transition: filter .5s ease; }
+:is(.frame, #lightContent)[data-edge="recon"] :is(video, img.livevid, #fullImg, canvas),
+:is(.frame, #lightContent)[data-edge="offline"] :is(video, img.livevid, #fullImg, canvas) { filter: grayscale(1) brightness(.5); }
+.cover { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; text-align: center;
+  padding: 34px 10px; background: rgba(8,10,13,.28); pointer-events: none; }
+.cover .cv-big { font-size: calc(13px * var(--ts, 1)); font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.9); }
+.cover .cv-small { font-size: var(--fs-s); color: #dbe1e8; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px rgba(0,0,0,.9); }
+:is(.frame, #lightContent)[data-edge="offline"] .cover .cv-big { color: #ffd0d5; }
+.cover .cv-rbtn { pointer-events: auto; margin-top: 4px; font: inherit; font-size: var(--fs-s); font-weight: 600; color: #fff; cursor: pointer;
+  background: rgba(12,15,19,.62); border: 1px solid rgba(255,255,255,.4); padding: 3px 12px; border-radius: 6px; min-height: 0; }
+.cover .cv-rbtn:hover { background: rgba(12,15,19,.85); border-color: rgba(255,255,255,.7); }
+.cover .cv-spin { display: block; width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; animation: tspin .9s linear infinite; }
+@keyframes tspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cover .cv-spin { animation-duration: 3s; } :is(.frame, #lightContent)::after { transition: none; } }
+
+/* ---- full view: the edge and cover sit on the picture box ---- */
+#lightContent[data-edge] .ptop, #lightContent[data-edge] .pbot { left: 8px; right: 8px; }
+
+/* ---- First run, Live empty state, cameras list, Find cameras (2026-11-07, "firstrun") ---- */
+a.btn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+a.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; padding: 8px 16px; }
+a.btn.primary:hover { filter: brightness(1.07); }
+.btn.link { background: none; border-color: transparent; color: var(--muted); text-decoration: underline; padding-left: 0; }
+.btn.link:hover { color: var(--text); }
+
+.grid:has(> .firstcam) { display: block; }
+.firstcam { display: grid; place-items: center; min-height: min(62vh, 560px); padding: var(--s4) 0; }
+.fc-card { width: min(100%, 460px); box-sizing: border-box; text-align: center; padding: 36px 28px 32px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r3, 14px); box-shadow: 0 6px 24px rgba(0,0,0,.08); }
+.fc-card .fc-ic { display: block; margin: 0 auto 8px; width: 44px; height: 44px; color: var(--accent); }
+.fc-card h2 { margin: 0 0 8px; font-size: calc(22px * var(--ts, 1)); letter-spacing: -.01em; }
+.fc-card p { margin: 0 auto 22px; max-width: 34ch; color: var(--muted); line-height: 1.45; }
+.fc-btns { display: flex; gap: var(--s2); justify-content: center; flex-wrap: wrap; }
+.fc-btns .btn { min-height: 44px; padding-left: 20px; padding-right: 20px; }
+#tab-live:has(.firstcam) .livebar { display: none; }
+
+/* Getting started banner */
+.gs-banner .gs-sum { flex: 1; min-width: 180px; }
+.gs-banner[data-fold="1"] { padding-top: 6px; padding-bottom: 6px; flex-wrap: nowrap; }
+.gs-banner[data-fold="1"] .gs-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gs-list li { align-items: flex-start; }
+.gs-list li > .gs-mark { margin-top: 2px; }
+.gs-list li.opt { opacity: .92; }
+.gs-list li.opt .gs-mark { border-style: dashed; }
+.gs-list li.opt b { font-weight: 500; }
+.gs-opt { font-size: var(--fs-s); font-weight: 500; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; margin-left: 6px; vertical-align: 1px; }
+.gs-sub { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.gs-sub a { color: var(--muted); }
+.gs-sub .gs-ok { color: var(--ok, #2e9b5f); font-weight: 600; }
+.gs-foot { margin-top: var(--s3); }
+@media (max-width: 640px) {
+  .gs-banner { gap: 6px; }
+  .gs-banner:not([data-fold="1"]) .gs-sum { flex-basis: 100%; }
+  .gs-banner .btn { min-height: 40px; }
+  .gs-list li { flex-wrap: wrap; }
+  .gs-list li .gs-text { flex-basis: calc(100% - 40px); }
+  .gs-list li > .btn { margin-left: 34px; }
+}
+
+/* Cameras list */
+.cs-item .cs-name b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cs-item .cs-groups { white-space: nowrap; }
+.cs-acts { display: inline-flex; align-items: center; gap: var(--s3); flex: none; }
+.cs-acts .sw { padding: 0; }
+.cs-aside { margin-top: var(--s3); }
+@media (max-width: 640px) {
+  .cs-listbar { flex-wrap: wrap; }
+  .cs-listbar .hint { flex-basis: 100%; }
+  .cs-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "pick name st" ". acts acts"; align-items: center; gap: 6px var(--s2); }
+  .cs-item .cs-pick { grid-area: pick; }
+  .cs-item .cs-name { grid-area: name; flex-basis: auto; }
+  .cs-item .badge { grid-area: st; justify-self: end; }
+  .cs-item .cs-acts { grid-area: acts; justify-content: space-between; }
+}
+@media (pointer: coarse) {
+  .cs-pick { min-width: 44px; min-height: 44px; justify-content: center; margin: -10px 0 -10px -14px; }
+  .cs-pick input, .cs-all input { width: 22px; height: 22px; }
+  .cs-all { min-height: 44px; }
+  .ptr .tileact .btn { width: 44px; height: 44px; }
+}
+
+/* Find cameras */
+.dl-first { max-width: 640px; }
+.dl-lead { margin: 0 0 var(--s3); font-size: var(--fs); }
+.dl-login { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); margin: 6px 0; }
+.dl-login label { display: flex; flex-direction: column; gap: 4px; }
+.dl-pw { display: flex; gap: 6px; }
+.dl-pw input { flex: 1; min-width: 0; }
+.dl-eye { flex: none; min-width: 64px; }
+.dl-scan { min-height: 44px; padding: 8px 22px; }
+.dl-more { margin-top: var(--s3); border-top: 1px solid var(--line); padding-top: var(--s2); }
+.dl-more > summary { cursor: pointer; color: var(--muted); padding: 6px 0; min-height: 32px; }
+.dl-moreb { display: flex; flex-direction: column; gap: var(--s2); padding-top: var(--s2); }
+.dl-card { border: 1px solid var(--line); border-radius: var(--r2); padding: var(--s2) var(--s3); margin-top: var(--s2); background: var(--surface); }
+.dl-card.dl-have { opacity: .8; }
+.dl-head { display: flex; align-items: center; gap: var(--s3); }
+.dl-head .ac-devname { gap: 2px; }
+.dl-snap { position: relative; flex: none; width: 96px; height: 54px; border-radius: 6px; overflow: hidden; background: var(--surface2, var(--raised)); display: grid; place-items: center; color: var(--muted); }
+.dl-snap .ic { width: 22px; height: 22px; }
+.dl-snap img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+@media (max-width: 640px) {
+  .dl-login { grid-template-columns: 1fr; }
+  .dl-head { flex-wrap: wrap; }
+  .dl-snap { width: 80px; height: 45px; }
+}
+
+/* Live: phone toolbar keeps short labels on its main buttons; the Layouts menu caret; sidebar figures */
+.lm-caret { width: 12px; height: 12px; margin-left: -2px; }
+@media (max-width: 640px) {
+  .livebar #dockOpen > span, .livebar #layoutEdit > span, .livebar #tlToggle > span { display: inline; font-size: calc(13px * var(--ts, 1)); }
+  .livebar .lm-caret { display: none; }
+}
+/* Narrow phones: the Timeline button must stay in view, so View is an icon and the layout chips scroll between the fixed buttons. */
+@media (max-width: 430px) {
+  .livebar #dockOpen > span { display: none; }
+  .livebar > #layoutChips { flex: 0 1 auto; min-width: 56px; overflow-x: auto; scrollbar-width: none; }
+  .livebar > #layoutChips::-webkit-scrollbar { display: none; }
+}
+.cyc { display: inline-flex; align-items: center; gap: var(--s2); }
+.cyc .sw { padding: 0; }
+/* Server figures: one tidy section that looks like the others (same heading style and padding). */
+.dk-status .dk-fold > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; list-style: none;
+  padding: 9px 10px 10px; font-size: var(--fs-s); font-weight: 600; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+.dk-status .dk-fold > summary::-webkit-details-marker { display: none; }
+.dk-status .dk-fold > summary::after { content: ""; flex: none; width: 7px; height: 7px; margin-right: 3px; border: solid currentColor; border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translateY(-2px); transition: transform .15s; }
+.dk-status .dk-fold[open] > summary::after { transform: rotate(-135deg) translate(-2px, -1px); }
+.dk-status .dk-fold > summary:hover { color: var(--text); }
+.dk-status .dk-fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--r1); }
+html[data-touch="1"] .dk-status .dk-fold > summary { min-height: 44px; }
+/* open or closed, the status sits right after the sections above it (no stretched gap) outside the pinned sidebar */
+html:not([data-dock="pinned"]) .dk-body > .dk-status { margin-top: 0; }
+/* inside the dock: no second title or collapse button, a roomier label column, one grid */
+.sm.indock .sm-head { padding: 0 10px 2px; }
+.sm.indock .sm-title, .sm.indock .sm-btn { display: none; }
+.sm.indock .sm-up { margin: 0; font-size: var(--fs-s); }
+.sm.indock .sm-tiles { gap: 9px; padding: 2px 10px 12px; }
+.sm.indock .sm-line, .sm.indock .hl-tier { grid-template-columns: 64px minmax(0, 1fr) auto; gap: 10px; min-height: 16px; }
+.sm.indock .sm-line .sm-val { min-width: 54px; }
+.sm.indock .sm-line .sm-spark { height: 16px; }
+.sm.indock .sm-sub { padding-left: 74px; flex-wrap: wrap; row-gap: 2px; }
+.sm.indock .hl-vram, .sm.indock .hl-w { margin-left: 74px; }
+.sm.indock .hl-tiers { margin: 5px 0 0; gap: 5px; }
+.sm.indock .hl-tier { font-size: var(--fs-s); }
+.sm.indock .hl-tier .sm-meter { height: 6px; }
+.sm.indock .sm-sub .sm-cap { flex: 1 1 100%; }
+.sm.indock .sm-chip { white-space: normal; max-width: 100%; align-items: flex-start; border-radius: 10px; padding: 2px 8px 2px 4px; }
+.sm.indock .sm-chip span { overflow: visible; text-overflow: clip; white-space: normal; }
+.sm.indock .sm-cap { white-space: normal; overflow: visible; text-overflow: clip; }
+
+/* ---- picture labels (HUD levels): body[data-hud] = clean | standard | detailed ---- */
+.pdet { font-size: calc(11px * var(--ts, 1)); font-variant-numeric: tabular-nums; }
+.pdet[hidden], body:not([data-hud="detailed"]) .pdet { display: none !important; }
+/* Clean: the alert ring stays; the name pill (and REC / clock) show only while the pointer is on the picture */
+body[data-hud="clean"] :is(.frame, #lightContent) :is(.pbot, .ptl, .dchip) { opacity: 0; transition: opacity var(--ease); }
+body[data-hud="clean"] :is(.frame, #lightContent):hover :is(.pbot, .ptl), body[data-hud="clean"] .ptl:focus-within { opacity: 1; }
+/* touch screens have no hover: no name pills, the buttons stay */
+@media (hover: none) { body[data-hud="clean"] :is(.frame, #lightContent) :is(.pbot, .ptl) { display: none !important; } }
+
+/* Header never wider than the window: the status area (lamp, health chip, clock) gives way first. */
+header { min-width: 0; }
+.hdr-right { min-width: 0; flex: 0 1 auto; }
+#status { flex: 0 1 auto; min-width: 0; }
+.healthchip { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.healthchip .hctext { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.healthchip .ic, .hdr-right > .btn, .usermenu { flex: none; }
+.lamp, .clock { flex: none; }
+
+/* Safety net: a transient element (toast, popover, sliding panel) parked past the right edge can never cause sideways scrolling (sticky headers still work). */
+html { overflow-x: hidden; }
+body { overflow-x: clip; }
+
+/* ---- Live full screen: the grid (or one camera) fills the screen, edge to edge ---- */
+/* (Above the page's header, 60, and below everything that opens over it: side panel 70, dialogs 89+, toasts, menus.) */
+#tab-live .livemain.tv { position: fixed; inset: 0; z-index: 65; background: #000; padding: 0; margin: 0; overflow: hidden; display: flex; align-items: center; }
+#tab-live .livemain.tv > :not(.grid):not(.tvbar):not(#tlDock) { display: none !important; }
+#tab-live .livemain.tv .grid { gap: 2px; max-width: none; margin: 0; padding: 0; width: 100%; }
+#tab-live .livemain.tv .tile { border-radius: 0; border-width: 0; }
+#tab-live .livemain.tv .tile .frame { border-radius: 0; }
+body.tvmode { overflow: hidden; }
+.tvbar { position: fixed; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); z-index: 95; display: flex; gap: 8px; opacity: 0; pointer-events: none; transition: opacity .25s; }
+.tvbar.show { opacity: 1; pointer-events: auto; }
+.tvbar .btn { min-height: 40px; }
+#fsBtn { margin-left: auto; }
+#tab-live .livemain.tv .grid { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; align-self: stretch; }
+#tab-live .livemain.tv.one .tileact button[title="Full screen"] { display: none; }
+/* Full screen with the timeline on: its controls along the bottom edge, the cameras in the rest. */
+#tab-live .livemain.tv > #tlDock { position: fixed; left: 0; right: 0; bottom: 0 !important; width: auto; margin: 0; border-radius: 0; border-width: 1px 0 0; box-shadow: none; }
+#tab-live .livemain.tv:has(> #tlDock:not([hidden])) .grid { height: auto !important; bottom: var(--tl-dock-h, 0px); }
+html[data-tlctl="autohide"] #tab-live .livemain.tv:has(> #tlDock:not([hidden])) .grid,
+html body.tlpeek #tab-live .livemain.tv:has(> #tlDock:not([hidden])) .grid { bottom: 0; }
+#tlFs[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+#tab-live .livemain.tv .grid.tlmode .tile, #tab-live .livemain.tv .grid.tlmode .frame { min-height: 0; height: 100%; }
+#tab-live .livemain.tv .grid.tlmode .tlp { height: 100%; aspect-ratio: auto; }

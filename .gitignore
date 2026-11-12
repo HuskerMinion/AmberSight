@@ -1,0 +1,12 @@
+target/
+config.toml
+config.toml.last
+*.toml.last
+dist/
+
+# Screenshots made while testing (can show camera pictures)
+/*.png
+
+# Release signing keys: never in the repository
+.ambersight-release/
+*.pk8

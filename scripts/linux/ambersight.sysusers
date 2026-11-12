@@ -1,0 +1,2 @@
+#Type Name       ID GECOS                          Home                Shell
+u     ambersight -  "AmberSight camera recorder"   /var/lib/ambersight /sbin/nologin

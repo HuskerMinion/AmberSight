@@ -1,0 +1,22 @@
+/* palette.css - command palette (Ctrl/Cmd+K). Uses the app tokens from app.css. */
+.cp-scrim { position: fixed; inset: 0; z-index: 95; background: light-dark(rgba(15,20,28,.38), rgba(3,5,8,.6)); display: flex; justify-content: center; align-items: flex-start; padding: 14vh var(--s3) var(--s3); backdrop-filter: blur(2px); }
+.cp-scrim[hidden] { display: none; }
+.cp { width: min(600px, 100%); max-height: min(70vh, 560px); display: flex; flex-direction: column; background: var(--surface); color: var(--text); border: 1px solid var(--line2); border-radius: var(--r3); box-shadow: var(--shadow); overflow: hidden; font-family: var(--font); }
+.cp-in { display: flex; align-items: center; gap: var(--s3); padding: 0 var(--s4); border-bottom: 1px solid var(--line); color: var(--muted); }
+.cp-in .ic { width: 18px; height: 18px; flex: none; }
+.cp-in input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-size: var(--fs-l); padding: 14px 0; outline: none; box-shadow: none; }
+.cp-in input:focus-visible { outline: none; }
+.cp-in kbd, .cp-key kbd { font-family: var(--mono); font-size: var(--fs-s); padding: 1px 6px; border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 5px; background: var(--surface2); color: var(--muted); }
+.cp-list { overflow-y: auto; padding: var(--s1); overscroll-behavior: contain; }
+.cp-h { padding: 8px 12px 4px; font-size: var(--fs-s); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.cp-row { display: flex; align-items: center; gap: var(--s3); padding: 9px 12px; border-radius: var(--r2); cursor: pointer; font-size: var(--fs); }
+.cp-row .ic { width: 17px; height: 17px; flex: none; color: var(--muted); }
+.cp-row.on { background: var(--accent-soft); }
+.cp-row.on .ic { color: var(--accent); }
+.cp-lab { flex: none; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-lab mark { background: none; color: var(--accent); font-weight: 700; }
+.cp-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--fs-s); }
+.cp-key { display: flex; gap: 3px; flex: none; margin-left: auto; }
+.cp-empty { padding: 22px; text-align: center; color: var(--muted); font-size: var(--fs); }
+@media (max-width: 600px) { .cp-scrim { padding-top: 8vh; } .cp-in kbd { display: none; } .cp-row { padding: 12px; } }
+@media (prefers-reduced-motion: no-preference) { .cp { animation: cpin .12s ease-out; } @keyframes cpin { from { opacity: 0; transform: translateY(-6px) scale(.98); } } }

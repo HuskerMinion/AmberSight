@@ -1,0 +1,105 @@
+/* Accessibility, touch sizes and the shared look of controls. Loaded last (after follow.css) so these
+   cross-page rules win over the page files; camera-panel.css and settings.css load later and carry their own. */
+
+/* ---------- keyboard focus: one visible ring everywhere ---------- */
+/* (:where keeps this rule at the lowest specificity, so the offsets below and in the page files win.) */
+:where(button, a[href], input:not([type=hidden]), select, textarea, summary, [tabindex]:not([tabindex="-1"]), [role=button], [role=tab], [role=link], [role=menuitem],
+    .tile, .evr, .evtile, .chip, .seg button, nav button, #tabbar button):focus-visible {
+  outline: 2px solid var(--accent) !important; outline-offset: 2px;
+}
+.sw input:focus-visible { outline: none !important; }           /* the switch's own track shows the ring */
+.dlg:focus, .cs-drawer:focus, [tabindex="-1"]:focus { outline: none !important; }
+.tile:focus-visible { box-shadow: none; }
+.ctxmenu button:focus-visible, .tlpr:focus-visible { outline-offset: -2px; }
+.seg button:focus-visible { outline-offset: -3px; }               /* inside the pill: .seg clips what is outside */
+body.viewonly .adminonly { display: none; }
+.logo:focus-visible { outline-offset: 3px; }
+
+/* ---------- reduced motion: nothing moves or fades; pulses show their steady state ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0s !important; animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important; transition-delay: 0s !important; scroll-behavior: auto !important; }
+  .badge.motion, .lamp.arming { animation: none !important; }
+  .tlload::before { animation: none !important; }
+}
+
+/* ---------- Events filter row: wraps on a desktop; scrolls sideways only on phones (review.css) ---------- */
+@media (min-width: 761px) {
+  .evbar { align-items: flex-start; }
+  .evchips { flex: 1 1 0; width: auto; flex-wrap: wrap; overflow: visible; row-gap: 6px; }
+  .evchips::after { display: none; }
+  .evsmart { align-self: center; }
+}
+
+/* ---------- one family of controls: heights, radii ---------- */
+.btn, button.primary, .searchbar button, .dlg .row button { min-height: 34px; }
+button.primary { padding: 6px 16px; }
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]), select { min-height: 34px; }
+.pager .btn.icon { width: 34px; height: 34px; }
+/* Sub-pages are pills (dialog tabs, status tabs, the camera panel's section index, help topics). */
+.dlg .tabs, .st-tabs { border-bottom: 0; gap: 6px; }
+.dlg .tabs button, .st-tabs button { border: 1px solid var(--line2); border-radius: 999px; margin-bottom: 0; padding: 5px 14px; min-height: 34px; }
+.dlg .tabs button:hover, .st-tabs button:hover { color: var(--text); border-color: var(--muted); }
+.dlg .tabs button.on, .st-tabs button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+/* View toggles (Events List/Grid, Live Quick/Smooth, view styles) are one segmented pill. */
+.seg { border: 1px solid var(--line); border-radius: 999px; overflow: hidden; background: var(--surface2); }
+.seg button { border: 0; border-radius: 0 !important; background: transparent; padding: 4px 12px; min-height: 30px; }
+.seg button + button { margin-left: 0; border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent-soft); color: var(--accent); }
+.evview .chip { padding: 4px 14px; min-height: 30px; }
+.evview .chip.on { background: var(--accent-soft); color: var(--accent); }
+.vstyle button { padding: 4px 10px; }
+
+/* Switch: the off track is a visible grey (>= 3:1 on the surfaces); a disabled one is faded and shows it. */
+.sw-track { background: var(--field-line); }
+.sw.off { opacity: .45; cursor: not-allowed; }
+.sw input:disabled + .sw-track { opacity: .5; }
+
+/* ---------- touch screens: 44 px targets ---------- */
+@media (pointer: coarse) {
+  .btn, button.primary, .searchbar button, .dlg .row button, select,
+  input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]) { min-height: 44px; }
+  .btn.icon, .pager .btn.icon { width: 44px; height: 44px; }
+  .chip, .seg button, .vstyle button, .evview .chip, .dlg .tabs button, .st-tabs button, .dock .btn { min-height: 44px; }
+  .seg button, .vstyle button { min-width: 44px; justify-content: center; }
+  .dk-ibtn, .dk-handle, .sm-btn, .spk, .spkbtn, .toast .tx, .toast .tact, .cs-x, .dlg .bar button, .chipx { min-width: 44px; min-height: 44px; }
+  .spk { height: 44px; border-radius: 22px; } .spkbtn { width: 44px; height: 44px; }
+  td button, td a.btn, .tlpr, .hwtoc a, .lycam button, .lycam label { min-height: 44px; }
+  .tlstep, .tlplay, .tlchip, .tlmk, .tlkind, .tlexp, .tlgoto input, .tlright .btn, .tlspdsel select { min-height: 44px; }
+  .tlkind { min-width: 44px; } .tlexp { height: 44px; border-radius: 22px; }
+  .tlbar .btn, .tlbar .tlstep, .tlbar2 .btn, .tlbar .tlplay, .tlbar2 .tlgoto input { min-height: 44px; }
+  /* A marker on the timeline strip is a small icon with a 44 px hit area around it. */
+  .tlm::after { inset: -11px; }
+  .tlrh { min-width: 44px; }
+  /* Small status chips that are buttons: the hit area is padded to 44 px without changing the look. */
+  .healthchip, .srv-btn, .gs-opt { position: relative; }
+  .healthchip::after, .srv-btn::after { content: ""; position: absolute; inset: -10px -4px; }
+  /* Checkboxes and radios: bigger boxes and a whole-row hit area. */
+  input[type=checkbox]:not([role=switch]), input[type=radio] { width: 22px; height: 22px; min-height: 0; flex: none; }
+  label:not(.evck):has(> input[type=checkbox]:not([role=switch])), label:not(.evck):has(> input[type=radio]) { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+  .sw { min-height: 44px; }
+  summary { min-height: 44px; padding-block: 10px; box-sizing: border-box; }
+  .gs-banner .btn { min-height: 44px; }
+  .helpq { position: relative; } .helpq::after { content: ""; position: absolute; inset: -10px; }
+  /* Row tick in the Events list: a 44 px box over the thumbnail's corner. */
+  .evck { left: 0; top: 0; width: 44px; height: 44px; align-items: center; justify-content: center; }
+  .evr.ck .evck, .evlist.bulk .evck { display: flex; }
+  .evck input { width: 22px; height: 22px; }
+}
+/* Phone top bar: the shield button, menu and logo are 44 px too. */
+@media (pointer: coarse) and (max-width: 760px) {
+  .shieldbtn, .shieldbtn:not(.shieldedbtn), .shieldbtn.shieldedbtn, .usermenu #userBtn { min-height: 44px; }
+  .usermenu #userBtn { width: 44px; }
+  .logo { min-width: 44px; min-height: 44px; justify-content: center; }
+}
+html[data-touch="1"] .seg button, html[data-touch="1"] .vstyle button { min-height: 44px; min-width: 44px; }
+html[data-touch="1"] .pager .btn.icon, html[data-touch="1"] .ptr .tileact .btn, html[data-touch="1"] .sm-btn, html[data-touch="1"] .toast .tx,
+html[data-touch="1"] .dk-ibtn { min-width: 44px; min-height: 44px; width: auto; height: auto; }
+html[data-touch="1"] .ptr .tileact .btn { width: 44px; height: 44px; }
+html[data-touch="1"] .spk { height: 44px; border-radius: 22px; } html[data-touch="1"] .spkbtn { width: 44px; height: 44px; }
+html:not([data-dock="pinned"]) .dock .btn, html:not([data-dock="pinned"]) .dk-ibtn { min-height: 44px; }
+
+/* ---------- small things ---------- */
+.dlg { overscroll-behavior: contain; }
+.toast.err { border-left-width: 4px; }
+@media (max-width: 560px) { .searchbar { align-items: flex-end; } }

@@ -1,0 +1,8 @@
+#!/bin/sh
+# AmberSight .deb: the recordings in /var/lib/ambersight and the service user
+# are kept, also on purge.
+set -e
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+fi
+exit 0

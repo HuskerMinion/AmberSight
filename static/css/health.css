@@ -1,0 +1,57 @@
+/* Health telemetry: server pod extras (AI, GPU, disk tiers) and the Status > Performance tab.
+   State colors only from --warn / --fault / --ok / --muted; amber (--accent) is the brand. */
+
+/* ---- server pod ---- */
+.sm-tile[hidden], .hl-tiers[hidden], .hl-vram[hidden] { display: none; }
+.hl-vram { margin: 3px 0 0 58px; height: 4px; }
+.hl-tiers { display: flex; flex-direction: column; gap: 3px; margin: 3px 0 0 58px; }
+.hl-tier { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 6px; font-size: var(--fs-s); color: var(--muted); }
+.hl-tier span { text-transform: lowercase; }
+.hl-tier .sm-meter { margin: 0; height: 5px; }
+.hl-tier em { font-style: normal; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hl-tier[data-lvl=warn] { --lv: var(--warn); }
+.hl-tier[data-lvl=crit] { --lv: var(--fault); }
+.hl-w { margin: 1px 0 0 44px; font-size: var(--fs-s); color: var(--muted); }
+.sm [data-lvl=warn] { --lv: var(--warn); }
+.sm [data-lvl=crit] { --lv: var(--fault); }
+.sm [data-lvl=info] { --lv: var(--muted); }
+
+/* ---- Performance tab ---- */
+.pf-note { color: var(--muted); font-size: var(--fs-s); margin: 0 0 var(--s2); }
+.pf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--s2); margin-bottom: var(--s3); }
+.pf-box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r2); padding: var(--s2) var(--s3) var(--s2); min-width: 0; }
+.pf-box[data-lvl=warn] { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.pf-box[data-lvl=crit] { border-color: color-mix(in srgb, var(--fault) 70%, var(--line)); }
+.pf-top { display: flex; align-items: baseline; gap: var(--s2); }
+.pf-ttl { color: var(--muted); font-size: var(--fs-s); text-transform: uppercase; letter-spacing: .03em; flex: 1; min-width: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pf-leg { color: var(--muted); font-size: var(--fs-s); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pf-now { font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pf-now small { font-size: var(--fs-s); color: var(--muted); font-weight: 400; margin-left: 2px; }
+.pf-spark { position: relative; height: 54px; margin-top: 4px; cursor: crosshair; border-bottom: 1px solid var(--line); }
+.pf-spark svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.pf-spark .l { fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.pf-spark .l.b { stroke: var(--muted); stroke-width: 1.4; }
+.pf-spark .a { fill: var(--accent); opacity: .13; stroke: none; }
+.pf-spark .none { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: var(--fs-s); }
+.pf-rule { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line2); display: none; pointer-events: none; }
+.pf-spark.on .pf-rule { display: block; }
+.pf-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 var(--s2); min-width: 0; color: var(--muted); font-size: var(--fs-s); font-variant-numeric: tabular-nums; margin-top: 2px; min-height: 15px; }
+.pf-foot b { color: var(--text); font-weight: 600; }
+.pf-legend i { display: inline-block; width: 8px; height: 2px; vertical-align: middle; margin-right: 3px; background: var(--accent); }
+.pf-legend i.b { background: var(--muted); }
+
+.pf-tbl th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+.pf-tbl th[data-sort]:hover { color: var(--text); }
+.pf-tbl th[aria-sort=ascending]::after { content: " \25B2"; font-size: var(--fs-s); }
+.pf-tbl th[aria-sort=descending]::after { content: " \25BC"; font-size: var(--fs-s); }
+.pf-tbl td.pf-warn { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); font-weight: 600; }
+.pf-tbl td.pf-fault { background: color-mix(in srgb, var(--fault) 18%, transparent); color: var(--fault); font-weight: 600; }
+.pf-tbl td small { color: var(--muted); font-weight: 400; }
+.pf-tbl td.pf-warn small, .pf-tbl td.pf-fault small { color: inherit; opacity: .8; }
+.pf-tbl tr.pf-mut td { color: var(--muted); }
+.pf-chip { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: var(--fs-s); font-weight: 600; line-height: 18px; background: color-mix(in srgb, var(--muted) 16%, transparent); }
+.pf-chip[data-lvl=ok] { color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.pf-chip[data-lvl=warn] { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.pf-chip[data-lvl=crit] { color: var(--fault); background: color-mix(in srgb, var(--fault) 16%, transparent); }
+.pf-foot span { white-space: nowrap; }
+.pf-foot span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; min-width: 0; text-align: center; }

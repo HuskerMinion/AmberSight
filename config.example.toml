@@ -1,0 +1,356 @@
+# AmberSight configuration
+# Run: ambersight run --config config.toml
+
+[server]
+bind = "0.0.0.0"
+port = 8090
+# HTTPS on the same port. AmberSight runs its own private certificate
+# authority (nothing is published to public certificate logs). Plain http://
+# requests to this port redirect to https://. Install the CA once per device:
+# sign in, user menu > "Trust this server (HTTPS)", or open /tls/ca.crt.
+# The microphone (two-way audio) only works on trusted HTTPS pages.
+# Or use Settings > Users & security > HTTPS (it saves these and restarts).
+# tls = true
+# Extra DNS names / IPs the certificate should cover (it already covers
+# localhost, the host name and every address of this machine), e.g.
+# nvr.lan. Names outside .lan/.local/.home.arpa/.internal (such as a
+# Tailscale MagicDNS name) are only covered if listed here when the private
+# CA is first made (before the first start with tls = true):
+# tls_names = ["nvr.lan", "nvr.tailnet-name.ts.net"]
+# Or use your own certificate instead of the private CA:
+# tls_cert = "/path/to/fullchain.pem"
+# tls_key = "/path/to/privkey.pem"
+# This server's name, shown to linked servers (Settings > Connections > Servers):
+# name = "Home"
+# Port for RTMP senders (OBS and similar) pushing to push:// cameras;
+# only opened while such a camera exists. 0 = off.
+# rtmp_port = 1935
+
+# SHARE STREAMS with other apps (Home Assistant, Scrypted, VLC, other NVRs)
+# over RTSP: rtsp://user:password@host:8554/<camera>[/sub]. Off by default;
+# each camera is also shared only with share = true (Settings > Connections > Share streams).
+# [restream]
+# enabled = true
+# port = 8554
+
+# SIGN-IN: with no accounts, ANYONE who can reach this port can watch every
+# camera and change every setting. Add an account (Settings > Users & security, or below)
+# before using AmberSight on a shared network.
+# Optional basic auth (uncomment to enable). Legacy single admin account:
+# [server.auth]
+# username = "admin"
+# password = "changeme"
+
+# Multiple accounts: admins can change anything; admin=false users are
+# view-only (they get 403 on any write: settings, camera edits, protect).
+# [[server.users]]
+# username = "admin"
+# password = "changeme"
+
+# [[server.users]]
+# username = "guest"
+# password = "look-only"
+# admin = false
+# # disabled = true       # turned off: cannot sign in or do anything until an admin turns it on again
+
+[storage]
+data_dir = "amberdata"
+segment_seconds = 5
+retention_days = 14
+# Size cap for the data folder in MB. 0 = automatic: recordings use what the
+# drive can spare and min_free_percent of the drive always stays free (the cap
+# follows the free space; other files on the drive shrink it). A number fixes
+# the size instead. Over the cap, the oldest recordings move to the archive
+# folder if one is set, otherwise the oldest recordings and unprotected events
+# are deleted. Protected events are kept. Retention days apply either way.
+max_mb = 0
+# Automatic folders keep this share of their drive free (percent).
+min_free_percent = 10
+# When a folder is full, footage with no events is deleted before footage
+# around events from the last this many days (0 = strictly oldest first).
+# event_keep_days = 21
+# Also record the sub stream of continuous cameras (about a tenth more space),
+# so phones with Data saver on play recordings small:
+# sub_copy = true
+# Backups of config.toml + the database into <data_dir>/backups (private folder).
+# backup_hours = 24   # 0 = off; `ambersight backup` makes one now
+# backup_keep = 7
+
+# Optional extra recording folders (other drives, NAS mounts), each with its
+# own cap (max_mb = 0 or left out = automatic for that folder's drive; folders
+# sharing a drive share its spare space). A camera picks one with
+# folder = "name". When a folder is full its oldest recordings move to the
+# archive folder; the archive deletes its oldest.
+# [[storage.folders]]
+# name = "main"
+# path = "D:/AmberSight"
+# max_mb = 500000
+#
+# [[storage.folders]]
+# name = "archive"
+# path = "E:/AmberSight-archive"
+# max_mb = 2000000
+# archive = true
+
+[motion]
+sensitivity = 0.12      # 0.0 (very sensitive) .. 0.5 (barely)
+min_frames = 3          # frames above threshold before an event is logged
+pre_roll = 5            # seconds of footage before the trigger
+post_roll = 10          # seconds of footage after the trigger
+# algorithm = "objects"   # "objects" (moving things) or "frame-diff" (changed pixels)
+# min_object = 0.002      # smallest moving object, as a share of the frame
+# max_object = 0.5        # larger changes are treated as lighting and ignored
+# contrast = 25           # brightness change (0-255) that counts as movement
+# min_travel = 0.03       # how far an object must move (share of the frame diagonal)
+# break_time = 5          # seconds of quiet that end an event
+
+# Alerts fire when a motion clip is finalized. Both may be set together.
+# [alerts]
+# webhook_url = "https://hooks.example.com/notify"   # POSTs JSON {id,camera,start,end,score,clip,thumb}
+# telegram_bot_token = "12345:YOUR_TOKEN"            # Telegram sendMessage (classic NVR "Alerts" equivalent)
+# telegram_chat_id = "-123456789"                    # chat id (negative for channels)
+# telegram_api_url = "https://api.telegram.org"      # optional API base override
+# ntfy_url = "https://ntfy.example.com/cameras"     # ntfy topic (picture attached)
+# ntfy_token = "tk_..."                              # if the topic needs one
+# pushover_token = "app-token"                       # Pushover (picture attached)
+# pushover_user = "user-key"
+# smtp_host = "smtp.example.com"                     # e-mail (see Settings > Detection & alerts > Alerts)
+# email_to = ["you@example.com"]
+# mqtt_url = "mqtt://192.168.1.5:1883"               # events and states for Home Assistant
+# ha_url = "http://homeassistant.local:8123"         # Home Assistant notify service
+# link_url = "https://nvr.example:8090"              # tap a notification to open the camera at the event
+# action_command = "/path/to/script {clip}"          # run a program for each alert (no shell)
+# min_interval = 60      # at most one notification per camera per 60 s (0 = no limit)
+# group_interval = 20    # and one across all cameras per 20 s; MQTT still reports every event
+# system_alerts = false  # no alerts about the system itself (camera offline, no recordings, disk nearly full)
+# system_alert_minutes = 5   # how long such a problem must last before it is reported
+
+# Optional object detection (classic NVR ODT equivalent): any command printing one
+# JSON line {"objects":[{"label":"person","score":0.9}]} on stdout.
+# {image} is replaced with the event thumbnail path.
+# [odt]
+# enabled = true
+# command = "my-detector --in {image}"
+# alert_only_known = true   # alerts fire only when the detector found objects
+
+# Built-in AI object detection (person, car, dog ...) for motion events.
+# Easiest: Settings > Detection & alerts > Objects (AI) downloads a model and turns it on. Or by hand:
+#   ambersight ai-model --config config.toml
+# [ai]
+# enabled = true
+# model = "amberdata/models/yolox_s.onnx"
+# min_score = 0.5          # how sure (0-1) the AI must be for an object to count
+# labels = ["person", "car", "dog", "cat"]   # objects that confirm an event
+# max_checks = 10          # frames checked per event
+# ignore_parked = true      # objects that sit still for minutes do not confirm
+# strict = false            # true: an object must be seen in 2 of 3 looks in a row, moving
+# A camera can use its own: ai = false, ai_labels = [...], ai_min_score = 0.6, ai_strict = true
+# ai_confirm_camera = true   # on a camera: its own person/car/animal detection alerts only when AI sees it too (off unless true)
+
+# Face recognition on person events (Settings > Smart features > Faces downloads the models):
+# [faces]
+# enabled = true
+# min_face = 40        # pixels wide; smaller faces are skipped
+# match_score = 0.40   # how alike a face must be to a named one
+# cameras = []         # empty = every camera with AI
+
+# Nightly time-lapse: each day of a camera squeezed into a short video
+# (Time-lapse tab; made from keyframes, the sub stream when recorded).
+# [timelapse]
+# enabled = true
+# seconds = 60        # length of one day's video
+# hour = 2            # made after this hour (local) for yesterday
+# keep_days = 30      # 0 = keep
+# cameras = []        # empty = every camera that records
+
+# Profiles and schedules (Home / Away / Night ...) are easiest to set up in
+# Settings > Schedules & presence; they are stored under [automation].
+
+# Presence (geofencing): phone apps report whether the phone is at home
+# (POST /api/presence). When everyone has been away for a while the server
+# arms or switches profile; when someone comes back it switches back. Only
+# changes (home -> away, away -> home) act, so a switch by hand stays until
+# the next one. Also in Settings > Schedules & presence > Presence.
+# [presence]
+# enabled = false
+# away_profile = ""          # profile when everyone has left ("" = none)
+# home_profile = ""          # profile when someone is back ("" = back to the schedule)
+# arm_when_away = true       # arm when everyone has left (default: true when away_profile is "")
+# disarm_when_home = false   # disarm when someone is back
+# away_delay_minutes = 10    # everyone away this long first (0-120)
+# stale_hours = 12           # a phone silent this long is ignored (1-168)
+# accounts = []              # accounts whose phones count ([] = every account); others get 403
+# (home_profile stays until changed by hand or the next away; leaving
+# replaces a profile chosen by hand. The last known home/away is kept
+# through spells with no phone counting and across restarts.)
+
+# Push notifications to phone apps (UnifiedPush, through a distributor app such as ntfy;
+# Settings > Notifications > Browser and phone push). The push servers an app's push address may
+# use: host names, optionally host:port, exact names (no wildcards). Browsers' own push services
+# need nothing here. https is required, except plain http for a listed server on the home
+# network, loopback or Tailscale. Only a host listed here may be on the home network; ntfy.sh
+# (the public ntfy server) must stay public.
+# [push]
+# app_hosts = ["ntfy.sh"]    # e.g. ["ntfy.sh", "ntfy.home.lan:8080", "ntfy.tail1234.ts.net"]
+
+# New versions (Settings > System > Status & updates shows them; installing always needs an
+# admin's click, or: ambersight update --config config.toml).
+# [update]
+# check = false                      # stop looking every 12 hours (on by default)
+# repo = "owner/name"               # the GitHub repository releases come from (the project's own is built in)
+
+# Paired screen-capture computers ([[helpers]]) and linked servers
+# ([[links]]) are added from the web page; they hold keys, do not copy them.
+# A linked server has one setting you may edit there by hand: who may be signed
+# in here from that server's menu (Settings > Connections > Servers sets it too):
+#   signin = "viewers"   # the same account, never as admin (the default)
+#                        # "all" = admins too, "off" = nobody
+
+# An IP camera (an example: copy this block without the leading "# ", set
+# its address and login, and set enabled = true; or add cameras from the
+# web page: Settings > Cameras > Add camera).
+# [[cameras]]
+# name = "Front Door"
+# short_name = "Door"     # dense UI spots use this
+# groups = ["Front yard"] # live-view groups (a camera can be in several)
+# url = "rtsp://192.168.1.50:554/h264Preview_01_main"
+# # Optional lower-resolution sub stream: used for motion detection and the live
+# # grid, so the main stream is only recorded (saves a lot of CPU).
+# # sub_url = "rtsp://192.168.1.50:554/h264Preview_01_sub"
+# # # Record the sub stream all the time and the main stream only around events
+# # # (pre-roll from memory; far less space). Needs sub_url; built-in reader only.
+# # record_sub = true
+# # How the camera is received: "auto" (built-in reader for rtsp:// and
+# # HTTP-FLV http(s)://host/flv?... URLs; an RTSP camera that cannot be played
+# # that way switches to ffmpeg), "native", or "ffmpeg".
+# # ingest = "auto"
+# # Hardware decoding for motion detection, e.g. "vaapi", "vaapi:/dev/dri/renderD130", "qsv".
+# # hwaccel = "vaapi"
+# # Record into a [[storage.folders]] entry instead of data_dir.
+# # folder = "main"
+# # Device credentials, separate from app users: injected into the URL as
+# # scheme://user:pass@host when username is set and the URL has no userinfo.
+# # The API never echoes the password back; on PUT a blank password keeps the
+# # stored one.
+# username = "admin"
+# password = "device-password"
+# fps = 10
+# scale = 640
+# record = true
+# motion = true
+# enabled = false
+# # Text on the picture in the live view (drawn by the browser, no server
+# # cost). Fill-ins: {name} {short} {site} {date} {time}. Corner: top-left,
+# # top-right, bottom-left (default) or bottom-right.
+# # overlay_text = "{short} {date} {time}"
+# # overlay_pos = "bottom-left"
+# # Also burn that text into the recordings. This re-encodes the camera's
+# # video (much more CPU); without overlay_text it burns name, date and time.
+# overlay = false
+# # Map source audio track into segments when present (direct mode keeps
+# # audio via -c copy regardless).
+# audio = false
+# # Stream-copy recording (no re-encode) for encoded sources; analysis still
+# # runs on its own decoded substream. Best for RTSP cameras.
+# direct = true
+# # Optional per-camera sensitivity override (else uses [motion].sensitivity):
+# # sensitivity = 0.05
+# # classic-style arm window, local time; wraps past midnight. Unset = armed 24/7.
+# # schedule = "07:00-19:00"
+# # Per-camera notifications: alerts = false, alert_channels = ["ntfy"],
+# # alert_interval = 120, alert_priority = "high"
+# # Notify only when the event holds one of these objects ("person", "car",
+# # "vehicle", "animal"...; needs AI to name them). Detection, events, search and
+# # MQTT are not affected; sounds, doorbell presses and packages always notify.
+# # alert_labels = ["person", "vehicle"]
+# # Also start recording on other cameras when this one sees motion:
+# # also_trigger = ["Side Yard", "group:Outside"]
+
+# # Privacy masks: rectangles blacked out in recordings, live view and snapshots.
+# # Cameras with masks (or overlay = true) are re-encoded, which costs CPU.
+# # [[cameras.privacy_masks]]
+# # x = 0.0
+# # y = 0.0
+# # w = 0.25
+# # h = 0.5
+# #
+# # Camera events (the camera's own motion/person/vehicle/doorbell detection):
+# # onvif_port = 8000
+# # trigger = "both"      # "video" (default) | "camera" | "both"
+# #
+# # Polygon zones (corner points, normalized), combined with rectangle zones:
+# # [[cameras.zone_polys]]
+# # points = [[0.1, 0.9], [0.45, 0.5], [0.6, 0.5], [0.9, 0.9]]
+# # [[cameras.ignore_polys]]
+# # points = [[0.0, 0.0], [0.3, 0.0], [0.0, 0.3]]
+#
+# # Areas that never send a notification (a street-facing edge): an alert is
+# # skipped when everything that confirmed the event stood inside one. Events,
+# # recording, search and MQTT are not affected. Same corner points as zones.
+# # [[cameras.alert_ignore_polys]]
+# # points = [[0.0, 0.7], [1.0, 0.7], [1.0, 1.0], [0.0, 1.0]]
+
+# # Motion zones: rectangles in normalized coordinates (0.0..1.0 of the frame).
+# # If any [[cameras.zones]] entries exist, only motion inside them counts.
+# # [[cameras.zones]] keeps e.g. the walkway; ignore_zones suppresses busy
+# # background like trees. Both may be repeated.
+# # [[cameras.zones]]
+# # x = 0.2
+# # y = 0.4
+# # w = 0.6
+# # h = 0.6
+
+# # Battery camera behind a Reolink Home Hub (or a Reolink NVR channel).
+# # The hub's HTTP-FLV stream is used rather than RTSP: for battery cameras
+# # it delivered video on every request, RTSP only on some. Channel numbers
+# # start at 0 here (channel0 = the hub's first camera); for the main stream
+# # use channel0_main.bcs. Credentials are added to the request from
+# # username/password below.
+# # [[cameras]]
+# # name = "Back Gate"
+# # url = "https://192.168.1.60/flv?port=1935&app=bcs&stream=channel0_sub.bcs"
+# # username = "admin"
+# # password = "device-password"
+# # # Stay disconnected (camera asleep) until someone views it, the wake
+# # # button is pressed, or the hub reports activity; sleep again after
+# # # idle_timeout seconds without viewers, events or activity (min 30).
+# # on_demand = true
+# # idle_timeout = 300
+# # # Read motion/person/vehicle/animal and sleep state per channel from the
+# # # Reolink API (the hub's ONVIF events do not say which channel fired).
+# # reolink_channel = 0
+# # # Record when the camera itself reports activity (it wakes for it).
+# # trigger = "camera"
+# # record_motion_only = true
+# # # For a hub with several cameras on ONVIF instead: onvif_source = "000"
+
+# # Local sources (encoded to H.264 by ffmpeg; list them with GET /api/devices):
+# # url = "device://USB Video?size=1920x1080&fps=30&audio=Microphone (USB Audio)"  # Windows (dshow)
+# # url = "device:///dev/video0?size=1280x720&fps=15"   # Linux (v4l2)
+# # url = "screen://?fps=15"                  # whole desktop; screen://1 = one monitor (Windows)
+# # url = "screen://?fps=10&region=0,0,1920,1080"
+# # The Windows service (session 0) cannot capture the screen; run
+# # `ambersight run` in the user's session for that.
+
+# A new install has no camera: add them from the web page (Settings > Cameras >
+# Find cameras). For testing without hardware, a synthetic camera:
+# [[cameras]]
+# name = "Test Pattern"
+# url = "lavfi://mandelbrot=size=640x360:rate=10"
+# fps = 10
+# scale = 640
+# record = true
+# motion = true
+# enabled = true
+
+# Example of an ignore zone suppressing the whole frame (never triggers):
+# [[cameras]]
+# name = "Zone Demo"
+# url = "lavfi://testsrc=size=640x360:rate=10"
+# enabled = true
+#
+# [[cameras.ignore_zones]]
+# x = 0.0
+# y = 0.0
+# w = 1.0
+# h = 1.0
