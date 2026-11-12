@@ -8,6 +8,12 @@
 <p align="center"><strong>Self-hosted camera recording and AI detection, written in Rust.</strong><br>
 Linux · macOS · Windows</p>
 
+<p align="center">
+  <a href="https://github.com/HuskerMinion/AmberSight/releases/latest"><img src="https://img.shields.io/github/v/release/HuskerMinion/AmberSight?label=release&color=e9a23b" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue" alt="PolyForm Noncommercial license"></a>
+  <a href="https://buymeacoffee.com/huskerminion"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
+
 AmberSight is a self-hosted camera security and recording server written in Rust.
 It runs on Linux, macOS, and Windows. It ingests RTSP (and other ffmpeg-readable)
 camera streams, detects motion, records video segments, builds motion clips with
