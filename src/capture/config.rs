@@ -140,12 +140,25 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            // One explicit entry (the user, full control), nothing inherited.
+            // The user with full control, nothing inherited, and no one else but
+            // SYSTEM and Administrators (who can read every file anyway; an
+            // elevated process's new files list them too).
             let out = std::process::Command::new(crate::lockdown::icacls_exe()).arg(&path).output().unwrap();
             let acl = String::from_utf8_lossy(&out.stdout).to_string();
             let entries: Vec<&str> = acl.lines().filter(|l| l.contains(":(")).collect();
-            assert_eq!(entries.len(), 1, "{acl}");
-            assert!(entries[0].trim_end().ends_with(":(F)"), "{acl}");
+            assert!(!acl.contains("(I)"), "nothing inherited: {acl}");
+            let user = std::env::var("USERNAME").unwrap_or_default().to_lowercase();
+            let mut mine = 0;
+            for e in &entries {
+                let who = e.rsplit_once(":(").map(|(w, _)| w.trim()).unwrap_or("").to_lowercase();
+                let who = who.rsplit(".toml").next().unwrap_or(&who).trim().to_string();
+                if who == "nt authority\\system" || who == "builtin\\administrators" {
+                    continue;
+                }
+                assert!(who.ends_with(&format!("\\{user}")) && e.trim_end().ends_with(":(F)"), "only this user: {acl}");
+                mine += 1;
+            }
+            assert_eq!(mine, 1, "{acl}");
         }
         assert!(HelperConfig::load(&dir.join("missing.toml")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
