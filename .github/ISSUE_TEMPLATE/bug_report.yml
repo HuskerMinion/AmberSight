@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in AmberSight doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions and ideas go in [Discussions](https://github.com/HuskerMinion/AmberSight/discussions). Security problems: report them privately (Security tab > Report a vulnerability), not here.
+
+        **Before you paste logs or settings, remove passwords, tokens, camera addresses and anything else private.**
+  - type: input
+    id: version
+    attributes:
+      label: AmberSight version
+      description: Settings > System > Status & updates, or `ambersight --version`
+      placeholder: "0.7.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (ARM, e.g. Raspberry Pi)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: How it's installed
+      description: Windows installer, zip, .deb, .rpm, tarball, built from source...
+  - type: input
+    id: cameras
+    attributes:
+      label: Camera make and model (if a camera is involved)
+      placeholder: "e.g. Reolink RLC-810A, Amcrest IP8M-2496"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines (Settings > System > Logs), with private details removed
+      render: text
