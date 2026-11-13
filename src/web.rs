@@ -114,6 +114,9 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/storage/plan", get(storage_plan))
         .route("/drives", get(drives))
         .route("/storage/privacy", get(storage_privacy))
+        .route("/storage/missing", get(missing_status))
+        .route("/storage/missing/scan", post(missing_scan))
+        .route("/storage/missing/apply", post(missing_apply))
         .route("/tls", get(crate::tls::api_tls))
         .route("/addresses", get(crate::tls::api_addresses))
         .route("/logs", get(logs))
@@ -224,7 +227,108 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/link/stats", get(crate::remote::share_stats))
         .nest("/api", api)
         .layer(axum::middleware::map_response(security_headers))
+        .layer(axum::middleware::from_fn_with_state(engine.clone(), real_client))
         .with_state(engine)
+}
+
+/// Behind a trusted reverse proxy ([server] trusted_proxies), every request
+/// arrives from the proxy: put the visitor's own address (the last entry of
+/// X-Forwarded-For, the one the proxy added) in its place, so everything that
+/// reads the caller's address sees the visitor.
+async fn real_client(State(engine): State<Arc<Engine>>, mut req: Request, next: Next) -> Response {
+    if let Some(peer) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0) {
+        let trusted = { engine.config.lock().unwrap().server.trusted_proxies.clone() };
+        if let Some(ip) = forwarded_client(peer.ip(), &trusted, req.headers()) {
+            req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(ip, peer.port())));
+            // The proxy took the visitor's HTTPS: cookies then get the Secure flag.
+            if forwarded_https(req.headers()) {
+                req.extensions_mut().insert(crate::tls::Secure);
+            }
+        }
+    }
+    next.run(req).await
+}
+
+/// The visitor's address when `peer` is a trusted proxy that named one.
+fn forwarded_client(peer: std::net::IpAddr, trusted: &[String], headers: &axum::http::HeaderMap) -> Option<std::net::IpAddr> {
+    if trusted.is_empty() || !trusted.iter().any(|t| ip_in(peer, t)) {
+        return None;
+    }
+    let last = headers.get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).last()?;
+    Some(parse_forwarded_ip(last.trim())?.to_canonical())
+}
+
+/// An address as proxies write it: plain, or with a port ("1.2.3.4:5678",
+/// "[2001:db8::1]:443") or brackets ("[2001:db8::1]").
+fn parse_forwarded_ip(s: &str) -> Option<std::net::IpAddr> {
+    if let Ok(ip) = s.parse() {
+        return Some(ip);
+    }
+    if let Some(rest) = s.strip_prefix('[') {
+        return rest.split(']').next()?.parse().ok();
+    }
+    // a.b.c.d:port (an IPv6 address without brackets has several colons and parsed above)
+    let (host, port) = s.rsplit_once(':')?;
+    port.parse::<u16>().ok()?;
+    host.parse::<std::net::Ipv4Addr>().ok().map(std::net::IpAddr::V4)
+}
+
+/// The trusted proxy says the visitor came over HTTPS (last X-Forwarded-Proto).
+fn forwarded_https(headers: &axum::http::HeaderMap) -> bool {
+    headers.get_all("x-forwarded-proto").iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).last().is_some_and(|p| p.trim().eq_ignore_ascii_case("https"))
+}
+
+/// Problems with [server] trusted_proxies worth saying at start: an entry
+/// that is not an address or range (it never matches), or a range so wide it
+/// would let ordinary visitors claim any address.
+pub fn trusted_proxy_warnings(list: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for spec in list {
+        let s = spec.trim();
+        let (addr, bits) = match s.split_once('/') {
+            Some((a, b)) => (a, Some(b)),
+            None => (s, None),
+        };
+        let Ok(ip) = addr.parse::<std::net::IpAddr>() else {
+            out.push(format!("trusted_proxies: \"{s}\" is not an address or range; it is ignored"));
+            continue;
+        };
+        let wide = match (ip.to_canonical(), bits.map(|b| b.parse::<u32>())) {
+            (_, Some(Err(_))) => {
+                out.push(format!("trusted_proxies: \"{s}\" has a bad range size; it is read as the single address {addr}"));
+                continue;
+            }
+            (std::net::IpAddr::V4(_), Some(Ok(n))) => n < 16,
+            (std::net::IpAddr::V6(_), Some(Ok(n))) => n < 48,
+            _ => false,
+        };
+        if wide {
+            out.push(format!("trusted_proxies: \"{s}\" is a very wide range: anyone in it can claim any address (sign-in limits, logs, alerts); list only your proxy's own address"));
+        }
+    }
+    out
+}
+
+/// `ip` is the address `spec` names, or inside its range ("a.b.c.d/n").
+fn ip_in(ip: std::net::IpAddr, spec: &str) -> bool {
+    let (addr, bits) = match spec.trim().split_once('/') {
+        Some((a, b)) => (a, b.parse::<u32>().ok()),
+        None => (spec.trim(), None),
+    };
+    let Ok(net) = addr.parse::<std::net::IpAddr>() else { return false };
+    match (ip.to_canonical(), net.to_canonical()) {
+        (std::net::IpAddr::V4(a), std::net::IpAddr::V4(n)) => {
+            let b = bits.unwrap_or(32).min(32);
+            let mask = if b == 0 { 0 } else { u32::MAX << (32 - b) };
+            u32::from(a) & mask == u32::from(n) & mask
+        }
+        (std::net::IpAddr::V6(a), std::net::IpAddr::V6(n)) => {
+            let b = bits.unwrap_or(128).min(128);
+            let mask = if b == 0 { 0 } else { u128::MAX << (128 - b) };
+            u128::from(a) & mask == u128::from(n) & mask
+        }
+        _ => false,
+    }
 }
 
 /// `PUT|POST /push/<key>`: an FLV stream sent to a push:// camera, held open
@@ -296,11 +400,11 @@ async fn ai_model_get(State(engine): State<Arc<Engine>>, Json(r): Json<AiModelRe
         let r = crate::ai_setup::ensure(&dir, m, &|b, t| set(&|j| { j.bytes = b; j.total = t; })).and_then(|path| {
             set(&|j| j.state = "loading");
             // Load first; only a model that works goes into the settings.
-            let (threads, gpu, gpu_name) = {
+            let (threads, gpu, gpu_name, gpu_mb) = {
                 let c = engine.config.lock().unwrap();
-                (c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone())
+                (c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone(), c.ai.gpu_memory_mb)
             };
-            let d = crate::ai::AiDetector::load_on(&path, threads, gpu, gpu_name.as_deref())?;
+            let d = crate::ai::AiDetector::load_on(&path, threads, gpu, gpu_name.as_deref(), gpu_mb)?;
             *engine.ai.write().unwrap() = Some(std::sync::Arc::new(d));
             let mut c = engine.config.lock().unwrap();
             c.ai.enabled = true;
@@ -827,6 +931,7 @@ fn viewer_may_write(path: &str, method: &axum::http::Method) -> bool {
 fn admin_only_path(path: &str) -> bool {
     matches!(path, "/settings" | "/logs" | "/health" | "/users" | "/addresses" | "/discover" | "/devices" | "/discover/logins" | "/discover/watch" | "/discover/ignore" | "/helpers" | "/connections" | "/storage/plan" | "/storage/privacy" | "/drives" | "/ai/reviews" | "/sound/status" | "/restream" | "/plates/status" | "/plates/known")
         || path.starts_with("/users/")
+        || path.starts_with("/storage/missing")
         || path.starts_with("/alert-rules")
         || path.starts_with("/faces")
         || path.starts_with("/people")
@@ -3451,6 +3556,8 @@ fn merge_alerts(cur: &AlertConfig, patch: serde_json::Value) -> Result<AlertConf
 }
 
 async fn get_settings(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
+    // Listing the cards may run nvidia-smi (up to seconds): not on this thread.
+    let (gpus, gpu_note) = tokio::task::spawn_blocking(|| (crate::gpu::list(), crate::ai::gpu_note())).await.unwrap_or_default();
     let cfg = engine.config.lock().unwrap();
     // Secrets are never sent to the browser; "<set>" means a value exists
     // and saving with the field untouched keeps it.
@@ -3466,7 +3573,9 @@ async fn get_settings(State(engine): State<Arc<Engine>>) -> Json<serde_json::Val
             "model_exists": cfg.ai.model.as_ref().map(|m| m.is_file()),
             // The graphics card it runs on (null: the CPU), and the cards there are.
             "running_on": engine.detector().and_then(|d| d.gpu_name().map(String::from)),
-            "gpus": crate::gpu::list(),
+            "gpus": gpus,
+            // Why it is not on the card although one was found (null: no reason to give).
+            "gpu_note": gpu_note,
         },
         "automation": cfg.automation,
         "timelapse": cfg.timelapse,
@@ -4008,7 +4117,7 @@ fn merge_settings(cfg: &mut crate::config::Config, update: &SettingsUpdate, in_u
     if let Some(a) = update.ai.clone() {
         match merge_section::<crate::config::AiConfig>(&cfg.ai, a) {
             Ok(v) => {
-                if v.model != cfg.ai.model || v.enabled != cfg.ai.enabled || v.threads != cfg.ai.threads || v.gpu != cfg.ai.gpu || v.gpu_name != cfg.ai.gpu_name {
+                if v.model != cfg.ai.model || v.enabled != cfg.ai.enabled || v.threads != cfg.ai.threads || v.gpu != cfg.ai.gpu || v.gpu_name != cfg.ai.gpu_name || v.gpu_memory_mb != cfg.ai.gpu_memory_mb {
                     fx.reload_ai = true;
                 }
                 cfg.ai = v;
@@ -4322,6 +4431,54 @@ async fn apply_settings(engine: Arc<Engine>, mut update: SettingsUpdate, caller:
     match https_warning {
         Some(w) => Json(serde_json::json!({ "result": "success", "restart_needed": restart_needed, "warning": w })),
         None => Json(serde_json::json!({ "result": "success", "restart_needed": restart_needed })),
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    #[test]
+    fn visitor_address_only_from_a_trusted_proxy() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("x-forwarded-for", "203.0.113.9, 198.51.100.7".parse().unwrap());
+        let docker = vec!["172.17.0.0/16".to_string()];
+        // The proxy's own entry is the last one.
+        assert_eq!(forwarded_client(ip("172.17.0.1"), &docker, &h), Some(ip("198.51.100.7")));
+        // Not a trusted proxy, or none configured: the header is ignored.
+        assert_eq!(forwarded_client(ip("192.0.2.5"), &docker, &h), None);
+        assert_eq!(forwarded_client(ip("172.17.0.1"), &[], &h), None);
+        // No header, or junk in it.
+        assert_eq!(forwarded_client(ip("172.17.0.1"), &docker, &axum::http::HeaderMap::new()), None);
+        let mut bad = axum::http::HeaderMap::new();
+        bad.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        assert_eq!(forwarded_client(ip("172.17.0.1"), &docker, &bad), None);
+        for (h, want) in [("1.2.3.4:5678", "1.2.3.4"), ("[2001:db8::1]", "2001:db8::1"), ("[2001:db8::1]:443", "2001:db8::1"), ("2001:db8::2", "2001:db8::2")] {
+            let mut x = axum::http::HeaderMap::new();
+            x.insert("x-forwarded-for", h.parse().unwrap());
+            assert_eq!(forwarded_client(ip("172.17.0.1"), &docker, &x), Some(ip(want)), "{h}");
+        }
+        let mut p = axum::http::HeaderMap::new();
+        p.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(forwarded_https(&p));
+        p.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert!(!forwarded_https(&p));
+        assert!(!forwarded_https(&axum::http::HeaderMap::new()));
+        // Single addresses, IPv6 and IPv4-mapped forms.
+        assert!(ip_in(ip("127.0.0.1"), "127.0.0.1"));
+        assert!(!ip_in(ip("127.0.0.2"), "127.0.0.1"));
+        assert!(ip_in(ip("::ffff:172.17.0.1"), "172.17.0.0/16"));
+        assert!(ip_in(ip("fd7a:115c:a1e0::5"), "fd7a:115c:a1e0::/48"));
+        assert!(!ip_in(ip("10.0.0.1"), "garbage"));
+        assert!(ip_in(ip("10.1.2.3"), "0.0.0.0/0"));
+        let w = |l: &[&str]| trusted_proxy_warnings(&l.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(w(&["127.0.0.1", "172.17.0.1", "172.17.0.0/16", "fd7a:115c:a1e0::/48"]).is_empty());
+        assert!(w(&["0.0.0.0/0"])[0].contains("very wide"));
+        assert!(w(&["::/0"])[0].contains("very wide"));
+        assert!(w(&["10.0.0.0/8"])[0].contains("very wide"));
+        assert!(w(&["proxy.lan"])[0].contains("not an address"));
+        assert!(w(&["10.0.0.1/abc"])[0].contains("bad range"));
     }
 }
 
@@ -4813,6 +4970,58 @@ async fn storage_plan(State(engine): State<Arc<Engine>>, Query(q): Query<PlanQ>)
 /// picking where a new recording folder goes.
 async fn drives() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "drives": tokio::task::spawn_blocking(crate::engine::list_drives).await.unwrap_or_default() }))
+}
+
+/// `GET /api/storage/missing` (admins): what the start-up check noticed
+/// (recording folders not there, or whose recordings are mostly missing),
+/// the last dry run of "remove missing recordings" and what is running.
+async fn missing_status(State(engine): State<Arc<Engine>>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::missing::status_json(&engine)).await {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage check error").into_response(),
+    }
+}
+
+/// `POST /api/storage/missing/scan` (admins): start a dry run (read only);
+/// its result appears in `GET /api/storage/missing`.
+async fn missing_scan(State(engine): State<Arc<Engine>>, axum::Extension(IsAdmin(admin)): axum::Extension<IsAdmin>) -> Response {
+    if !admin {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "admin access required" }))).into_response();
+    }
+    match crate::missing::start_scan(engine) {
+        Ok(()) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(why) => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": why }))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MissingApply {
+    /// The dry run's id (what the admin looked at).
+    scan_id: String,
+    /// Folders to include although they need confirming (not there, not in
+    /// the settings, or none of their recordings found); "" = data folder.
+    #[serde(default)]
+    include: Vec<String>,
+}
+
+/// `POST /api/storage/missing/apply` (admins): back up the database, then
+/// remove the rows of the missing recordings found by dry run `scan_id`
+/// (never files). Runs in the background; see `GET /api/storage/missing`.
+async fn missing_apply(
+    State(engine): State<Arc<Engine>>,
+    axum::Extension(IsAdmin(admin)): axum::Extension<IsAdmin>,
+    caller: Option<axum::Extension<Caller>>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    Json(b): Json<MissingApply>,
+) -> Response {
+    if !admin {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "admin access required" }))).into_response();
+    }
+    let who = format!("{} from {}", caller.map(|c| c.0 .0.clone()).unwrap_or_else(|| "?".into()), peer.map(|p| p.0.ip().to_string()).unwrap_or_else(|| "?".into()));
+    match crate::missing::start_apply(engine, &b.scan_id, b.include, who) {
+        Ok(()) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err((code, why)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::CONFLICT), Json(serde_json::json!({ "error": why }))).into_response(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -6027,6 +6236,9 @@ mod viewer_write_tests {
         "/links/:id/stats",
         "/storage/plan",
         "/storage/privacy",
+        "/storage/missing",
+        "/storage/missing/scan",
+        "/storage/missing/apply",
         "/drives",
         "/tls",
         "/addresses",
@@ -6280,7 +6492,7 @@ mod viewer_write_tests {
 
     #[test]
     fn admin_only_reads() {
-        for p in ["/settings", "/system/restart", "/system", "/update", "/logs", "/users", "/cameras/3/tamper", "/cameras/3/unusual", "/cameras/3/onvif", "/alert-rules", "/alert-rules/preview"] {
+        for p in ["/settings", "/storage/missing", "/storage/missing/scan", "/storage/missing/apply", "/system/restart", "/system", "/update", "/logs", "/users", "/cameras/3/tamper", "/cameras/3/unusual", "/cameras/3/onvif", "/alert-rules", "/alert-rules/preview"] {
             assert!(super::admin_only_path(p), "{p}");
         }
         for p in ["/tls", "/whoami", "/cameras", "/status", "/cameras/3/tamper/ref/day", "/cameras/3/tamper/incidents/7/cur"] {

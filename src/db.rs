@@ -12,6 +12,8 @@ use crate::engine::Event;
 mod account;
 mod devices;
 mod digest;
+mod missing;
+pub use missing::path_hash;
 mod plates;
 pub use account::{AccountRequest, TokenRow};
 pub use devices::StoredSession;
@@ -2571,11 +2573,21 @@ impl Db {
     }
 
     pub fn delete_events(&self, ids: &[String]) -> Result<usize> {
+        Ok(self.delete_events_where(ids, "")?.len())
+    }
+
+    /// As `delete_events`, only those still unprotected with a clip address
+    /// (not marked "No clip" meanwhile, see crate::missing). Returns the ids deleted.
+    pub fn delete_events_with_clip(&self, ids: &[String]) -> Result<Vec<String>> {
+        self.delete_events_where(ids, " AND protect = 0 AND clip IS NOT NULL")
+    }
+
+    fn delete_events_where(&self, ids: &[String], cond: &str) -> Result<Vec<String>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        let mut n = 0;
+        let mut done = Vec::new();
         {
-            let mut st = tx.prepare("DELETE FROM events WHERE id = ?1")?;
+            let mut st = tx.prepare(&format!("DELETE FROM events WHERE id = ?1{cond}"))?;
             let mut ai = tx.prepare("DELETE FROM ai_reviews WHERE event_id = ?1")?;
             let mut ai_sum = tx.prepare("DELETE FROM ai_review_sums WHERE event_id = ?1")?;
             // Faces seen in the event go with it, unless someone named them
@@ -2586,7 +2598,13 @@ impl Db {
             let mut smart = tx.prepare("DELETE FROM smart_vecs WHERE event_id = ?1")?;
             let mut smart_done = tx.prepare("DELETE FROM smart_done WHERE event_id = ?1")?;
             for id in ids {
-                n += st.execute(params![id])?;
+                let n = st.execute(params![id])?;
+                if n == 0 && !cond.is_empty() {
+                    continue;
+                }
+                if n > 0 {
+                    done.push(id.clone());
+                }
                 ai.execute(params![id])?;
                 ai_sum.execute(params![id])?;
                 faces.execute(params![id])?;
@@ -2596,7 +2614,7 @@ impl Db {
             }
         }
         tx.commit()?;
-        Ok(n)
+        Ok(done)
     }
 
     /// Oldest unprotected events first.
@@ -2604,6 +2622,16 @@ impl Db {
         let conn = self.lock();
         let mut st = conn.prepare(&format!(
             "SELECT {EV_COLS} FROM events WHERE protect = 0 ORDER BY start, id LIMIT ?1"
+        ))?;
+        let rows = st.query_map(params![limit as i64], event_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Oldest unprotected events that have a clip address first.
+    pub fn oldest_unprotected_events_with_clip(&self, limit: usize) -> Result<Vec<Event>> {
+        let conn = self.lock_ro();
+        let mut st = conn.prepare(&format!(
+            "SELECT {EV_COLS} FROM events WHERE protect = 0 AND clip IS NOT NULL ORDER BY start, id LIMIT ?1"
         ))?;
         let rows = st.query_map(params![limit as i64], event_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

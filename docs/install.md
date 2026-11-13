@@ -15,8 +15,10 @@ down, under each system's name.
 **You need**
 
 - A computer that stays on: a desktop, a mini PC or a small server. Recording uses little
-  processing power, but AI object detection is faster with a graphics card (on Windows any
-  DirectX 12 card is used automatically).
+  processing power, but AI object detection is faster with a graphics card: on Windows any
+  DirectX 12 card is used automatically, on Apple silicon Macs the chip's Neural Engine and
+  GPU, and on 64-bit Linux an NVIDIA card once NVIDIA's CUDA libraries are installed (see
+  [Linux: an NVIDIA card for the AI](#linux-an-nvidia-card-for-the-ai)).
 - Enough disk space. A typical camera records 10–30 GB a day. A separate large drive for
   recordings is best.
 - Cameras that send video over the network: RTSP (most IP cameras, ONVIF cameras, Reolink,
@@ -28,9 +30,9 @@ down, under each system's name.
 | System | Package | Notes |
 |---|---|---|
 | Windows 10 / 11, 64-bit | `ambersight-<version>-windows-x86_64-setup.exe` (installer) or `ambersight-<version>-windows-x86_64.zip` | AI uses the graphics card (DirectML) |
-| macOS on Apple silicon (M1 and later) | `ambersight-<version>-darwin-arm64.tar.gz` | |
+| macOS on Apple silicon (M1 and later) | `ambersight-<version>-darwin-arm64.tar.gz` | AI uses the Neural Engine and GPU (Core ML) |
 | macOS on Intel | `ambersight-<version>-darwin-x86_64.tar.gz` | Built-in AI is not available; an external AI server can be used |
-| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer |
+| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer. AI uses an NVIDIA card (CUDA) when NVIDIA's libraries are installed |
 | Raspberry Pi 4 / 5 (and other 64-bit ARM Linux) | `ambersight_<version>_arm64.deb`, `ambersight-<version>-1.aarch64.rpm` or `ambersight-<version>-linux-aarch64.tar.gz` | Needs the **64-bit** Raspberry Pi OS, trixie (2025) or newer. See [Raspberry Pi](#raspberry-pi). |
 
 The `.zip` and `.tar.gz` packages hold the AmberSight program, an example settings file
@@ -59,7 +61,7 @@ it in the browser. Your settings and recordings are kept when you update or remo
 2. Windows asks whether to allow it to make changes: choose **Yes** (it installs a service).
    The program is not signed, so SmartScreen may first say "Windows protected your PC": choose
    **More info**, then **Run anyway**.
-3. Follow the pages: licence, install folder (`C:\Program Files\AmberSight NVR` is fine; it will not install into a folder that already holds another program), Install.
+3. Follow the pages: license, install folder (`C:\Program Files\AmberSight NVR` is fine; it will not install into a folder that already holds another program), Install.
 4. On the last page leave **Open AmberSight** ticked and choose **Finish**.
 
 What it sets up:
@@ -401,6 +403,71 @@ If a firewall is on, open port 8090:
 | Logs | `journalctl --user -u ambersight -f` (also Settings > System > Logs) |
 | Remove the service | `./ambersight service uninstall` |
 
+### Linux: an NVIDIA card for the AI
+
+On a 64-bit Intel/AMD Linux computer with an NVIDIA graphics card, the built-in AI runs on the
+card (CUDA): checks take a few milliseconds instead of tens to hundreds on the processor, and
+the Large model keeps up with many cameras. Without it everything still works on the processor.
+
+It needs three things:
+
+1. **NVIDIA's driver** (`nvidia-smi` lists the card). Most distributions install it for you
+   (Ubuntu: *Additional Drivers*, or `sudo ubuntu-drivers install`).
+2. **NVIDIA's CUDA 13 and cuDNN 9 libraries**: the CUDA runtime (cudart), cuBLAS, cuRAND and
+   cuDNN 9 for CUDA 13. These are not part of Ubuntu or Debian: they come from NVIDIA's own
+   package repository (about 1.3 GB installed). On Ubuntu 26.04:
+
+   ```sh
+   wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+   sudo dpkg -i cuda-keyring_1.1-1_all.deb
+   sudo apt update
+   sudo apt install cuda-cudart-13-5 libcublas-13-5 libcurand-13-5 libcudnn9-cuda-13
+   ldconfig -p | grep -E 'libcudart.so.13|libcublasLt.so.13|libcurand.so.10|libcudnn.so.9'
+   ```
+
+   The last line should list all four. Other systems: use the matching folder instead of
+   `ubuntu2604` (`ubuntu2404`, `debian13`, `fedora42`, ... see
+   [NVIDIA's CUDA downloads](https://developer.nvidia.com/cuda-downloads)); any CUDA 13.x works.
+   This adds NVIDIA's repository and these libraries only; the driver you have stays.
+3. **AmberSight's NVIDIA add-on**: ONNX Runtime's CUDA part (about 70 MB to download). The
+   packages leave it out, since most computers have no NVIDIA card. When AmberSight finds a
+   card and NVIDIA's libraries (step 2) it downloads the add-on of its own version from the
+   release by itself, checks it against the release's signed checksums like an update, and
+   keeps it in `<data folder>/tools/cuda-<version>/` (with the packages:
+   `/var/lib/ambersight/tools/`). A failed download is tried again after 5 and 15 minutes, then
+   hourly, and given up after about a day (until AmberSight restarts or the AI settings change).
+   After an update it downloads the new version's add-on. With `[update] check = false`
+   nothing is downloaded: then, or without internet, put the two `.so` files from that
+   version's `ambersight-cuda-<version>-linux-x86_64.tar.gz` in that folder yourself. The
+   folder and both files must be real files (not links), belong to the user AmberSight runs as
+   (or root) and not be writable by others, or they are not loaded:
+
+   ```sh
+   sudo install -d -o ambersight -g ambersight -m 755 /var/lib/ambersight/tools
+   sudo install -d -o ambersight -g ambersight -m 755 /var/lib/ambersight/tools/cuda-<version>
+   sudo install -o ambersight -g ambersight -m 644 libonnxruntime_providers_*.so /var/lib/ambersight/tools/cuda-<version>/
+   ```
+
+Then restart AmberSight (`sudo systemctl restart ambersight`). **Settings > Detection & alerts >
+Objects (AI)** shows *Running on: NVIDIA GeForce ...*, or why it is not on the card (for
+example *libcudnn.so.9 not found*), and lets you choose the card when there are several (two
+cards of the same model are told apart by their number, e.g. *NVIDIA GeForce RTX 3060 #1*).
+AmberSight finds the chosen card in CUDA by its PCI address, so `CUDA_DEVICE_ORDER` does not
+mix the cards up; a card hidden with `CUDA_VISIBLE_DEVICES` is reported as not usable. To try
+it by hand, run the AI test as the user AmberSight runs as (run as root, AmberSight loads the
+add-on only from beside the program, owned by root, and downloads nothing):
+`sudo -u ambersight ambersight ai-test --config /etc/ambersight/config.toml --model <model.onnx> <picture.jpg>`.
+A copy you put beside the program yourself (root-owned) is used as it is and is not replaced by
+updates: put the add-on of the new version there after each update, or remove it and let
+AmberSight download its own into the data folder.
+
+cuFFT (`libcufft-13-x`) is not needed: only models with FFT operations use it, and the YOLOX
+models do not.
+
+The AI's memory pool on the card is capped at 1.5 GB so other programs on the same card keep
+theirs (CUDA adds a few hundred MB on top: the Small model uses about 400 MB in all, the Large
+one about 750 MB). Change it with `gpu_memory_mb` in `[ai]` in the settings file.
+
 ---
 
 ## Raspberry Pi
@@ -609,6 +676,80 @@ Your settings (`config.toml`), recordings and database are kept.
 
 ---
 
+## Moving recordings or moving to a new computer
+
+AmberSight's database stores each recording as the name of its folder ("data folder", or an
+extra folder's name such as `new` or `stored`) plus a path inside that folder. It does not store
+`D:\...` or `/mnt/...` paths, so the database works on another drive or another operating system
+as it is. To move:
+
+1. Stop AmberSight. Copy the data folder (with `ambersight.db`, `clips/`, `thumbs/` and the rest)
+   and any recording folders you want to keep to the new place, or plug the drives into the new
+   computer.
+2. Put `config.toml` in place and change the paths in it: `data_dir` under `[storage]`, and the
+   `path` of each `[[storage.folders]]`. Keep each folder's `name` as it was. The extra folders
+   can also be changed later in Settings > Recording > Drives & folders.
+3. Start AmberSight. Users, cameras, events, faces and plates you named, layouts, clips and
+   pictures carry over.
+4. If some recordings did not come along (a folder left behind, a drive reformatted), AmberSight
+   notices at start: the log says so and Settings > Recording shows a note. Check the folder
+   paths first: a wrong path looks the same as deleted recordings. Then remove the ones that are
+   gone from the database under Drives & folders, **Recordings whose files are gone**: **Check
+   now**, look at what it found, **Remove**. Or from the command line, as the account AmberSight
+   runs as (it refuses to run as root on a data folder that belongs to another account). The
+   server can be running or stopped. One check or removal runs at a time: while one runs (on the
+   page or the command line), starting another is refused until it has finished. A running
+   server shows the result at once, apart from playback it had already prepared, which catches
+   up within a minute.
+
+   ```
+   ambersight storage prune-missing --config config.toml           # what is missing; changes nothing
+   ambersight storage prune-missing --config config.toml --apply   # remove them from the database
+   ```
+
+   It backs the database up first (into `backups/` in the data folder) and never deletes a file.
+   That backup is one of the `backup_keep` backups (at least 2 are kept), so newer ones replace it
+   in time; putting it back undoes the removal but loses the events recorded since.
+   A folder whose recordings could just as well be behind a wrong path or a drive that is not
+   connected is left alone unless you name it with `--include-folder <name>` (`data` for the data
+   folder), or tick it on the page: a folder that is not there, holds none or most of its
+   recordings, has a camera none of whose recordings are there, or (Linux) looks like the mount
+   point of a drive that is not mounted: it is on a mount point in `/etc/fstab` that is not
+   mounted now, or, for drives not in fstab, under `/mnt`, `/media` or `/run/media` with nothing
+   mounted there. In that last case mount the drive first: until then new recordings go to the
+   system disk. If the folder really is meant to be on the system disk, name or tick it.
+   Events whose video was all in the removed recordings stay in the event list with their
+   pictures, marked "No clip", until retention removes them by age; protected events are not
+   changed.
+
+Example: from Windows to Linux. The Windows config had
+
+```toml
+[storage]
+data_dir = "D:/AmberSight/data"
+
+[[storage.folders]]
+name = "stored"
+path = "F:/AmberSight/Stored"
+```
+
+With the data folder copied to `/var/lib/ambersight` and the F: drive mounted at `/mnt/f`, the
+Linux config gets
+
+```toml
+[storage]
+data_dir = "/var/lib/ambersight"
+
+[[storage.folders]]
+name = "stored"
+path = "/mnt/f/AmberSight/Stored"
+```
+
+Make sure the service account can read and write both (`sudo chown -R ambersight: /var/lib/ambersight /mnt/f/AmberSight`
+for the packages), start AmberSight, then run the dry run above as that account
+(`sudo -u ambersight ambersight storage prune-missing --config /etc/ambersight/config.toml`) and
+`--apply` when what it lists is really gone.
+
 ## Uninstalling
 
 - **Windows installer:** Settings > Apps > Installed apps > AmberSight > Uninstall.
@@ -631,13 +772,41 @@ place in Settings > Recording > Drives & folders). Delete that folder too if you
 
 ## Troubleshooting
 
-### Behind a reverse proxy: one address for everyone
+### Behind a reverse proxy or tunnel
 
-AmberSight counts wrong passwords and wrong codes per address, and has no setting to trust a proxy's
-forwarded address. Behind a reverse proxy every client has the proxy's address, so they all share those
-limits: someone who gets too many wrong makes everyone behind that proxy wait. Limits that count per
-account and address, such as tries at codes and recovery codes, then count per account. Where that
-matters, have clients connect to AmberSight directly. The alert for a password sent directly by a program (HTTP Basic or RTSP) is once per account and network, so behind a proxy it sees only one network.
+AmberSight counts wrong passwords and wrong codes per address. Behind a reverse proxy or tunnel
+(nginx, Caddy, Traefik, cloudflared, Tailscale Funnel) every visitor arrives from the proxy, so they
+would all share those limits: someone who gets too many wrong would make everyone behind the proxy
+wait, and logs and new-device alerts would show the proxy's address. Tell AmberSight the proxy's own
+address and it takes each visitor's address from the `X-Forwarded-For` header the proxy adds:
+
+```toml
+[server]
+trusted_proxies = ["127.0.0.1"]   # the proxy's address as AmberSight sees it
+```
+
+- **List only the proxy.** Use its exact address (`127.0.0.1` for a proxy on the same computer;
+  Docker's bridge gateway, e.g. `172.17.0.1`, for a proxy on the host of a container on a bridge
+  network). Never a LAN or internet range: anyone connecting from a listed address could claim any
+  address and get past the sign-in limits. For the same reason, don't also expose AmberSight's port
+  directly to the clients the proxy serves.
+- **An HTTP proxy that adds the visitor to `X-Forwarded-For`.** Caddy, Traefik, cloudflared and
+  Tailscale do. nginx needs `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. A TCP
+  (layer 4) proxy passes the client's own header through and must not be listed. With several proxies
+  in a row, list only the one that connects to AmberSight.
+- **Keep the host name.** AmberSight refuses changes from another web site by comparing the page's
+  origin with the `Host` header, so the proxy must pass the original host (nginx:
+  `proxy_set_header Host $host;`) and allow websockets for live video (nginx:
+  `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`).
+- **HTTPS.** Either have the proxy connect to AmberSight's HTTPS (`https://`, trusting its private
+  CA or skipping verification on localhost), or turn AmberSight's HTTPS off and bind it to
+  `127.0.0.1` so only the proxy reaches it. With HTTPS off, the proxy's `X-Forwarded-Proto: https`
+  keeps sign-in cookies marked secure.
+- AmberSight says at start when an entry is not an address or is a very wide range.
+
+Without `trusted_proxies`, everyone behind the proxy shares one address as described above. The alert
+for a password sent directly by a program (HTTP Basic or RTSP) is once per account and network, so
+behind a proxy that is not listed it sees only one network.
 
 ### Who is signed in, and new device alerts
 

@@ -89,6 +89,14 @@ pub struct ServerConfig {
     /// (default: the computer name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reverse proxies in front of this server: the proxy's own address, e.g.
+    /// "127.0.0.1" (a range only when the proxy's address changes; never one
+    /// that ordinary visitors connect from). A request from one of them is taken
+    /// to come from the address it puts last in X-Forwarded-For, so sign-in
+    /// limits, logs and alerts see each visitor. Empty (the default): the
+    /// header is ignored, as anyone could send it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -104,6 +112,7 @@ impl Default for ServerConfig {
             tls_key: None,
             tls_names: Vec::new(),
             name: None,
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -2060,13 +2069,19 @@ pub struct AiConfig {
     #[serde(default = "default_ai_threads")]
     pub threads: usize,
     /// Run the built-in detector on the graphics card where possible
-    /// (Windows); false: always the CPU.
+    /// (Windows: DirectML; Linux: an NVIDIA card with CUDA; Apple silicon
+    /// Macs: Core ML); false: always the CPU.
     #[serde(default = "yes")]
     pub gpu: bool,
-    /// Which graphics card (its name as Windows lists it); none: the one
+    /// Which graphics card (its name as the system lists it); none: the one
     /// with the most video memory.
     #[serde(default)]
     pub gpu_name: Option<String>,
+    /// NVIDIA cards (Linux): the most video memory the AI's memory pool may
+    /// take, MB, so other programs on the card keep theirs (CUDA itself
+    /// adds a few hundred MB on top).
+    #[serde(default = "default_gpu_memory_mb")]
+    pub gpu_memory_mb: u32,
 }
 
 fn default_ai_min_score() -> f32 { 0.5 }
@@ -2075,6 +2090,7 @@ fn default_ai_labels() -> Vec<String> {
 }
 fn default_ai_max_checks() -> u32 { 10 }
 fn default_ai_threads() -> usize { 2 }
+fn default_gpu_memory_mb() -> u32 { 1536 }
 fn default_zone_interval() -> u32 { 700 }
 fn default_zone_hold() -> u32 { 600 }
 
@@ -2095,6 +2111,7 @@ impl Default for AiConfig {
             threads: default_ai_threads(),
             gpu: true,
             gpu_name: None,
+            gpu_memory_mb: default_gpu_memory_mb(),
         }
     }
 }

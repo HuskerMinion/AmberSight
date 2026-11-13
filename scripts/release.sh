@@ -13,6 +13,10 @@
 #   ambersight-<v>-darwin-arm64.tar.gz        ambersight-<v>-darwin-x86_64.tar.gz
 #   ambersight_<v>_amd64.deb                  ambersight_<v>_arm64.deb
 #   ambersight-<v>-1.x86_64.rpm               ambersight-<v>-1.aarch64.rpm
+#   ambersight-cuda-<v>-linux-x86_64.tar.gz   (the NVIDIA add-on, made by
+#                                              scripts/package.sh on Linux x86_64)
+# Any 64-bit Intel/AMD Linux package needs the NVIDIA add-on beside it:
+# AmberSight downloads it from the same release when it finds an NVIDIA card.
 #
 # It writes dist/release-<v>/SHA256SUMS over them and signs it with the
 # offline release key (dist/release-<v>/SHA256SUMS.sig), using this
@@ -66,12 +70,20 @@ for f in \
   "ambersight-$v-linux-x86_64.tar.gz" "ambersight-$v-linux-aarch64.tar.gz" \
   "ambersight-$v-darwin-arm64.tar.gz" "ambersight-$v-darwin-x86_64.tar.gz" \
   "ambersight_${v}_amd64.deb" "ambersight_${v}_arm64.deb" \
-  "ambersight-$v-1.x86_64.rpm" "ambersight-$v-1.aarch64.rpm"; do
+  "ambersight-$v-1.x86_64.rpm" "ambersight-$v-1.aarch64.rpm" \
+  "ambersight-cuda-$v-linux-x86_64.tar.gz"; do
   if [ -f "dist/$f" ]; then
     files="$files $f"
   fi
 done
 [ -n "$files" ] || { echo "no packages for $v in dist/" >&2; exit 1; }
+case "$files" in
+  *"linux-x86_64.tar.gz"* | *"_amd64.deb"* | *".x86_64.rpm"*)
+    case "$files" in
+      *"ambersight-cuda-$v-linux-x86_64.tar.gz"*) ;;
+      *) echo "dist/ambersight-cuda-$v-linux-x86_64.tar.gz is missing (the NVIDIA add-on the Linux x86_64 packages download): run scripts/package-cuda-addon.sh" >&2; exit 1 ;;
+    esac ;;
+esac
 
 out="dist/release-$v"
 mkdir -p "$out"

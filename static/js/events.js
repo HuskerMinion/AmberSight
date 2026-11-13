@@ -342,10 +342,17 @@ function render() {
   if (sig === lastRender) return;
   lastRender = sig;
   // Remember where the viewer is, so rows added on top do not push the list around.
+  // The open event's row when it is on screen (a link to an older event scrolls to it, and a
+  // page loaded above it must not push it away), else the top row in view.
   let anchor = null, anchorTop = 0;
-  if (scr.scrollTop > 4) {
-    const top = scr.getBoundingClientRect().top;
-    for (const el of rows.querySelectorAll('.evr, .evtile')) { const r = el.getBoundingClientRect(); if (r.bottom > top + 20) { anchor = el; anchorTop = r.top; break; } }
+  const box = scr.getBoundingClientRect();
+  const sel = selId ? (V === 'grid' ? tileEls.get(selId) : rowEls.get(selId)) : null;
+  if (sel && sel.isConnected) {
+    const r = sel.getBoundingClientRect();
+    if (r.bottom > box.top && r.top < box.bottom) { anchor = sel; anchorTop = r.top; }
+  }
+  if (!anchor && scr.scrollTop > 4) {
+    for (const el of rows.querySelectorAll('.evr, .evtile')) { const r = el.getBoundingClientRect(); if (r.bottom > box.top + 20) { anchor = el; anchorTop = r.top; break; } }
   }
   const nodes = [];
   let lastH = '';
@@ -555,7 +562,7 @@ function paintPlayer(e) {
     '<div class="evp-vid">' + (e.clip ? '<video controls playsinline preload="auto" poster="' + (e.thumb ? '/api/events/' + enc(e.id) + '/thumb' : '') + '"></video>' : (e.thumb ? '<img src="/api/events/' + enc(e.id) + '/thumb" alt="">' : '') + '<span class="nc">No clip</span>') + '</div>' +
     (e.clip ? '<div class="evp-ctl"><div class="evp-mtl" title="Click to jump"><i></i><b></b></div><label class="evp-speed">Speed <select aria-label="Playback speed">' + speedOptions(state.speed, MAX_RATE) + '</select></label></div>' : '') +
     '<div class="evp-acts"></div>' +
-    '<div class="evp-keys"><kbd>↑</kbd><kbd>↓</kbd> or <kbd>J</kbd><kbd>K</kbd> next and previous · <kbd>Space</kbd> play · <kbd>P</kbd> keep forever · <kbd>X</kbd> not a real alert · <kbd>O</kbd> looks fine · <kbd>Enter</kbd> open on the timeline</div>' +
+    '<div class="evp-keys"><kbd>↑</kbd><kbd>↓</kbd> or <kbd>J</kbd><kbd>K</kbd> next and previous · <kbd>Space</kbd> play · ' + (state.isAdmin ? '<kbd>P</kbd> keep forever · <kbd>X</kbd> not a real alert · ' : '') + '<kbd>O</kbd> looks fine · <kbd>Enter</kbd> open on the timeline</div>' +
     '<div class="evv" data-verdict></div><div data-evfaces></div><div data-evplates></div>';
   box.querySelector('.evp-back').onclick = () => setPanel(false);
   const v = box.querySelector('video');

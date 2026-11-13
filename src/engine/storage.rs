@@ -367,6 +367,18 @@ impl Engine {
 
     fn storage_status_now(self: &Arc<Engine>) -> serde_json::Value {
         let mut v = self.storage_usage();
+        // The indexed sizes from the running totals as they are now (a few rows): the walk above
+        // is kept for minutes, and recordings removed from the index meanwhile (see
+        // crate::missing) must not show until then.
+        if self.db.segment_totals_ready() {
+            v["indexed_bytes"] = serde_json::json!(self.db.total_segment_bytes().unwrap_or(0));
+            if let Some(fs) = v["folders"].as_array_mut() {
+                for f in fs.iter_mut() {
+                    let name = f["name"].as_str().unwrap_or("").to_string();
+                    f["bytes"] = serde_json::json!(self.db.folder_bytes(&name).unwrap_or(0));
+                }
+            }
+        }
         let caps = self.storage_caps();
         let levels = self.storage_levels(&caps);
         let pct = self.config.lock().unwrap().storage.min_free_pct();
@@ -1054,12 +1066,14 @@ fn retire_segment(
 
 /// Unprotected events with no saved clip file whose recordings have all been
 /// deleted (they ended before the oldest recording still kept for their
-/// camera) can no longer be played: remove them.
+/// camera) can no longer be played: remove them. Events with no clip address
+/// (never had video, or marked so when missing recordings were removed, see
+/// crate::missing) are not: age retention removes those.
 fn drop_events_without_video(engine: &Arc<Engine>) -> anyhow::Result<()> {
     let cfg = engine.config.lock().unwrap().clone();
     let mut oldest: std::collections::HashMap<String, Option<i64>> = Default::default();
     let mut gone = Vec::new();
-    for ev in engine.db.oldest_unprotected_events(5000)? {
+    for ev in engine.db.oldest_unprotected_events_with_clip(5000)? {
         let cam = slug(&ev.camera);
         let first = match oldest.get(&cam) {
             Some(v) => *v,
@@ -1073,11 +1087,14 @@ fn drop_events_without_video(engine: &Arc<Engine>) -> anyhow::Result<()> {
         // clips are files; age retention handles those.
         let Some(first) = first else { continue };
         if (ev.end + cfg.motion_for(&ev.camera).post_roll as i64) * 1000 < first && !engine.clip_file_path(&ev.id).exists() {
-            remove_event_files(&engine.data_dir, &ev.id);
             gone.push(ev.id);
         }
     }
-    engine.db.delete_events(&gone)?;
+    // Only those still unprotected with a clip address (a removal of missing recordings may have
+    // marked one meanwhile), and their files only once their row is gone.
+    for id in engine.db.delete_events_with_clip(&gone)? {
+        remove_event_files(&engine.data_dir, &id);
+    }
     Ok(())
 }
 

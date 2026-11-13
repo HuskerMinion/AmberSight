@@ -29,6 +29,8 @@ mod rules_http;
 mod alert_rules;
 mod sound;
 mod gpu;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod gpu_addon;
 mod capture;
 mod child;
 mod ffmpeg_bin;
@@ -41,6 +43,7 @@ mod engine;
 mod live_http;
 mod local_source;
 mod logbuf;
+mod missing;
 mod ingest;
 mod motion;
 mod tracker;

@@ -498,12 +498,14 @@ function aiPage(el) {
       pageBar() + '</div>';
     bind();
   }
-  // Where the built-in model runs: a graphics card (Windows) or the CPU.
+  // Where the built-in model runs: a graphics card (Windows, Linux with
+  // NVIDIA, Apple silicon) or the CPU, and why not the card when one is there.
   function hardwareCard() {
     const gpus = status.gpus || [];
     const on = status.running_on;
-    const now = '<div class="hint">Running on: <b>' + esc(on || (status.builtin_loaded ? 'the CPU' : 'not loaded')) + '</b></div>';
-    if (!gpus.length) return '<div class="ac-sub">Hardware</div>' + now + '<div class="hint">No graphics card the AI can use was found (it needs Windows and a DirectX 12 card), so it uses the CPU.</div>';
+    const now = '<div class="hint">Running on: <b>' + esc(on || (status.builtin_loaded ? 'the CPU' : 'not loaded')) + '</b></div>' +
+      (!on && status.builtin_loaded && draft.gpu && status.gpu_note ? '<div class="hint">Not on the graphics card: ' + esc(status.gpu_note) + '</div>' : '');
+    if (!gpus.length) return '<div class="ac-sub">Hardware</div>' + now + '<div class="hint">No graphics card the AI can use was found (Windows: a DirectX 12 card; Linux: an NVIDIA card with its driver; Mac: Apple silicon), so it uses the CPU.</div>';
     const best = gpus.slice().sort((a, b) => b.memory_mb - a.memory_mb || a.index - b.index)[0];
     const gb = (g) => g.memory_mb >= 1024 ? ' (' + Math.round(g.memory_mb / 1024) + ' GB)' : '';
     return '<div class="ac-sub">Hardware</div>' + now +
@@ -590,6 +592,121 @@ function storagePage(el, mode) {
     folders: (s.folders || []).map(f => ({ name: f.name, path: String(f.path), max_mb: f.max_mb || 0, archive: !!f.archive, private: f.private === true ? true : f.private === false ? false : null })),
     min_free_percent: s.min_free_percent != null ? s.min_free_percent : 10,
   });
+  // Recordings whose files are gone (src/missing.rs): what the start-up check noticed (both
+  // pages) and the check with its Remove button (Drives & folders). Drawn into their own boxes so
+  // the progress can update without drawing the page again.
+  let miss = null, missErr = '', missTimer = null, missBusy = false;
+  const missInclude = {};
+  async function loadMissing() {
+    clearTimeout(missTimer);
+    try { miss = await api('/api/storage/missing'); missErr = ''; } catch (e) { missErr = errText(e); }
+    if (!el.isConnected) return;
+    paintMissing();
+    if (miss && ['scanning', 'applying'].includes(miss.job.state)) missTimer = setTimeout(loadMissing, 1000);
+  }
+  const fmtDay = (ms) => ms ? new Date(ms).toLocaleDateString() : '';
+  const MISS_PHASE = { recordings: 'Looking for recordings', events: 'Looking at events', backup: 'Backing up the database', checking: 'Looking for each one again', removing: 'Removing from the database' };
+  function missNoteHtml() {
+    const notes = miss && miss.detected ? miss.detected.notes || [] : [];
+    if (!notes.length) return '';
+    return '<div class="ac-card ac-warncard"><div class="ac-card-t">' + ic('alert') + ' Recordings missing</div>' +
+      notes.map(n => '<p class="hint warn">' + esc(n.text.charAt(0).toUpperCase() + n.text.slice(1)) + '.</p>').join('') +
+      (retention ? '<div class="hint">To remove them from the database: Drives &amp; folders, Recordings whose files are gone.</div>' : '') + '</div>';
+  }
+  // Why a folder's missing recordings are left alone unless ticked (see src/missing.rs confirm_why).
+  const WHY = {
+    not_found: () => 'the folder is not there',
+    not_configured: () => 'no folder of this name is in the settings',
+    all_missing: () => 'none of its recordings are there',
+    most_missing: () => 'most of its recordings are missing',
+    cameras_all_missing: (f) => 'every recording of ' + f.whole_cameras.join(', ') + ' in it is missing',
+    not_mounted: () => 'is the drive mounted?',
+  };
+  function folderLine(f) {
+    const n = f.missing.toLocaleString(), rows = f.rows.toLocaleString();
+    const what = {
+      ok: f.rows ? 'all ' + rows + ' there' : 'no recordings',
+      some_missing: n + ' of ' + rows + ' missing (' + fmtSize(f.missing_bytes) + ', ' + fmtDay(f.oldest_missing_ms) + ' to ' + fmtDay(f.newest_missing_ms) + ')',
+      all_missing: 'the folder is there but none of its ' + rows + ' recordings are (' + fmtSize(f.missing_bytes) + '). If it is a drive or network share that is not connected, connect it first.',
+      not_found: f.rows ? 'folder not found (' + rows + ' recordings in the database). If the drive is not connected or the folder moved, fix its path above and save first.' : 'folder not found',
+      not_configured: 'no folder of this name in the settings any more; ' + n + ' of ' + rows + ' are not in the data folder either. If it moved, add it again above.',
+    }[f.state] || f.state;
+    let h = '<div class="ac-mfolder"><b>' + esc(f.label) + '</b> <span class="ac-path-i">' + esc(f.path) + '</span><div class="hint' + (f.needs_confirm ? ' warn' : '') + '">' + esc(what) + '</div>';
+    if (f.not_mounted && f.missing) h += '<p class="hint warn"><b>Is the drive mounted?</b> This folder looks like the mount point of a drive that is not mounted: mount it and restart AmberSight. If this folder is meant to be on the system disk, tick it to remove the missing ones.</p>';
+    if (f.unknown) h += '<div class="hint">' + f.unknown.toLocaleString() + ' could not be looked for and are kept.</div>';
+    if (f.case_differs) h += '<div class="hint warn">' + f.case_differs.toLocaleString() + ' are there under a name with other capitals (a folder renamed?) and are kept.</div>';
+    if (f.needs_confirm) {
+      h += '<div class="hint warn">Left alone unless ticked: ' + esc(f.confirm_why.map(w => WHY[w] ? WHY[w](f) : w).join('; ')) + '. A wrong path or a drive that is not connected looks the same.</div>' +
+        swHtml('data-minc="' + esc(f.name) + '"', !!missInclude[f.name], 'Remove these ' + n + ' too', 'Only if they are gone for good.');
+    }
+    return h + '</div>';
+  }
+  function missCardHtml() {
+    let h = '<div class="ac-card-t">Recordings whose files are gone</div>' +
+      '<div class="hint">Finds recordings the database lists whose files are no longer on disk (a folder emptied, a drive replaced, a database brought from another computer) and removes them from the database, after backing it up. No file is deleted. If a folder moved, set its new path above and save first.</div>';
+    if (missErr) return h + '<p class="hint warn">' + esc(missErr) + '</p>';
+    if (!miss) return h + '<p class="hint">Loading...</p>';
+    const j = miss.job, sc = miss.scan, ap = miss.applied;
+    const running = ['scanning', 'applying'].includes(j.state);
+    if (running) {
+      h += '<div class="ac-meterrow"><div class="ac-meter"><i style="width:' + (j.total ? Math.min(100, j.done / j.total * 100).toFixed(1) : 0) + '%"></i></div><span class="hint">' +
+        esc(MISS_PHASE[j.phase] || 'Starting') + (j.total ? ': ' + j.done.toLocaleString() + ' of ' + j.total.toLocaleString() : '...') + '</span></div>';
+      return h;
+    }
+    if (j.state === 'failed') h += '<p class="hint warn">' + esc(j.error || 'failed') + '</p>';
+    if (ap && !sc) {
+      h += '<p>Removed <b>' + ap.removed.toLocaleString() + '</b> recordings (' + fmtSize(ap.removed_bytes) + ') from the database.' +
+        (ap.events_marked ? ' ' + ap.events_marked.toLocaleString() + ' events have no video to play: they stay in the list, marked No clip.' : '') +
+        (ap.found_again ? ' ' + ap.found_again.toLocaleString() + ' were found again and kept.' : '') +
+        (ap.moved ? ' ' + ap.moved.toLocaleString() + ' had moved to another folder and were kept.' : '') +
+        (ap.case_differs ? ' ' + ap.case_differs.toLocaleString() + ' are there under other capitals and were kept.' : '') +
+        (ap.skipped_folders.length ? ' Left alone: ' + esc(ap.skipped_folders.join(', ')) + '.' : '') + '</p>' +
+        (ap.backup ? '<div class="hint">The database before this is in <span class="ac-path-i">' + esc(ap.backup) + '</span>. It is one of the backups kept, so newer ones replace it in time; putting it back loses the events recorded since.</div>' : '');
+    }
+    if (sc) {
+      const shown = sc.folders.filter(f => f.missing || f.state !== 'ok' || f.unknown);
+      h += '<p>' + (sc.missing ? '<b>' + sc.missing.toLocaleString() + '</b> of ' + sc.rows.toLocaleString() + ' recordings are missing (' + fmtSize(sc.missing_bytes) + ').' : 'All ' + sc.rows.toLocaleString() + ' recordings are there.') +
+        ' <span class="hint">Checked ' + new Date(sc.made_ms).toLocaleTimeString() + '.</span></p>' + shown.map(folderLine).join('');
+      if (sc.events_no_video || sc.events_no_video_all || sc.protected_no_video) {
+        const a = sc.events_no_video_all.toLocaleString(), n = sc.events_no_video.toLocaleString();
+        const lead = sc.events_no_video_all === sc.events_no_video ? n + ' events would have no video to play'
+          : sc.events_no_video ? n + ' events would have no video to play (' + a + ' with the folders above ticked)'
+          : 'With the folders above ticked, ' + a + ' events would have no video to play';
+        h += '<div class="hint">' + (sc.events_no_video_all ? lead + ' (none left, or older than what would be their camera\'s oldest recording): they stay in the event list with their pictures, marked No clip. ' : '') +
+          (sc.protected_no_video ? sc.protected_no_video.toLocaleString() + ' protected events would have none either; they are not changed. ' : '') + '</div>';
+      }
+      const count = sc.folders.reduce((a, f) => a + (!f.needs_confirm || missInclude[f.name] ? f.missing : 0), 0);
+      if (sc.stale) h += '<p class="hint warn">' + esc(sc.stale.charAt(0).toUpperCase() + sc.stale.slice(1)) + '.</p>';
+      else if (count) h += '<div class="ac-row"><span class="ac-sp"></span><button class="btn danger" type="button" data-mapply>Remove ' + count.toLocaleString() + ' from the database</button></div>';
+    }
+    return h + '<div class="ac-row"><button class="btn" type="button" data-mscan' + (missBusy ? ' disabled' : '') + '>' + (sc ? 'Check again' : 'Check now') + '</button></div>';
+  }
+  function paintMissing() {
+    const note = el.querySelector('[data-missnote]');
+    if (note) note.innerHTML = missNoteHtml();
+    const card = el.querySelector('[data-missing]');
+    if (!card) return;
+    card.innerHTML = missCardHtml();
+    const scanBtn = card.querySelector('[data-mscan]');
+    if (scanBtn) scanBtn.onclick = async () => {
+      missBusy = true; scanBtn.disabled = true;
+      try { await api('/api/storage/missing/scan', { json: {} }); } catch (e) { toast(errText(e), { kind: 'err' }); }
+      missBusy = false; loadMissing();
+    };
+    card.querySelectorAll('[data-minc]').forEach(inp => { inp.onchange = () => { missInclude[inp.dataset.minc] = inp.checked; paintMissing(); }; });
+    const applyBtn = card.querySelector('[data-mapply]');
+    if (applyBtn) applyBtn.onclick = async () => {
+      const sc = miss.scan;
+      const include = sc.folders.filter(f => f.needs_confirm && missInclude[f.name]).map(f => f.name);
+      const count = sc.folders.reduce((a, f) => a + (!f.needs_confirm || missInclude[f.name] ? f.missing : 0), 0);
+      const ticked = sc.folders.filter(f => f.needs_confirm && missInclude[f.name]);
+      const named = ticked.length ? ' Including ' + ticked.map(f => f.label + ' (' + f.confirm_why.map(w => WHY[w] ? WHY[w](f) : w).join('; ') + ')').join(', ') + ': make sure these are gone for good.' : '';
+      if (!(await confirmDialog({ title: 'Remove ' + count.toLocaleString() + ' recordings from the database?', body: 'Their files are already gone; nothing is deleted from disk.' + named + ' The database is backed up first; putting that backup back undoes this but loses events recorded since. Recording carries on meanwhile.', ok: 'Remove', danger: true }))) return;
+      applyBtn.disabled = true;
+      try { await api('/api/storage/missing/apply', { json: { scan_id: sc.id, include } }); } catch (e) { toast(errText(e), { kind: 'err' }); }
+      loadMissing();
+    };
+  }
   // "Keep this folder private": the real state of each folder (private, open, being applied, failed, refused).
   let privLoaded = false;
   async function loadPrivacy() {
@@ -692,6 +809,7 @@ function storagePage(el, mode) {
       // answer must not keep the page on Loading (or the folder from being removed).
       paint();
       if (!retention) loadPrivacy().then(() => { if (el.isConnected) { repaintQuietly(); watchPrivacy(); } });
+      loadMissing();
       // The plan ("room for about N days") is slow on a big site: the page is drawn first and gets it when it arrives.
       api('/api/storage/plan').then(v => { plan = v; repaintQuietly(); }).catch(() => {});
     } catch (e) { el.innerHTML = '<p class="empty">' + esc(e.message) + '</p>'; }
@@ -736,7 +854,7 @@ function storagePage(el, mode) {
     const auto = !draft.max_mb;
     const dc = st.data_cap || {};
     let h = lead('How long recordings are kept, and how much space they may use.', 'The default uses what the drive can spare. Change it only if you want a fixed number of days.') +
-      how('Over the limit, the oldest recordings move to the archive folder if one is set, otherwise they are deleted. Events you keep forever are never removed.') + tiles() +
+      how('Over the limit, the oldest recordings move to the archive folder if one is set, otherwise they are deleted. Events you keep forever are never removed.') + '<div data-missnote>' + missNoteHtml() + '</div>' + tiles() +
       '<div class="ac-card"><div class="ac-card-t">How long to keep</div>' +
       fld('Keep recordings for', 'data-k="retention_days" min="1" value="' + draft.retention_days + '"', 'days') +
       '</div><div class="ac-card"><div class="ac-card-t">How much space</div>' +
@@ -772,6 +890,7 @@ function storagePage(el, mode) {
     const camsIn = (n) => state.cams.filter(c => c.folder === n).length;
     let h = lead('Where recordings are stored.', 'Most homes only need the default folder; add a drive when it fills up.') +
       how('Cameras without a folder of their own record into the data folder; a camera can pick another folder in its own settings. The archive folder receives the oldest recordings pushed out of the others. How much space each may use is set under Storage &amp; retention.') +
+      '<div data-missnote>' + missNoteHtml() + '</div>' +
       '<div class="ac-card"><div class="ac-card-t">Data folder</div><div class="ac-path">' + esc(dataDir) + '</div><div class="hint">' + fmtSize(st.bytes || 0) + ' used. Changing this folder needs a config edit and a restart.</div>' + endLine(ends.data) + '</div>' +
       (ends.program && ends.program.state !== 'na' ? '<div class="ac-card"><div class="ac-card-t">Program folder</div><div class="ac-path">' + esc(ends.program.path) + '</div>' + endLine(ends.program) + '</div>' : '') +
       '<div class="ac-card"><div class="ac-row"><div class="ac-card-t">Extra folders</div><span class="ac-sp"></span><button class="btn" type="button" data-addf>' + ic('plus') + ' Add folder</button></div>' +
@@ -792,10 +911,11 @@ function storagePage(el, mode) {
         '<div class="hint" data-privline="' + i + '">' + esc(privLine(f, i)) + '</div>' +
         '<div class="ac-row"><span class="hint ac-inl">' + fmtSize(usage[f.name] || 0) + ' used - ' + whoUses(f, n) + '</span><span class="ac-sp"></span><button class="btn danger" type="button" data-rm>Remove</button></div></div>';
     });
-    h += '</div>' + pageBar();
+    h += '</div><div class="ac-card" data-missing>' + missCardHtml() + '</div>' + pageBar();
     el.innerHTML = '<div class="ac">' + h + '</div>';
     bindCommon();
     bindDrives();
+    paintMissing();
   }
 
   let more = false;

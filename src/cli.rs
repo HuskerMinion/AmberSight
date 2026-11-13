@@ -106,7 +106,35 @@ enum UserCmd {
 }
 
 #[derive(Subcommand)]
+enum StorageCmd {
+    /// Find recordings the database knows whose files are gone (a folder
+    /// emptied, a drive reformatted, a database moved to another computer)
+    /// and, with --apply, remove them from the database after a backup of
+    /// it. Files are never deleted. Without --apply nothing is changed.
+    /// Works with the server running or stopped. A folder that is not there
+    /// at all, or holds none of its recordings, is left alone unless named
+    /// with --include-folder (a wrong path looks the same as deleted files)
+    PruneMissing {
+        #[arg(long, default_value = "config.toml")]
+        config: String,
+        /// Remove them (after a backup); without it, only a report
+        #[arg(long)]
+        apply: bool,
+        /// Also remove the missing recordings of this folder though it is not
+        /// there or none of its recordings are ("data" = the data folder);
+        /// may be given more than once
+        #[arg(long = "include-folder", value_name = "FOLDER")]
+        include_folder: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
+    /// Recording storage tools (see `storage prune-missing --help`)
+    Storage {
+        #[command(subcommand)]
+        action: StorageCmd,
+    },
     /// Create a starter config file
     Init {
         #[arg(default_value = "config.toml")]
@@ -359,6 +387,16 @@ enum Commands {
         model: String,
         #[arg(long, default_value_t = 0.4)]
         min_score: f32,
+        /// Only the CPU (to compare with the graphics card)
+        #[arg(long)]
+        cpu: bool,
+        /// How many times to run it
+        #[arg(long, default_value_t = 3)]
+        runs: u32,
+        /// Settings file: its graphics card choices, and (Linux) where the
+        /// NVIDIA add-on is kept, downloaded first when it is missing
+        #[arg(long)]
+        config: Option<String>,
         image: String,
     },
     /// Find and read license plates in image files (fetches the plate
@@ -766,6 +804,9 @@ pub async fn run() -> Result<()> {
             println!("backup saved to {}", dir.display());
             Ok(())
         }
+        Commands::Storage { action: StorageCmd::PruneMissing { config, apply, include_folder } } => {
+            tokio::task::spawn_blocking(move || crate::missing::cli(&config, apply, &include_folder)).await?
+        }
         Commands::Index { config } => {
             let cfg = Config::load(&config)?;
             let db = crate::db::Db::open(&cfg.storage.data_dir.join("ambersight.db"))?;
@@ -1019,16 +1060,49 @@ pub async fn run() -> Result<()> {
             let cfg = Config::load(&config)?;
             crate::engine::packages::scan(&cfg, &camera, hours)
         }
-        Commands::AiTest { model, min_score, image } => {
+        Commands::AiTest { model, min_score, cpu, runs, config, image } => {
+            let ai = match &config {
+                Some(c) => Config::load(c)?.ai,
+                None => crate::config::AiConfig::default(),
+            };
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(c) = &config {
+                let cfg = Config::load(c)?;
+                let data_dir = &cfg.storage.data_dir;
+                crate::gpu_addon::configure(data_dir, &cfg.update.repo, cfg.update.check);
+                let wanted = !cpu && ai.gpu && !crate::gpu::list().is_empty() && crate::gpu_addon::missing_system_libs().is_none();
+                match crate::gpu_addon::find() {
+                    // A copy this user may not load (another user's, e.g. the service's while running as root).
+                    Err(why) if wanted => anyhow::bail!("{why}"),
+                    Ok(None) if wanted => match crate::gpu_addon::downloads_allowed(data_dir, cfg.update.check) {
+                        Err(why) => println!("{why}"),
+                        Ok(()) => {
+                            println!("downloading the NVIDIA add-on into {}", crate::gpu_addon::folder(data_dir).display());
+                            match crate::gpu_addon::download(data_dir, &cfg.update.repo, &|d, _| {
+                                print!("\r  {} MB", d >> 20);
+                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                            }) {
+                                Ok(_) => println!(),
+                                Err(e) => anyhow::bail!("the NVIDIA add-on could not be downloaded: {e:#}"),
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
             let t0 = std::time::Instant::now();
-            let det = crate::ai::AiDetector::load(std::path::Path::new(&model), 4)?;
+            let det = crate::ai::AiDetector::load_on(std::path::Path::new(&model), 4, !cpu && ai.gpu, ai.gpu_name.as_deref(), ai.gpu_memory_mb)?;
             println!("model loaded in {:?} (input {}x{}, on {})", t0.elapsed(), det.input_size(), det.input_size(), det.gpu_name().unwrap_or("the CPU"));
+            if let Some(why) = crate::ai::gpu_note() {
+                println!("not on the graphics card: {why}");
+            }
             let bytes = std::fs::read(&image).context("could not read image")?;
-            for run in 0..3 {
+            let runs = runs.max(1);
+            for run in 0..runs {
                 let t = std::time::Instant::now();
                 let found = det.detect(&bytes, min_score)?;
                 println!("run {}: {} objects in {:?}", run + 1, found.len(), t.elapsed());
-                if run == 2 {
+                if run == runs - 1 {
                     for d in found {
                         println!("  {:<12} {:.2}  box x={:.3} y={:.3} w={:.3} h={:.3}", d.label, d.score, d.x, d.y, d.w, d.h);
                     }
@@ -1195,6 +1269,10 @@ pub async fn run_server_until(config: String, shutdown: impl std::future::Future
         let msg = "no user accounts: ANYONE who can reach this server can watch every camera and change every setting (including commands it runs). Add an account in Settings > Users & security (or [[server.users]] in the config) before using it on a shared network.";
         println!("WARNING: {msg}");
         tracing::warn!("{msg}");
+    }
+    for w in crate::web::trusted_proxy_warnings(&cfg.server.trusted_proxies) {
+        println!("WARNING: {w}");
+        tracing::warn!("{w}");
     }
     protect_folders(&cfg, &config);
     crate::links::remember_name(&cfg);

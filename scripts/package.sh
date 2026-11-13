@@ -60,3 +60,8 @@ else
   tar -C dist --uid 0 --gid 0 --uname root --gname wheel -czf "dist/$name.tar.gz" "$name"
 fi
 echo "dist/$name.tar.gz"
+# 64-bit Intel/AMD Linux: also the NVIDIA add-on for the AI (a release asset
+# of its own; the package leaves it out).
+if [ "$os" = linux ] && [ "$arch" = x86_64 ] && [ -z "${PREBUILT_TARGET:-}" ]; then
+  CUDA_LIBS_DIR="${CUDA_LIBS_DIR:-$(dirname "$bin")}" sh scripts/package-cuda-addon.sh
+fi

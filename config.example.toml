@@ -22,6 +22,15 @@ port = 8090
 # tls_key = "/path/to/privkey.pem"
 # This server's name, shown to linked servers (Settings > Connections > Servers):
 # name = "Home"
+# Behind a reverse proxy or tunnel (nginx, Caddy, Traefik, cloudflared,
+# Tailscale Funnel), list only the proxy's own address, so sign-in limits,
+# logs and alerts see each visitor (from X-Forwarded-For). Never a LAN or
+# internet range: anyone in it could then claim any address. The proxy must
+# add the visitor to X-Forwarded-For (Caddy, Traefik, cloudflared and
+# Tailscale do; nginx needs proxy_set_header X-Forwarded-For
+# $proxy_add_x_forwarded_for). Docker's network as seen from the container,
+# e.g. "172.17.0.1", for a proxy on the host.
+# trusted_proxies = ["127.0.0.1"]
 # Port for RTMP senders (OBS and similar) pushing to push:// cameras;
 # only opened while such a camera exists. 0 = off.
 # rtmp_port = 1935
@@ -144,6 +153,10 @@ post_roll = 10          # seconds of footage after the trigger
 # max_checks = 10          # frames checked per event
 # ignore_parked = true      # objects that sit still for minutes do not confirm
 # strict = false            # true: an object must be seen in 2 of 3 looks in a row, moving
+# gpu = true                # use a graphics card where possible (Windows: DirectML; Linux:
+#                           # an NVIDIA card with CUDA 13 + cuDNN 9; Apple silicon: Core ML)
+# gpu_name = "NVIDIA GeForce RTX 5060 Ti"   # which card (default: the one with the most memory)
+# gpu_memory_mb = 1536      # NVIDIA: the most video memory the AI's pool may take
 # A camera can use its own: ai = false, ai_labels = [...], ai_min_score = 0.6, ai_strict = true
 # ai_confirm_camera = true   # on a camera: its own person/car/animal detection alerts only when AI sees it too (off unless true)
 

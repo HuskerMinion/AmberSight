@@ -68,6 +68,22 @@ simplest and is what the examples use. It is needed for:
 On Docker's own network (bridge), publish the port (`-p 8090:8090`) and add
 cameras by address. RTSP, ONVIF events, PTZ and everything else work the same.
 
+**Behind a reverse proxy or tunnel** (nginx, Caddy, Traefik, cloudflared,
+Tailscale Funnel), every request reaches AmberSight from the proxy, so one
+visitor's failed sign-ins would lock out everyone. Tell AmberSight the proxy's
+own address in `config.toml` and it takes each visitor's address from
+`X-Forwarded-For`:
+
+```toml
+[server]
+trusted_proxies = ["172.17.0.1"]   # the proxy as the container sees it (Docker's bridge gateway)
+```
+
+List only the proxy, never a LAN or internet range: anyone in a listed range
+could claim any address. The proxy must add the visitor to `X-Forwarded-For`
+(Caddy, Traefik, cloudflared and Tailscale do; nginx needs
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`).
+
 Ports, if you publish them one by one:
 
 | Port | For |
@@ -94,6 +110,54 @@ hwaccel = "vaapi:/dev/dri/renderD129"     # a particular one, when there are sev
 `ls -l /dev/dri/by-path` on the host shows which `renderD` belongs to which
 graphics card (an NVIDIA card's node does not do VAAPI). Without `hwaccel`,
 motion analysis decodes on the processor.
+
+## AI on an NVIDIA card
+
+The plain image runs the built-in AI on the processor. For an NVIDIA card,
+build the CUDA image instead (`Dockerfile.cuda`: NVIDIA's CUDA 13 + cuDNN 9
+runtime libraries with AmberSight and its NVIDIA add-on; it is large, about
+4 GB):
+
+```sh
+docker build -f Dockerfile.cuda -t ambersight:cuda .
+docker run -d --name ambersight --restart unless-stopped --gpus all --network host \
+  -v ./config:/config -v ./data:/data ambersight:cuda
+```
+
+The host needs NVIDIA's driver and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+(`--gpus all` passes the cards in). With compose, use `image: ambersight:cuda`,
+`build: { context: .., dockerfile: Dockerfile.cuda }` and add:
+
+```yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+Settings > Detection & alerts > Objects (AI) then shows *Running on: NVIDIA
+...*. The AI's memory pool on the card is capped at 1.5 GB (`gpu_memory_mb`
+in `[ai]`). The plain image given `--gpus all` finds the card but has no CUDA
+libraries: it stays on the processor, downloads nothing, and says why in
+Settings (*libcudart.so.13 not found*).
+
+## Recordings whose files are gone
+
+After moving recordings or replacing a drive, Settings > Recording > Drives & folders can find and
+remove the ones whose files are gone. From the command line, run it as the container's user (not
+root):
+
+```sh
+docker exec -u 1000:1000 ambersight ambersight storage prune-missing --config /config/config.toml
+docker exec -u 1000:1000 ambersight ambersight storage prune-missing --config /config/config.toml --apply
+```
+
+(use your `PUID:PGID` if you set them; the first line only reports). See the install guide's
+"Moving recordings or moving to a new computer".
 
 ## Updates
 

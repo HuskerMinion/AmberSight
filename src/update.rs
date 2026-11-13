@@ -160,7 +160,7 @@ fn b64(bytes: &[u8]) -> String {
 
 /// The key releases must be signed with. Debug builds (tests only) may use
 /// another from AMBERSIGHT_UPDATE_TEST_PUBKEY; release builds cannot.
-fn release_pubkey() -> String {
+pub(crate) fn release_pubkey() -> String {
     #[cfg(debug_assertions)]
     {
         if let Ok(k) = std::env::var("AMBERSIGHT_UPDATE_TEST_PUBKEY") {
@@ -560,7 +560,7 @@ fn host_of(url: &str) -> String {
     url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "the server".into())
 }
 
-fn valid_repo(repo: &str) -> bool {
+pub(crate) fn valid_repo(repo: &str) -> bool {
     let mut parts = repo.split('/');
     let ok = |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p != "." && p != ".." && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
     ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
@@ -739,14 +739,14 @@ fn note_version_for_windows(dir: &Path, version: &str) {
 }
 
 /// A small download (checksums, signature) into memory.
-fn get_small(url: &str, limit: u64) -> Result<Vec<u8>> {
+pub(crate) fn get_small(url: &str, limit: u64) -> Result<Vec<u8>> {
     let mut resp = get(url, 120).map_err(|(_, m)| anyhow!("download failed: {m}"))?;
     resp.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| anyhow!("download failed: {e}"))
 }
 
 /// Download `url` to `dest` (through a .part file), keeping it only when
 /// its SHA-256 is `sha256` and it is no bigger than the limit.
-fn download_checked(url: &str, dest: &Path, sha256: &str, total: u64, progress: &dyn Fn(u64, u64)) -> Result<()> {
+pub(crate) fn download_checked(url: &str, dest: &Path, sha256: &str, total: u64, progress: &dyn Fn(u64, u64)) -> Result<()> {
     let mut resp = get(url, DOWNLOAD_SECS).map_err(|(_, m)| anyhow!("download failed: {m}"))?;
     let rd = resp.body_mut().with_config().limit(MAX_PACKAGE_BYTES + 1).reader();
     save_checked(rd, dest, sha256, total, progress)
@@ -797,7 +797,7 @@ struct Staged {
 
 /// A path inside an archive as safe parts: no absolute paths, no "..",
 /// no drive letters. Windows zips may use backslashes.
-fn safe_parts(name: &str) -> Option<Vec<String>> {
+pub(crate) fn safe_parts(name: &str) -> Option<Vec<String>> {
     let name = name.replace('\\', "/");
     if name.starts_with('/') {
         return None;

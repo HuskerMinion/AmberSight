@@ -1605,6 +1605,8 @@ function mountFull() {
   $('fullName').hidden = false;
   // Another server's camera: its recordings and clips are on that server.
   for (const b of ['fullTl', 'fullClips', 'fullClip']) $(b).hidden = !!(c && c.remote);
+  // Recording a clip is for admins (as in the tile menus).
+  if (!state.isAdmin) $('fullClip').hidden = true;
   fullSpk = Speaker.attach(content, { id: fullCamId, q: bigQ(), videos: () => [$('fullVid')] });
   if (keepAudio && c && c.audio) fullSpk.unmute();
   fullPlayer = startLive(video, fullCamId, bigQ(), () => {

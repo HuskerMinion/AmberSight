@@ -319,8 +319,25 @@ impl Engine {
                 warn!("could not start indexing of existing recordings: {e}");
             }
         }
+        // Where the NVIDIA add-on for the AI is kept or downloaded to, and
+        // (set before the first load, which may start a download) reloading
+        // the AI onto the card once it is in.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let engine_slot: Arc<std::sync::OnceLock<std::sync::Weak<Engine>>> = Arc::new(std::sync::OnceLock::new());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            crate::gpu_addon::configure(&data_dir, &config.update.repo, config.update.check);
+            let slot = engine_slot.clone();
+            crate::gpu_addon::on_ready(move || {
+                if let Some(e) = slot.get().and_then(|w| w.upgrade()) {
+                    if let Err(err) = e.reload_ai() {
+                        warn!("AI: {err:#}");
+                    }
+                }
+            });
+        }
         let ai = match (&config.ai.enabled, &config.ai.model) {
-            (true, Some(model)) => match crate::ai::AiDetector::load_on(model, config.ai.threads, config.ai.gpu, config.ai.gpu_name.as_deref()) {
+            (true, Some(model)) => match crate::ai::AiDetector::load_on(model, config.ai.threads, config.ai.gpu, config.ai.gpu_name.as_deref(), config.ai.gpu_memory_mb) {
                 Ok(d) => {
                     info!("AI: loaded {} ({}x{} input, on {})", model.display(), d.input_size(), d.input_size(), d.gpu_name().unwrap_or("CPU"));
                     Some(Arc::new(d))
@@ -358,6 +375,9 @@ impl Engine {
             overlay_vars: Mutex::new(std::collections::HashMap::new()),
         });
         engine.load_alert_pauses();
+        // Once the NVIDIA add-on is downloaded, load the AI again onto the card.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let _ = engine_slot.set(Arc::downgrade(&engine));
         crate::push::init(&engine);
         {
             let mut cfgs = engine.config.lock().unwrap();
@@ -458,6 +478,7 @@ impl Engine {
         crate::auth::attach_store(engine.db.clone());
         crate::account_http::start_account_requests(engine.clone());
         crate::backup::start(engine.clone());
+        crate::missing::start(engine.clone());
         crate::offsite::start(engine.clone());
         if let Some(h) = crate::mqtt::start(&engine) { let _ = engine.mqtt.set(h); }
         crate::ingest::baichuan::pushx::start(engine.clone());
@@ -670,18 +691,28 @@ impl Engine {
     }
 
     /// Load (or drop) the built-in detector to match the AI settings now.
+    /// One reload at a time, each reading the settings itself: a reload
+    /// started earlier (the NVIDIA add-on arriving) never stores a model
+    /// loaded with settings older than a later one's.
     pub fn reload_ai(&self) -> anyhow::Result<()> {
-        let (enabled, model, threads, gpu, gpu_name) = {
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let (enabled, model, threads, gpu, gpu_name, gpu_mb) = {
             let c = self.config.lock().unwrap();
-            (c.ai.enabled, c.ai.model.clone(), c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone())
+            (c.ai.enabled, c.ai.model.clone(), c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone(), c.ai.gpu_memory_mb)
         };
         let new = match (enabled, model) {
             (true, Some(m)) => {
-                let d = crate::ai::AiDetector::load_on(&m, threads, gpu, gpu_name.as_deref())?;
+                let d = crate::ai::AiDetector::load_on(&m, threads, gpu, gpu_name.as_deref(), gpu_mb)?;
                 info!("AI: loaded {} ({}x{} input, on {})", m.display(), d.input_size(), d.input_size(), d.gpu_name().unwrap_or("CPU"));
                 Some(Arc::new(d))
             }
-            _ => None,
+            _ => {
+                // The AI is off: no card wanted.
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                crate::gpu_addon::not_wanted();
+                None
+            }
         };
         *self.ai.write().unwrap() = new;
         Ok(())

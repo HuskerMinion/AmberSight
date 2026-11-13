@@ -1,0 +1,51 @@
+# AmberSight in a container with the AI on an NVIDIA card (CUDA 13 + cuDNN 9).
+#
+#   docker build -f Dockerfile.cuda -t ambersight:cuda .
+#   docker run -d --gpus all --network host -v ./config:/config -v ./data:/data ambersight:cuda
+#
+# Needs the NVIDIA driver and the NVIDIA Container Toolkit on the host. The
+# image is large (NVIDIA's CUDA and cuDNN libraries, a few GB); without an
+# NVIDIA card use the plain Dockerfile. See docs/docker.md.
+
+# ---- build ----
+FROM rust:1-trixie AS build
+WORKDIR /src
+COPY . .
+# The program, and ONNX Runtime's two CUDA libraries beside it (the NVIDIA
+# add-on, which other installs download; cargo leaves links to its cache).
+RUN RUSTFLAGS='--remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo=~/.cargo' \
+    cargo build --release --locked \
+ && mkdir /out \
+ && install -m 755 target/release/ambersight /out/ambersight \
+ && cp -L target/release/libonnxruntime_providers_shared.so target/release/libonnxruntime_providers_cuda.so /out/ \
+ && chmod 644 /out/*.so
+
+# ---- run ----
+# Ubuntu 26.04 (the program needs glibc 2.41 or newer) with only the CUDA 13
+# libraries the AI uses, from NVIDIA's repository (as docs/install.md does
+# it): NVIDIA's own cuda images carry every CUDA library and are 7 GB.
+# (ca-certificates first: NVIDIA's repository is HTTPS only.)
+FROM ubuntu:26.04
+ADD https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb /tmp/
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && echo "f7f474b5f6a4adf987aa587920df00e713285958ef6a913dda1945a544a3099e  /tmp/cuda-keyring_1.1-1_all.deb" | sha256sum -c - \
+ && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && rm /tmp/cuda-keyring_1.1-1_all.deb \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata tini \
+      cuda-cudart-13-5 libcublas-13-5 libcurand-13-5 libcudnn9-cuda-13 \
+ && rm -rf /var/lib/apt/lists/* \
+ && (userdel -r ubuntu 2>/dev/null || true) \
+ && useradd --system --uid 1000 --user-group --home-dir /data --no-create-home ambersight \
+ && mkdir -p /config /data \
+ && chown ambersight:ambersight /config /data
+COPY --from=build /out/ /opt/ambersight/
+RUN ln -s /opt/ambersight/ambersight /usr/local/bin/ambersight
+COPY docker/entrypoint.sh /usr/local/bin/ambersight-entrypoint
+COPY LICENSE THIRD-PARTY-NOTICES.txt /usr/share/doc/ambersight/
+
+ENV HOME=/data PUID=1000 PGID=1000 \
+    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
+VOLUME ["/config", "/data"]
+EXPOSE 8090
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ambersight-entrypoint"]

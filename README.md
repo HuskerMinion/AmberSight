@@ -193,7 +193,8 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   playback, and export of a time range.
 - **Events:** a list beside the player, filters, false alarms, protect (kept
   from cleanup), and export. Events are stored in a SQLite database.
-- **AI:** built-in YOLOX object detection on CPU or GPU (DirectML on Windows),
+- **AI:** built-in YOLOX object detection on CPU or GPU (DirectML on Windows,
+  NVIDIA CUDA on Linux, Core ML on Apple silicon Macs),
   with a Large model for the most accurate checks, an AI server option, or an
   external detector command. AI review explains why an event did or did not
   alert. AI remembers fixed spots it keeps mistaking for a person or a car (a
@@ -255,6 +256,15 @@ tools/                          # ffmpeg downloaded by AmberSight (Windows, macO
 ```
 
 A storage folder set in the config holds its own `cameras/` tree.
+
+The database stores each recording as its folder's name plus a path inside
+that folder, so a moved folder (another drive, another computer, Windows to
+Linux) only needs its new path set in Settings > Recording > Drives & folders.
+Recordings whose files are gone (a folder emptied, a drive reformatted) are
+noticed at start and can be removed from the database there, or with
+`ambersight storage prune-missing` (a dry run unless `--apply`; it backs the
+database up first and never deletes files). See "Moving recordings or moving
+to a new computer" in [docs/install.md](docs/install.md).
 
 ## API
 

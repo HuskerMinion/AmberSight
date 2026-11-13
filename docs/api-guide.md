@@ -660,7 +660,7 @@ a viewer app can ignore. The fields useful to a viewer:
 | `sleeping` | bool | On-demand camera currently disconnected on purpose |
 | `device_sleeping` | bool or null | What the camera or hub itself reports about sleeping |
 | `record` | bool | Recording on |
-| `alert_ignore_polys` | list | Areas that never send a notification: `[{"points": [[x, y], ...]}]`, 3 or more corners, 0..1 of the picture (same shape as `zone_polys`; at most 12). An ordinary notification is skipped when every object that confirmed the event had its box centre inside one of them. Detection, events, recordings, search and MQTT are not affected. Rules and zone alerts are not filtered. Set it with `PUT /api/cameras/:id`. |
+| `alert_ignore_polys` | list | Areas that never send a notification: `[{"points": [[x, y], ...]}]`, 3 or more corners, 0..1 of the picture (same shape as `zone_polys`; at most 12). An ordinary notification is skipped when every object that confirmed the event had its box center inside one of them. Detection, events, recordings, search and MQTT are not affected. Rules and zone alerts are not filtered. Set it with `PUT /api/cameras/:id`. |
 | `alert_labels` | list or null | "Notify only for" objects (`person`, `vehicle`, `animal`, or labels such as `car`, `dog`); `null` = every object. Other objects are still detected, recorded, searchable and sent to MQTT; they just send no notification. Rules and zone alerts are not filtered, and doorbell presses (`visitor`), sounds (`sound`) and packages (`package`, `package picked up`) always notify, also when other labels are present. With AI on, an event with no object stays silent; with AI off, it notifies, since nothing could have named an object. Set it with the camera's settings (`PUT /api/cameras/:id`, the same field). |
 | `alerts_paused`, `alerts_paused_until` | bool, int or null | Notifications paused; end time in epoch seconds, `null` = until resumed |
 | `packages` | bool | Package detection on |
@@ -1014,7 +1014,7 @@ the account may not see is 404). The verdict labels the event for filtering; it 
 
 `"false_alarm"` with a `"label"` ("not a person") also tells the AI it was wrong, e.g.
 `{"verdict": "false_alarm", "label": "person"}` (any vehicle label means the vehicles; animals
-likewise). The event's boxes of that kind that sat still (their centre moved less than 3% of the
+likewise). The event's boxes of that kind that sat still (their center moved less than 3% of the
 picture between the event's checks) are remembered on that camera as a fixed spot for 30 days: the same kind of object there does not
 alert again unless it moves (see "Remembered spots" below). A box that moved between checks
 (someone walking) is never remembered. With that kind seen in one check only, nothing is: too
@@ -1870,6 +1870,40 @@ and a camera name is not required. It returns `application/zip` (`ambersight-eve
   **503** with `Retry-After: 30`.
 - Restricted viewers must name a camera, or use `cameras`, `ids` or the other list filters.
 
+### Recordings whose files are gone: `/api/storage/missing` (admin)
+
+For an admin tool: finds recordings the database lists whose files are no longer on disk and
+removes them from the database (never a file). Admins only, also for reading (403 for viewers
+and device tokens); the POSTs follow the origin rule.
+
+- `GET /api/storage/missing`: `{detected, job, scan, applied}`. `detected` is what the start-up
+  check noticed (`{at_ms, notes: [{name, label, path, state, sampled, missing, text}]}`, `state`
+  `not_found`, `not_mounted`, `mostly_missing` or `not_configured`; checked again in the
+  background when the folders change).
+  `job` is `{state: idle|scanning|applying|failed, phase, done, total, error}`. `scan` is the
+  last dry run: `{id, made_ms, took_ms, rows, missing, missing_bytes, events_no_video,
+  protected_no_video, events_part_video, events_no_video_all, stale, folders: [{name, label,
+  path, configured, exists, state, not_mounted, rows, bytes, missing, missing_bytes, unknown,
+  case_differs, oldest_missing_ms, newest_missing_ms, absolute_paths, confirm_why,
+  needs_confirm, whole_cameras, cameras: [{camera, rows, missing, missing_bytes}]}]}`. Folder
+  `state` is `ok`, `some_missing`, `all_missing`, `not_found` or `not_configured`; `confirm_why`
+  lists why it needs naming: `not_found`, `not_configured`, `all_missing`, `most_missing`,
+  `cameras_all_missing` (see `whole_cameras`), `not_mounted` (Linux: on a drive that is set to be
+  mounted there but is not). `events_no_video` counts the folders that need no naming, `events_no_video_all` all
+  of them. `applied` is the last removal: `{scan_id, removed, removed_bytes, found_again, moved,
+  case_differs, skipped_folders, skipped_rows, events_marked, backup, took_ms}` (`backup` is
+  `null` when there was nothing to remove).
+- `POST /api/storage/missing/scan`: start a dry run (reads only). **202**; **409** while one runs
+  (here or `ambersight storage prune-missing` on the command line).
+- `POST /api/storage/missing/apply` with `{"scan_id": "...", "include": ["stored"]}`: back up the
+  database, then remove the missing recordings that dry run found (each is looked for again
+  first). Folders with `needs_confirm` are left alone unless named in `include` (`""` = the data
+  folder). **202**; **409** when `scan_id` is not the latest dry run, it is over an hour old, the
+  folders changed since, or something is running. Poll `GET` for the result.
+
+Events whose video was all in the removed recordings keep their row and picture; their `clip`
+becomes `null` (shown as "No clip"). Protected events are not changed.
+
 ---
 
 ## 7. Control
@@ -2269,6 +2303,12 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.8.0**
+
+- `[server] trusted_proxies`: requests from a listed reverse proxy are taken to come from the address it puts last in `X-Forwarded-For` (plain, with a port, or in brackets), and its `X-Forwarded-Proto: https` marks cookies `Secure`. Sign-in limits, `GET /api/me/account` `sessions` addresses, the audit log and new-device alerts then show each visitor rather than the proxy.
+- `[ai] gpu_memory_mb` and the GPU on Linux (NVIDIA, CUDA 13) and Apple silicon: `GET /api/settings` `ai_status.gpu_note` says why the AI is not on the card (or `null`), and `ai_status.gpus` now lists NVIDIA cards on Linux and the Apple chip on Macs.
+- New admin `GET /api/storage/missing`, `POST /api/storage/missing/scan` and `POST /api/storage/missing/apply`: find and remove recordings whose files are gone. An event whose video was all in them keeps its row with `clip: null`. See section 6.
+
 **Since 0.6.0**
 
 - New `GET /api/recordings/days?starts=&end=[&cameras=]` (device tokens may use it): which days hold recordings and alerts, for a calendar. See "Which days have recordings" under section 6.
@@ -2282,7 +2322,7 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 **Since 0.3.0**
 
-- **New device sign-in alerts and the list of signed-in devices.** A sign-in answer (`POST /api/login`, `/api/login/totp`, `/api/pair`) also sets a long-lived `as_device` cookie (HttpOnly, SameSite=Strict, about two years, Secure over TLS). It gives no access: it only lets the server say "this browser signed in to this account before". Keep your client's cookie jar if it has one; without it, each sign-in from a fresh jar is a new device and admins are told. `GET /api/me/account` has `sessions`, and `POST /api/me/sessions/:id/sign-out` and `POST /api/me/sessions/sign-out-others` sign devices out (session only; device tokens get 403). A password used directly in HTTP Basic or on RTSP is noted once per account and network (an IPv6 /64) without a cookie; behind a reverse proxy that is one network. A client that signs in on every run, without sending `as_device` back, alerts admins every time: keep the cookie, or use a device token. Database schema 24; a build from before it still runs on the same database.
+- **New device sign-in alerts and the list of signed-in devices.** A sign-in answer (`POST /api/login`, `/api/login/totp`, `/api/pair`) also sets a long-lived `as_device` cookie (HttpOnly, SameSite=Strict, about two years, Secure over TLS). It gives no access: it only lets the server say "this browser signed in to this account before". Keep your client's cookie jar if it has one; without it, each sign-in from a fresh jar is a new device and admins are told. `GET /api/me/account` has `sessions`, and `POST /api/me/sessions/:id/sign-out` and `POST /api/me/sessions/sign-out-others` sign devices out (session only; device tokens get 403). A password used directly in HTTP Basic or on RTSP is noted once per account and network (an IPv6 /64) without a cookie; behind a reverse proxy that is one network (unless the proxy is listed in `[server] trusted_proxies`). A client that signs in on every run, without sending `as_device` back, alerts admins every time: keep the cookie, or use a device token. Database schema 24; a build from before it still runs on the same database.
 - **Doorbell presses, sounds and packages always notify**, whatever `alert_labels` and `alert_ignore_polys` say. `alert_labels` no longer silences a camera with AI off.
 - AI review `alert.why` can be `paused`, `alert_window` or `alert_interval`, with `alert.sent` false; `summary.kind` is then `alerts_off`, and such events no longer count as sent in `GET /api/noisy` or `alerted`. Rows from before this keep what they say.
 - `GET /api/noisy` is kept on the server for up to a minute. `GET /api/cameras/:id/onvif` is admin only. `GET /api/cameras/:id/netinfo` shows the maker and model with a port AmberSight found itself, and its `onvif_port` can be that port.
