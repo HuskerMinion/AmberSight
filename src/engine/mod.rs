@@ -1040,7 +1040,7 @@ impl Engine {
     /// Returns false for unknown cameras; always-on cameras are unaffected.
     pub fn wake_camera(&self, id: usize) -> bool {
         let Some(h) = self.camera(id) else { return false };
-        let idle = h.running.read().unwrap().idle_timeout.max(30) as i64;
+        let idle = crate::config::idle_secs(h.running.read().unwrap().idle_timeout);
         let mut st = h.state.write().unwrap();
         st.wake_until = st.wake_until.max(Utc::now().timestamp() + idle);
         true

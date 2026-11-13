@@ -1,0 +1,24 @@
+# docker compose -f docker/compose.yaml up -d   (from the repository folder)
+# Then open http://<this-computer>:8090
+services:
+  ambersight:
+    build: ..
+    image: ambersight
+    container_name: ambersight
+    restart: unless-stopped        # also how AmberSight restarts after a settings change
+    stop_grace_period: 30s         # time to finish writing recordings and alerts on stop
+    # Host networking: camera discovery (ONVIF multicast) and battery Reolink
+    # cameras need it. Without it, remove this line, add cameras by address,
+    # and publish the port instead:
+    #   ports: ["8090:8090"]
+    network_mode: host
+    environment:
+      TZ: America/New_York         # yours; schedules and quiet hours use local time
+      # PUID: 1000                 # the user AmberSight runs as (owns ./config and ./data)
+      # PGID: 1000
+    volumes:
+      - ./config:/config           # config.toml
+      - ./data:/data               # database, recordings, AI models, backups
+    # Hardware video decode (Intel/AMD). Remove if you don't have /dev/dri.
+    devices:
+      - /dev/dri:/dev/dri

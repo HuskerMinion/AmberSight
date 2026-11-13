@@ -28,6 +28,7 @@ const KEYS = [
   [K('P'), 'Save a snapshot of the highlighted tile'],
   [K('Shift') + ' ' + K('&larr;') + K('&rarr;'), 'Arrange mode: move the focused tile'],
   [K('&larr;') + K('&uarr;') + K('&darr;') + K('&rarr;'), 'Side panel: hold to move a PTZ camera'],
+  ['Wheel', 'Over the selected tile: zoom that camera (drag to move around, click the zoom badge, e.g. 2.0&times;, to reset); anywhere else: scroll'],
   'Events (list or grid)',
   [K('&darr;') + K('&uarr;') + ' or ' + K('J') + K('K'), 'Next / previous event (the arrows also move across the grid)'],
   [K('Space'), 'Play / pause the clip'],

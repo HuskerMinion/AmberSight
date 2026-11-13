@@ -718,7 +718,7 @@ function readForm(d, c, isNew) {
     name: v('name'), short_name: v('short_name'), groups: readGroups(d),
     url: v('url'), sub_url: v('sub_url') || null, username: v('username'), password: d.querySelector('[data-k="password"]').value,
     record: v('record') === '1', record_motion_only: v('record_mode') === '1', record_sub: v('record_mode') === '2', direct: v('direct') === '1',
-    on_demand: v('on_demand') === '1', idle_timeout: num('idle_timeout', 60),
+    on_demand: v('on_demand') === '1', idle_timeout: Math.min(604800, Math.max(30, num('idle_timeout', 300) || 300)),
     fps: num('fps', 10), scale: num('scale', 640),
     audio: v('audio') === '1', overlay: v('overlay') === '1', packages: v('packages') === '1' ? true : null,
     overlay_text: v('overlay_text') || null, overlay_pos: v('overlay_pos') || null,
@@ -882,7 +882,7 @@ function sectionsOf(c, isNew, multi) {
       field('Short name', text('short_name', c.short_name, 'placeholder="Door"'), 'Shown where space is tight.')],
     stream: [streamHtml(c, isNew),
       field('Battery camera (connect only when needed)', onoff('on_demand', !!c.on_demand)) +
-      field('Disconnect after idle (s)', text('idle_timeout', c.idle_timeout || 60, 'type="number" min="10" step="10"'))],
+      field('Disconnect after idle (s)', text('idle_timeout', c.idle_timeout || 300, 'type="number" min="30" max="604800" step="10"'))],
     recording: [
       field('Record', onoff('record', c.record !== false)) +
       field('Record mode', sel('record_mode', [['0', 'continuous'], ['2', 'continuous: sub stream, main stream around events'], ['1', 'motion only']], c.record_motion_only ? '1' : (c.record_sub ? '2' : '0')),
@@ -1421,7 +1421,7 @@ const MIXED = '\u0001mixed';
 const BULK_KEYS = { record_mode: ['record_motion_only', 'record_sub'] };
 const BULK_BASE = (v, num) => ({
   record: v('record') === '1', record_motion_only: v('record_mode') === '1', record_sub: v('record_mode') === '2', direct: v('direct') === '1',
-  on_demand: v('on_demand') === '1', idle_timeout: num('idle_timeout', 60), motion: v('motion') === '1',
+  on_demand: v('on_demand') === '1', idle_timeout: Math.min(604800, Math.max(30, num('idle_timeout', 300) || 300)), motion: v('motion') === '1',
   fps: num('fps', 10), scale: num('scale', 640), audio: v('audio') === '1', overlay: v('overlay') === '1', packages: v('packages') === '1' ? true : null,
   overlay_text: v('overlay_text') || null, overlay_pos: v('overlay_pos') || null,
 });

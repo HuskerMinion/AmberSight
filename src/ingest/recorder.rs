@@ -602,9 +602,13 @@ pub struct AudioParams {
     pub clock_rate: u32,
 }
 
+/// Samples in one AAC-LC frame (the audio timescale is the sample rate).
+const AAC_FRAME: i64 = 1024;
+
 enum Reader {
     /// `g711`: the audio track is G.711, converted to FLAC frames on the way.
-    Rtsp { demuxed: retina::client::Demuxed, video_i: usize, audio_i: Option<usize>, g711: Option<super::g711::ToFlac> },
+    /// `aac_next`: where the next AAC frame starts at the earliest (see below).
+    Rtsp { demuxed: retina::client::Demuxed, video_i: usize, audio_i: Option<usize>, g711: Option<super::g711::ToFlac>, aac_next: Option<i64> },
     Flv(Box<super::flv::FlvStream>),
     /// A battery Argus over the clean-room Baichuan client: already-converted
     /// `MediaItem::Video` frames arrive on a channel; the handle stops preview
@@ -701,7 +705,7 @@ impl OpenStream {
         use retina::codec::CodecItem;
         loop {
             match &mut self.reader {
-                Reader::Rtsp { demuxed, video_i, audio_i, g711 } => {
+                Reader::Rtsp { demuxed, video_i, audio_i, g711, aac_next } => {
                     let item = match demuxed.next().await? {
                         Ok(i) => i,
                         // Keep retina's text: it says whether one packet was bad.
@@ -733,11 +737,25 @@ impl OpenStream {
                             return Some(Ok(self.settle_params(item)));
                         }
                         CodecItem::AudioFrame(f) if (self.use_audio || self.tap_audio) && Some(f.stream_id()) == *audio_i => {
+                            let mut ticks = f.timestamp().elapsed();
                             let data = match g711.as_mut() {
                                 Some(c) => c.convert(f.data()),
-                                None => f.data().to_vec(),
+                                None => {
+                                    let Some(d) = super::aac::raw_frame(f.data()) else { continue };
+                                    // An AAC frame is 1024 samples. Some cameras give
+                                    // two frames one time (a Kuna sends pairs 2048
+                                    // apart): the second starts where the first ends.
+                                    // A big jump back (a restart) is taken as it is.
+                                    if let Some(n) = *aac_next {
+                                        if ticks < n && n - ticks <= 4 * AAC_FRAME {
+                                            ticks = n;
+                                        }
+                                    }
+                                    *aac_next = Some(ticks + AAC_FRAME);
+                                    d.to_vec()
+                                }
                             };
-                            return Some(Ok(MediaItem::Audio { ticks: f.timestamp().elapsed(), data }));
+                            return Some(Ok(MediaItem::Audio { ticks, data }));
                         }
                         CodecItem::Rtcp(r) => {
                             let track = match r.stream_id() {
@@ -1012,7 +1030,7 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
         .map_err(|e| anyhow!("PLAY failed: {e}"))?
         .demuxed()
         .map_err(|e| anyhow!("demux setup failed: {e}"))?;
-    Ok(opened(Reader::Rtsp { demuxed, video_i, audio_i, g711 }))
+    Ok(opened(Reader::Rtsp { demuxed, video_i, audio_i, g711, aac_next: None }))
 }
 
 /// Track descriptions for the MP4 writer, once codec parameters are known.

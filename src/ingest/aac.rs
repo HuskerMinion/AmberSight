@@ -3,11 +3,37 @@
 //! A browser's audio decoder stops the whole video on one frame it rejects.
 //! To learn what such a camera really sends, the first frames of each
 //! camera's audio are summarised in one log line per camera per run: the
-//! stream header's facts next to what the frames look like. Nothing here
-//! changes what is recorded or streamed.
+//! stream header's facts next to what the frames look like.
+//!
+//! `raw_frame` is the one thing here that changes what is kept: it turns a
+//! camera's AAC frame into the raw frame MP4 expects.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+
+/// The raw AAC frame to record and stream, or None to drop it.
+///
+/// Some cameras (seen on a Kuna camera) send every frame with its ADTS
+/// header (the framing of .aac files) and an empty frame before each one. In
+/// an MP4 neither is valid: players and ffmpeg refuse the whole file. An
+/// empty frame is dropped; a frame that is exactly one ADTS frame with one
+/// raw block loses its header. Anything else is kept as it is.
+pub fn raw_frame(data: &[u8]) -> Option<&[u8]> {
+    if data.is_empty() {
+        return None;
+    }
+    // Syncword 0xFFF and layer 00.
+    if data.len() >= 7 && data[0] == 0xFF && data[1] & 0xF6 == 0xF0 {
+        let header = if data[1] & 1 == 0 { 9 } else { 7 }; // CRC present: 2 more bytes
+        let frame_len = (usize::from(data[3] & 3) << 11) | (usize::from(data[4]) << 3) | usize::from(data[5] >> 5);
+        let blocks = data[6] & 3; // raw data blocks in the frame, minus one
+        if frame_len == data.len() && blocks == 0 {
+            // A header with nothing after it is an empty frame too.
+            return if data.len() > header { Some(&data[header..]) } else { None };
+        }
+    }
+    Some(data)
+}
 
 /// The AudioSpecificConfig inside an `mp4a` sample entry's `esds`.
 pub fn asc_of_entry(entry: &[u8]) -> Option<&[u8]> {
@@ -110,6 +136,33 @@ impl Diag {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn camera_frames_become_raw_aac() {
+        use super::raw_frame;
+        // Empty frames (sent before each real one) are dropped.
+        assert_eq!(raw_frame(&[]), None);
+        // One whole ADTS frame (no CRC, 130 bytes): the 7-byte header goes.
+        let mut f = vec![0xFF, 0xF9, 0x4C, 0x40, 0x10, 0x42, 0xFC];
+        f.extend((0..123).map(|i| i as u8));
+        assert_eq!(f.len(), 130);
+        assert_eq!(raw_frame(&f), Some(&f[7..]));
+        // With a CRC the header is 9 bytes.
+        let mut c = f.clone();
+        c[1] = 0xF8;
+        assert_eq!(raw_frame(&c), Some(&c[9..]));
+        // A length that does not match, or several raw blocks: left alone.
+        let short = &f[..100];
+        assert_eq!(raw_frame(short), Some(short));
+        let mut multi = f.clone();
+        multi[6] = 0xFD;
+        assert_eq!(raw_frame(&multi), Some(&multi[..]));
+        // A header-only frame is dropped like an empty one.
+        assert_eq!(raw_frame(&[0xFF, 0xF9, 0x4C, 0x40, 0x00, 0xFF, 0xFC]), None);
+        // Ordinary raw AAC is untouched.
+        let raw = [0x21, 0x10, 0x05, 0x00];
+        assert_eq!(raw_frame(&raw), Some(&raw[..]));
+    }
+
     use super::*;
 
     /// AAC-LC, 48 kHz, `ch` channels.

@@ -4,4 +4,4 @@ Report a security problem privately: on GitHub, open the **Security** tab of thi
 
 Include the AmberSight version, your operating system, and the steps to reproduce. Leave out your own passwords, tokens and camera addresses.
 
-Fixes go into the next release. Only the latest release is supported; update with Settings > System > Status & updates or `ambersight update`.
+Fixes go into the next release. Only the latest release is supported; update with Settings > System > Status & updates or `ambersight update` (in Docker, rebuild the image: see docs/docker.md).

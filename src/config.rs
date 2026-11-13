@@ -26,6 +26,9 @@ fn no() -> bool { false }
 fn default_ingest() -> String { "auto".into() }
 fn default_trigger() -> String { "video".into() }
 fn default_idle_timeout() -> u64 { 300 }
+/// A battery camera's idle timeout as used: at least 30 s, at most a week
+/// (so the wake-until arithmetic cannot overflow).
+pub fn idle_secs(idle_timeout: u64) -> i64 { idle_timeout.clamp(30, 7 * 86400) as i64 }
 fn is_default_idle(v: &u64) -> bool { *v == 300 }
 fn is_default_trigger(s: &String) -> bool { s == "video" }
 fn is_default_ingest(s: &String) -> bool { s == "auto" }

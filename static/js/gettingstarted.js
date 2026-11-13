@@ -148,6 +148,10 @@ export async function refreshGettingStarted() {
   if (!host || !state.isAdmin || hidden() || window.top !== window) return off();
   let r;
   try { r = await results(); } catch (e) { return off(); }
+  // Another call may have added it while this one waited (two at once when
+  // the app opens from a notification link).
+  b = $('gsBanner');
+  if (!state.isAdmin || hidden()) return off();
   const core = r.filter(x => !x.optional);
   const left = core.filter(x => !x.done);
   if (r.filter(x => x.id === 'cameras' || x.id === 'alerts').every(x => x.done)) return off();

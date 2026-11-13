@@ -144,6 +144,13 @@ main { padding: var(--s4); max-width: 1900px; margin: 0 auto; }
 .tile:hover { border-color: var(--line2); }
 .tile.sel { border-color: var(--accent); }
 .frame { position: relative; background: #000; }
+/* Per-camera zoom in the grid: the picture stays inside its tile; the reset
+   badge sits bottom-center (the corners hold the pills). The pictures let
+   the pointer through to the frame, so the cursor goes on the frame. */
+.tile .frame.zoomed { overflow: hidden; }
+.tile .frame > .zoombadge { top: auto; bottom: 8px; left: 50%; transform: translateX(-50%); }
+.tile.sel .frame.zoomed { cursor: grab; }
+.tile.sel .frame.zoomed.panning { cursor: grabbing; }
 .tile img, .tile video.livevid { width: 100%; display: block; }
 .tile video.livevid { background: #000; aspect-ratio: 16 / 9; pointer-events: none; }
 .tile img.livevid { background: #000; aspect-ratio: 16 / 9; object-fit: contain; pointer-events: none; }

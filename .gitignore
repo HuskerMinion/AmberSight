@@ -10,3 +10,6 @@ dist/
 # Release signing keys: never in the repository
 .ambersight-release/
 *.pk8
+# Docker Compose example's folders (docker/compose.yaml)
+docker/config/
+docker/data/

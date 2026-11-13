@@ -495,7 +495,7 @@ let order = [];          // camera ids of the whole ordered list (all pages), us
 let cycleTimer = null;
 
 export function stopTiles() {
-  for (const id in liveTiles) { const t = liveTiles[id]; if (t.spk) t.spk.destroy(); if (t.player) t.player.stop(); clearTimeout(t.sleepTimer); }
+  for (const id in liveTiles) { const t = liveTiles[id]; if (t.spk) t.spk.destroy(); if (t.zoom) t.zoom.destroy(); if (t.player) t.player.stop(); clearTimeout(t.sleepTimer); }
   liveTiles = {}; liveSig = null;
 }
 
@@ -783,7 +783,12 @@ function grabLast(t) {
   } catch (e) { /* not drawable */ }
 }
 
+// (A new picture element, e.g. the Offline cover, takes the tile's zoom too.)
 function setTileMedia(t, c) {
+  placeTileMedia(t, c);
+  if (t.zoom) t.zoom.refresh();
+}
+function placeTileMedia(t, c) {
   const mode = wantedMode(t, c);
   if (mode === t.mode) return;
   if (t.spk) t.spk.reset();
@@ -839,6 +844,7 @@ function setTileMedia(t, c) {
   } else if (t.last) {
     // Keep the last picture (dimmed by CSS) under the Offline cover.
     ph.classList.add('lastpic');
+    t.last.cv.style.transform = '';  // reused: setTileMedia applies the current zoom
     ph.appendChild(t.last.cv);
   }
   frame.insertBefore(ph, frame.firstChild);
@@ -848,7 +854,7 @@ function setTileMedia(t, c) {
 // Wake a battery camera from its tile and show it for its idle timeout; then the
 // tile goes back to 'asleep' so an open grid does not keep the camera awake.
 async function wakeTile(t, c) {
-  const secs = Math.max(30, c.idle_timeout || 300);
+  const secs = Math.min(604800, Math.max(30, c.idle_timeout || 300));
   t.wakeUntil = Date.now() + secs * 1000;
   try { await api('/api/cameras/' + c.id + '/wake', { method: 'POST' }); } catch (e) { /* the stream request wakes it too */ }
   setTileMedia(t, c);
@@ -1284,10 +1290,12 @@ export function renderLive() {
     for (const z of (c.ignore_zones || [])) addZoneBox(t.pic, z, true);
     const fit = () => {
       fitPic(frame, t.pic);
+      if (t.zoom) t.zoom.refresh();
       const m = t.media;
       const w = m && (m.videoWidth || m.naturalWidth), h = m && (m.videoHeight || m.naturalHeight);
       if (w && h && !tlHook && setAr(t, c.id, w / h) && frame.closest('.grid.fill')) scheduleFit();
     };
+    frame._fit = fit;  // the resize observer runs it too (the zoom follows the layer)
     frame.addEventListener('loadedmetadata', fit, true);
     frame.addEventListener('load', fit, true);
     frame.addEventListener('resize', fit, true);
@@ -1298,6 +1306,7 @@ export function renderLive() {
     tile.tabIndex = 0;
     tile.setAttribute('aria-label', c.name);
     if (!arrange) attachTileInput(tile, frame, c.id);
+    if (!arrange && !tlHook) t.zoom = tileZoomFor(t, frame, c.id);
     // The camera's own text on the picture (drawn here; costs the server
     // nothing). When it is burned into the video, the picture already has it.
     // (Not over recorded footage in timeline mode: {time} would be today's.)
@@ -1392,30 +1401,50 @@ function addZoneBox(frame, z, ignore) {
 
 // Keep a tile's picture layer over the picture (re-run when the tile or the
 // stream changes size).
+// Measured before any zoom: the tile's zoom moves this layer with the
+// picture (zoom.js layers), so it must not be measured from the zoomed one.
 function fitPic(frame, pic) {
   if (!pic) return;
-  const f = frame.getBoundingClientRect();
-  if (!f.width || !f.height) return;
-  const r = pictureRect(frame);
-  pic.style.left = (r.left - f.left) + 'px';
-  pic.style.top = (r.top - f.top) + 'px';
+  if (!frame.offsetWidth || !frame.offsetHeight) return;
+  const r = layoutPictureRect(frame);
+  pic.style.left = r.left + 'px';
+  pic.style.top = r.top + 'px';
   pic.style.width = r.width + 'px';
   pic.style.height = r.height + 'px';
 }
-const picObserver = new ResizeObserver(entries => {
-  for (const e of entries) fitPic(e.target, e.target.querySelector(':scope > .pic'));
-});
 
-// The part of an element that shows the picture (cameras that are not 16:9 are letterboxed).
-function pictureRect(host) {
-  const m = host.querySelector('video, img');
-  const r = (m || host).getBoundingClientRect();
+// The picture's part of the frame in its own layout (no CSS transforms),
+// relative to the frame.
+function layoutPictureRect(frame) {
+  const m = frame.querySelector('video, img');
+  if (!m || m.offsetParent !== frame) {
+    const f = frame.getBoundingClientRect(), r = pictureRect(frame);
+    return { left: r.left - f.left, top: r.top - f.top, width: r.width, height: r.height };
+  }
+  return letterbox(m, { left: m.offsetLeft, top: m.offsetTop, width: m.offsetWidth, height: m.offsetHeight });
+}
+
+// The part of box r that shows the picture of media m (letterboxed).
+function letterbox(m, r) {
   const nw = m ? (m.videoWidth || m.naturalWidth) : 0;
   const nh = m ? (m.videoHeight || m.naturalHeight) : 0;
   if (!nw || !nh) return r;
   const sc = Math.min(r.width / nw, r.height / nh);
   const w = nw * sc, h = nh * sc;
   return { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, width: w, height: h };
+}
+const picObserver = new ResizeObserver(entries => {
+  for (const e of entries) {
+    if (e.target._fit) e.target._fit();
+    else fitPic(e.target, e.target.querySelector(':scope > .pic'));
+  }
+});
+
+// The part of an element that shows the picture (cameras that are not 16:9 are letterboxed).
+// On screen, so zoom included (right for aiming at what is shown).
+function pictureRect(host) {
+  const m = host.querySelector('video, img');
+  return letterbox(m, (m || host).getBoundingClientRect());
 }
 
 // A drag (or click) with the pointer on a camera picture. Calls done({x,y}) for a click or
@@ -1507,6 +1536,25 @@ function attachTileInput(tile, frame, id) {
     else if (ev.key === ' ') { setSelected(id); ev.preventDefault(); }
   });
   tile.addEventListener('focus', () => { if (!tlHook) setSelected(id); });
+}
+
+// Per-camera zoom in the grid (mouse): once a tile is selected, the wheel over
+// it zooms that camera and dragging moves the zoomed picture; over any other
+// tile, or with nothing selected, the wheel scrolls the page as usual. Touch
+// keeps tap-to-open (the full view has pinch zoom). The zoom of each camera
+// stays while this page is open (groups, pages and layouts rebuild the tiles).
+const tileViews = new Map();   // camera id -> {s, fx, fy}
+function tileZoomFor(t, frame, id) {
+  return Zoom.createZoom(frame, {
+    scrollAt1: true,  // out at 1x the wheel scrolls the page
+    box: true, dblclick: false, touch: false,
+    on: () => id === selId && !tool && !tlHook && !arrange,
+    layers: () => (t.pic ? [t.pic] : []),
+    initial: tileViews.get(id),
+    onChange: (v) => { if (v) tileViews.set(id, v); else tileViews.delete(id); },
+    onPan: () => { lastDrag = performance.now(); },
+    badgeTitle: 'Zoomed in: click to reset, or scroll out',
+  });
 }
 
 // ---------- full screen ----------

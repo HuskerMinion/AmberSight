@@ -143,6 +143,15 @@ pub fn is_unreachable(e: &str) -> bool {
         .any(|k| l.contains(k))
 }
 
+/// The camera answered DESCRIBE with 404: no stream at this address (a
+/// wrong path, or a stream that has not started yet). ffmpeg would get the
+/// same answer, so it does not count towards switching to ffmpeg. A 404 to
+/// a later request (SETUP of one track, PLAY) still counts: ffmpeg builds
+/// those addresses differently and can often play such a camera.
+pub fn is_not_found(e: &str) -> bool {
+    e.to_ascii_lowercase().contains("404 response to describe")
+}
+
 /// The camera (or its hub) answered but said it is busy or failing for now
 /// (RTSP 5xx such as 503 Service Unavailable): ffmpeg would get the same.
 pub fn is_busy(e: &str) -> bool {
@@ -327,7 +336,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             let now = Utc::now().timestamp();
             let mut st = handle.state.write().unwrap();
             if st.camera_detections.active() {
-                st.wake_until = st.wake_until.max(now + cfg.idle_timeout.max(30) as i64);
+                st.wake_until = st.wake_until.max(now + crate::config::idle_secs(cfg.idle_timeout));
             }
             if now >= st.wake_until {
                 if !st.sleeping {
@@ -433,7 +442,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 let busy = handle.live_main.viewers() + handle.live_sub.viewers() > 0 || event_start.is_some();
                 let mut st = handle.state.write().unwrap();
                 if busy || st.camera_detections.active() {
-                    st.wake_until = st.wake_until.max(now + cfg.idle_timeout.max(30) as i64);
+                    st.wake_until = st.wake_until.max(now + crate::config::idle_secs(cfg.idle_timeout));
                 }
                 if now >= st.wake_until {
                     idle_stop = true;
@@ -533,14 +542,15 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 failures_before_play = 0;
                 failing_since = None;
             }
-        } else if is_unreachable(&why) {
+        } else if is_unreachable(&why) || is_not_found(&why) {
             if ever_played {
                 failures_before_play = 0;
                 failing_since = None;
             }
         } else {
             // Only a camera that answers but cannot be played counts towards
-            // switching to ffmpeg; one that is off or rebooting does not.
+            // switching to ffmpeg; one that is off, rebooting or has no stream
+            // at that path (yet) does not.
             failures_before_play += 1;
             failing_since.get_or_insert_with(std::time::Instant::now);
         }
@@ -1303,6 +1313,15 @@ mod tests {
         assert!(!is_unreachable("camera did not answer within 15 s (rtsp://192.0.2.10:554/stream)"));
         assert!(!is_unreachable("DESCRIBE failed: 454 Session Not Found"));
         assert!(!is_unreachable("stream ended"));
+        // No stream at this path (yet): retry the built-in reader, not ffmpeg.
+        assert!(is_not_found("DESCRIBE failed: 404 response to DESCRIBE CSeq=2: Unexpected RTSP response status"));
+        assert!(!is_not_found("SETUP failed: 404 response to SETUP CSeq=4: Unexpected RTSP response status"));
+        assert!(!is_not_found("PLAY failed: 404 response to PLAY CSeq=5"));
+        assert_eq!(crate::config::idle_secs(0), 30);
+        assert_eq!(crate::config::idle_secs(300), 300);
+        assert_eq!(crate::config::idle_secs(u64::MAX), 7 * 86400, "no overflow from a huge timeout");
+        assert!(!is_not_found("DESCRIBE failed: 454 Session Not Found"));
+        assert!(!is_not_found("DESCRIBE failed: 503 response to DESCRIBE CSeq=3"));
         assert_eq!(stream_addr("rtsp://u:p@192.0.2.10/stream").as_deref(), Some("192.0.2.10:554"));
         assert_eq!(stream_addr("rtsp://192.0.2.10:8554/a?b=c").as_deref(), Some("192.0.2.10:8554"));
         assert_eq!(stream_addr("https://cam.example/flv?x=1").as_deref(), Some("cam.example:443"));

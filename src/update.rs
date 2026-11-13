@@ -267,8 +267,19 @@ pub fn is_packaged(exe: &Path) -> bool {
     exe.starts_with("/usr") && !exe.starts_with("/usr/local")
 }
 
+const CONTAINER: &str = "AmberSight is running in a container: update by building or pulling a new image";
+
+/// Docker and Podman mark their containers with these files. An update
+/// installed inside one would be lost when the container is recreated.
+fn in_container() -> bool {
+    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
+}
+
 /// Why this program cannot replace itself, if it cannot.
 fn path_blocker(exe: &Path) -> Option<String> {
+    if in_container() {
+        return Some(CONTAINER.to_string());
+    }
     if is_packaged(exe) {
         return Some(PACKAGED.to_string());
     }
@@ -387,9 +398,11 @@ pub fn set_under_service() {
 }
 
 /// Started by a service manager that starts it again when it exits with an
-/// error: the Windows service, systemd (INVOCATION_ID) or our launchd job.
+/// error: the Windows service, systemd (INVOCATION_ID), our launchd job, or a
+/// container (its restart policy; docs/docker.md asks for one).
 pub fn under_service() -> bool {
     UNDER_SERVICE.load(Ordering::Relaxed)
+        || in_container()
         || (cfg!(target_os = "linux") && std::env::var_os("INVOCATION_ID").is_some())
         || (cfg!(target_os = "macos") && std::env::var("XPC_SERVICE_NAME").is_ok_and(|n| n.starts_with("com.ambersight.")))
 }
@@ -616,7 +629,9 @@ pub fn check(repo: &str) -> Result<Release> {
                     return Ok(r);
                 }
             }
-            if program_path().is_ok_and(|p| is_packaged(&p)) {
+            if in_container() {
+                tracing::info!("AmberSight {} is available (this is {CURRENT}); this copy runs in a container: build or pull a new image", r.version);
+            } else if program_path().is_ok_and(|p| is_packaged(&p)) {
                 tracing::info!("AmberSight {} is available (this is {CURRENT}); this copy came from a package: update it with apt or dnf", r.version);
             } else {
                 tracing::info!("AmberSight {} is available (this is {CURRENT}); install it from Settings > System > Status & updates", r.version);
@@ -1246,6 +1261,11 @@ mod tests {
         assert!(!is_packaged(Path::new("/home/me/ambersight/ambersight")));
         assert!(!is_packaged(Path::new("/usrx/ambersight")));
         assert!(!is_packaged(Path::new("C:\\AmberSight\\ambersight.exe")));
+        if in_container() {
+            // Inside a container nothing replaces itself (tests built in Docker).
+            assert_eq!(path_blocker(Path::new("/opt/ambersight/ambersight")).unwrap(), CONTAINER);
+            return;
+        }
         assert_eq!(path_blocker(Path::new("/usr/bin/ambersight")).unwrap(), PACKAGED);
         assert!(PACKAGED.contains("apt/dnf"));
         // A folder we can write to is fine.

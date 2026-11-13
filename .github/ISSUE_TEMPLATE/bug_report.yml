@@ -33,7 +33,7 @@ body:
     id: install
     attributes:
       label: How it's installed
-      description: Windows installer, zip, .deb, .rpm, tarball, built from source...
+      description: Windows installer, zip, .deb, .rpm, tarball, Docker, built from source...
   - type: input
     id: cameras
     attributes:

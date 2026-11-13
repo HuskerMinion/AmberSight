@@ -55,6 +55,7 @@ Step-by-step instructions for every system are in the
 | Debian, Ubuntu, Linux Mint, Raspberry Pi OS (64-bit) | `ambersight_<version>_amd64.deb` or `_arm64.deb` | `sudo apt install ./ambersight_<version>_amd64.deb`. Installs `/usr/bin/ambersight`, `/etc/ambersight/config.toml`, data in `/var/lib/ambersight`, a systemd service running as the user `ambersight`, an app menu entry, and ffmpeg. |
 | Fedora | `ambersight-<version>-1.x86_64.rpm` or `.aarch64.rpm` | Add [RPM Fusion](https://rpmfusion.org/Configuration) first, then `sudo dnf install ./ambersight-<version>-1.x86_64.rpm --allowerasing`. Same layout as the .deb. |
 | macOS and other Linux | `.tar.gz` (Windows also has a `.zip`) | Unpack, then run `./ambersight setup` (see below). |
+| Docker | build from this repository | `docker compose -f docker/compose.yaml up -d --build`. See [docs/docker.md](docs/docker.md) for folders, networking and hardware decode. |
 
 The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer (and 64-bit
 Raspberry Pi OS, trixie or newer). Intel Macs have no built-in AI; use an AI

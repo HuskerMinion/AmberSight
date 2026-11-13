@@ -1,0 +1,12 @@
+# Only what the build needs goes into the image build.
+*
+!Cargo.toml
+!Cargo.lock
+!src
+!static
+!models
+!vendor/retina
+!config.example.toml
+!LICENSE
+!THIRD-PARTY-NOTICES.txt
+!docker/entrypoint.sh
