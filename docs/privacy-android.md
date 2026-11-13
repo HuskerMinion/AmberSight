@@ -1,6 +1,6 @@
 # AmberSight app privacy policy
 
-Last updated: November 12, 2026
+Last updated: November 13, 2026
 
 The AmberSight app for Android lets you watch the cameras on your own AmberSight server. It talks only to the server you add to it. We, the makers of the app, receive nothing from it: no account, no analytics, no ads, no tracking.
 
@@ -38,6 +38,14 @@ We do not sell or share any data. The app contains no advertising or analytics c
 ## Children
 
 The app is not designed for children.
+
+## Deleting your data
+
+Everything the app keeps is on your phone and on your own AmberSight server; we hold nothing about you.
+
+- **On your phone:** remove the server in the app, or uninstall the app. Either deletes the server details, sign-in token and settings it kept.
+- **On your server:** your account, recordings and events are kept by your AmberSight server. Its owner (admin) deletes accounts in Settings > Users & security, and recordings and events in the server itself. If someone else runs the server you use, ask them.
+- **Questions or help:** email huskerminion@gmail.com. Since we receive no data from the app, there is nothing for us to delete, but we will help you find it.
 
 ## Changes
 
