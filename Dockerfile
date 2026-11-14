@@ -19,7 +19,7 @@ FROM debian:trixie-slim
 # Debian's ffmpeg decodes H.264 and H.265. Hardware decode (VAAPI/QSV) needs
 # the drivers below and /dev/dri passed in.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata tini mesa-va-drivers \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata tini mesa-va-drivers fonts-dejavu-core \
  && if [ "$(dpkg --print-architecture)" = amd64 ]; then \
       apt-get install -y --no-install-recommends intel-media-va-driver; fi \
  && rm -rf /var/lib/apt/lists/* \

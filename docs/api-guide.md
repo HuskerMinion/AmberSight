@@ -25,6 +25,7 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/login` | anyone | Password sign-in; sets the `as_session` cookie, or asks for a two-step code |
 | POST | `/api/login/totp` | anyone | The two-step code that goes with a password; sets the `as_session` cookie |
 | POST | `/api/pair` | anyone | Sign in with a one-time pairing (QR) code |
+| POST | `/api/demo/signin` | anyone (when the server has a demo account) | Sign in to the demo account, no password; 24-hour session |
 | GET | `/api/whoami` | anyone | Who am I, is sign-in required |
 | POST | `/api/logout` | anyone | End the session |
 | GET | `/api/status` | viewer | Server name, version, armed state, active profile |
@@ -40,7 +41,7 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/cameras/:id/wake` | viewer | Wake a battery/on-demand camera |
 | GET | `/api/events` | viewer | Event (alert) list with filters and paging |
 | GET | `/api/events/:id/thumb` | viewer | Event thumbnail (JPEG) |
-| POST | `/api/events/:id/review` | **admin** | Mark an event a false alarm / OK, or clear the mark |
+| POST | `/api/events/:id/review` | **admin**, operator (`events`) | Mark an event a false alarm / OK, or clear the mark |
 | GET | `/api/clips/:id` | viewer | Event clip (MP4, Range supported) |
 | GET | `/api/timeline/events` | viewer | Compact event marks for a timeline |
 | GET | `/api/events/:id/ai` | viewer | What the AI saw for an event |
@@ -49,6 +50,8 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET | `/api/plates/known` | **admin** | The library of known plates |
 | POST / PUT / DELETE | `/api/plates/known[/:id]` | **admin** | Add / change / remove a known plate |
 | DELETE | `/api/plates/:id` | **admin** | Delete a reading |
+| GET | `/api/smart/search` | viewer (their cameras) | Alert search: events whose pictures match words ("red truck") |
+| GET | `/api/smart/pic/:pic` | viewer (their cameras) | A search result's picture (JPEG) |
 | GET | `/api/smart/follow` | viewer (their cameras) | Follow a person or vehicle from an event to other cameras ("Where did they go?") |
 | GET / POST | `/api/alert-rules` | **admin** | Alert rules in plain words: list / add or change |
 | DELETE | `/api/alert-rules/:id` | **admin** | Delete a rule |
@@ -88,6 +91,7 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/push/unsubscribe` | viewer (own) | Stop notifications on a device |
 | GET | `/api/push/devices` | viewer (own) | The account's devices with notifications on |
 | POST | `/api/push/test` | viewer (own) | Send a test notification to the account's devices |
+| GET / POST | `/api/me/snooze` | viewer (own; device tokens too) | This account's snoozes / snooze one camera's push notifications for this account, 1–1440 minutes |
 | GET | `/api/tls` | viewer | HTTPS mode, certificate names, CA fingerprint, expiry |
 | GET / POST | `/api/settings` (`server` section) | **admin** | HTTPS on/off, extra certificate names, own certificate files |
 | POST | `/api/system/restart` | **admin** | Restart AmberSight (only when it runs as a service) |
@@ -305,7 +309,7 @@ can do the same to notice that the server was updated, or ignore it.
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
-| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras`. Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -373,6 +377,89 @@ The body is limited to 4 KB. The response matches `/api/login`: **200** `{"user"
 the `as_session` cookie. An expired or already-used code returns **401**
 `this sign-in code has expired or was already used; ask for a new one`. Lockout returns
 **429**. The code itself grants the account's role. The server never asks for the password.
+
+### Demo sign-in: `POST /api/demo/signin`
+
+A server can offer a demo: visitors (an app's "Try the demo" button) sign in to one viewer account
+with no password. The owner sets it up:
+
+```toml
+[server]
+demo_user = "demo"   # an existing, enabled viewer (not an operator or admin)
+```
+
+If the account does not exist, is disabled, or is an operator or admin, the demo is off and the
+server says why at startup. It is checked at every request, so promoting or disabling the account
+turns the demo off at once.
+
+**The account is reached only through demo sign-in.** Its password opens nothing while it is the
+demo account: `POST /api/login` answers **403** `this is the demo account: it is signed in to with
+demo sign-in only`; HTTP Basic, RTSP and its device tokens are refused as wrong; pairing (QR) codes
+and linked servers cannot sign in to it. Demo sessions are kept in memory only, never in the
+database: a restart ends them all (the app gets **401** and signs in again), and no other version
+of the server, run on the same data, ever sees one. While the server runs, a change of the demo
+account (`demo_user` changed or removed, the account disabled, deleted or made an operator or
+admin) ends every session of the old and the new account: an old demo cookie never becomes a
+viewer's session. The demo account never gets push notifications and its phones never count as
+someone at home; push subscriptions, presence phones and snoozes it has (from when it was an
+ordinary account) are removed when it becomes the demo account and at every start.
+
+**Discovery.** `GET /api/whoami` (also before sign-in) has `"demo": true` when the demo is
+available, and `"demo_account": true` when the caller is signed in with a demo session; `false`
+otherwise. `features` lists `"demo"` on servers that know demo sign-in.
+
+**Sign-in.** Send no body and no `Content-Type`:
+
+```http
+POST /api/demo/signin
+```
+
+**200**: the `as_session` cookie (as for a password sign-in: `HttpOnly`, `SameSite=Strict`,
+`Secure` over HTTPS, also behind a trusted proxy) and the `GET /api/whoami` JSON for the new session
+(`"demo_account": true`). An app without an `Origin` header is fine; a browser page of this server
+is too; another site's page gets **403**, as for every sign-in. **404** when the demo is off.
+**429** `too many demo sign-ins from here; wait a minute` past 10 a minute from one address (an
+IPv4 address, or an IPv6 /48), past 20 a minute from one network (an IPv4 /24 or an IPv6 /48: a
+third of the whole), or past 60 a minute from everywhere together.
+
+- A demo session lasts **24 hours** (cookie `Max-Age=86400`), not 30 days. One network (IPv4 /24,
+  IPv6 /48) holds at most 20 live: its next sign-in ends its own least recently used session,
+  never another network's. At most 200 live in all; past that the least recently used ends. Many
+  visitors may be signed in at the same time.
+- Admins get no new-device alert for demo sign-ins, and the visitors' browsers are not written
+  down. The audit log gets one line a minute at most, and one at shutdown, for the minute's
+  sign-ins and refusals: `12 demo sign-ins, 7 refused (most from 203.0.113.0/24 (5), ...)` (up to
+  three networks), so visitors cannot push everything else out of it.
+
+**Behind a reverse proxy or tunnel** (nginx, Caddy, cloudflared, Tailscale Funnel), list the
+proxy's own address in `[server] trusted_proxies`. Without it every visitor seems to come from the
+proxy: they all share one limit (10 sign-ins a minute) and one network's 20 live demo sessions (each
+new visitor ends the session used least recently), and the cookie lacks `Secure` when the proxy takes
+the HTTPS.
+
+**What the demo account may not do**, though it is a viewer: **403** `this is a demo account: it
+can watch, but not change anything that would stay or reach other visitors` for
+
+| Refused | Why |
+|---|---|
+| everything under `/api/me/` except `GET /api/me/snooze` (password, two-step, device tokens, `GET /api/me/account`, signing devices out, snooze writes) | The account is shared: its sessions would show other visitors |
+| `POST /api/push/subscribe`, `POST /api/push/test` | Notifications |
+| `POST /api/presence`, `DELETE /api/presence/:id` | Presence |
+| `POST /api/signals` | Signals |
+| `POST /api/links/:id/open` | Switching to a linked server |
+| `GET /api/export` | Exports |
+| `GET /api/playback?download=1&caps=…` (downloads fitted to the device) | The server converts two at a time for everyone |
+| `POST /api/cameras/:id/wake` | It costs battery cameras power: nothing the demo account asks for wakes one (see below) |
+| `PUT` / `PATCH /api/ui/prefs` | Layout every visitor would share |
+
+Watching works as for any viewer of those cameras: live view, events, clips, recordings,
+untouched downloads. Video is never converted for the demo account: with `caps`, live view, clips
+and playback get the untouched stream (or the smaller one) that fits best, as when the encoders
+are busy (`x-as-why: busy_fallback`); `/api/live/:id/info?caps=` says the same
+(`transcoded: false`). Battery (on-demand) cameras are never woken for the demo account:
+`/api/snapshot/:id` gives the last picture there is (**503** when there is none), and live view
+plays one only while it is awake already (else **503**, or `waking` stays as it is in `/info`). Show the refused buttons grayed out (or hide them) when
+`demo_account` is true.
 
 ### Two-step codes (accounts with an authenticator app)
 
@@ -450,7 +537,7 @@ gets **403** `sign in with a password for this`.
 
 | Scope | Allowed |
 |---|---|
-| `"viewer"` (default) | `GET`: `/api/cameras`, `/status`, `/live/:id` and `/live/:id/info`, `/stream`, `/ws`, `/jpeg`, `/snapshot/:id`, `/events`, `/events/:id/thumb`, `/timeline/events`, `/clips`, `/clips/:id`, `/recordings`, `/playback`, `/playback/picture`, `/seek`, `/still`, `/preview`, `/filmstrip`. `POST`: `/cameras/:id/wake`, `/signals`. Also RTSP. |
+| `"viewer"` (default) | `GET`: `/api/cameras`, `/status`, `/live/:id` and `/live/:id/info`, `/stream`, `/ws`, `/jpeg`, `/snapshot/:id`, `/events`, `/events/:id/thumb`, `/timeline/events`, `/clips`, `/clips/:id`, `/recordings`, `/playback`, `/playback/picture`, `/seek`, `/still`, `/preview`, `/filmstrip`, `/smart/search`, `/smart/pic/:pic`. `POST`: `/cameras/:id/wake`, `/signals`. Also RTSP. |
 | `"admin"` (only for an admin or operator account; "day-to-day control") | All of the above except RTSP, plus `POST`: `/shield`, `/profile`, `/cameras/:id/ptz` (moves and go-to-preset; **403** for `set_preset`, `remove_preset` and `tour`), `/cameras/:id/ptz/aim`, `/cameras/:id/pause`, `/clips/record`, `/events/:id/review`, `/events/:id/protect`. `GET`: `/profiles`, `/cameras/:id/ptz/presets`, `/cameras/:id/ptz/caps`. A token holds a profile or a pause for 24 hours at most, whatever it asks. Admins get a system alert when a token disarms, pauses or sets a profile, and the audit log names the token. An operator's token can do only what the operator's rights allow (**403** for the rest), on the operator's cameras. |
 
 `GET /api/whoami` also answers a token (`"by_token": true`).
@@ -493,6 +580,7 @@ always the account's password. `code` may be `recovery_code` instead wherever it
 | `POST /api/me/sessions/sign-out-others` | Every device of the account but this one. `{"ended": N}`. Forgets the ended devices' browsers and push subscriptions as above. **500** `…could return at a restart…` if some could not be removed from the database. |
 | `POST /api/me/tokens {name, scope?, password, code?}` | `{"token": "ast_…", "info": {...}}`. `code` is needed when two-step is on. At most 20 per account (400). |
 | `DELETE /api/me/tokens/:id` | Revoke one |
+| `GET /api/me/snooze`, `POST /api/me/snooze {camera, minutes}` | This account's snoozed cameras; snooze one (see "Snooze a camera for yourself"). Device tokens may use both. |
 | `POST /api/me/two-step/start {password}` | `{secret, uri, svg, expires_in, setup_id}`: a new secret as text, `otpauth://` link and QR picture. Not on yet. 409 if it already is. |
 | `POST /api/me/two-step/confirm {code}` | On. `{"on": true, "recovery_codes": [10 codes]}`, shown this once. Other sessions end. **403**: wrong code (limited like sign-in codes, **429**); **409**: nothing waiting (start again after 15 minutes). |
 | `POST /api/me/two-step/cancel {setup_id}` | Forget the secret that start gave out (`setup_id` is in its answer), if it is still waiting for its first code. Never touches codes that are on, or a newer start. |
@@ -655,6 +743,7 @@ no `Origin` header, which is accepted. If your WebSocket library adds one, set i
       "on_demand": false,
       "sleeping": false,
       "device_sleeping": null,
+      "battery": null,
       "record": true,
       "motion": false,
       "alerts_paused": false,
@@ -691,6 +780,7 @@ a viewer app can ignore. The fields useful to a viewer:
 | `on_demand` | bool | Battery or on-demand camera that connects only while watched or triggered |
 | `sleeping` | bool | On-demand camera currently disconnected on purpose |
 | `device_sleeping` | bool or null | What the camera or hub itself reports about sleeping |
+| `battery` | object or null | A battery camera's charge as it last reported it: `{"percent": 87, "charging": false, "at_ms": 1762480900000}` (`percent` 0 to 100; `at_ms`: when it was read, epoch ms). `null` until the camera reports one (and for cameras without a battery). Read only from Reolink battery cameras (Argus) reached directly (`baichuan://` cameras), at sign-in and when they send a battery report; a battery camera on a Reolink hub (Home Hub, NVR) stays `null`. Kept in memory: `null` again after a restart until the next report. The list is not pushed; read it again to refresh. |
 | `record` | bool | Recording on |
 | `alert_ignore_polys` | list | Areas that never send a notification: `[{"points": [[x, y], ...]}]`, 3 or more corners, 0..1 of the picture (same shape as `zone_polys`; at most 12). An ordinary notification is skipped when every object that confirmed the event had its box center inside one of them. Detection, events, recordings, search and MQTT are not affected. Rules and zone alerts are not filtered. Set it with `PUT /api/cameras/:id`. |
 | `alert_labels` | list or null | "Notify only for" objects (`person`, `vehicle`, `animal`, or labels such as `car`, `dog`); `null` = every object. Other objects are still detected, recorded, searchable and sent to MQTT; they just send no notification. Rules and zone alerts are not filtered, and doorbell presses (`visitor`), sounds (`sound`) and packages (`package`, `package picked up`) always notify, also when other labels are present. With AI on, an event with no object stays silent; with AI off, it notifies, since nothing could have named an object. Set it with the camera's settings (`PUT /api/cameras/:id`, the same field). |
@@ -848,8 +938,9 @@ play a camera's main stream as it is (an Android TV whose hardware HEVC decoder 
 4096x2304 and a 4608x1728 camera, for example), instead of falling back to the sub stream.
 
 `caps` is taken by `GET /api/live/:id/stream`, `GET /api/live/:id/info`, `GET /api/playback`
-and `GET /api/clips/:id`. Without `caps` nothing changes (same bytes as before). Downloads
-(`download=1`), fast playback (`speed`) and `reverse=1` ignore it.
+and `GET /api/clips/:id`. Without `caps` nothing changes (same bytes as before). Fast playback
+(`speed`), `reverse=1` and clip downloads ignore it. A playback download (`download=1`) with
+`caps` is a file made to fit the device: see [Downloads that fit the device](#downloads-that-fit-the-device).
 
 **Format.** A comma list of `codec:WxH[@fps]`:
 
@@ -1148,8 +1239,9 @@ Any signed-in user who can see the camera may call this. The body is ignored. Re
 
 The camera stays awake until `awake_until` (epoch seconds, at least the camera's idle timeout,
 minimum 30 s). Opening `/info`, `/ws`, `/stream`, `/api/live/:id` or `/api/snapshot/:id` also
-wakes it. Call `wake` periodically while the user keeps watching. Returns 404 for unknown cameras
-and for linked-server cameras.
+wakes it. Call `wake` periodically while the user keeps watching (every 20 s or so is plenty).
+Returns 404 for unknown cameras and for linked-server cameras. One account may wake one camera
+once every 10 seconds: sooner is **429** with `Retry-After: 10` (the camera is awake already).
 
 ### Playing it on phones (suggestions only)
 
@@ -1254,7 +1346,9 @@ objects the AI sees (a light tracker) and judges them by their feet (the bottom 
 
 Each event is an ordinary event (`GET /api/events`, the clip, the thumbnail, notifications) with
 two labels in `objects`: a tag, then what it was. Tags are `loitering: <zone name>` and
-`crossed: <zone name> (in)` or `(out)`, so `objects=loitering` or `objects=Gate` finds them.
+`crossed: <zone name> (in)` or `(out)`. A tag is found only by a word that starts like one:
+`objects=loitering`, `objects=crossed` or `object=loitering: Gate` find them, but `objects=Gate`
+does not (a plain word matches what was seen, never a tag).
 `start` is when the object came into the area (loitering) or the crossing; `end` is when it was
 reported. A zone with `record: false` sends the notification but saves no event. Zone events are
 not held back by the alert interval (they have their own cooldowns) and follow the arm state,
@@ -1434,6 +1528,58 @@ characters; notes up to 300; 409 if the plate is already listed) answers `{"id":
 `PUT /api/plates/known/:id` takes any of `text`, `name`, `notes`; `DELETE /api/plates/known/:id`
 removes it (its earlier readings stay, as unknown). Naming a plate makes its earlier readings of
 exactly that text known.
+
+### Alert search: `GET /api/smart/search`
+
+Find events by what their pictures show, in plain words ("red truck", "person with a dog",
+"delivery van at night"). It needs smart search on (an admin turns it on in Settings; the server
+then fingerprints every event's pictures in the background, newest first, so older events become
+searchable over time). whoami feature `alert_search`.
+
+Who: any signed-in account, and device tokens with the `viewer` scope. Results are only from
+cameras the account may see.
+
+Query:
+
+| Param | Required | Meaning |
+|---|---|---|
+| `q` | yes | The words, 1 to 200 characters |
+| `cameras` | no | Exact camera names, comma separated (`cameras=Front Door,Garage`): only those. Names the account may not see, or that do not exist, are left out (no error); if none is left, there are no results. Empty or missing: every camera the account may see. |
+| `camera` | no | Cameras whose name contains this (any case). A name the account may not see is **404**, as elsewhere. Prefer `cameras`. |
+| `since`, `until` | no | Epoch **seconds**, like `/api/events`: when the matching picture was taken |
+| `limit` | no | Most results, 1 to 300 (default 60) |
+| `mode`, `min_z` | no | For tuning only: `mode=plain` ranks by likeness alone; `min_z` changes how far a result must stand out (default 1.0) |
+
+```json
+{
+  "results": [
+    { "event_id": "garage-1762480900", "camera": "Garage", "camera_id": 2,
+      "start_ms": 1762480900000, "at_ms": 1762480903500, "pic": 4711,
+      "box": [0.41, 0.2, 0.18, 0.7], "label": "car", "score": 0.31, "z": 3.2 }
+  ],
+  "ms": 85
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `event_id` | The event (`/api/events`, `/api/clips/:id`, `/api/events/:id/thumb`) |
+| `camera`, `camera_id` | Its camera's name, and its id today (as in `/api/cameras`). `camera_id` is `null` when no camera has that name now: the camera was removed, or renamed after the event (the event keeps the old name) |
+| `start_ms` | When the event started (epoch ms) |
+| `at_ms` | When the matching picture was taken (epoch ms): open the recording there (`/api/playback`) |
+| `pic` | The matching picture: `GET /api/smart/pic/:pic` (JPEG; same access rules, 404 for a camera the account may not see) |
+| `box`, `label` | Where in the picture, when the match is an object AI found (x, y, width, height as fractions of it; its label), else `null` |
+| `score`, `z` | How well it matches, and how far it stands out from all pictures searched. Best first. |
+
+One result per event, its best-matching picture. When 50 pictures or more were searched, results
+that do not stand out (`z` under 1.0) are left out, so a search can have fewer results than
+`limit`, or none. Matches are approximate (CLIP fingerprints of what things look like): show
+them as suggestions.
+
+Errors: **400** `{"error": "describe what to look for (up to 200 letters)"}`; **503**
+`{"error": "smart search is off ..."}` when it is off, and `{"error": "smart search failed ..."}`
+while its model is still loading or downloading (`GET /api/smart/status`, admin, tells which);
+**404** for a `camera=` the account may not see.
 
 ### Follow across cameras: `GET /api/smart/follow`
 
@@ -1727,7 +1873,9 @@ What an app receives (UTF-8 JSON, at most 3,000 bytes before encryption):
   "body": "Thu 9:01:12 PM · person, dog",
   "camera": "Front Door",
   "camera_id": 3,
-  "actions": [{"action": "pause", "title": "Pause 1 h", "minutes": 60}],
+  "actions": [{"action": "snooze", "minutes": 60, "title": "Snooze 1 h"},
+              {"action": "ok", "title": "Mark OK"},
+              {"action": "pause", "minutes": 60, "title": "Pause 1 h"}],
   "event_id": "front_door-1762480872",
   "labels": ["person", "dog"],
   "at_ms": 1762480872000,
@@ -1754,7 +1902,7 @@ A system problem:
 | `title`, `body` | Ready to show. Local server time is in `body`. |
 | `camera` | Camera name (`event`, `camera`), else `null`. |
 | `camera_id` | Camera id (`event` only), else `null`. Use it with `actions`. |
-| `actions` | Buttons to show on the notification (`event` to an admin account's device, or with no accounts; otherwise `[]`). Today one: `{"action": "pause", "title": "Pause 1 h", "minutes": 60}`. When the user taps it, call `POST /api/cameras/<camera_id>/pause` with `{"minutes": 60}` and your token or session. Then confirm in the app, e.g. "Notifications from Front Door paused for 1 hour. It still records and detects." Ignore actions you do not know. |
+| `actions` | Buttons to show on an `event` notification: only what this device's account may do (`[]` for other types). Use your token or session for the call, then confirm in the app. Ignore actions you do not know. See the table below. |
 | `event_id` | The event (`event` only), as in `/api/events`. |
 | `labels` | What was seen, e.g. `["person"]` (`event`; may be empty). |
 | `at_ms` | When it happened (epoch ms); for other types when it was sent. |
@@ -1764,7 +1912,19 @@ A system problem:
 | `tag` | A newer notification with the same tag may replace the older one. |
 | `urgent` | The camera's alert priority is high or urgent, or a system problem. |
 
-Long messages are cut to fit: `body` first, then `labels` and `thumb`. As a last resort every
+The actions, in this order:
+
+| `action` | Offered to | When tapped |
+|---|---|---|
+| `snooze` (`"minutes": 60`, "Snooze 1 h") | Everyone | `POST /api/me/snooze {"camera": <camera>, "minutes": 60}`. Only this account's notifications of that camera stop; e.g. "No notifications from Front Door on your devices for 1 hour." |
+| `ok` ("Mark OK") | Admins, operators with `events`, everyone on a server without accounts | `POST /api/events/<event_id>/review {"verdict": "ok"}` |
+| `pause` (`"minutes": 60`, "Pause 1 h") | Admins, operators with `arm`, everyone on a server without accounts | `POST /api/cameras/<camera_id>/pause {"minutes": 60}`. Every account's notifications of that camera stop, e.g. "Notifications from Front Door paused for 1 hour. It still records and detects." |
+
+They come most useful first: snooze, ok, pause. Browsers get the same `actions` (and
+`event_id`) in their payload; the web app shows as many as the browser allows, in that order
+(often two: snooze and Mark OK).
+
+Long messages are cut to fit: `body` first, then `labels` and `thumb` (`actions` stay). As a last resort every
 field is still there, but `title` is shortened, `body` is empty, `labels` is `[]`, `camera`,
 `event_id` and `thumb` are `null`, and `url` and `tag` are the fixed values `"/"` and
 `"ambersight"` (`v`, `type`, `at_ms`, `sent_ms` and `urgent` are kept). Text fields can end in
@@ -1797,6 +1957,32 @@ All are plain-text messages you can show; they are **400** unless the table says
 
 A viewer account may use all of `/api/push/*` for its own devices. On a server without accounts
 anyone on the network can.
+
+#### Snooze a camera for yourself: `/api/me/snooze`
+
+```http
+POST /api/me/snooze
+Content-Type: application/json
+
+{"camera": "Front Door", "minutes": 60}
+```
+
+`minutes` is 1–1440 (a day at most); `0` clears the snooze. **200** `{"camera": "Front Door",
+"until_ms": 1762484472000}` (`until_ms` is `null` after clearing). The camera is named as in
+`GET /api/cameras` (case and spacing do not matter); one the account cannot see, or that does not
+exist, is **404**; minutes over 1440 are **400**. Snoozing again replaces the end time.
+
+`GET /api/me/snooze` → `{"snoozed": [{"camera": "Front Door", "until_ms": 1762484472000}]}`: the
+snoozes still running, soonest end first.
+
+While a camera is snoozed, **this account's** devices get no push notification about it: browser
+push and app (UnifiedPush) alike. Every other account still gets them, and the camera records and
+detects as before. The server-wide channels (ntfy, Pushover, email, Telegram, webhooks, MQTT and
+the rest) are not per account and are not affected: to stop those, pause the camera (`POST
+/api/cameras/:id/pause`). Snoozes are kept in the database, so a restart keeps them; deleting or
+disabling the account removes them. Every role may snooze the cameras it can see, and device
+tokens may too (the viewer scope is enough). On a server without accounts a snooze applies to
+every device.
 
 ### Unusual events
 
@@ -2070,8 +2256,8 @@ the web app uses it directly as `<video src>`. Over HTTPS with the private CA, s
 | `speed` | no | 2–1024: fast playback (keyframes only, retimed) |
 | `frame_ms` | no | Fast playback: ms each picture shows, 100–1000 (default 100) |
 | `reverse` | no | `1`: the window played backwards. Capped at 10 s, scaled down to at most 960 px wide; `speed` is ignored. |
-| `download` | no | `1`: attachment, with the camera name and time burned in as captions (normal speed only) |
-| `caps`, `start`, `info` | no | What the player decodes: transcoded when the recording does not fit, from `start`; `info=1` answers JSON. See [Best quality on every device](#best-quality-on-every-device-caps). |
+| `download` | no | `1`: attachment, exactly the window, with the camera name and time as captions (normal speed only). With `caps`: made to fit the device, see below. |
+| `caps`, `start`, `info` | no | What the player decodes: transcoded when the recording does not fit, from `start`; `info=1` answers JSON. See [Best quality on every device](#best-quality-on-every-device-caps). With `download=1`, see below (`start` and `info` are not used there). |
 | `quiet` | no | `1`: when nothing is recorded in the window, answer `204` with the header `x-none: 1` instead of `404` (the web app uses this so a browser's console stays free of errors; `/api/filmstrip` and `/api/playback/picture` take it too) |
 
 Response: `video/mp4`, with `Range`/206/416 and `HEAD` handled as for clips. Extra headers:
@@ -2097,13 +2283,45 @@ Errors:
 | 503 | `busy, try again`, with `Retry-After: 1` |
 | 500 | `playback failed (details are in the server log)` |
 
+#### Downloads that fit the device
+
+A download for a phone to keep and play: `GET /api/playback?camera=&from=&to=&download=1&caps=h264:1920x1080@30`.
+`caps` is the same list as for playback (see [Best quality on every device](#best-quality-on-every-device-caps)),
+and the target is picked the same way. whoami feature `fit_download`. Device tokens with the
+`viewer` scope may use it.
+
+- **The recording fits** the device: the same file as a download without `caps` (exact window,
+  captions as a subtitle track), with `x-as-transcoded: 0` and the `x-as-codec`, `x-as-width`,
+  `x-as-height` of what is sent.
+- **It does not fit**: one encode makes the codec and size picked, at the playback bit rate
+  (`x-as-*` headers as for converted playback, `x-as-transcoded: 1`), with the camera name and the
+  date and time **burned into the picture** (bottom center). Exactly the window, at most 2 hours.
+  It uses the server's video encoder (or software), within the same limits as converted playback.
+  The file is fragmented MP4 sent as it is made: no `Content-Length`, `Accept-Ranges: none`,
+  `Content-Disposition: attachment`. Headers `x-clip-start-ms`, `x-clip-end-ms` (the window
+  covered) and `x-as-media-duration-ms`. `HEAD` or `Range: bytes=0-0` answers the headers and
+  starts nothing; a Range from further in is **416** (a download cannot resume; ask again).
+- **Conversion off** (`[transcode] encoder = "off"`, or no encoder works) or a target under 128
+  px: the plain download, with `x-as-why` (`off`, `too_big` ...).
+- Two fitted downloads are converted at a time on the server. Past that, and when the account or
+  the encoders have no room, **503** with `Retry-After` (seconds; the body says why). Also 503
+  with `Retry-After: 3` in the first seconds after a start, while the encoders are checked.
+- A malformed `caps` is **400**.
+- A converted download takes at most three times its length, plus a minute to start. One read
+  more slowly than that (or not at all) is ended so it does not hold one of the two places: the
+  response then ends with an error, never as a shorter file that looks whole. The same goes for any
+  conversion that stops before its end (ffmpeg failed or was stopped, or the recording could not be
+  read): a converted answer that ends without an error is complete.
+- When the captions cannot be drawn (no font on the server) and nothing was sent yet, the
+  download is made again without them. The Docker images include a font.
+
 ### Pictures from recordings
 
 | Endpoint | Params | Returns |
 |---|---|---|
 | `GET /api/still` | `camera`, `at` (ms), `download=1` optional | Full-resolution JPEG at that moment. 404 `no recording at that time`. |
 | `GET /api/preview` | `camera`, `at` (ms), `w` (px, default 320, clamped 64–640) | Small JPEG of the keyframe at or before `at`. Header `x-preview-ms` gives that keyframe's time. `Cache-Control: private, max-age=3600`. 503 with `Retry-After: 2` when busy. |
-| `GET /api/filmstrip` | `camera`, `from` (ms), `step` (ms), `n` (default 60), `w` (default 160) | One JPEG grid of `n` pictures. Headers `x-sprite-cols`, `x-sprite-w`, `x-sprite-h`, and `x-sprite-times` (comma-separated ms). |
+| `GET /api/filmstrip` | `camera`, `from` (ms), `step` (ms, clamped 1 s to 2 h), `n` (default 60, clamped 1–240), `w` (px, default 160, clamped 64–320) | One JPEG grid of `n` pictures. Headers `x-sprite-cols`, `x-sprite-w`, `x-sprite-h`, and `x-sprite-times` (comma-separated ms). Two are made at a time; 503 with `Retry-After: 2` when busy. |
 
 ### `GET /api/seek?camera=&at=`
 
@@ -2286,11 +2504,12 @@ null) to hold the profile until it is changed. Send `{"name": null}` to return t
 `minutes` is clamped to 1–525600. The response is the same JSON as `GET /api/profiles`. An
 unknown name returns 400 `unknown profile '…'`.
 
-### Pause a camera's notifications: `POST /api/cameras/:id/pause` (admin)
+### Pause a camera's notifications: `POST /api/cameras/:id/pause` (admin, operator with `arm`)
 
 Body `{"minutes": 60}`. `0` resumes; omitted or `null` pauses until resumed. Motion, recording
-and events carry on; only notifications stop. Event notifications offer this as a "Pause 1 h"
-button (see `actions` under "Push notifications for apps"). `GET /api/cameras` shows the state in
+and events carry on; only notifications stop, for everyone. Event notifications offer this as a
+"Pause 1 h" button to the accounts that may use it (see `actions` under "Push notifications for
+apps"). To mute only your own devices, snooze instead (`POST /api/me/snooze`). `GET /api/cameras` shows the state in
 `alerts_paused` and `alerts_paused_until`: show it as "Notifications paused" (never just "Paused":
 the camera is still recording).
 
@@ -2547,6 +2766,8 @@ Limits:
 | Session lifetime | 30 days |
 | Basic-auth result cache | 5 min |
 | Playback window | 2 h (normal), 24 h (fast), 10 s (reverse) |
+| Downloads fitted to a device (`download=1&caps`) | 2 converted at a time (server), then 503 with `Retry-After` |
+| Alert search | `q` up to 200 characters; up to 300 results (default 60) |
 | Open-ended Range reply | to the end of the clip |
 | JPEG live fps | 1–15 (default 6) |
 | Timeline marks | 20,000 rows unbucketed; at most 200 cameras |
@@ -2606,6 +2827,39 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.10.0**
+
+- Alert search is documented and open to device tokens with the `viewer` scope: `GET /api/smart/search` and `GET /api/smart/pic/:pic`. New `cameras=` (exact names, comma separated; names the account may not see are left out). Each result has `start_ms` (the event's start) and `camera_id`. 503 says when smart search is off. whoami feature `alert_search`. See "Alert search" in section 5.
+- `GET /api/playback?download=1&caps=…`: a download made to fit the device (the codec and size playback would pick, captions burned in, one encode); 2 at a time, 503 with `Retry-After` past that. Without `caps`, or when the recording fits, the same download as before. whoami feature `fit_download`. See [Downloads that fit the device](#downloads-that-fit-the-device).
+- `GET /api/cameras`: new `battery` (`{"percent", "charging", "at_ms"}` or `null`) for battery cameras. whoami feature `battery`.
+- Docs: zone tags are found only by tag words (`objects=loitering`, `object=loitering: Gate`), not by the zone name alone; the filmstrip's limits (`n` 1–240, `w` 64–320, `step` 1 s–2 h, 2 at a time, 503 with `Retry-After: 2`).
+- Per-account snooze: `POST /api/me/snooze {"camera", "minutes"}` (1–1440, `0` clears) and
+  `GET /api/me/snooze`. Mutes that account's browser and app push notifications of one camera;
+  other accounts and the server-wide channels are not affected. Every role, for the cameras it
+  can see (others **404**); device tokens with the viewer scope too. Kept across restarts. whoami
+  feature `snooze`. See [Snooze a camera for yourself](#snooze-a-camera-for-yourself-apimesnooze).
+- Push `actions` list what the device's account may do: `snooze` for everyone, `pause` for admins
+  and operators with `arm` (before, operators with `arm` could pause but were not offered the
+  button), `ok` ("Mark OK", `POST /api/events/:id/review {"verdict":"ok"}`) for admins and
+  operators with `events`. The browser payload carries the same `actions` and `event_id`; the web
+  app's notifications show snooze and Mark OK too. In that order: snooze, ok, pause.
+- Demo sign-in: `[server] demo_user` names an enabled viewer; `POST /api/demo/signin` (no body,
+  no password) signs visitors in to it for 24 hours. whoami `demo` (offered) and `demo_account`
+  (this caller is the demo account), feature `demo`. The demo account cannot change its account,
+  get notifications, report presence, send signals, open linked servers, export, make fitted
+  downloads, wake cameras or change prefs (**403**), and its video is never converted. It is
+  reached only through demo sign-in (no password, Basic, token or pairing), and a change of the
+  demo account ends its sessions. Demo sessions live in memory only (a restart ends them); the
+  account gets no push and its phones never count for presence. See [Demo sign-in](#demo-sign-in-post-apidemosignin).
+- `POST /api/cameras/:id/wake`: once per camera every 10 s per account, else **429**.
+- Converted answers (`caps`) that stop before their end (ffmpeg failed or was stopped, or the
+  recording could not be read) end with an error instead of looking complete. A fitted download
+  takes at most three times its length plus a minute; one read more slowly is ended. Captions
+  that cannot be drawn (no font) are left out instead of failing the download.
+- Snoozes follow a renamed camera, and go with a removed one.
+- Docs: reviewing events is for admins and operators with `events`, and pausing for admins and
+  operators with `arm` (the reference table said admins only).
 
 **New in 0.9.1**
 

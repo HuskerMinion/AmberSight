@@ -66,6 +66,7 @@ mod update;
 mod push;
 mod push_http;
 mod presence_http;
+mod snooze;
 mod web;
 
 #[tokio::main]

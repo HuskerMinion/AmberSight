@@ -20,6 +20,7 @@ mod static_files;
 
 pub fn build_router(engine: Arc<Engine>) -> Router {
     spawn_ptz_checker(engine.clone());
+    spawn_demo_audit(engine.clone());
     let api = Router::new()
         .route("/cameras", get(list_cameras).post(add_camera))
         .route("/cameras/:id", put(update_camera).delete(remove_camera))
@@ -98,6 +99,8 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/me/two-step/recovery", post(crate::account_http::two_step_recovery))
         .route("/me/tokens", post(crate::account_http::token_create))
         .route("/me/tokens/:id", axum::routing::delete(crate::account_http::token_revoke))
+        .route("/me/snooze", get(crate::snooze::list).post(crate::snooze::set))
+        .route("/demo/signin", post(demo_signin))
         .route("/push/key", get(crate::push_http::key))
         .route("/push/subscribe", post(crate::push_http::subscribe))
         .route("/push/unsubscribe", post(crate::push_http::unsubscribe))
@@ -701,8 +704,13 @@ const TOKEN_ROUTES: &[(&str, &str, bool)] = &[
     ("/still", "GET", false),
     ("/preview", "GET", false),
     ("/filmstrip", "GET", false),
+    ("/smart/search", "GET", false),
+    ("/smart/pic/:id", "GET", false),
     ("/cameras/:id/wake", "POST", false),
     ("/signals", "POST", false),
+    // Muting this account's own notifications of a camera for a while.
+    ("/me/snooze", "GET", false),
+    ("/me/snooze", "POST", false),
     // Day-to-day control.
     ("/shield", "POST", true),
     ("/profiles", "GET", true),
@@ -916,6 +924,8 @@ fn viewer_may_write(path: &str, method: &axum::http::Method) -> bool {
         // Their own signed-in devices.
         || (method == Method::POST && (path == "/me/sessions/sign-out-others" || (path.starts_with("/me/sessions/") && path.ends_with("/sign-out"))))
         || path == "/ui/prefs"
+        // Snoozing their own notifications of a camera they can see.
+        || path == "/me/snooze"
         // Page timings and the sound tripwire from their own devices.
         || path == "/ui/diag"
         // Notifications on their own devices.
@@ -992,12 +1002,100 @@ fn admin_only_path(path: &str) -> bool {
         || matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(), ["cameras", _, "tamper" | "unusual" | "onvif" | "spots"])
 }
 
+/// The answer to a password (or code, or token) for the demo account.
+const DEMO_SIGN_IN_ONLY: &str = "this is the demo account: it is signed in to with demo sign-in only";
+
+/// The answer to the demo account for what it may not do.
+const DEMO_REFUSED: &str = "this is a demo account: it can watch, but not change anything that would stay or reach other visitors";
+
+/// What the demo account (`[server] demo_user`) may not do, though it is a
+/// viewer: anything about the account (password, two-step, device tokens, its
+/// sessions, which would show other visitors), notifications and presence,
+/// signals, switching to a linked server, exports, and changes that every
+/// visitor would share (layout, snoozes).
+/// Also waking battery cameras (it costs them battery) and downloads fitted to
+/// the device (`/playback?download=1&caps=`: the server converts only two at a
+/// time). `query`: the request's query string.
+fn demo_refused(path: &str, method: &axum::http::Method, query: Option<&str>) -> bool {
+    let write = method != axum::http::Method::GET && method != axum::http::Method::HEAD;
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let q = |k: &str| query.map(|q| url::form_urlencoded::parse(q.as_bytes()).filter(|(n, _)| n == k).map(|(_, v)| v.into_owned()).collect::<Vec<_>>()).unwrap_or_default();
+    let fitted_download = path == "/playback" && q("download").iter().any(|v| v == "1" || v == "true") && q("caps").iter().any(|c| !c.is_empty());
+    (path.starts_with("/me/") && (write || path != "/me/snooze"))
+        || matches!(path, "/push/subscribe" | "/push/test" | "/export")
+        || (write && (path == "/presence" || path.starts_with("/presence/") || path == "/signals" || path == "/ui/prefs" || path.starts_with("/ui/orders/")))
+        || matches!(parts.as_slice(), ["links", _, "open"] | ["cameras", _, "wake"])
+        || fitted_download
+}
+
+/// The demo account now (`[server] demo_user`, if it may be one). When it is
+/// not the one seen last (the settings, the account or the file changed), the
+/// sessions of the old and the new account end (`auth::demo_changed`).
+/// The first time (at startup) and at every change, the demo account's push
+/// subscriptions and presence phones are removed too (`purge_demo_devices`).
+fn demo_now(engine: &Arc<Engine>) -> Option<String> {
+    let d = engine.config.lock().unwrap().demo_account();
+    crate::transcode::set_unconverted(d.as_deref());
+    let mut seen = engine.demo_seen.lock().unwrap();
+    match seen.as_ref() {
+        Some(before) if *before == d => {}
+        Some(before) => {
+            let before = before.clone();
+            *seen = Some(d.clone());
+            drop(seen);
+            if before.is_some() || d.is_some() {
+                crate::auth::demo_changed(before.as_deref(), d.as_deref());
+                purge_demo_devices(engine, d.as_deref());
+            }
+        }
+        None => {
+            *seen = Some(d.clone());
+            drop(seen);
+            purge_demo_devices(engine, d.as_deref());
+        }
+    }
+    d
+}
+
+/// The demo account keeps no push subscriptions and no presence phones (it
+/// may have had them as an ordinary account, or from an older version): they
+/// are removed, and who is home is worked out again without them.
+fn purge_demo_devices(engine: &Arc<Engine>, demo: Option<&str>) {
+    let Some(user) = demo else { return };
+    let _ = engine.db.push_delete_user(user);
+    let _ = engine.db.snooze_delete_user(user);
+    if engine.db.presence_delete_user(user).unwrap_or(0) > 0 {
+        // (On a thread of its own: no lock may be held for it.)
+        let e = engine.clone();
+        std::thread::spawn(move || e.presence_evaluate(None));
+    }
+}
+
+/// Write the demo sign-ins not yet in the audit log (see `auth::demo_audit_line`).
+pub fn flush_demo_audit(engine: &Engine) {
+    if let Some(line) = crate::auth::demo_audit_line() {
+        let user = engine.config.lock().unwrap().demo_account().unwrap_or_default();
+        let _ = engine.db.insert_audit(&user, "", &line, "", 200);
+    }
+}
+
+/// Writes the demo sign-in line once a minute.
+fn spawn_demo_audit(engine: Arc<Engine>) {
+    let _ = std::thread::Builder::new().name("demo-audit".into()).spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        flush_demo_audit(&engine);
+    });
+}
+
 async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
+    // (Before any session is looked at: one of an account that stopped being the
+    // demo account is gone by then.)
+    demo_now(&engine);
     // Sign-in endpoints answer for themselves (but not to other web sites'
     // pages: no signing someone in as another account, no guessing
     // passwords from another site).
-    if matches!(path.as_str(), "/login" | "/login/totp" | "/logout" | "/whoami" | "/pair") {
+    if matches!(path.as_str(), "/login" | "/login/totp" | "/logout" | "/whoami" | "/pair" | "/demo/signin") {
         if req.method() != axum::http::Method::GET && !same_origin(req.headers(), request_host(&req).as_deref()) {
             return (StatusCode::FORBIDDEN, "request from another web site refused").into_response();
         }
@@ -1040,9 +1138,9 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
                 // An operator's device token has the operator's rights only
                 // when it was made with control rights.
                 let control = !by_token || req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).is_some_and(crate::auth::token_control);
-                let (r, limits) = {
+                let (r, limits, demo) = {
                     let cfg = engine.config.lock().unwrap();
-                    (crate::auth::role_of(&cfg, &id.user, id.admin, control), crate::auth::camera_limits(&cfg, &id.user))
+                    (crate::auth::role_of(&cfg, &id.user, id.admin, control), crate::auth::camera_limits(&cfg, &id.user), crate::auth::is_demo(&acc, &id.user))
                 };
                 if by_token && !token_may(&path, req.method(), r != Role::Viewer) {
                     return (StatusCode::FORBIDDEN, "sign in with a password for this").into_response();
@@ -1064,6 +1162,9 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
                 // Settings, logs, health, accounts and network scans: admins only.
                 if let Err(why) = gate(&path, req.method(), &r, limits.is_some()) {
                     return (StatusCode::FORBIDDEN, why).into_response();
+                }
+                if demo && demo_refused(&path, req.method(), req.uri().query()) {
+                    return (StatusCode::FORBIDDEN, DEMO_REFUSED).into_response();
                 }
                 access = Access(limits);
                 is_admin = id.admin;
@@ -1228,11 +1329,19 @@ async fn whoami(State(engine): State<Arc<Engine>>, req: Request) -> Response {
         None if acc.is_empty() => Some((Role::Admin, false)),
         None => None,
     };
-    Json(serde_json::json!({
-        "signed_in": id.is_some() || acc.is_empty(),
-        "user": id.as_ref().map(|i| i.user.clone()).unwrap_or_default(),
+    let cookie = !crate::auth::cookie_tokens(req.headers()).is_empty();
+    Json(whoami_json(&engine, id.as_ref(), role, acc.is_empty(), by_token, two_step_needed, cookie)).into_response()
+}
+
+/// The /api/whoami answer (also the demo sign-in's). `role`: the caller's
+/// role and whether it is limited to some cameras; None: not signed in.
+fn whoami_json(engine: &Arc<Engine>, id: Option<&crate::auth::Identity>, role: Option<(Role, bool)>, open: bool, by_token: bool, two_step_needed: bool, session_cookie: bool) -> serde_json::Value {
+    let demo = demo_now(engine);
+    serde_json::json!({
+        "signed_in": id.is_some() || open,
+        "user": id.map(|i| i.user.clone()).unwrap_or_default(),
         // (Operators are not admins: an app that knows only this flag shows them a viewer's buttons.)
-        "admin": id.as_ref().map(|i| i.admin).unwrap_or(acc.is_empty()),
+        "admin": id.map(|i| i.admin).unwrap_or(open),
         // "viewer", "operator" or "admin"; null when not signed in.
         "role": role.map(|r| r.0.name()),
         // What this session may do now beyond watching (all true for an admin's
@@ -1240,7 +1349,11 @@ async fn whoami(State(engine): State<Arc<Engine>>, req: Request) -> Response {
         "perms": role.map(|r| r.0.perms_json(r.1, by_token)),
         // Limited to some cameras (an admin never is).
         "limited": role.is_some_and(|r| r.1),
-        "auth_required": !acc.is_empty(),
+        "auth_required": !open,
+        // Demo sign-in is available (POST /api/demo/signin), and whether this
+        // caller is signed in to the demo account.
+        "demo": demo.is_some(),
+        "demo_account": id.is_some_and(|i| demo.as_deref() == Some(i.user.as_str())),
         // What this server can do, for apps to check before asking (also
         // before sign-in): "caps" = transcoding for players (see transcode/).
         "features": FEATURES,
@@ -1249,9 +1362,8 @@ async fn whoami(State(engine): State<Arc<Engine>>, req: Request) -> Response {
         // Came with a device token, so account changes are refused with 403.
         "by_token": by_token,
         // Sign-in troubleshooting: did a session cookie arrive at all?
-        "session_cookie": !crate::auth::cookie_tokens(req.headers()).is_empty(),
-    }))
-    .into_response()
+        "session_cookie": session_cookie,
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -1280,6 +1392,9 @@ pub(crate) async fn login(State(engine): State<Arc<Engine>>, req: Request) -> Re
         return (StatusCode::BAD_REQUEST, "expected {\"username\", \"password\"}").into_response();
     };
     let user = body.username.trim().to_string();
+    if demo_now(&engine).as_deref() == Some(user.as_str()) {
+        return (StatusCode::FORBIDDEN, DEMO_SIGN_IN_ONLY).into_response();
+    }
     let generation = crate::auth::generation(&user);
     let acc = accounts(&engine);
     // Argon2 is slow on purpose, and costs memory: off the async runtime, a few at a time.
@@ -1372,7 +1487,12 @@ pub(crate) fn add_role(engine: &Engine, answer: &mut serde_json::Value, user: &s
 /// `answer` (at least `{user, admin}`) with the cookies of a new session and
 /// of the browser it was made in.
 pub(crate) fn signed_in_with(answer: serde_json::Value, started: crate::devices::Started, secure: bool) -> Response {
-    let cookie = session_cookie(&started.token, crate::auth::SESSION_DAYS as u64 * 86400, secure);
+    signed_in_lasting(answer, started, secure, crate::auth::SESSION_DAYS as u64 * 86400)
+}
+
+/// As `signed_in_with`, for a session that lasts `secs`.
+fn signed_in_lasting(answer: serde_json::Value, started: crate::devices::Started, secure: bool, secs: u64) -> Response {
+    let cookie = session_cookie(&started.token, secs, secure);
     Response::builder()
         .header(header::SET_COOKIE, cookie)
         .header(header::SET_COOKIE, crate::devices::set_cookie(&started.device_cookie, secure))
@@ -1404,7 +1524,9 @@ pub(crate) async fn pair(State(engine): State<Arc<Engine>>, req: Request) -> Res
     let generation = taken.as_ref().map_or(0, |(u, _, _)| crate::auth::generation(u));
     let acc = accounts(&engine);
     let from_link = taken.as_ref().is_some_and(|t| t.2);
-    let found = taken.and_then(|(u, admin_ok, _)| acc.iter().find(|(n, _, _)| *n == u).map(|(n, _, a)| crate::auth::Identity { user: n.clone(), admin: *a && admin_ok }));
+    // (The demo account signs in with demo sign-in only: no code made for it works.)
+    let demo = demo_now(&engine);
+    let found = taken.filter(|(u, _, _)| demo.as_deref() != Some(u.as_str())).and_then(|(u, admin_ok, _)| acc.iter().find(|(n, _, _)| *n == u).map(|(n, _, a)| crate::auth::Identity { user: n.clone(), admin: *a && admin_ok }));
     let how = if from_link { crate::devices::How::LinkedServer } else { crate::devices::How::QrCode };
     let started = found.as_ref().and_then(|id| crate::devices::complete_sign_in(&engine, &ctx, id.clone(), generation, how));
     match found.zip(started) {
@@ -1422,6 +1544,30 @@ pub(crate) async fn pair(State(engine): State<Arc<Engine>>, req: Request) -> Res
 }
 
 /// `POST /api/logout` → ends the session and clears the cookie.
+/// `POST /api/demo/signin` (no body, no password) → a session of the demo
+/// account (`[server] demo_user`) as a cookie, and the /api/whoami answer for
+/// it. 404 when demo sign-in is off; a few a minute per address. The session
+/// lasts a day; admins are not told of it (see `devices::demo_sign_in`).
+async fn demo_signin(State(engine): State<Arc<Engine>>, req: Request) -> Response {
+    let ip = client_ip(&req);
+    let secure = arrived_secure(&req);
+    let Some(user) = demo_now(&engine) else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    if !crate::auth::demo_allowed(ip) {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many demo sign-ins from here; wait a minute").into_response();
+    }
+    let ctx = crate::devices::SignInCtx::new(&engine, req.headers(), ip);
+    let generation = crate::auth::generation(&user);
+    let id = crate::auth::Identity { user: user.clone(), admin: false };
+    let Some(started) = crate::devices::demo_sign_in(&ctx, id.clone(), generation) else {
+        return (StatusCode::CONFLICT, "the demo account changed meanwhile: try again").into_response();
+    };
+    let limited = crate::auth::camera_limits(&engine.config.lock().unwrap(), &user).is_some();
+    let answer = whoami_json(&engine, Some(&id), Some((Role::Viewer, limited)), false, false, false, true);
+    signed_in_lasting(answer, started, secure, crate::auth::DEMO_SESSION_SECS as u64)
+}
+
 async fn logout(State(engine): State<Arc<Engine>>, req: Request) -> Response {
     let acc = accounts(&engine);
     for tok in crate::auth::cookie_tokens(req.headers()) {
@@ -1684,6 +1830,9 @@ async fn list_cameras(
                 "overlay": cfg.overlay,
                 "audio": cfg.audio,
             });
+            // A battery camera's last reported charge (next to device_sleeping; the
+            // json! above is at its macro's depth limit).
+            v["battery"] = serde_json::json!(st.battery);
             v["ai_last"] = st.ai_last.as_ref().map(|(l, s, t)| serde_json::json!({"label": l, "score": s, "age_ms": (chrono::Utc::now().timestamp_millis() - t).max(0)})).into();
             // The camera's motion-detection setting ("motion" above is motion happening now).
             v["motion_enabled"] = cfg.motion.into();
@@ -1774,6 +1923,30 @@ async fn list_cameras(
         list.extend(crate::remote::ui_cameras(&engine));
     }
     Json(serde_json::json!({ "cameras": list, "overlay_vars": serde_json::Value::Object(engine.overlay_vars_json()) }))
+}
+
+#[cfg(test)]
+mod battery_tests {
+    use super::{list_cameras, Access, IsAdmin};
+    use axum::{extract::State, Extension};
+
+    #[tokio::test]
+    async fn the_camera_list_has_each_battery_level() {
+        let engine = crate::engine::Engine::for_test(toml::from_str("").unwrap());
+        let garden = engine.add_test_camera("Garden");
+        engine.add_test_camera("Gate");
+        let b = crate::ingest::baichuan::client::Battery { percent: 64, charging: false, ..Default::default() };
+        crate::engine::camera_events::note_battery(&garden, &b, 1_700_000_000_000);
+        // A viewer limited to the garden camera sees its level, nothing of the other.
+        let only = Access(Some(["garden".to_string()].into_iter().collect()));
+        let v = list_cameras(State(engine.clone()), Extension(only), Extension(IsAdmin(false))).await.0;
+        let cams = v["cameras"].as_array().unwrap();
+        assert_eq!(cams.len(), 1);
+        assert_eq!(cams[0]["battery"], serde_json::json!({ "percent": 64, "charging": false, "at_ms": 1_700_000_000_000i64 }));
+        // Not known yet: null.
+        let v = list_cameras(State(engine), Extension(Access::default()), Extension(IsAdmin(true))).await.0;
+        assert!(v["cameras"][1]["battery"].is_null() && v["cameras"][1].as_object().unwrap().contains_key("battery"));
+    }
 }
 
 /// Another camera already uses this name (compared as recordings are stored:
@@ -2792,7 +2965,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -3568,7 +3741,8 @@ struct PlaybackQ {
     #[serde(default)]
     download: String,
     /// What the player decodes (see transcode/): transcoded when the
-    /// recording does not fit. Not with download, speed or reverse.
+    /// recording does not fit. With download: a file made to fit. Not with
+    /// speed or reverse.
     #[serde(default)]
     caps: Option<String>,
     /// Play from this moment (ms; within from..to; a value below `from` is
@@ -3618,6 +3792,10 @@ struct SmartQ {
     q: String,
     #[serde(default)]
     camera: String,
+    /// Exact camera names, comma separated: only these (those the account
+    /// may not see, or that do not exist, are left out).
+    #[serde(default)]
+    cameras: String,
     /// Seconds since the epoch, like the events list.
     since: Option<i64>,
     until: Option<i64>,
@@ -3632,6 +3810,9 @@ struct SmartQ {
 /// `GET /api/smart/search?q=red truck&camera=&since=&until=`: events whose
 /// pictures look like the description, best first.
 async fn smart_search(State(engine): State<Arc<Engine>>, axum::Extension(access): axum::Extension<Access>, Query(q): Query<SmartQ>) -> Response {
+    if !engine.config.lock().unwrap().smart_search.enabled {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": "smart search is off (an admin turns it on in Settings)" }))).into_response();
+    }
     let text = q.q.trim().to_string();
     if text.is_empty() || text.chars().count() > 200 {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "describe what to look for (up to 200 letters)" }))).into_response();
@@ -3641,7 +3822,7 @@ async fn smart_search(State(engine): State<Arc<Engine>>, axum::Extension(access)
     let limit = q.limit.unwrap_or(60).clamp(1, 300);
     let t0 = std::time::Instant::now();
     // A user limited to some cameras finds only those.
-    let allowed = move |cam: &str| access.can_name(cam);
+    let allowed = search_cameras(access, &q.cameras);
     match tokio::task::spawn_blocking(move || engine.smart_search(&text, &q.camera, from, to, limit, q.mode == "plain", q.min_z, &allowed)).await {
         Ok(Ok(hits)) => Json(serde_json::json!({ "results": hits, "ms": t0.elapsed().as_millis() as u64 })).into_response(),
         Ok(Err(e)) => {
@@ -3652,10 +3833,41 @@ async fn smart_search(State(engine): State<Arc<Engine>>, axum::Extension(access)
     }
 }
 
+/// Which cameras a search looks at: those the account may see, and with
+/// `cameras` (exact names, comma separated; empty: all) only those of them.
+fn search_cameras(access: Access, cameras: &str) -> impl Fn(&str) -> bool + Send + 'static {
+    let only: std::collections::HashSet<String> = cameras.split(',').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect();
+    move |cam: &str| access.can_name(cam) && (only.is_empty() || only.contains(cam))
+}
+
 async fn smart_pic(State(engine): State<Arc<Engine>>, axum::Extension(access): axum::Extension<Access>, AxPath(id): AxPath<i64>) -> Response {
     match tokio::task::spawn_blocking(move || engine.smart_pic(id, &|cam| access.can_name(cam))).await {
         Ok(Ok(Some(b))) => Response::builder().header(header::CONTENT_TYPE, "image/jpeg").header(header::CACHE_CONTROL, "private, max-age=3600").body(Body::from(b)).unwrap(),
         _ => (StatusCode::NOT_FOUND, "no picture").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod smart_search_tests {
+    use super::{search_cameras, Access};
+
+    #[test]
+    fn cameras_narrow_a_search_to_those_the_account_may_see() {
+        let limited = Access(Some(["porch", "garage"].iter().map(|s| s.to_string()).collect()));
+        // No list: every camera the account may see.
+        let f = search_cameras(limited.clone(), "");
+        assert!(f("Porch") && f("Garage") && !f("Yard"));
+        // A list: exact names, those hidden or unknown left out.
+        let f = search_cameras(limited.clone(), "Porch, Yard,Nowhere");
+        assert!(f("Porch") && !f("Garage") && !f("Yard") && !f("Nowhere"));
+        // Only names it may not see: nothing (not everything).
+        let f = search_cameras(limited, "Yard");
+        assert!(!f("Porch") && !f("Garage") && !f("Yard"));
+        // Exact: not a part of a name, not another case.
+        let f = search_cameras(Access::default(), "Front");
+        assert!(f("Front") && !f("Front Door") && !f("front"));
+        let f = search_cameras(Access::default(), ",");
+        assert!(f("Anything"), "an empty list is no list");
     }
 }
 
@@ -3743,11 +3955,26 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
     let to = to.min(from + if trick.is_some() { crate::engine::playback::MAX_TRICK_WINDOW_MS } else { crate::engine::playback::MAX_WINDOW_MS });
     let download = q.download == "1" || q.download == "true";
     let mut low = q.quality == "low";
+    let mut caps_headers = Vec::new();
+    if download && trick.is_none() && !reverse {
+        if let Some(caps) = q.caps.as_deref() {
+            let caps = match crate::transcode::Caps::parse(caps) {
+                Ok(c) => c,
+                Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+            };
+            let user = caller.as_ref().map(|c| c.0 .0.clone()).unwrap_or_default();
+            let offset_s = chrono::DateTime::from_timestamp_millis(from).map(|t| t.with_timezone(&chrono::Local).offset().local_minus_utc() as i64).unwrap_or(0);
+            match crate::transcode::http::download(engine.clone(), camera.clone(), from, to, caps, ask_of(&req), low, user, offset_s).await {
+                crate::transcode::http::Outcome::Done(r) => return r,
+                // Fits the device (or cannot be converted): today's download, saying so.
+                crate::transcode::http::Outcome::Untouched { headers, .. } => caps_headers = headers,
+            }
+        }
+    }
     let caps = match caps_of(&q.caps, download || trick.is_some() || reverse) {
         Ok(c) => c,
         Err(r) => return r,
     };
-    let mut caps_headers = Vec::new();
     let mut from = from;
     if caps.is_some() || (q.info == "1" && !(download || trick.is_some() || reverse)) {
         // `start`: a moment (epoch ms) within the window; a value no
@@ -4095,7 +4322,36 @@ async fn still(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>) ->
 
 /// `POST /api/cameras/:id/wake` — wake an on-demand (battery) camera for its
 /// idle timeout (any signed-in user who can see the camera).
-async fn wake_camera(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>) -> Response {
+/// How often one account may wake one camera (each wake costs a battery
+/// camera minutes of power).
+const WAKE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether `user` may wake camera `id` now: once per `WAKE_EVERY`. Noted when it may.
+fn wake_allowed(user: &str, id: usize) -> bool {
+    static LAST: Mutex<Option<std::collections::HashMap<(String, usize), std::time::Instant>>> = Mutex::new(None);
+    let now = std::time::Instant::now();
+    let mut m = LAST.lock().unwrap();
+    let m = m.get_or_insert_with(Default::default);
+    if m.len() > 10_000 {
+        m.retain(|_, t| now.duration_since(*t) < WAKE_EVERY);
+    }
+    let key = (user.to_string(), id);
+    if m.get(&key).is_some_and(|t| now.duration_since(*t) < WAKE_EVERY) {
+        return false;
+    }
+    m.insert(key, now);
+    true
+}
+
+async fn wake_camera(State(engine): State<Arc<Engine>>, caller: Option<axum::Extension<Caller>>, AxPath(id): AxPath<usize>) -> Response {
+    let user = caller.map(|c| c.0 .0).unwrap_or_default();
+    if engine.camera(id).is_some() && !wake_allowed(&user, id) {
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header(header::RETRY_AFTER, WAKE_EVERY.as_secs().to_string())
+            .body(Body::from("this camera was just woken; try again in a few seconds"))
+            .unwrap();
+    }
     if engine.wake_camera(id) {
         let st = engine.camera(id).map(|h| (h.state.read().unwrap().sleeping, h.state.read().unwrap().wake_until));
         Json(serde_json::json!({ "woken": true, "sleeping": st.map(|s| s.0), "awake_until": st.map(|s| s.1) })).into_response()
@@ -4104,12 +4360,19 @@ async fn wake_camera(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize
     }
 }
 
-pub(crate) async fn snapshot(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>) -> Response {
+/// Whether `user` may wake a battery camera by watching it: not the demo account.
+pub fn may_wake(engine: &Engine, user: &str) -> bool {
+    !crate::auth::is_demo(&accounts(engine), user)
+}
+
+pub(crate) async fn snapshot(State(engine): State<Arc<Engine>>, caller: Option<axum::Extension<Caller>>, AxPath(id): AxPath<usize>) -> Response {
     if crate::remote::is_remote(id) {
         return crate::remote::proxy_get(&engine, id, "/link/snapshot/{id}", "image/jpeg").await;
     }
-    // Asking for a picture of a battery camera wakes it.
-    if engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand) {
+    // Asking for a picture of a battery camera wakes it (not for the demo
+    // account: it gets the last picture there is).
+    let user = caller.map(|c| c.0 .0).unwrap_or_default();
+    if engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand) && may_wake(&engine, &user) {
         engine.wake_camera(id);
     }
     let handle = match engine.camera(id) {
@@ -4127,12 +4390,13 @@ pub(crate) async fn snapshot(State(engine): State<Arc<Engine>>, AxPath(id): AxPa
         .unwrap()
 }
 
-async fn live(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>) -> Response {
+async fn live(State(engine): State<Arc<Engine>>, caller: Option<axum::Extension<Caller>>, AxPath(id): AxPath<usize>) -> Response {
     // Another server's camera: one current picture (its live view uses the sockets).
     if crate::remote::is_remote(id) {
         return crate::remote::proxy_get(&engine, id, "/link/snapshot/{id}", "image/jpeg").await;
     }
-    if engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand) {
+    let user = caller.map(|c| c.0 .0).unwrap_or_default();
+    if engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand) && may_wake(&engine, &user) {
         engine.wake_camera(id);
     }
     let handle = match engine.camera(id) {
@@ -6875,6 +7139,7 @@ mod viewer_write_tests {
         "/login",
         "/login/totp",
         "/pair",
+        "/demo/signin",
         "/logout",
         "/audit",
         "/users",
@@ -6933,8 +7198,6 @@ mod viewer_write_tests {
         "/smart/status",
         "/sound/status",
         "/cameras/:id/sound",
-        "/smart/search",
-        "/smart/pic/:id",
         "/smart/follow",
         "/alert-rules",
         "/alert-rules/preview",
@@ -7118,6 +7381,9 @@ mod viewer_write_tests {
         ("/me/two-step/recovery", "POST", "viewer"),
         ("/me/tokens", "POST", "viewer"),
         ("/me/tokens/:id", "DELETE", "viewer"),
+        ("/me/snooze", "GET", "viewer"),
+        ("/me/snooze", "POST", "viewer"),
+        ("/demo/signin", "POST", "admin"),
         ("/push/key", "GET", "viewer"),
         ("/push/subscribe", "POST", "viewer"),
         ("/push/unsubscribe", "POST", "viewer"),
@@ -7397,7 +7663,7 @@ mod viewer_write_tests {
             assert!(!may(p, &Method::POST, true), "{p}");
         }
         // What a watching token does, and control only with control rights.
-        for (p, m) in [("/cameras", Method::GET), ("/status", Method::GET), ("/live/1/ws", Method::GET), ("/snapshot/1", Method::GET), ("/snapshot/1", Method::HEAD), ("/events", Method::GET), ("/clips/1", Method::GET), ("/recordings", Method::GET), ("/playback", Method::GET), ("/timeline/events", Method::GET), ("/still", Method::GET), ("/cameras/1/wake", Method::POST), ("/signals", Method::POST)] {
+        for (p, m) in [("/cameras", Method::GET), ("/status", Method::GET), ("/live/1/ws", Method::GET), ("/snapshot/1", Method::GET), ("/snapshot/1", Method::HEAD), ("/events", Method::GET), ("/clips/1", Method::GET), ("/recordings", Method::GET), ("/playback", Method::GET), ("/timeline/events", Method::GET), ("/still", Method::GET), ("/cameras/1/wake", Method::POST), ("/signals", Method::POST), ("/smart/search", Method::GET), ("/smart/pic/1", Method::GET)] {
             assert!(may(p, &m, false), "{p}");
             assert!(may(p, &m, true), "{p}");
         }
@@ -7979,5 +8245,406 @@ mod ask_tests {
         assert!(ask("GET", Some("bytes=5-18446744073709551615")) == Ask::Resume(Some((5, Some(u64::MAX)))));
         assert!(ask("GET", Some("bytes=-500")) == Ask::Resume(None));
         assert!(ask("GET", Some("bytes=9-3")) == Ask::Resume(None));
+    }
+}
+
+#[cfg(test)]
+mod demo_and_snooze_tests {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use base64::Engine as _;
+    use tower::ServiceExt;
+
+    /// A server with an admin, a viewer, a viewer limited to Porch, an operator
+    /// and a demo viewer, each name starting with `tag` (sign-in state is global).
+    fn site(tag: &str, demo_user: &str) -> (std::sync::Arc<crate::engine::Engine>, axum::Router) {
+        let mut text = format!("[server]\ndemo_user = \"{demo_user}\"\n\n[[cameras]]\nname = \"Porch\"\nurl = \"rtsp://x/\"\n\n[[cameras]]\nname = \"Garage\"\nurl = \"rtsp://y/\"\n");
+        for (name, extra) in [("ann", "admin = true"), ("vic", "admin = false"), ("lim", "admin = false\ncameras = [\"Porch\"]"), ("otto", "admin = false\nrole = \"operator\""), ("demo", "admin = false")] {
+            text += &format!("\n[[server.users]]\nusername = \"{tag}{name}\"\npassword = \"{}\"\n{extra}\n", crate::auth::hash_password(&format!("pw-{tag}{name}-1")));
+        }
+        let mut e = crate::engine::Engine::for_test(toml::from_str(&text).unwrap());
+        // (Account changes save the config.)
+        std::sync::Arc::get_mut(&mut e).unwrap().config_path = config_file(tag);
+        let app = super::build_router(e.clone());
+        (e, app)
+    }
+
+    fn config_file(tag: &str) -> String {
+        std::env::temp_dir().join(format!("ambersight-demo-{tag}-{}.toml", std::process::id())).to_string_lossy().to_string()
+    }
+
+    struct Call<'a> {
+        method: &'a str,
+        path: &'a str,
+        ip: [u8; 4],
+        basic: Option<String>,
+        cookie: Option<String>,
+        bearer: Option<String>,
+        origin: Option<&'a str>,
+        body: Option<&'a str>,
+    }
+
+    fn call<'a>(method: &'a str, path: &'a str) -> Call<'a> {
+        Call { method, path, ip: [10, 0, 0, 1], basic: None, cookie: None, bearer: None, origin: None, body: None }
+    }
+
+    /// (status, body, the session cookie set).
+    async fn send(app: &axum::Router, c: Call<'_>) -> (StatusCode, String, Option<String>) {
+        let mut b = Request::builder().method(c.method).uri(c.path).header(header::HOST, "localhost:8090");
+        if let Some(u) = &c.basic {
+            b = b.header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{u}:pw-{u}-1"))));
+        }
+        if let Some(t) = &c.bearer {
+            b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        if let Some(k) = &c.cookie {
+            b = b.header(header::COOKIE, format!("as_session={k}"));
+        }
+        if let Some(o) = c.origin {
+            b = b.header(header::ORIGIN, o);
+        }
+        let body = match c.body {
+            Some(j) => {
+                b = b.header(header::CONTENT_TYPE, "application/json");
+                Body::from(j.to_string())
+            }
+            None => Body::empty(),
+        };
+        let mut req = b.body(body).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((c.ip, 5000))));
+        let r = app.clone().oneshot(req).await.unwrap();
+        let s = r.status();
+        let cookie = r.headers().get_all(header::SET_COOKIE).iter().filter_map(|v| v.to_str().ok()).find(|v| v.starts_with("as_session=")).map(str::to_string);
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        (s, String::from_utf8_lossy(&body).into_owned(), cookie)
+    }
+
+    fn json(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap_or_else(|e| panic!("{e}: {s}"))
+    }
+
+    /// The session token in a Set-Cookie value.
+    fn token(set_cookie: &str) -> String {
+        set_cookie.trim_start_matches("as_session=").split(';').next().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn demo_sign_in_and_what_it_may_not_do() {
+        let (e, app) = site("d1", "d1demo");
+        // Told before sign-in; nobody is the demo account yet.
+        let (s, w, _) = send(&app, call("GET", "/api/whoami")).await;
+        let w = json(&w);
+        assert_eq!((s, w["demo"].as_bool(), w["demo_account"].as_bool(), w["signed_in"].as_bool()), (StatusCode::OK, Some(true), Some(false), Some(false)), "{w}");
+        let features = w["features"].as_array().unwrap();
+        assert!(features.iter().any(|f| f == "demo") && features.iter().any(|f| f == "snooze"), "{w}");
+        // A native app: no body, no Content-Type, no Origin.
+        let (s, b, c) = send(&app, Call { ip: [10, 1, 0, 1], ..call("POST", "/api/demo/signin") }).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let b = json(&b);
+        assert_eq!((b["user"].as_str(), b["role"].as_str(), b["admin"].as_bool(), b["demo"].as_bool(), b["demo_account"].as_bool(), b["signed_in"].as_bool()), (Some("d1demo"), Some("viewer"), Some(false), Some(true), Some(true), Some(true)), "{b}");
+        let c = c.expect("a session cookie");
+        assert!(c.contains("HttpOnly") && c.contains("Max-Age=86400") && !c.contains("; Secure"), "{c}");
+        let tok = token(&c);
+        // A day long, not 30.
+        let left = crate::auth::session_expires(&tok).unwrap() - chrono::Utc::now().timestamp();
+        assert!((86_000..=86_400).contains(&left), "{left}");
+        // A browser on this server's page works; another site's page is refused.
+        let (s, _, _) = send(&app, Call { ip: [10, 1, 0, 1], origin: Some("http://localhost:8090"), ..call("POST", "/api/demo/signin") }).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _, c2) = send(&app, Call { ip: [10, 1, 0, 1], origin: Some("http://evil.example"), ..call("POST", "/api/demo/signin") }).await;
+        assert_eq!((s, c2.is_none()), (StatusCode::FORBIDDEN, true));
+        // whoami with the session says it is the demo account.
+        let me = |m, p| Call { cookie: Some(tok.clone()), ..call(m, p) };
+        let w = json(&send(&app, me("GET", "/api/whoami")).await.1);
+        assert_eq!((w["demo_account"].as_bool(), w["user"].as_str()), (Some(true), Some("d1demo")), "{w}");
+        assert!(crate::auth::session_is_demo(&tok), "marked a demo session");
+        // Its password opens nothing: demo sign-in is the only way in.
+        let w = json(&send(&app, Call { basic: Some("d1demo".into()), ..call("GET", "/api/whoami") }).await.1);
+        assert_eq!((w["signed_in"].as_bool(), w["demo_account"].as_bool()), (Some(false), Some(false)), "{w}");
+        assert_eq!(send(&app, Call { basic: Some("d1demo".into()), ..call("GET", "/api/me/account") }).await.0, StatusCode::UNAUTHORIZED);
+        let (s, b, c) = send(&app, Call { body: Some(r#"{"username":"d1demo","password":"pw-d1demo-1"}"#), ..call("POST", "/api/login") }).await;
+        assert_eq!((s, b.as_str(), c.is_none()), (StatusCode::FORBIDDEN, super::DEMO_SIGN_IN_ONLY, true));
+        // Others are not.
+        let w = json(&send(&app, Call { basic: Some("d1vic".into()), ..call("GET", "/api/whoami") }).await.1);
+        assert_eq!((w["demo"].as_bool(), w["demo_account"].as_bool()), (Some(true), Some(false)), "{w}");
+        // Watching works.
+        for p in ["/api/cameras", "/api/status", "/api/me/snooze", "/api/events"] {
+            assert_eq!(send(&app, me("GET", p)).await.0, StatusCode::OK, "{p}");
+        }
+        // Everything refused, with the demo answer.
+        for (m, p, body) in [
+            ("POST", "/api/me/password", r#"{"current":"x","new":"y-long-enough"}"#),
+            ("GET", "/api/me/account", ""),
+            ("POST", "/api/me/sessions/sign-out-others", ""),
+            ("POST", "/api/me/sessions/abc/sign-out", ""),
+            ("POST", "/api/me/two-step/start", "{}"),
+            ("POST", "/api/me/two-step/confirm", "{}"),
+            ("POST", "/api/me/two-step/cancel", "{}"),
+            ("POST", "/api/me/two-step/off", "{}"),
+            ("POST", "/api/me/two-step/recovery", "{}"),
+            ("POST", "/api/me/tokens", r#"{"name":"x"}"#),
+            ("DELETE", "/api/me/tokens/1", ""),
+            ("POST", "/api/me/snooze", r#"{"camera":"Porch","minutes":10}"#),
+            ("POST", "/api/push/subscribe", "{}"),
+            ("POST", "/api/push/test", ""),
+            ("POST", "/api/presence", r#"{"device_id":"a","home":true}"#),
+            ("DELETE", "/api/presence/a", ""),
+            ("POST", "/api/signals", r#"{"name":"x","on":true}"#),
+            ("POST", "/api/links/abc/open", ""),
+            ("GET", "/api/export", ""),
+            ("PUT", "/api/ui/prefs", "{}"),
+            ("PATCH", "/api/ui/prefs", "{}"),
+            ("POST", "/api/cameras/0/wake", ""),
+            ("GET", "/api/playback?camera=Porch&from=1700000000000&to=1700000060000&download=1&caps=h264:1920x1080", ""),
+        ] {
+            let (s, b, _) = send(&app, Call { body: (!body.is_empty()).then_some(body), ..me(m, p) }).await;
+            assert_eq!((s, b.as_str()), (StatusCode::FORBIDDEN, super::DEMO_REFUSED), "{m} {p}");
+        }
+        // A plain viewer may.
+        assert_eq!(send(&app, Call { basic: Some("d1vic".into()), ..call("GET", "/api/me/account") }).await.0, StatusCode::OK);
+        assert_ne!(send(&app, Call { basic: Some("d1vic".into()), body: Some("{}"), ..call("PATCH", "/api/ui/prefs") }).await.0, StatusCode::FORBIDDEN);
+        // No new-device alert or record for demo sign-ins.
+        let rows = e.db.audit_rows();
+        assert!(!rows.iter().any(|r| r.1.contains("new device")), "{rows:?}");
+        // Not one audit line per sign-in (see DemoGate::tally for the count).
+        assert!(rows.iter().filter(|r| r.1.contains("demo sign-in")).count() <= 1, "{rows:?}");
+        // Not pairable: an admin's code for it is refused, and a code made anyway does not sign in.
+        let (s, b, _) = send(&app, Call { basic: Some("d1ann".into()), body: Some(r#"{"origin":"http://localhost:8090"}"#), ..call("POST", "/api/users/d1demo/pair") }).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        let code = crate::auth::new_pair_code("d1demo");
+        let body = serde_json::json!({ "code": code }).to_string();
+        let (s, _, c) = send(&app, Call { body: Some(&body), ..call("POST", "/api/pair") }).await;
+        assert_eq!((s, c.is_none()), (StatusCode::UNAUTHORIZED, true));
+    }
+
+    #[tokio::test]
+    async fn demo_sign_in_is_rate_limited_per_address() {
+        let (_e, app) = site("d2", "d2demo");
+        for i in 0..10 {
+            assert_eq!(send(&app, Call { ip: [10, 2, 0, 1], ..call("POST", "/api/demo/signin") }).await.0, StatusCode::OK, "{i}");
+        }
+        assert_eq!(send(&app, Call { ip: [10, 2, 0, 1], ..call("POST", "/api/demo/signin") }).await.0, StatusCode::TOO_MANY_REQUESTS);
+        // Another address is not held up.
+        assert_eq!(send(&app, Call { ip: [10, 2, 0, 2], ..call("POST", "/api/demo/signin") }).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn demo_sign_in_is_404_when_off() {
+        for (tag, demo_user) in [("d3", "d3ann"), ("d4", "d4otto"), ("d5", "nobody"), ("d6", "")] {
+            let (_e, app) = site(tag, demo_user);
+            let (s, _, c) = send(&app, Call { ip: [10, 3, 0, 1], ..call("POST", "/api/demo/signin") }).await;
+            assert_eq!((s, c.is_none()), (StatusCode::NOT_FOUND, true), "{demo_user}");
+            let w = json(&send(&app, call("GET", "/api/whoami")).await.1);
+            assert_eq!(w["demo"].as_bool(), Some(false), "{demo_user}");
+            // An admin named as the demo account keeps all its rights.
+            if tag == "d3" {
+                let w = json(&send(&app, Call { basic: Some("d3ann".into()), ..call("GET", "/api/whoami") }).await.1);
+                assert_eq!((w["admin"].as_bool(), w["demo_account"].as_bool()), (Some(true), Some(false)), "{w}");
+                assert_eq!(send(&app, Call { basic: Some("d3ann".into()), ..call("GET", "/api/me/account") }).await.0, StatusCode::OK);
+            }
+        }
+    }
+
+    #[test]
+    fn demo_sessions_are_capped_least_recently_used_first() {
+        let id = crate::auth::Identity { user: "d7demo".into(), admin: false };
+        let new = || crate::auth::new_demo_session(id.clone(), crate::auth::generation("d7demo"), Default::default()).unwrap();
+        let (first, second) = (new(), new());
+        // The first is still in use: it stays; the second, made earliest of the rest, goes.
+        crate::auth::session_used_at(&first, chrono::Utc::now().timestamp() + 1000);
+        for _ in 0..crate::auth::MAX_DEMO_SESSIONS {
+            new();
+        }
+        assert_eq!(crate::auth::live_sessions("d7demo"), crate::auth::MAX_DEMO_SESSIONS);
+        assert!(crate::auth::session_expires(&first).is_some(), "used lately: kept");
+        assert!(crate::auth::session_expires(&second).is_none(), "the least recently used ended");
+    }
+
+    #[tokio::test]
+    async fn turning_demo_off_ends_its_sessions() {
+        for how in ["off", "promoted", "other account"] {
+            let tag = match how { "off" => "d8", "promoted" => "d9", _ => "d10" };
+            let (e, app) = site(tag, &format!("{tag}demo"));
+            let (s, _, c) = send(&app, Call { ip: [10, 8, 0, 1], ..call("POST", "/api/demo/signin") }).await;
+            assert_eq!(s, StatusCode::OK);
+            let tok = token(&c.unwrap());
+            let me = |m, p| Call { cookie: Some(tok.clone()), ..call(m, p) };
+            assert_eq!(send(&app, me("GET", "/api/cameras")).await.0, StatusCode::OK);
+            {
+                let mut cfg = e.config.lock().unwrap();
+                match how {
+                    "off" => cfg.server.demo_user = None,
+                    "promoted" => cfg.server.users.iter_mut().find(|u| u.username == format!("{tag}demo")).unwrap().role = "operator".into(),
+                    _ => cfg.server.demo_user = Some(format!("{tag}vic")),
+                }
+            }
+            // The old cookie is no session at all now: none of what it was refused opens up.
+            for (m, p, body) in [("GET", "/api/me/account", ""), ("POST", "/api/push/subscribe", "{}"), ("POST", "/api/presence", r#"{"device_id":"a","home":true}"#), ("POST", "/api/signals", r#"{"name":"x","on":true}"#), ("POST", "/api/me/snooze", r#"{"camera":"Porch","minutes":10}"#), ("POST", "/api/me/sessions/sign-out-others", ""), ("GET", "/api/cameras", "")] {
+                assert_eq!(send(&app, Call { body: (!body.is_empty()).then_some(body), ..me(m, p) }).await.0, StatusCode::UNAUTHORIZED, "{how}: {m} {p}");
+            }
+            let w = json(&send(&app, me("GET", "/api/whoami")).await.1);
+            assert_eq!(w["signed_in"].as_bool(), Some(false), "{how}: {w}");
+            assert!(crate::auth::session_expires(&tok).is_none(), "{how}: ended, not only refused");
+            // Back on: it does not come back.
+            if how == "off" {
+                e.config.lock().unwrap().server.demo_user = Some(format!("{tag}demo"));
+                assert_eq!(send(&app, me("GET", "/api/cameras")).await.0, StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
+
+    fn add_devices(e: &crate::engine::Engine, user: &str) {
+        let sub = crate::db::PushSub { endpoint: format!("https://fcm.googleapis.com/x/{user}"), user: user.into(), p256dh: "k".into(), auth: "a".into(), device: "d".into(), kind: "browser".into(), ..Default::default() };
+        e.db.push_save(&sub, 0).unwrap();
+        let d = crate::db::PresenceDevice { user: user.into(), device_id: format!("ph-{user}"), name: "Phone".into(), home: true, updated_ms: 1, created_ms: 1 };
+        assert!(e.db.presence_report(&d, 10, 100).unwrap().is_ok());
+        e.db.snooze_set(user, "porch", i64::MAX).unwrap();
+    }
+
+    fn devices(e: &crate::engine::Engine, user: &str) -> (usize, usize, usize) {
+        (e.db.push_list(Some(user)).unwrap().len(), e.db.presence_list(Some(user)).unwrap().len(), e.db.snooze_list(user, 0).unwrap().len())
+    }
+
+    #[tokio::test]
+    async fn the_demo_account_keeps_no_push_or_presence_devices() {
+        let (e, app) = site("d12", "d12demo");
+        // Left from before (an ordinary account then, or an older version).
+        add_devices(&e, "d12demo");
+        add_devices(&e, "d12vic");
+        // At the first look (the server's start): gone.
+        assert_eq!(send(&app, call("GET", "/api/whoami")).await.0, StatusCode::OK);
+        assert_eq!(devices(&e, "d12demo"), (0, 0, 0));
+        assert_eq!(devices(&e, "d12vic"), (1, 1, 1), "others keep theirs");
+        // Never sent to and never counted, whatever is in the database.
+        add_devices(&e, "d12demo");
+        {
+            let cfg = e.config.lock().unwrap();
+            assert!(!crate::push::wants(&cfg, "d12demo", &crate::push::Audience::Camera("Porch".into())));
+            assert!(crate::push::wants(&cfg, "d12vic", &crate::push::Audience::Camera("Porch".into())));
+            let names = crate::engine::presence::account_names(&cfg);
+            assert!(!cfg.presence.counts("d12demo", &names) && cfg.presence.counts("d12vic", &names));
+        }
+        assert!(!e.presence_counts("d12demo"));
+        // A change of the demo account: the new one's go too.
+        e.config.lock().unwrap().server.demo_user = Some("d12vic".into());
+        assert_eq!(send(&app, call("GET", "/api/whoami")).await.0, StatusCode::OK);
+        assert_eq!(devices(&e, "d12vic"), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn the_demo_account_never_wakes_a_battery_camera() {
+        let (e, app) = site("d13", "d13demo");
+        let h = e.add_test_camera("Den");
+        h.running.write().unwrap().on_demand = true;
+        let id = h.id;
+        let awake = || h.state.read().unwrap().wake_until;
+        let (s, _, c) = send(&app, Call { ip: [10, 13, 0, 1], ..call("POST", "/api/demo/signin") }).await;
+        assert_eq!(s, StatusCode::OK);
+        let tok = token(&c.unwrap());
+        let (snap, info, wake) = (format!("/api/snapshot/{id}"), format!("/api/live/{id}/info"), format!("/api/cameras/{id}/wake"));
+        let me = |m, p| Call { cookie: Some(tok.clone()), ..call(m, p) };
+        // No picture yet, and not woken for one.
+        assert_eq!(send(&app, me("GET", &snap)).await.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(send(&app, me("GET", &info)).await.0, StatusCode::OK);
+        assert_eq!(send(&app, me("POST", &wake)).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(awake(), 0, "still asleep");
+        // The last picture there is, still without waking it.
+        h.state.write().unwrap().latest_frame = vec![0xff, 0xd8, 0xff, 0xd9];
+        assert_eq!(send(&app, me("GET", &snap)).await.0, StatusCode::OK);
+        assert_eq!(awake(), 0);
+        // Anyone else wakes it.
+        assert_eq!(send(&app, Call { basic: Some("d13vic".into()), ..call("GET", &snap) }).await.0, StatusCode::OK);
+        assert!(awake() > 0);
+    }
+
+    #[test]
+    fn a_network_holds_at_most_its_share_of_demo_sessions() {
+        let id = crate::auth::Identity { user: "d14demo".into(), admin: false };
+        let from = |ip: [u8; 4]| crate::auth::new_demo_session(id.clone(), crate::auth::generation("d14demo"), crate::auth::SessionMeta::new(std::net::IpAddr::from(ip), String::new(), String::new())).unwrap();
+        // A reviewer from elsewhere, idle since.
+        let reviewer = from([192, 0, 2, 7]);
+        crate::auth::session_used_at(&reviewer, 1);
+        let first = from([10, 14, 0, 1]);
+        let rest: Vec<String> = (2..40u8).map(|n| from([10, 14, 0, n])).collect();
+        assert_eq!(crate::auth::live_sessions("d14demo"), 1 + crate::auth::MAX_DEMO_SESSIONS_PER_NET, "the /24 holds 20");
+        assert!(crate::auth::session_expires(&reviewer).is_some(), "another network's session is never pushed out");
+        assert!(crate::auth::session_expires(&first).is_none(), "the network's own least recently used went");
+        assert!(crate::auth::session_expires(rest.last().unwrap()).is_some());
+    }
+
+    #[tokio::test]
+    async fn demo_sign_ins_reach_the_audit_log_by_the_minute() {
+        let (e, app) = site("d15", "d15demo");
+        assert_eq!(send(&app, Call { ip: [10, 15, 0, 1], ..call("POST", "/api/demo/signin") }).await.0, StatusCode::OK);
+        assert!(!e.db.audit_rows().iter().any(|r| r.1.contains("demo sign-in")), "not one line per sign-in");
+        super::flush_demo_audit(&e);
+        let rows = e.db.audit_rows();
+        assert!(rows.iter().any(|r| r.0 == "d15demo" && r.1.contains("demo sign-in")), "{rows:?}");
+    }
+
+    #[test]
+    fn waking_is_limited_per_account_and_camera() {
+        assert!(super::wake_allowed("wk-ann", 3));
+        assert!(!super::wake_allowed("wk-ann", 3), "again at once");
+        assert!(super::wake_allowed("wk-ann", 4), "another camera");
+        assert!(super::wake_allowed("wk-bob", 3), "another account");
+    }
+
+    #[test]
+    fn what_the_demo_account_may_not_do() {
+        use axum::http::Method;
+        let no = |p: &str, m: &Method| super::demo_refused(p, m, None);
+        let dl = |q: &str| super::demo_refused("/playback", &Method::GET, Some(q));
+        assert!(dl("camera=Porch&from=1&to=2&download=1&caps=h264:1920x1080"), "a fitted download");
+        assert!(dl("download=true&caps=hevc:3840x2160"));
+        assert!(!dl("camera=Porch&from=1&to=2&download=1"), "an untouched download");
+        assert!(!dl("camera=Porch&from=1&to=2&caps=h264:1920x1080"), "playback (converted answers are refused by the transcoder)");
+        assert!(no("/cameras/2/wake", &Method::POST));
+        for (p, m) in [("/me/snooze", Method::POST), ("/me/account", Method::GET), ("/me/password", Method::POST), ("/export", Method::GET), ("/export", Method::HEAD), ("/links/x/open", Method::POST), ("/ui/prefs", Method::PUT), ("/ui/orders/x", Method::PUT), ("/presence", Method::POST), ("/signals", Method::POST), ("/push/subscribe", Method::POST), ("/push/test", Method::POST)] {
+            assert!(no(p, &m), "{p} {m}");
+        }
+        for (p, m) in [("/me/snooze", Method::GET), ("/ui/prefs", Method::GET), ("/cameras", Method::GET), ("/live/1/ws", Method::GET), ("/events", Method::GET), ("/clips/x-1", Method::GET), ("/push/unsubscribe", Method::POST), ("/presence", Method::GET), ("/signals", Method::GET), ("/links", Method::GET), ("/ui/diag", Method::POST)] {
+            assert!(!no(p, &m), "{p} {m}");
+        }
+    }
+
+    #[tokio::test]
+    async fn snooze_for_every_role_and_token() {
+        let (e, app) = site("s1", "s1demo");
+        for who in ["s1ann", "s1vic", "s1otto", "s1lim"] {
+            let (s, b, _) = send(&app, Call { basic: Some(who.into()), body: Some(r#"{"camera":"porch","minutes":30}"#), ..call("POST", "/api/me/snooze") }).await;
+            assert_eq!(s, StatusCode::OK, "{who}: {b}");
+            let b = json(&b);
+            let now = chrono::Utc::now().timestamp_millis();
+            assert_eq!(b["camera"], "Porch", "{who}: the camera's own name");
+            assert!((b["until_ms"].as_i64().unwrap() - now - 30 * 60_000).abs() < 5_000, "{b}");
+        }
+        let vic = |m, p| Call { basic: Some("s1vic".into()), ..call(m, p) };
+        // Only the caller's own.
+        let l = json(&send(&app, vic("GET", "/api/me/snooze")).await.1);
+        assert_eq!(l["snoozed"].as_array().unwrap().len(), 1, "{l}");
+        assert_eq!(l["snoozed"][0]["camera"], "Porch");
+        assert_eq!(e.db.snoozed_users("porch", 0).unwrap().len(), 4);
+        // A camera it cannot see, or none, is not found; too long is refused.
+        assert_eq!(send(&app, Call { basic: Some("s1lim".into()), body: Some(r#"{"camera":"Garage","minutes":5}"#), ..call("POST", "/api/me/snooze") }).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(send(&app, Call { body: Some(r#"{"camera":"Attic","minutes":5}"#), ..vic("POST", "/api/me/snooze") }).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(send(&app, Call { body: Some(r#"{"camera":"Porch","minutes":1441}"#), ..vic("POST", "/api/me/snooze") }).await.0, StatusCode::BAD_REQUEST);
+        // 0 clears.
+        let (s, b, _) = send(&app, Call { body: Some(r#"{"camera":"Porch","minutes":0}"#), ..vic("POST", "/api/me/snooze") }).await;
+        assert_eq!((s, json(&b)["until_ms"].is_null()), (StatusCode::OK, true), "{b}");
+        assert!(json(&send(&app, vic("GET", "/api/me/snooze")).await.1)["snoozed"].as_array().unwrap().is_empty());
+        // A viewer's device token may snooze.
+        let (tok, _) = crate::auth::add_token("s1vic", "app", false, crate::auth::generation("s1vic")).unwrap().unwrap();
+        let (s, b, _) = send(&app, Call { bearer: Some(tok.clone()), body: Some(r#"{"camera":"Garage","minutes":60}"#), ..call("POST", "/api/me/snooze") }).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(send(&app, Call { bearer: Some(tok), ..call("GET", "/api/me/snooze") }).await.0, StatusCode::OK);
+        assert_eq!(e.db.snooze_list("s1vic", 0).unwrap().len(), 1);
+        // Deleting the account removes its snoozes.
+        let (s, b, _) = send(&app, Call { basic: Some("s1ann".into()), ..call("DELETE", "/api/users/s1vic") }).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(e.db.snooze_list("s1vic", 0).unwrap().is_empty());
+        for f in [config_file("s1"), config_file("s1") + ".last"] {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }

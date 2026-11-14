@@ -499,6 +499,7 @@ pub async fn save_user(
         let _ = tokio::task::spawn_blocking(move || {
             if d {
                 let _ = e.db.push_delete_user(&n);
+                let _ = e.db.snooze_delete_user(&n);
                 let _ = e.db.presence_delete_user(&n);
             }
             e.presence_evaluate(None);
@@ -609,6 +610,7 @@ pub async fn delete_user(
     let (e, n) = (engine.clone(), name.clone());
     let _ = tokio::task::spawn_blocking(move || {
         let _ = e.db.push_delete_user(&n);
+        let _ = e.db.snooze_delete_user(&n);
         if e.db.presence_delete_user(&n).unwrap_or(0) > 0 {
             e.presence_evaluate(None);
         }
@@ -716,6 +718,9 @@ pub async fn pair_code(State(engine): State<Arc<Engine>>, caller: Option<axum::E
     let generation = caller.as_ref().map(|c| c.0 .1).unwrap_or(0);
     if engine.config.lock().unwrap().server.users.iter().any(|u| u.username == name && u.disabled) {
         return (StatusCode::BAD_REQUEST, "this account is disabled: enable it first").into_response();
+    }
+    if engine.config.lock().unwrap().demo_account().as_deref() == Some(name.as_str()) {
+        return (StatusCode::BAD_REQUEST, "this is the demo account: visitors sign in to it with demo sign-in, not a code").into_response();
     }
     if !crate::auth::accounts(&engine.config.lock().unwrap()).iter().any(|(u, _, _)| *u == name) {
         return (StatusCode::NOT_FOUND, "no such user").into_response();

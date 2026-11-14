@@ -32,22 +32,78 @@ pub fn picture_filters(cfg: &CameraConfig) -> String {
     f.join(",")
 }
 
-/// The font for burned-in text. ffmpeg on Windows has no font configuration
-/// to find one itself (drawtext then fails), so name a Windows font there.
+/// Captions burned into a download: `label` and the date and time of each
+/// moment, centered at the bottom. `base_s`: the local wall time (seconds
+/// since the epoch, the time zone's offset added) of the input's first frame;
+/// ffmpeg adds each frame's time to it.
+pub fn caption_drawtext(label: &str, base_s: f64) -> String {
+    format!(
+        "drawtext={}text='{}  %{{pts\\:gmtime\\:{base_s:.3}}}':fontcolor=white:fontsize=h/25+12:box=1:boxcolor=black@0.5:boxborderw=6:x=(w-tw)/2:y=h-th-12",
+        font_option(),
+        drawtext_safe(label)
+    )
+}
+
+/// The font for burned-in text, named as a file: ffmpeg on Windows has no
+/// font configuration, and static or container builds often have none either
+/// (drawtext then fails). Empty when none of the usual fonts is there:
+/// ffmpeg's own font lookup is tried then.
 fn font_option() -> String {
-    if !cfg!(windows) {
-        return String::new();
+    static FONT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| font_option_from(&font_candidates())).clone()
+}
+
+/// Where the usual fonts are, best first.
+fn font_candidates() -> Vec<std::path::PathBuf> {
+    if cfg!(windows) {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        return ["arial.ttf", "segoeui.ttf", "tahoma.ttf"].iter().map(|f| std::path::Path::new(&root).join("Fonts").join(f)).collect();
     }
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    for f in ["arial.ttf", "segoeui.ttf", "tahoma.ttf"] {
-        let p = std::path::Path::new(&root).join("Fonts").join(f);
-        if p.is_file() {
-            // Filter syntax: forward slashes, the drive colon escaped.
-            let s = p.to_string_lossy().replace('\\', "/").replace(':', "\\:");
-            return format!("fontfile='{s}':");
+    [
+        // Debian and Ubuntu (fonts-dejavu-core, in the Docker images), Fedora, Arch, Alpine.
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        // macOS.
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .collect()
+}
+
+/// The drawtext `fontfile` option for the first of `candidates` that is there.
+fn font_option_from(candidates: &[std::path::PathBuf]) -> String {
+    match candidates.iter().find(|p| p.is_file()) {
+        // Filter syntax: forward slashes, a drive colon escaped.
+        Some(p) => format!("fontfile='{}':", p.to_string_lossy().replace('\\', "/").replace(':', "\\:")),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    #[test]
+    fn the_first_font_that_is_there_is_named() {
+        let dir = std::env::temp_dir().join(format!("amber-font-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let have = dir.join("Have.ttf");
+        std::fs::write(&have, b"x").unwrap();
+        let gone = dir.join("Gone.ttf");
+        let got = super::font_option_from(&[gone.clone(), have.clone()]);
+        assert_eq!(got, format!("fontfile='{}':", have.to_string_lossy().replace('\\', "/").replace(':', "\\:")));
+        assert_eq!(super::font_option_from(&[gone]), "");
+        // (The Debian path the Docker images install is looked for.)
+        if !cfg!(windows) {
+            assert!(super::font_candidates().iter().any(|p| p.ends_with("truetype/dejavu/DejaVuSans.ttf")));
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    String::new()
 }
 
 /// Characters that could break out of a drawtext value, removed from user text.
@@ -879,9 +935,9 @@ mod overlay_tests {
         // is dropped from burned-in text (not left as garbage).
         assert_eq!(overlay_drawtext(&cam(Some("{short} {v:outside_temp}C"))), "Door C");
         let f = picture_filters(&cam(Some("{short}")));
-        // (On Windows a fontfile= option comes first.)
+        // (A fontfile= option comes first when a usual font is found: see font_option.)
         assert!(f.starts_with("drawtext=") && f.contains("text='Door':") && f.contains("x=10:y=h-th-10"), "{f}");
-        assert_eq!(f.contains("fontfile="), cfg!(windows), "{f}");
+        assert_eq!(f.contains("fontfile="), !font_option().is_empty(), "{f}");
         // A long text never ends inside a time expansion.
         let long = format!("{}{{time}}", "x".repeat(118));
         let t = overlay_drawtext(&cam(Some(&long)));

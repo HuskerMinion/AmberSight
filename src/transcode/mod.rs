@@ -760,6 +760,29 @@ pub fn filters(e: &Encoder, hw_decode: bool, t: &Target, _depth: u8) -> String {
     f.join(",")
 }
 
+/// The filter chain of a download fitted to a device: frames decoded in
+/// software, the rate cap, scaling to the size, `caption` (a drawtext
+/// filter) drawn on the scaled picture, then the encoder's format (sent to
+/// the graphics card for Quick Sync and VAAPI).
+pub fn caption_filters(e: &Encoder, t: &Target, caption: &str) -> String {
+    let mut f = Vec::new();
+    if let Some(r) = t.fps {
+        f.push(format!("fps={r}"));
+    }
+    f.push(format!("scale={}:{}:flags=bilinear", t.width, t.height));
+    f.push(caption.to_string());
+    f.push(
+        match e.hw {
+            Some(Hw::Qsv) => "format=nv12,hwupload=extra_hw_frames=16",
+            Some(Hw::Vaapi) => "format=nv12,hwupload",
+            Some(_) => "format=nv12",
+            None => "format=yuv420p",
+        }
+        .to_string(),
+    );
+    f.join(",")
+}
+
 /// Encoder settings: the bit rate, a keyframe every second (live) or two,
 /// no B-frames, and the low-delay settings of each encoder for live.
 pub fn encoder_args(e: &Encoder, t: &Target, fps: f64, live: bool) -> Vec<String> {
@@ -867,6 +890,26 @@ pub fn reserve_software() -> Option<Slot> {
     take(&SW_RUNNING, config().max_software).then_some(Slot { hardware: false })
 }
 
+/// Downloads fitted to a device converted at a time (the whole server): each
+/// runs a whole recording through the encoder as fast as it can.
+pub const MAX_FIT_DOWNLOADS: usize = 2;
+
+static DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
+
+/// One fitted download's place; freed when dropped.
+pub struct DownloadSlot(());
+
+impl Drop for DownloadSlot {
+    fn drop(&mut self) {
+        DOWNLOADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A place for one fitted download. None: `MAX_FIT_DOWNLOADS` are running.
+pub fn reserve_download() -> Option<DownloadSlot> {
+    take(&DOWNLOADS, MAX_FIT_DOWNLOADS).then_some(DownloadSlot(()))
+}
+
 /// Whether a place is free now (for `info`, which starts nothing).
 pub fn would_reserve(encoders: &[Encoder]) -> Option<Encoder> {
     let cfg = config();
@@ -909,8 +952,36 @@ impl Drop for UserLease {
     }
 }
 
-/// A place for this account, within `max_per_user` of this kind.
+/// The account whose video is never converted (the demo account: visitors
+/// must not take the encoders from the owner). Its players get the stream
+/// as it is, or the smaller one, as when the encoders are busy.
+static UNCONVERTED: Mutex<Option<String>> = Mutex::new(None);
+
+/// Whether `user` is the account never converted for (`unconverted`).
+fn never_converted(unconverted: Option<&str>, user: &str) -> bool {
+    !user.is_empty() && unconverted == Some(user)
+}
+
+/// Whether `user`'s video is never converted (the demo account): its players
+/// are told and sent what busy encoders would give them.
+pub fn is_unconverted(user: &str) -> bool {
+    never_converted(UNCONVERTED.lock().unwrap().as_deref(), user)
+}
+
+/// Set which account is never converted (see `UNCONVERTED`); None: none.
+pub fn set_unconverted(user: Option<&str>) {
+    let mut u = UNCONVERTED.lock().unwrap();
+    if u.as_deref() != user {
+        *u = user.map(str::to_string);
+    }
+}
+
+/// A place for this account, within `max_per_user` of this kind. Never for
+/// the account that is not converted for.
 pub fn user_lease_of(kind: LeaseKind, user: &str) -> Option<UserLease> {
+    if is_unconverted(user) {
+        return None;
+    }
     let max = config().max_per_user;
     let mut m = PER_USER.lock().unwrap();
     let n = m.get_or_insert_with(Default::default).entry((kind, user.to_string())).or_insert(0);
@@ -1287,6 +1358,14 @@ mod tests {
         assert_eq!(bitrate_kbps(OutCodec::H264, 4096, 1536, 20.0), 10066);
         assert_eq!(bitrate_kbps(OutCodec::Hevc, 4096, 1536, 20.0), 6291);
         assert_eq!(bitrate_kbps(OutCodec::H264, 160, 90, 5.0), 300);
+    }
+
+    #[test]
+    fn the_demo_account_is_never_converted_for() {
+        assert!(never_converted(Some("demo"), "demo"));
+        assert!(!never_converted(Some("demo"), "ann"));
+        assert!(!never_converted(None, "demo"));
+        assert!(!never_converted(Some(""), ""), "no accounts: never refused");
     }
 
     #[test]

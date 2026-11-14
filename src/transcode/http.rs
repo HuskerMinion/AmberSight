@@ -287,7 +287,10 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     };
     let codec = target.codec;
     let encoders = tokio::task::spawn_blocking(move || super::encoders_for(codec)).await.ok().flatten();
-    let busy = if !super::usable(&target) {
+    let busy = if super::is_unconverted(&user) {
+        // (The demo account: never converted, as when the encoders are busy.)
+        Some(Why::BusyFallback)
+    } else if !super::usable(&target) {
         // Too small to be worth making: the best there is instead.
         Some(why)
     } else if encoders.is_none() {
@@ -356,6 +359,8 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         limit_ms: o.limit_ms,
         what: if is_event { "clip" } else { "playback" },
         camera: o.camera,
+        caption: None,
+        download: None,
     };
     let first_wait = super::file::first_byte_wait(&job);
     let mut hs: Vec<(String, String)> = vec![
@@ -385,6 +390,113 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         b = b.header(k, v);
     }
     Outcome::Done(b.body(super::file::stream(job)).unwrap())
+}
+
+/// Where a download's conversion reads: (ms into the clip to start at, ms of
+/// video to make), for the window `from`..`to` of a clip that runs
+/// `clip_start`..`clip_end` (it starts at the keyframe before `from`).
+fn download_cut(clip_start: i64, clip_end: i64, from: i64, to: i64) -> (i64, i64) {
+    let a = from.clamp(clip_start, clip_end);
+    let b = to.clamp(a, clip_end);
+    (a - clip_start, b - a)
+}
+
+/// Busy: 503, and when to ask again.
+fn busy(why: &'static str, retry_s: u32) -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, retry_s.to_string())], why).into_response()
+}
+
+/// A download fitted to the device (`download=1` with `caps`): when the
+/// window does not fit the device, it is converted to the codec and size
+/// `decide` picks, the camera and time burned into the picture (one encode).
+/// `Untouched`: it fits, or cannot be converted here (conversion off, too
+/// small): the caller sends today's download with these headers.
+/// `offset_s`: the local time zone's offset from UTC (seconds), for the
+/// captions' clock.
+#[allow(clippy::too_many_arguments)]
+pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, caps: Caps, ask: Ask, low: bool, user: String, offset_s: i64) -> Outcome {
+    super::set_config(&engine.config.lock().unwrap().transcode);
+    let (e, cam) = (engine.clone(), camera.clone());
+    let opened = tokio::task::spawn_blocking(move || e.playback_clip(&cam, from, to, low).map(|c| c.and_then(|c| probe_clip(&c).map(|d| (c, d))))).await;
+    let (clip, desc) = match opened {
+        Ok(Ok(Some(o))) => o,
+        // (Nothing there: the caller answers as it does today.)
+        Ok(Ok(None)) => return Outcome::Untouched { low, headers: Vec::new() },
+        Ok(Err(e)) => return Outcome::Done(crate::web::internal_error("download", &e)),
+        Err(_) => return Outcome::Done((StatusCode::INTERNAL_SERVER_ERROR, "download error").into_response()),
+    };
+    let as_is = |why: Option<Why>| Outcome::Untouched { low, headers: Plan { source: desc.clone(), target: None, encoder: None, why, sent: None }.headers() };
+    let Some((target, why)) = super::decide(&caps, &desc) else { return as_is(None) };
+    if !super::usable(&target) {
+        return as_is(Some(why));
+    }
+    let codec = target.codec;
+    let encoders = match tokio::task::spawn_blocking(move || super::encoders_for(codec)).await.ok().flatten() {
+        None => return Outcome::Done(busy("the video encoders are still being checked; try again in a few seconds", 3)),
+        Some(v) if v.is_empty() => return as_is(Some(Why::Off)),
+        Some(v) => v,
+    };
+    let (seek_ms, media_ms) = download_cut(clip.start_ms, clip.end_ms, from, to);
+    let start = clip.start_ms + seek_ms;
+    let mut hs: Vec<(String, String)> = vec![
+        ("content-type".into(), "video/mp4".into()),
+        ("content-disposition".into(), format!("attachment; filename=\"{}-{start}.mp4\"", crate::config::slug(&camera))),
+        ("cache-control".into(), "no-store".into()),
+        ("accept-ranges".into(), "none".into()),
+        ("x-clip-start-ms".into(), start.to_string()),
+        ("x-clip-end-ms".into(), (start + media_ms).to_string()),
+        ("x-clip-sub".into(), (clip.sub as u8).to_string()),
+        ("x-as-media-duration-ms".into(), media_ms.to_string()),
+    ];
+    let response = |hs: Vec<(String, String)>, body: axum::body::Body| {
+        let mut b = Response::builder();
+        for (k, v) in hs {
+            b = b.header(k, v);
+        }
+        b.body(body).unwrap()
+    };
+    match ask {
+        Ask::Headers => {
+            let plan = Plan { source: desc.clone(), target: Some(target), encoder: super::would_reserve(&encoders).map(|e| e.name(codec).to_string()), why: Some(why), sent: None };
+            hs.extend(plan.headers().into_iter().map(|(k, v)| (k.to_string(), v)));
+            hs.push(("content-length".into(), "0".into()));
+            return Outcome::Done(response(hs, axum::body::Body::empty()));
+        }
+        Ask::Resume(r) if r.is_none_or(|(a, _)| a > 0) => return Outcome::Done(no_byte_positions()),
+        _ => {}
+    }
+    // Two at a time on the server, within the account's limit and the encoders' places; the
+    // account's start is counted only once it has them all.
+    let Some(hold) = super::reserve_download() else { return Outcome::Done(busy("two downloads are being converted already; try again shortly", 10)) };
+    let Some(lease) = super::user_lease(&user) else { return Outcome::Done(busy("this account is converting as many videos as it may; try again shortly", 10)) };
+    let all_encoders = encoders.clone();
+    let Some((encoders, slot)) = super::reserve(&encoders) else { return Outcome::Done(busy("the video encoders are busy; try again shortly", 10)) };
+    if !super::may_start(&user) {
+        return Outcome::Done(busy("too many conversions started in the last minute; try again shortly", 20));
+    }
+    let plan = Plan { source: desc.clone(), target: Some(target), encoder: encoders.first().map(|e| e.name(codec).to_string()), why: Some(why), sent: None };
+    hs.extend(plan.headers().into_iter().map(|(k, v)| (k.to_string(), v)));
+    // The captions' clock: ffmpeg counts each frame's time from the clip's first frame.
+    let caption = crate::engine::caption_drawtext(&camera, (clip.start_ms as f64 / 1000.0) + offset_s as f64);
+    let job = Job {
+        target,
+        software_after: slot.hardware && all_encoders.iter().any(|e| e.hw.is_none()),
+        encoders,
+        slot,
+        lease: Some(lease),
+        fps: desc.fps.unwrap_or(25.0),
+        depth: desc.bit_depth,
+        src_codec: format!("{:?}", desc.codec),
+        seek_ms,
+        media_ms: Some(media_ms),
+        limit_ms: Some(media_ms),
+        what: "download",
+        camera,
+        caption: Some(caption),
+        download: Some(hold),
+        input: Input::Clip(clip),
+    };
+    Outcome::Done(response(hs, super::file::stream(job)))
 }
 
 /// Everything that changes the converted output, hashed: the account, the recording, the
@@ -481,6 +593,22 @@ async fn serve(e: &std::sync::Arc<super::cache::Entry>, ask: Ask) -> Response {
         b = b.header(header::CONTENT_LENGTH, l.to_string());
     }
     b.body(e.read_held(hold, from, end)).unwrap()
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::download_cut;
+
+    #[test]
+    fn a_download_is_cut_to_the_window_asked_for() {
+        // The clip starts at the keyframe 1.5 s before the window.
+        assert_eq!(download_cut(10_000, 80_000, 11_500, 71_500), (1_500, 60_000));
+        // A window running past the recording: up to its end.
+        assert_eq!(download_cut(10_000, 40_000, 11_500, 71_500), (1_500, 28_500));
+        // One starting before it: from its start.
+        assert_eq!(download_cut(10_000, 40_000, 5_000, 20_000), (0, 10_000));
+        assert_eq!(download_cut(10_000, 40_000, 50_000, 60_000), (30_000, 0));
+    }
 }
 
 #[cfg(test)]

@@ -58,6 +58,11 @@ const THREADS: usize = 2;
 pub struct SmartHit {
     pub event_id: String,
     pub camera: String,
+    /// The camera's id today (as in GET /api/cameras); None: it is gone.
+    pub camera_id: Option<usize>,
+    /// When the event started (ms).
+    pub start_ms: i64,
+    /// When the matching picture was taken (ms).
     pub at_ms: i64,
     /// The picture (GET /api/smart/pic/:pic).
     pub pic: i64,
@@ -193,6 +198,8 @@ impl Engine {
                     SmartHit {
                         event_id: ev.to_string(),
                         camera: c.to_string(),
+                        camera_id: None,
+                        start_ms: at,
                         at_ms: at,
                         pic: id,
                         r#box: bx.and_then(|b| serde_json::from_str(b).ok()),
@@ -215,12 +222,25 @@ impl Engine {
                 hits.retain(|h| h.z >= min_z.unwrap_or(MIN_STANDOUT));
             }
             hits.truncate(limit);
+            self.add_event_details(&mut hits);
             Ok(hits)
         }
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         {
             let _ = (q, camera, from_ms, to_ms, limit, plain, min_z, allowed);
             anyhow::bail!("smart search is not available on this computer")
+        }
+    }
+
+    /// Each result's event start and its camera's id today (read for the
+    /// results only, not for every picture searched).
+    pub(super) fn add_event_details(&self, hits: &mut [SmartHit]) {
+        let ids: HashMap<String, usize> = self.cameras.read().unwrap().iter().flatten().map(|h| (h.cfg.read().unwrap().name.clone(), h.id)).collect();
+        for h in hits.iter_mut() {
+            if let Ok(Some(ev)) = self.db.get_event(&h.event_id) {
+                h.start_ms = ev.start.saturating_mul(1000);
+            }
+            h.camera_id = ids.get(&h.camera).copied();
         }
     }
 
@@ -379,5 +399,46 @@ fn smart_loop_on(engine: Arc<Engine>) {
             continue;
         }
         thread::sleep(Duration::from_secs(if engine.rules_active() { 3 } else { 10 }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(event_id: &str, camera: &str, at_ms: i64) -> SmartHit {
+        SmartHit { event_id: event_id.into(), camera: camera.into(), camera_id: None, start_ms: at_ms, at_ms, pic: 1, r#box: None, label: None, score: 0.5, z: 2.0 }
+    }
+
+    #[test]
+    fn results_carry_the_event_start_and_the_camera_id() {
+        let engine = Engine::for_test(toml::from_str("").unwrap());
+        engine.add_test_camera("Porch");
+        engine.add_test_camera("Garage");
+        let ev = Event { id: "garage-1700000000".into(), camera_id: 0, camera: "Garage".into(), start: 1_700_000_000, end: 1_700_000_030, score: 0.5, clip: None, thumb: None, objects: vec![], protect: false };
+        engine.db.insert_event(&ev).unwrap();
+        let mut hits = vec![hit("garage-1700000000", "Garage", 1_700_000_012_500), hit("gone-1", "Gone", 5_000)];
+        engine.add_event_details(&mut hits);
+        // The id today (not the one stored with the event), the picture's time kept.
+        assert_eq!((hits[0].camera_id, hits[0].start_ms, hits[0].at_ms), (Some(1), 1_700_000_000_000, 1_700_000_012_500));
+        // An event or camera no longer there: the picture's time, no id.
+        assert_eq!((hits[1].camera_id, hits[1].start_ms), (None, 5_000));
+        let v = serde_json::to_value(&hits[0]).unwrap();
+        assert_eq!((v["camera_id"].as_u64(), v["start_ms"].as_i64()), (Some(1), Some(1_700_000_000_000)));
+    }
+
+    #[test]
+    fn a_result_picture_is_only_for_those_who_may_see_its_camera() {
+        let engine = Engine::for_test(toml::from_str("").unwrap());
+        let rel = format!("smart-pic-test-{}.jpg", std::process::id());
+        let path = engine.data_dir.join("thumbs").join(&rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"jpeg").unwrap();
+        engine.db.smart_store("gate-1", &[("Gate".into(), 1000, rel.clone(), None, None, vec![0; 8])]).unwrap();
+        let mut id = 0;
+        engine.db.smart_scan(0, i64::MAX, &mut |i, ev, _, _, _, _, _| if ev == "gate-1" { id = i }).unwrap();
+        assert_eq!(engine.smart_pic(id, &|c| c == "Gate").unwrap().as_deref(), Some(&b"jpeg"[..]));
+        assert_eq!(engine.smart_pic(id, &|c| c == "Porch").unwrap(), None, "another camera's account (or token) gets nothing");
+        let _ = std::fs::remove_file(&path);
     }
 }

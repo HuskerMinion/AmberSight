@@ -33,13 +33,19 @@ self.addEventListener('push', (ev) => {
       renotify: !!m.tag,
       requireInteraction: !!m.urgent,
       timestamp: m.ts || Date.now(),
-      data: { url: m.url || '/', camera_id: m.camera_id, camera: m.camera },
+      data: { url: m.url || '/', camera_id: m.camera_id, camera: m.camera, event_id: m.event_id },
     };
-    // "Pause 1 h" (event notifications): pauses this camera's notifications only.
-    if (Array.isArray(m.actions) && typeof m.camera_id === 'number') {
-      const acts = m.actions.filter(a => a && a.action === 'pause' && a.title).slice(0, 2);
+    // Event notifications: the buttons this account may use, as many as the
+    // browser shows, in the server's order (snooze, Mark OK, pause: the most
+    // useful first, as many browsers show two). "Snooze 1 h" mutes this camera for this account only,
+    // "Pause 1 h" pauses its notifications for everyone, "Mark OK" reviews the event.
+    if (Array.isArray(m.actions)) {
+      const usable = (a) => a && a.title && ((a.action === 'snooze' && m.camera) ||
+        (a.action === 'pause' && typeof m.camera_id === 'number') || (a.action === 'ok' && m.event_id));
+      const most = (typeof Notification !== 'undefined' && Notification.maxActions) || 2;
+      const acts = m.actions.filter(usable).slice(0, most);
       if (acts.length) {
-        opts.actions = acts.map(a => ({ action: 'pause:' + (Number(a.minutes) || 60), title: String(a.title) }));
+        opts.actions = acts.map(a => ({ action: a.action === 'ok' ? 'ok' : a.action + ':' + (Number(a.minutes) || 60), title: String(a.title) }));
       }
     }
     if (m.image && m.image.startsWith('/') && !m.image.startsWith('//')) {
@@ -67,17 +73,66 @@ async function pauseFromNotification(data, minutes) {
     });
   } catch (e) {
     await self.registration.showNotification('Could not pause notifications', {
-      body: 'Open AmberSight and use the camera’s menu (Pause notifications). Pausing needs an admin sign-in.',
+      body: 'Open AmberSight and use the camera’s menu (Pause notifications). Pausing needs an admin, or an operator allowed to arm.',
       icon: '/static/icons/icon-192.png', badge: '/static/icons/badge-96.png', tag: 'pause-' + data.camera_id,
       data: { url: '/' },
     });
   }
 }
 
+// A short note after a button, in place of the alert it came from.
+function note(title, body, tag) {
+  return self.registration.showNotification(title, {
+    body, icon: '/static/icons/icon-192.png', badge: '/static/icons/badge-96.png', tag, data: { url: '/' },
+  });
+}
+
+function hours(minutes) {
+  return minutes % 60 === 0 ? (minutes / 60) + (minutes === 60 ? ' hour' : ' hours') : minutes + ' minutes';
+}
+
+// Snooze this camera for this account only (signed in by the cookie).
+async function snoozeFromNotification(data, minutes) {
+  const name = data.camera || 'this camera';
+  try {
+    const r = await fetch('/api/me/snooze', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ camera: data.camera, minutes }),
+    });
+    if (!r.ok) throw new Error(String(r.status));
+    await note('Snoozed', 'No notifications from ' + name + ' on your devices for ' + hours(minutes) + '. Others still get them, and it still records.', 'snooze-' + name);
+  } catch (e) {
+    await note('Could not snooze', 'Open AmberSight to snooze ' + name + '.', 'snooze-' + name);
+  }
+}
+
+// Mark the event "looks fine" (the review route: admins, operators with that right).
+async function okFromNotification(data) {
+  try {
+    const r = await fetch('/api/events/' + encodeURIComponent(data.event_id) + '/review', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ verdict: 'ok' }),
+    });
+    if (!r.ok) throw new Error(String(r.status));
+    await note('Marked OK', 'The alert from ' + (data.camera || 'the camera') + ' is marked as looking fine.', 'ok-' + data.event_id);
+  } catch (e) {
+    await note('Could not mark it OK', 'Open AmberSight and review the event there.', 'ok-' + data.event_id);
+  }
+}
+
 self.addEventListener('notificationclick', (ev) => {
   ev.notification.close();
-  if (ev.action && ev.action.startsWith('pause:') && ev.notification.data && typeof ev.notification.data.camera_id === 'number') {
-    ev.waitUntil(pauseFromNotification(ev.notification.data, Number(ev.action.slice(6)) || 60));
+  const data = ev.notification.data || {};
+  if (ev.action && ev.action.startsWith('pause:') && typeof data.camera_id === 'number') {
+    ev.waitUntil(pauseFromNotification(data, Number(ev.action.slice(6)) || 60));
+    return;
+  }
+  if (ev.action && ev.action.startsWith('snooze:') && data.camera) {
+    ev.waitUntil(snoozeFromNotification(data, Number(ev.action.slice(7)) || 60));
+    return;
+  }
+  if (ev.action === 'ok' && data.event_id) {
+    ev.waitUntil(okFromNotification(data));
     return;
   }
   const path = (ev.notification.data && ev.notification.data.url) || '/';

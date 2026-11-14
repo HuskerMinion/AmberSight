@@ -129,9 +129,49 @@ pub(super) fn spawn_camera_events(engine: Arc<Engine>, handle: Arc<CameraHandle>
     });
 }
 
+/// A battery camera's charge as it last reported it (`GET /api/cameras`
+/// `battery`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct BatteryLevel {
+    /// 0 to 100.
+    pub percent: u8,
+    pub charging: bool,
+    /// When it was read (epoch ms).
+    pub at_ms: i64,
+}
+
+impl BatteryLevel {
+    /// None: the report has no usable level (a negative percentage).
+    pub fn of(b: &crate::ingest::baichuan::client::Battery, at_ms: i64) -> Option<BatteryLevel> {
+        (b.percent >= 0).then(|| BatteryLevel { percent: b.percent.min(100) as u8, charging: b.charging, at_ms })
+    }
+}
+
+/// Keep a battery report as the camera's latest level.
+pub fn note_battery(handle: &CameraHandle, b: &crate::ingest::baichuan::client::Battery, at_ms: i64) {
+    if let Some(level) = BatteryLevel::of(b, at_ms) {
+        handle.state.write().unwrap().battery = Some(level);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_battery_report_is_kept_as_the_latest_level() {
+        use crate::ingest::baichuan::client::Battery;
+        let engine = Engine::for_test(toml::from_str("").unwrap());
+        let h = engine.add_test_camera("Garden");
+        assert_eq!(h.state.read().unwrap().battery, None, "unknown until the camera says");
+        note_battery(&h, &Battery { percent: 87, charging: true, ..Default::default() }, 1000);
+        assert_eq!(h.state.read().unwrap().battery, Some(BatteryLevel { percent: 87, charging: true, at_ms: 1000 }));
+        // A report without a level keeps the last one; one past 100 is 100.
+        note_battery(&h, &Battery { percent: -1, ..Default::default() }, 2000);
+        assert_eq!(h.state.read().unwrap().battery.unwrap().at_ms, 1000);
+        note_battery(&h, &Battery { percent: 140, charging: false, ..Default::default() }, 3000);
+        assert_eq!(h.state.read().unwrap().battery, Some(BatteryLevel { percent: 100, charging: false, at_ms: 3000 }));
+    }
 
     fn ev(kind: EventKind, topic: &str, active: bool) -> OnvifEvent {
         OnvifEvent { kind, active, topic: topic.into(), utc_time: None, initial: false, source: String::new() }
@@ -350,6 +390,7 @@ fn spawn_baichuan_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &C
                         "camera '{name}': battery {}% adapter={} {}mV {}C",
                         b.percent, b.adapter, b.voltage_mv, b.temp_c
                     );
+                    note_battery(&handle, &b, Utc::now().timestamp_millis());
                 }
                 None => {}
             }

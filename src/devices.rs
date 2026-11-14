@@ -174,6 +174,17 @@ pub fn complete_sign_in(engine: &Arc<Engine>, ctx: &SignInCtx, id: Identity, gen
     Some(Started { token, device_cookie: cookie })
 }
 
+/// A demo sign-in (`POST /api/demo/signin`) becomes a short session (see
+/// `auth::new_demo_session`). Its browser is not written down and admins are
+/// not told: visitors come from anywhere, all the time, and the account can
+/// only watch. None if the account changed meanwhile.
+pub fn demo_sign_in(ctx: &SignInCtx, id: Identity, generation: u64) -> Option<Started> {
+    let cookie = ctx.cookie.clone().unwrap_or_else(random_cookie);
+    let meta = SessionMeta::new(ctx.ip, ctx.label.clone(), browser_hash(&cookie));
+    let token = crate::auth::new_demo_session(id, generation, meta)?;
+    Some(Started { token, device_cookie: cookie })
+}
+
 /// Write the browser down. True: tell admins. Not told when the browser is
 /// known, when the same request also carries a live session of the account
 /// (so after an upgrade a browser is told once, the next time it signs in

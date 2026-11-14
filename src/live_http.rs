@@ -35,14 +35,17 @@ impl StreamQ {
     }
 }
 
-/// Viewing an on-demand (battery) camera wakes it. Returns true if the
-/// camera is on-demand (so callers may wait for its stream to start).
-fn wake_if_on_demand(engine: &Engine, id: usize) -> bool {
+/// Viewing an on-demand (battery) camera wakes it, unless `user` may not wake
+/// cameras (the demo account: it watches one that is awake already, never
+/// wakes one; None: a linked server). True when it was woken (so callers
+/// may wait for its stream to start).
+fn wake_if_on_demand(engine: &Engine, id: usize, user: Option<&str>) -> bool {
     let on_demand = engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand);
-    if on_demand {
+    let wake = on_demand && user.is_none_or(|u| crate::web::may_wake(engine, u));
+    if wake {
         engine.wake_camera(id);
     }
-    on_demand
+    wake
 }
 
 fn hubs(engine: &Engine, id: usize) -> Option<(Arc<LiveHub>, Arc<LiveHub>)> {
@@ -71,7 +74,8 @@ pub async fn live_info(
         Some(Ok(c)) => Some(c),
         None => None,
     };
-    wake_if_on_demand(&engine, id);
+    let user = caller.map(|c| c.0 .0.clone()).unwrap_or_default();
+    wake_if_on_demand(&engine, id, Some(&user));
     let sleeping = engine.camera(id).is_some_and(|h| h.state.read().unwrap().sleeping);
     match hubs(&engine, id) {
         None => (StatusCode::NOT_FOUND, "camera not found").into_response(),
@@ -84,7 +88,6 @@ pub async fn live_info(
                 "waking": sleeping || (main.info().is_none() && sub.info().is_none() && engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand)),
             });
             if let Some(caps) = caps {
-                let user = caller.map(|c| c.0 .0.clone()).unwrap_or_default();
                 if let Ok(p) = plan_live(&engine, id, &q, &caps, &user, false).await {
                     if let (Some(o), serde_json::Value::Object(add)) = (v.as_object_mut(), p.plan.json()) {
                         o.extend(add);
@@ -118,7 +121,7 @@ async fn plan_live(engine: &Arc<Engine>, id: usize, q: &StreamQ, caps: &crate::t
     };
     let order = if q.q.as_deref() == Some("sub") { [(true, sub), (false, main)] } else { [(false, main), (true, sub)] };
     // A battery camera is woken and given time to start streaming.
-    let on_demand = wake_if_on_demand(engine, id);
+    let on_demand = wake_if_on_demand(engine, id, Some(user));
     let deadline = std::time::Instant::now() + if on_demand && start { std::time::Duration::from_secs(60) } else { std::time::Duration::ZERO };
     while order.iter().all(|(_, h)| h.info().is_none()) && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -148,6 +151,11 @@ async fn plan_live(engine: &Arc<Engine>, id: usize, q: &StreamQ, caps: &crate::t
         let pick = avail.iter().filter(|a| caps.fits(&a.2)).max_by_key(|a| area(&a.2)).or_else(|| avail.iter().min_by_key(|a| area(&a.2))).unwrap();
         untouched(Some(why), pick)
     };
+    // The demo account: never converted, as when the encoders are busy (also
+    // when asked only what would be sent).
+    if tc::is_unconverted(user) {
+        return Ok(fallback(Why::BusyFallback));
+    }
     // A picture too small to be worth making: the best stream there is.
     if !tc::usable(&target) {
         return Ok(fallback(why));
@@ -216,12 +224,12 @@ type Subscription = (String, Vec<Arc<Vec<u8>>>, tokio::sync::broadcast::Receiver
 /// Subscribe to a camera's live fragments. A sleeping battery camera is woken
 /// and given time to start streaming (a hub may need a few attempts; the
 /// camera is kept awake meanwhile). None: unknown camera or no live stream.
-async fn subscribe(engine: &Arc<Engine>, id: usize, q: Option<&str>, quiet: bool) -> Result<Subscription, Response> {
+async fn subscribe(engine: &Arc<Engine>, id: usize, q: Option<&str>, quiet: bool, user: Option<&str>) -> Result<Subscription, Response> {
     let Some((main, sub)) = hubs(engine, id) else {
         return Err((StatusCode::NOT_FOUND, "camera not found").into_response());
     };
     let order = if q == Some("sub") { [sub, main] } else { [main, sub] };
-    let on_demand = wake_if_on_demand(engine, id);
+    let on_demand = wake_if_on_demand(engine, id, user);
     let deadline = std::time::Instant::now()
         + if on_demand { std::time::Duration::from_secs(60) } else { std::time::Duration::ZERO };
     let mut got = order.iter().find_map(|h| h.subscribe_for(quiet).map(|s| (h.info(), s)));
@@ -302,7 +310,7 @@ pub async fn live_stream(
                 None => return (StatusCode::SERVICE_UNAVAILABLE, "no live stream").into_response(),
             }
         }
-        None => match subscribe(&engine, id, q.q.as_deref(), quiet).await {
+        None => match subscribe(&engine, id, q.q.as_deref(), quiet, who.as_ref().map(|w| w.1.as_str())).await {
             Ok((m, f, r)) => (m, f, r, quiet),
             Err(r) => return r,
         },
@@ -363,8 +371,9 @@ pub fn live_ws_with(engine: Arc<Engine>, id: usize, q: StreamQ, ws: axum::extrac
         let query = q.as_deref().map(|v| format!("q={}{}", url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>(), if quiet { "&audio=0" } else { "" }));
         return crate::remote::proxy_ws(&engine, id, "/link/live/{id}/ws", query, ws, who);
     }
+    let viewer = who.as_ref().map(|w| w.1.clone());
     ws.on_upgrade(move |mut socket| crate::web::while_account_allowed(who, async move {
-        let (_mime, first, mut rx) = match subscribe(&engine, id, q.as_deref(), quiet).await {
+        let (_mime, first, mut rx) = match subscribe(&engine, id, q.as_deref(), quiet, viewer.as_deref()).await {
             Ok(s) => s,
             Err(_) => {
                 let _ = socket.send(Message::Close(None)).await;

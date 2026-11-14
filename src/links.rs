@@ -616,6 +616,11 @@ pub async fn signin(State(engine): State<Arc<Engine>>, req: Request) -> Response
     // sign-in instead (a browser already signed in here stays as it is).
     // An operator's account likewise (a session cannot be held to a viewer's
     // rights in an operator's account: it would have the operator's).
+    // The demo account is signed in to with demo sign-in only.
+    if engine.config.lock().unwrap().demo_account().as_deref() == Some(name.as_str()) {
+        let _ = engine.db.insert_audit("(linked server)", "", "sign-in to the demo account not carried over", &l.name, 200);
+        return Json(serde_json::json!({ "code": null })).into_response();
+    }
     let is_operator = crate::auth::is_operator(&engine.config.lock().unwrap(), name);
     if (*is_admin || is_operator) && !admin_ok {
         let _ = engine.db.insert_audit("(linked server)", "", "sign-in to an admin account not carried over", &l.name, 200);

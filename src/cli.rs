@@ -1335,6 +1335,8 @@ pub async fn run_server_until(config: String, shutdown: impl std::future::Future
             _ = shutdown => {}
         }
     }
+    // Demo sign-ins not yet in the audit log.
+    crate::web::flush_demo_audit(&engine);
     // What admins were to hear goes out first: a restart must not hide it.
     let e = engine.clone();
     tokio::task::spawn_blocking(move || crate::account_http::finish_alerts(&e, std::time::Duration::from_secs(10))).await.ok();

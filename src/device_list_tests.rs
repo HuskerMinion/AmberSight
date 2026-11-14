@@ -580,3 +580,20 @@ async fn a_password_change_ends_the_sessions_without_waiting_for_a_push_service(
     assert!(endpoints(&e, u).is_empty());
     let _ = std::fs::remove_file(&path);
 }
+
+// ---- demo sessions are never kept ----
+
+#[test]
+fn demo_sessions_never_reach_the_database() {
+    let e = engine(&["dl-demo", "dl-norm"]);
+    let _g = store(&e);
+    let meta = || crate::auth::SessionMeta::new("10.0.0.9".parse().unwrap(), "Edge on Windows".into(), String::new());
+    let demo = crate::auth::new_demo_session(crate::auth::Identity { user: "dl-demo".into(), admin: false }, crate::auth::generation("dl-demo"), meta()).unwrap();
+    let normal = crate::auth::new_session_with(crate::auth::Identity { user: "dl-norm".into(), admin: false }, meta());
+    crate::auth::session_seen(&demo, "10.0.0.10".parse().unwrap());
+    let users: Vec<String> = e.db.load_sessions().unwrap().into_iter().map(|r| r.user).collect();
+    // (An older version, or this one after a restart, finds nothing of it.)
+    assert!(users.contains(&"dl-norm".to_string()) && !users.contains(&"dl-demo".to_string()), "{users:?}");
+    crate::auth::end_session(&demo);
+    crate::auth::end_session(&normal);
+}

@@ -529,7 +529,8 @@ pub fn wants(cfg: &crate::config::Config, user: &str, aud: &Audience) -> bool {
     if acc.is_empty() {
         return true;
     }
-    let Some((_, _, admin)) = acc.iter().find(|(u, _, _)| u == user) else { return false };
+    // (Nor the demo account's: visitors never get the alerts, whatever devices it has.)
+    let Some((_, _, admin)) = acc.iter().find(|(u, p, _)| u == user && p != crate::auth::DEMO_HASH) else { return false };
     match aud {
         Audience::Admins => *admin,
         Audience::Camera(name) => *admin || crate::auth::camera_limits(cfg, user).is_none_or(|s| s.contains(&crate::config::slug(name))),
@@ -539,20 +540,40 @@ pub fn wants(cfg: &crate::config::Config, user: &str, aud: &Audience) -> bool {
 /// The message as an admin's device gets it.
 #[cfg(test)]
 pub fn payload(m: &Message) -> Vec<u8> {
-    payload_for(m, true)
+    payload_for(m, Rights::ALL)
 }
 
 /// The app's message as an admin's device gets it.
 #[cfg(test)]
 pub fn app_payload(m: &Message) -> Vec<u8> {
-    app_payload_for(m, true)
+    app_payload_for(m, Rights::ALL)
 }
 
-/// Whether `user`'s devices are offered "Pause 1 h": the route is admin only.
-/// Without accounts everyone is.
-fn may_pause(cfg: &crate::config::Config, user: &str) -> bool {
+/// The buttons beyond "Snooze 1 h" (offered to everyone) a device's account
+/// may be offered: what its role may call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Rights {
+    /// "Pause 1 h": `POST /api/cameras/:id/pause` (admins, operators with `arm`).
+    pub pause: bool,
+    /// "Mark OK": `POST /api/events/:id/review` (admins, operators with `events`).
+    pub ok: bool,
+}
+
+impl Rights {
+    #[cfg(test)]
+    pub const ALL: Rights = Rights { pause: true, ok: true };
+}
+
+/// What `user`'s devices are offered. Without accounts everyone is an admin;
+/// a deleted or disabled account is offered nothing beyond snoozing.
+pub fn rights_of(cfg: &crate::config::Config, user: &str) -> Rights {
     let acc = crate::auth::accounts(cfg);
-    acc.is_empty() || acc.iter().any(|(u, _, admin)| u == user && *admin)
+    if acc.is_empty() {
+        return Rights { pause: true, ok: true };
+    }
+    let Some((_, _, admin)) = acc.iter().find(|(u, _, _)| u == user) else { return Rights::default() };
+    let role = crate::auth::role_of(cfg, user, *admin, true);
+    Rights { pause: role.may(crate::auth::Perm::Arm), ok: role.may(crate::auth::Perm::Events) }
 }
 
 /// What a message is about (apps get it as "type").
@@ -614,20 +635,31 @@ fn cut(s: &str, n: usize) -> String {
     s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
 }
 
-/// The buttons an event notification offers (the app or browser calls
-/// `POST /api/cameras/<camera_id>/pause {minutes}`, admin only: `may_pause` says
-/// whether this device's account may).
-fn pause_actions(m: &Message, may_pause: bool) -> serde_json::Value {
-    if may_pause && m.kind == MsgType::Event && m.camera_id.is_some() {
-        serde_json::json!([{ "action": "pause", "title": "Pause 1 h", "minutes": 60 }])
-    } else {
-        serde_json::json!([])
+/// The buttons an event notification offers, for an account with `rights`,
+/// most useful first (a browser may show only two): "Snooze 1 h" (`POST
+/// /api/me/snooze {camera, minutes}`, everyone), "Mark OK" (`POST
+/// /api/events/<event_id>/review {"verdict":"ok"}`) and "Pause 1 h" (`POST
+/// /api/cameras/<camera_id>/pause {minutes}`, which stops it for everyone).
+fn actions(m: &Message, rights: Rights) -> serde_json::Value {
+    let mut out = Vec::new();
+    if m.kind != MsgType::Event {
+        return serde_json::json!(out);
     }
+    if m.camera.as_deref().is_some_and(|c| !c.is_empty()) {
+        out.push(serde_json::json!({ "action": "snooze", "title": "Snooze 1 h", "minutes": 60 }));
+    }
+    if rights.ok && m.event_id.as_deref().is_some_and(|e| !e.is_empty()) {
+        out.push(serde_json::json!({ "action": "ok", "title": "Mark OK" }));
+    }
+    if rights.pause && m.camera_id.is_some() {
+        out.push(serde_json::json!({ "action": "pause", "title": "Pause 1 h", "minutes": 60 }));
+    }
+    serde_json::json!(out)
 }
 
 /// The message as the page's service worker reads it, always under
 /// MAX_PAYLOAD bytes.
-fn payload_for(m: &Message, may_pause: bool) -> Vec<u8> {
+fn payload_for(m: &Message, rights: Rights) -> Vec<u8> {
     let make = |body_len: usize, image: bool| {
         serde_json::json!({
             "title": cut(&m.title, 120),
@@ -639,7 +671,8 @@ fn payload_for(m: &Message, may_pause: bool) -> Vec<u8> {
             "ts": chrono::Utc::now().timestamp_millis(),
             "camera": m.camera.as_deref().map(|c| cut(c, 120)),
             "camera_id": m.camera_id,
-            "actions": pause_actions(m, may_pause),
+            "event_id": m.event_id.as_deref().map(|c| cut(c, 120)),
+            "actions": actions(m, rights),
         })
         .to_string()
         .into_bytes()
@@ -656,7 +689,7 @@ fn payload_for(m: &Message, may_pause: bool) -> Vec<u8> {
 /// The message as a phone app gets it (UnifiedPush; documented in
 /// docs/api-guide.md, "Push notifications for apps"), always under
 /// MAX_PAYLOAD bytes: the body, labels and picture are cut first.
-fn app_payload_for(m: &Message, may_pause: bool) -> Vec<u8> {
+fn app_payload_for(m: &Message, rights: Rights) -> Vec<u8> {
     let now = chrono::Utc::now().timestamp_millis();
     let make = |body_len: usize, labels: usize, image: bool| {
         serde_json::json!({
@@ -674,7 +707,7 @@ fn app_payload_for(m: &Message, may_pause: bool) -> Vec<u8> {
             "tag": cut(&m.tag, 120),
             "urgent": m.urgent,
             "camera_id": m.camera_id,
-            "actions": pause_actions(m, may_pause),
+            "actions": actions(m, rights),
         })
         .to_string()
         .into_bytes()
@@ -732,15 +765,23 @@ pub fn any_subscribed() -> bool {
 /// background thread). None when no device is signed up for it.
 pub fn send(aud: &Audience, m: &Message) -> Option<Report> {
     let engine = engine()?;
-    let subs = engine.db.push_list(None).ok()?;
-    let subs: Vec<PushSub> = {
-        let cfg = engine.config.lock().unwrap();
-        subs.into_iter().filter(|s| wants(&cfg, &s.user, aud)).collect()
-    };
+    let subs = recipients(&engine, aud)?;
     if subs.is_empty() {
         return None;
     }
     Some(send_to(&engine, &subs, m))
+}
+
+/// The devices that get a message for `aud`: of accounts that may have it,
+/// less those that snoozed the camera (they get nothing about it for now).
+fn recipients(engine: &Engine, aud: &Audience) -> Option<Vec<PushSub>> {
+    let subs = engine.db.push_list(None).ok()?;
+    let snoozed = match aud {
+        Audience::Camera(name) => crate::snooze::snoozed_users(engine, name),
+        Audience::Admins => Default::default(),
+    };
+    let cfg = engine.config.lock().unwrap();
+    Some(subs.into_iter().filter(|s| wants(&cfg, &s.user, aud) && !snoozed.contains(&s.user)).collect())
 }
 
 /// Send to these devices. Blocking.
@@ -754,13 +795,16 @@ pub fn send_to(engine: &Engine, subs: &[PushSub], m: &Message) -> Report {
             return rep;
         }
     };
-    let (subject, app_hosts, may) = {
+    let (subject, app_hosts, rights) = {
         let c = engine.config.lock().unwrap();
-        let may: Vec<bool> = subs.iter().map(|s| may_pause(&c, &s.user)).collect();
-        (subject(&c.alerts), c.push.app_hosts.clone(), may)
+        let rights: Vec<Rights> = subs.iter().map(|s| rights_of(&c, &s.user)).collect();
+        (subject(&c.alerts), c.push.app_hosts.clone(), rights)
     };
-    let admin_bodies = Bodies { browser: payload_for(m, true), app: app_payload_for(m, true) };
-    let viewer_bodies = Bodies { browser: payload_for(m, false), app: app_payload_for(m, false) };
+    // (One pair of bodies per set of buttons: at most four.)
+    let mut bodies: std::collections::HashMap<Rights, Bodies> = std::collections::HashMap::new();
+    for r in &rights {
+        bodies.entry(*r).or_insert_with(|| Bodies { browser: payload_for(m, *r), app: app_payload_for(m, *r) });
+    }
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(8)))
         .max_redirects(0)
@@ -773,9 +817,9 @@ pub fn send_to(engine: &Engine, subs: &[PushSub], m: &Message) -> Report {
     let results: Vec<(&PushSub, Result<u16>)> = std::thread::scope(|sc| {
         let jobs: Vec<_> = subs
             .iter()
-            .zip(may)
-            .map(|(s, may)| {
-                let bodies = if may { &admin_bodies } else { &viewer_bodies };
+            .zip(rights)
+            .map(|(s, r)| {
+                let bodies = &bodies[&r];
                 let (agent, keys, subject, app_hosts) = (&agent, &keys, &subject, &app_hosts);
                 (s, sc.spawn(move || deliver(agent, keys, s, bodies, m, subject, app_hosts)))
             })
@@ -1274,31 +1318,101 @@ admin = false
         assert!(b.get("type").is_none() && b.get("v").is_none() && b["image"] == "/api/events/ev1/thumb");
     }
 
-    #[test]
-    fn event_notifications_offer_a_pause() {
-        for bytes in [app_payload(&app_msg()), payload(&app_msg())] {
-            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(v["camera_id"], 3);
-            assert_eq!(v["actions"], serde_json::json!([{ "action": "pause", "title": "Pause 1 h", "minutes": 60 }]));
-        }
-        let n = Message { kind: MsgType::Notice, ..Default::default() };
-        let v: serde_json::Value = serde_json::from_slice(&payload(&n)).unwrap();
-        assert_eq!(v["actions"], serde_json::json!([]));
+    const SNOOZE: &str = r#"{"action":"snooze","minutes":60,"title":"Snooze 1 h"}"#;
+    const PAUSE: &str = r#"{"action":"pause","minutes":60,"title":"Pause 1 h"}"#;
+    const OK: &str = r#"{"action":"ok","title":"Mark OK"}"#;
+
+    fn actions_in(bytes: &[u8]) -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        v["actions"].as_array().map(|a| a.iter().map(|x| x.to_string()).collect()).unwrap_or_default()
     }
 
     #[test]
-    fn only_admins_are_offered_the_pause_button() {
-        for bytes in [app_payload_for(&app_msg(), false), payload_for(&app_msg(), false)] {
+    fn event_notifications_offer_snooze_pause_and_ok() {
+        for bytes in [app_payload(&app_msg()), payload(&app_msg())] {
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(v["actions"], serde_json::json!([]));
-            assert_eq!(v["camera_id"], 3);
+            assert_eq!((v["camera_id"].as_u64(), v["event_id"].as_str()), (Some(3), Some("ev1")));
+            assert_eq!(actions_in(&bytes), [SNOOZE, OK, PAUSE], "most useful first: a browser may show two");
         }
+        // Other messages offer nothing.
+        for kind in [MsgType::Notice, MsgType::Camera, MsgType::Problem, MsgType::Test] {
+            let n = Message { kind, camera: Some("Front Door".into()), camera_id: Some(3), event_id: Some("ev1".into()), ..Default::default() };
+            assert!(actions_in(&payload(&n)).is_empty() && actions_in(&app_payload(&n)).is_empty(), "{kind:?}");
+        }
+        // No event id: no "Mark OK"; no camera: nothing to snooze or pause.
+        let m = Message { event_id: None, ..app_msg() };
+        assert_eq!(actions_in(&app_payload(&m)), [SNOOZE, PAUSE]);
+        let m = Message { camera: None, camera_id: None, ..app_msg() };
+        assert_eq!(actions_in(&app_payload(&m)), [OK]);
+    }
+
+    #[test]
+    fn each_role_is_offered_what_it_may_do() {
+        let cfg: crate::config::Config = toml::from_str(concat!(
+            "[[server.users]]\nusername = \"boss\"\npassword = \"x\"\nadmin = true\n",
+            "[[server.users]]\nusername = \"ann\"\npassword = \"x\"\nadmin = false\n",
+            "[[server.users]]\nusername = \"otto\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\n",
+            "[[server.users]]\nusername = \"noarm\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\nperms = { arm = false }\n",
+            "[[server.users]]\nusername = \"noev\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\nperms = { events = false }\n",
+            "[[server.users]]\nusername = \"off\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\ndisabled = true\n",
+        ))
+        .unwrap();
         let open: crate::config::Config = toml::from_str("").unwrap();
-        assert!(may_pause(&open, "anyone"), "no accounts: everyone is an admin");
-        let cfg: crate::config::Config = toml::from_str("[[server.users]]\nusername = \"boss\"\npassword = \"x\"\nadmin = true\n[[server.users]]\nusername = \"ann\"\npassword = \"x\"\nadmin = false\n").unwrap();
-        assert!(may_pause(&cfg, "boss"));
-        assert!(!may_pause(&cfg, "ann"));
-        assert!(!may_pause(&cfg, "gone"));
+        assert_eq!(rights_of(&open, "anyone"), Rights::ALL, "no accounts: everyone is an admin");
+        for (user, pause, ok) in [("boss", true, true), ("ann", false, false), ("otto", true, true), ("noarm", false, true), ("noev", true, false), ("off", false, false), ("gone", false, false)] {
+            assert_eq!(rights_of(&cfg, user), Rights { pause, ok }, "{user}");
+            let want: Vec<&str> = [Some(SNOOZE), ok.then_some(OK), pause.then_some(PAUSE)].into_iter().flatten().collect();
+            for bytes in [app_payload_for(&app_msg(), rights_of(&cfg, user)), payload_for(&app_msg(), rights_of(&cfg, user))] {
+                assert_eq!(actions_in(&bytes), want, "{user}");
+            }
+        }
+    }
+
+    #[test]
+    fn snoozed_accounts_get_nothing_about_that_camera() {
+        let cfg: crate::config::Config = toml::from_str(concat!(
+            "[[server.users]]\nusername = \"boss\"\npassword = \"x\"\nadmin = true\n",
+            "[[server.users]]\nusername = \"ann\"\npassword = \"x\"\nadmin = false\n",
+        ))
+        .unwrap();
+        let e = crate::engine::Engine::for_test(cfg);
+        for (i, user) in ["boss", "ann", "ann"].into_iter().enumerate() {
+            let sub = PushSub { endpoint: format!("https://fcm.googleapis.com/x/{i}"), user: user.into(), p256dh: "k".into(), auth: "a".into(), device: format!("d{i}"), kind: KIND_BROWSER.into(), ..Default::default() };
+            e.db.push_save(&sub, 0).unwrap();
+        }
+        let who = |aud: &Audience| -> Vec<String> {
+            let mut v: Vec<String> = recipients(&e, aud).unwrap().into_iter().map(|s| s.user).collect();
+            v.sort();
+            v
+        };
+        let porch = Audience::Camera("Porch".into());
+        assert_eq!(who(&porch), ["ann", "ann", "boss"]);
+        let now = chrono::Utc::now().timestamp_millis();
+        e.db.snooze_set("ann", "porch", now + 60_000).unwrap();
+        assert_eq!(who(&porch), ["boss"], "both of ann's devices skipped");
+        assert_eq!(who(&Audience::Camera("Garage".into())), ["ann", "ann", "boss"], "other cameras still come");
+        assert_eq!(who(&Audience::Admins), ["boss"]);
+        // Ended: sent again.
+        e.db.snooze_set("ann", "porch", now - 1).unwrap();
+        assert_eq!(who(&porch), ["ann", "ann", "boss"]);
+    }
+
+    #[test]
+    fn payloads_with_every_action_stay_small() {
+        let mut m = app_msg();
+        m.title = "t".repeat(500);
+        m.body = "é".repeat(5000);
+        m.labels = (0..50).map(|i| format!("{i}{}", "x".repeat(100))).collect();
+        m.url = format!("/{}", "u".repeat(5000));
+        m.image = Some(format!("/{}", "i".repeat(5000)));
+        m.camera = Some("c".repeat(5000));
+        m.event_id = Some("e".repeat(5000));
+        m.tag = "g".repeat(5000);
+        for p in [app_payload(&m), payload(&m)] {
+            assert!(p.len() <= MAX_PAYLOAD, "{}", p.len());
+            // Cut down, the buttons stay.
+            assert_eq!(actions_in(&p).len(), 3, "{}", String::from_utf8_lossy(&p));
+        }
     }
 
     #[test]

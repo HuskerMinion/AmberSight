@@ -194,7 +194,9 @@ pub fn clean_name(name: &str) -> Result<String, String> {
 
 /// The names of the server's accounts (none: an open server).
 pub fn account_names(cfg: &crate::config::Config) -> Vec<String> {
-    crate::auth::accounts(cfg).into_iter().map(|a| a.0).collect()
+    // The demo account's phones never count: it stands in the list under a
+    // name nobody has (so the list is not empty, which would count everyone).
+    crate::auth::accounts(cfg).into_iter().map(|(u, p, _)| if p == crate::auth::DEMO_HASH { "(demo)".to_string() } else { u }).collect()
 }
 
 /// The last thing presence did.

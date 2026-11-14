@@ -34,6 +34,15 @@ port = 8090
 # Port for RTMP senders (OBS and similar) pushing to push:// cameras;
 # only opened while such a camera exists. 0 = off.
 # rtmp_port = 1935
+# DEMO SIGN-IN: visitors (an app's "Try the demo" button) may sign in to this
+# account with no password (POST /api/demo/signin): sessions last 24 hours, it
+# can only watch (what it may not do is listed in docs/api-guide.md, "Demo
+# sign-in"), and its password opens nothing while it is the demo account. It
+# must be an enabled viewer (not an operator or admin) that exists below, or the
+# demo stays off (a warning at start). Behind a reverse proxy or tunnel, list
+# the proxy in trusted_proxies above, or all visitors share one limit. Off when
+# left out.
+# demo_user = "demo"
 
 # SHARE STREAMS with other apps (Home Assistant, Scrypted, VLC, other NVRs)
 # over RTSP: rtsp://user:password@host:8554/<camera>[/sub]. Off by default;

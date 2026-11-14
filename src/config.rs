@@ -174,6 +174,11 @@ pub struct ServerConfig {
     /// header is ignored, as anyone could send it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_proxies: Vec<String>,
+    /// An account visitors may sign in to with no password (`POST
+    /// /api/demo/signin`), for trying an app out. It must be an enabled plain
+    /// viewer; otherwise the demo is off (see `demo_account`). None: off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demo_user: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -190,6 +195,7 @@ impl Default for ServerConfig {
             tls_names: Vec::new(),
             name: None,
             trusted_proxies: Vec::new(),
+            demo_user: None,
         }
     }
 }
@@ -2444,12 +2450,47 @@ impl Config {
         for w in cfg.push.sanitize_at_load() {
             tracing::warn!("push: app_hosts: {w}");
         }
+        // A demo account that is not an enabled plain viewer turns the demo off (it
+        // would hand out more than watching).
+        if let Some(w) = cfg.demo_warning() {
+            tracing::warn!("{path}: {w}");
+        }
         // A missing presence profile does not stop the server: the rule
         // leaves it out until it exists (or another is chosen).
         if let Err(e) = cfg.presence.validate(&cfg.automation) {
             tracing::warn!("presence: {e}; it is ignored until then");
         }
         Ok(cfg)
+    }
+
+    /// The account demo sign-in signs visitors in to, when it may: `[server]
+    /// demo_user` names an account that exists, is enabled, and is a plain
+    /// viewer (not an admin or an operator, and not the old `[server.auth]`
+    /// admin). Checked at every use, so promoting or disabling the account
+    /// turns the demo off at once.
+    pub fn demo_account(&self) -> Option<String> {
+        let want = self.server.demo_user.as_deref().map(str::trim).filter(|n| !n.is_empty())?;
+        if self.server.auth.as_ref().is_some_and(|a| a.username.trim() == want) {
+            return None;
+        }
+        let u = self.server.users.iter().find(|u| u.username.trim() == want)?;
+        (!u.disabled && !u.admin && u.role.is_empty()).then(|| want.to_string())
+    }
+
+    /// Why `[server] demo_user` is set but the demo is off, if it is.
+    pub fn demo_warning(&self) -> Option<String> {
+        let want = self.server.demo_user.as_deref().map(str::trim).filter(|n| !n.is_empty())?;
+        if self.demo_account().is_some() {
+            return None;
+        }
+        let why = match self.server.users.iter().find(|u| u.username.trim() == want) {
+            _ if self.server.auth.as_ref().is_some_and(|a| a.username.trim() == want) => "is an admin",
+            None => "does not exist",
+            Some(u) if u.disabled => "is disabled",
+            Some(u) if u.admin => "is an admin",
+            Some(_) => "is not a plain viewer",
+        };
+        Some(format!("server.demo_user: the account \"{want}\" {why}; demo sign-in is off (it must be an enabled viewer, not an operator or admin)"))
     }
 
     /// Keep one entry per account name: the first that can sign in (the one sign-in
@@ -2528,6 +2569,34 @@ pub fn slug(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Config, parse_schedule, schedule_active};
+
+    #[test]
+    fn the_demo_account_must_be_an_enabled_plain_viewer() {
+        let users = "[[server.users]]\nusername = \"boss\"\npassword = \"x\"\n\
+            [[server.users]]\nusername = \"demo\"\npassword = \"x\"\nadmin = false\n\
+            [[server.users]]\nusername = \"off\"\npassword = \"x\"\nadmin = false\ndisabled = true\n\
+            [[server.users]]\nusername = \"op\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\n";
+        let with = |demo: &str| -> Config { toml::from_str(&format!("[server]\ndemo_user = \"{demo}\"\n{users}")).unwrap() };
+        let c = with(" demo ");
+        assert_eq!((c.demo_account().as_deref(), c.demo_warning()), (Some("demo"), None));
+        for (name, why) in [("boss", "is an admin"), ("off", "is disabled"), ("op", "is not a plain viewer"), ("ghost", "does not exist")] {
+            let c = with(name);
+            assert_eq!(c.demo_account(), None, "{name}");
+            let w = c.demo_warning().unwrap_or_default();
+            assert!(w.contains(why) && w.contains("demo sign-in is off"), "{name}: {w}");
+        }
+        // Left out or empty: off, and nothing to warn of.
+        let c: Config = toml::from_str(users).unwrap();
+        assert_eq!((c.demo_account(), c.demo_warning()), (None, None));
+        assert_eq!((with("").demo_account(), with("").demo_warning()), (None, None));
+        // The old single admin account.
+        let c: Config = toml::from_str("[server]\ndemo_user = \"admin\"\n[server.auth]\nusername = \"admin\"\npassword = \"x\"\n").unwrap();
+        assert!(c.demo_account().is_none() && c.demo_warning().unwrap().contains("is an admin"));
+        // Saved again: kept as written.
+        let c = with("demo");
+        let back: Config = toml::from_str(&c.to_toml().unwrap()).unwrap();
+        assert_eq!(back.server.demo_user.as_deref(), Some("demo"));
+    }
 
     #[test]
     fn storage_cap_zero_or_left_out_is_automatic() {

@@ -15,12 +15,26 @@ mod digest;
 mod missing;
 pub use missing::path_hash;
 mod plates;
+mod snooze;
 pub use account::{AccountRequest, TokenRow};
 pub use devices::StoredSession;
 pub use digest::DigestEvent;
 pub use plates::{PlateFilter, PlateRow};
 
-const SCHEMA_VERSION: i64 = 26;
+/// The newest database version (`PRAGMA user_version`; see `Db::init`). A
+/// number is never used twice, also one only a pre-release build used: a
+/// database it touched is at that number already, and would skip the step.
+const SCHEMA_VERSION: i64 = 28;
+
+/// Remove the sessions a pre-release build kept for demo sign-in (a `demo`
+/// column it added to `sessions`), if there are any.
+fn drop_kept_demo_sessions(conn: &Connection) -> Result<()> {
+    let has: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'demo'", [], |r| r.get(0))?;
+    if has > 0 {
+        conn.execute("DELETE FROM sessions WHERE demo = 1", [])?;
+    }
+    Ok(())
+}
 /// Different signal names kept at most.
 const MAX_SIGNALS: i64 = 200;
 
@@ -1016,6 +1030,32 @@ impl Db {
             tx.pragma_update(None, "user_version", 26)?;
             tx.commit()?;
         }
+        if version < 27 {
+            // v27: per-account snoozes (that account's push notifications for one
+            // camera, until a time). Keyed by the camera's slug, so a snooze
+            // outlives a change of the name's case or spacing.
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS snoozes (
+                    user TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    until_ms INTEGER NOT NULL,
+                    PRIMARY KEY (user, camera)
+                );",
+            )?;
+            tx.pragma_update(None, "user_version", 27)?;
+            tx.commit()?;
+        }
+        if version < 28 {
+            // v28: no change of its own. A pre-release build used 28 for a
+            // `sessions.demo` column (demo sessions kept); databases it touched are
+            // at 28, so the next real change must be 29 on all of them.
+            conn.pragma_update(None, "user_version", 28)?;
+        }
+        // Demo sessions that pre-release build kept: never valid (demo sessions
+        // live in memory only). Done at every start: its databases are at 28
+        // already. The column itself stays, unused.
+        drop_kept_demo_sessions(&conn)?;
         // The triggers are part of the database, so an older version run in between keeps the
         // totals too. Should they be missing (made by hand, a tool), they are made again and the
         // totals counted afresh.
@@ -3091,6 +3131,43 @@ mod tests {
         assert_eq!(e, vec![(10, vec!["person".to_string()])]);
         assert_eq!(db.first_event_start("Front").unwrap(), Some(10));
         assert_eq!(db.first_event_start("None").unwrap(), None);
+    }
+
+    #[test]
+    fn version_28_is_reached_and_kept_demo_sessions_go() {
+        let dir = tmp("v28");
+        let version = |p: &std::path::Path| -> i64 { rusqlite::Connection::open(p).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap() };
+        let users = |db: &Db| -> Vec<String> { let mut u: Vec<String> = db.load_sessions().unwrap().into_iter().map(|s| s.user).collect(); u.sort(); u };
+        // A fresh database.
+        let fresh = dir.join("fresh.db");
+        drop(Db::open(&fresh).unwrap());
+        assert_eq!(version(&fresh), 28);
+        // One at 27 (this release's schema before the step).
+        let v27 = dir.join("v27.db");
+        {
+            let db = Db::open(&v27).unwrap();
+            db.save_session(&stored("h1", "ann")).unwrap();
+        }
+        rusqlite::Connection::open(&v27).unwrap().pragma_update(None, "user_version", 27).unwrap();
+        let db = Db::open(&v27).unwrap();
+        assert_eq!((version(&v27), users(&db)), (28, vec!["ann".to_string()]));
+        drop(db);
+        // One the pre-release build left at 28, with a demo session kept in its column.
+        let pre = dir.join("pre.db");
+        drop(Db::open(&pre).unwrap());
+        {
+            let c = rusqlite::Connection::open(&pre).unwrap();
+            c.execute_batch("ALTER TABLE sessions ADD COLUMN demo INTEGER NOT NULL DEFAULT 0;").unwrap();
+            c.execute("INSERT INTO sessions (hash, user, admin, expires, demo) VALUES ('d1', 'demo', 0, 4000000000, 1), ('n1', 'ann', 0, 4000000000, 0)", []).unwrap();
+            c.pragma_update(None, "user_version", 28).unwrap();
+        }
+        let db = Db::open(&pre).unwrap();
+        assert_eq!((version(&pre), users(&db)), (28, vec!["ann".to_string()]), "the demo session is gone, the other kept");
+        // A new session there still saves (the unused column has a default).
+        db.save_session(&stored("h2", "bob")).unwrap();
+        assert_eq!(users(&db), vec!["ann".to_string(), "bob".to_string()]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

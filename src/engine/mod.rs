@@ -44,7 +44,7 @@ mod worker;
 mod zone_watch;
 
 pub use creds::{camera_url, normalize_creds, redact_url};
-pub use worker::{ffmpeg_input_args, video_filter};
+pub use worker::{caption_drawtext, ffmpeg_input_args, video_filter};
 
 use clip::*;
 use storage::*;
@@ -149,6 +149,8 @@ pub struct CameraState {
     pub sleeping: bool,
     /// What the camera/hub itself says about sleeping (battery cameras).
     pub device_sleeping: Option<bool>,
+    /// Its battery as last reported (battery cameras; None: not known).
+    pub battery: Option<camera_events::BatteryLevel>,
     /// How far the camera's own clock is from this computer's (seconds),
     /// from its RTCP sender reports.
     pub clock_skew: Option<f64>,
@@ -216,6 +218,8 @@ pub struct Engine {
     pub manual_profile: Mutex<Option<(String, Option<i64>)>>,
     pub data_dir: std::path::PathBuf,
     pub config_path: String,
+    /// The demo account as last seen (see web::demo_now); None: not looked yet.
+    pub demo_seen: Mutex<Option<Option<String>>>,
     pub started: i64,
     // Global arm/disarm switch: false suppresses motion on every camera.
     pub shield: Arc<AtomicBool>,
@@ -369,6 +373,7 @@ impl Engine {
             manual_profile: Mutex::new(manual),
             data_dir,
             config_path,
+            demo_seen: Mutex::new(None),
             started: Utc::now().timestamp(),
             shield: Arc::new(AtomicBool::new(true)),
             arm_at: std::sync::atomic::AtomicI64::new(0),
@@ -520,6 +525,17 @@ impl Engine {
         Ok(engine)
     }
 
+    /// Add a camera of this name to a test engine (nothing runs for it).
+    #[cfg(test)]
+    pub fn add_test_camera(&self, name: &str) -> Arc<CameraHandle> {
+        let cfg: CameraConfig = toml::from_str(&format!("name = {name:?}\nurl = \"rtsp://127.0.0.1/x\"")).unwrap();
+        let mut cams = self.cameras.write().unwrap();
+        let h = make_handle(cams.len(), cfg.clone());
+        cams.push(Some(h.clone()));
+        self.config.lock().unwrap().cameras.push(cfg);
+        h
+    }
+
     /// An engine with no cameras, threads or files (an in-memory database),
     /// for tests of what it does by itself.
     #[cfg(test)]
@@ -534,6 +550,7 @@ impl Engine {
             manual_profile: Mutex::new(None),
             data_dir: std::env::temp_dir(),
             config_path: String::new(),
+            demo_seen: Mutex::new(None),
             started: Utc::now().timestamp(),
             shield: Arc::new(AtomicBool::new(false)),
             arm_at: std::sync::atomic::AtomicI64::new(0),
@@ -855,6 +872,10 @@ impl Engine {
     pub fn rename_camera_refs(&self, old: &str, new: &str) {
         self.rename_alert_pause(old, new);
         event_copy::rename_camera(old, new);
+        // Snoozes follow the camera (they are kept by its name's slug).
+        if let Err(e) = self.db.snooze_rename_camera(&crate::config::slug(old), &crate::config::slug(new)) {
+            tracing::warn!("could not move the snoozes of {old} to {new}: {e:#}");
+        }
         {
             let mut c = self.config.lock().unwrap();
             for cam in c.cameras.iter_mut() {
@@ -930,6 +951,10 @@ impl Engine {
         // A new camera given the same name must not inherit its alert pause.
         if let Some(name) = &removed {
             self.pause_alerts(name, Some(0));
+            // ... nor anyone's snooze of it.
+            if let Err(e) = self.db.snooze_forget_camera(&crate::config::slug(name)) {
+                tracing::warn!("could not forget the snoozes of {name}: {e:#}");
+            }
             // ... nor its plate reading or alert rules.
             let mut c = self.config.lock().unwrap();
             c.lpr.cameras.retain(|l| &l.name != name);
@@ -1312,6 +1337,7 @@ fn make_handle(id: usize, cfg: CameraConfig) -> Arc<CameraHandle> {
             wake_until: 0,
             sleeping: false,
             device_sleeping: None,
+            battery: None,
             ai_last: None,
             zones_occupied: Vec::new(),
             clock_skew: None,

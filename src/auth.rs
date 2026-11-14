@@ -144,8 +144,12 @@ pub fn accounts(cfg: &crate::config::Config) -> Vec<(String, String, bool)> {
     }
     // (An old-style account with the name of a disabled one is disabled too.)
     out.retain(|(n, _, _)| !cfg.server.users.iter().any(|u| u.disabled && u.username.trim() == n));
+    // The demo account takes no password: demo sign-in is the only way in.
+    let demo = cfg.demo_account();
     for u in cfg.server.users.iter().filter(|u| !u.disabled) {
-        out.push((u.username.trim().to_string(), u.password.trim().to_string(), u.admin));
+        let name = u.username.trim().to_string();
+        let password = if demo.as_deref() == Some(name.as_str()) { DEMO_HASH.to_string() } else { u.password.trim().to_string() };
+        out.push((name, password, u.admin));
     }
     if out.is_empty() && !cfg.server.users.is_empty() {
         out.push((LOCKED_ACCOUNT.to_string(), LOCKED_HASH.to_string(), false));
@@ -307,12 +311,19 @@ pub struct SessionMeta {
     pub last_seen: i64,
     /// When `last_seen` was last written to the database.
     saved_seen: i64,
+    /// Made by demo sign-in: held to what the demo account may do, and kept
+    /// in memory only (a restart, or a change of the demo account, ends it).
+    pub demo: bool,
+    /// The address it was made from (`ip` is the last one it was used from).
+    ip_made: Option<IpAddr>,
+    /// The order sessions were made in (since the server started).
+    seq: u64,
 }
 
 impl SessionMeta {
     /// For a session being made now (see `new_session_with`).
     pub fn new(ip: IpAddr, label: String, device: String) -> SessionMeta {
-        SessionMeta { ip: Some(ip), label, device, ..Default::default() }
+        SessionMeta { ip: Some(ip), ip_made: Some(ip), label, device, ..Default::default() }
     }
 
     /// Note a use of the session. True when the database should be told too
@@ -331,7 +342,7 @@ impl SessionMeta {
 /// A stored session as kept in memory. Those made before the list of devices
 /// existed have no creation time, label or address.
 fn session_from_row(r: crate::db::StoredSession) -> (String, Session) {
-    let meta = SessionMeta { created: r.created, ip: r.ip.parse().ok(), label: r.label, device: r.device, last_seen: r.last_seen, saved_seen: r.last_seen };
+    let meta = SessionMeta { created: r.created, ip: r.ip.parse().ok(), label: r.label, device: r.device, last_seen: r.last_seen, saved_seen: r.last_seen, demo: false, ip_made: None, seq: 0 };
     (r.hash, Session { id: Identity { user: r.user, admin: r.admin }, expires: r.expires, meta })
 }
 
@@ -513,6 +524,19 @@ struct State {
     two_step_test: std::collections::HashSet<String>,
     /// Where sessions are kept across restarts.
     store: Option<std::sync::Arc<crate::db::Db>>,
+    /// Demo sign-ins: how many lately, and what the audit log was not told yet.
+    demo: DemoGate,
+    /// Sessions made since the server started (see `SessionMeta::seq`).
+    session_seq: u64,
+}
+
+/// The demo account's stored password in `accounts`: no password matches it
+/// (not a valid hash), and it marks the account as the demo one.
+pub const DEMO_HASH: &str = "$argon2id$demo";
+
+/// Whether `user` is the demo account in this list of `accounts`.
+pub fn is_demo(accounts: &[(String, String, bool)], user: &str) -> bool {
+    accounts.iter().any(|(u, p, _)| u == user && p == DEMO_HASH)
 }
 
 fn state() -> &'static Mutex<State> {
@@ -1057,6 +1081,9 @@ pub fn token_identity(header: &str, accounts: &[(String, String, bool)]) -> Opti
         return None;
     }
     let (user, acc_admin) = accounts.iter().find(|(u, _, _)| *u == t.user).map(|(u, _, a)| (u.clone(), *a))?;
+    if is_demo(accounts, &user) {
+        return None;
+    }
     let touch = (now - t.last_used.unwrap_or(0) >= TOKEN_TOUCH_SECS).then(|| t.id.clone());
     if touch.is_some() {
         t.last_used = Some(now);
@@ -1137,7 +1164,7 @@ fn check_without_hashing(header: &str, accounts: &[(String, String, bool)]) -> O
     let key: [u8; 32] = Sha256::digest(header.as_bytes()).into();
     let s = state().lock().unwrap();
     if let Some((id, at)) = s.basic.get(&key) {
-        if at.elapsed() < BASIC_CACHE && accounts.iter().any(|(u, _, a)| *u == id.user && *a == id.admin) {
+        if at.elapsed() < BASIC_CACHE && accounts.iter().any(|(u, p, a)| *u == id.user && *a == id.admin && p != DEMO_HASH) {
             // (Any change to the account empties this cache under this same lock.)
             return Some(Cred::Password(id.clone(), s.generations.get(&id.user).copied().unwrap_or(0)));
         }
@@ -1210,10 +1237,15 @@ struct PasswordTurn {
 /// none if the account changed meanwhile (a sign-in racing a disable must
 /// not leave a session that comes back to life when it is enabled again).
 pub fn new_session_if_current(id: Identity, generation_then: u64, meta: SessionMeta) -> Option<String> {
+    new_session_if_current_lasting(id, generation_then, meta, SESSION_DAYS * 86400)
+}
+
+/// As `new_session_if_current`, for a session that lasts `secs`.
+fn new_session_if_current_lasting(id: Identity, generation_then: u64, meta: SessionMeta, secs: i64) -> Option<String> {
     if state().lock().unwrap().generations.get(&id.user).copied().unwrap_or(0) != generation_then {
         return None;
     }
-    let token = new_session_with(id.clone(), meta);
+    let token = new_session_lasting(id.clone(), meta, secs);
     // (Changed in the moment between the two: forget_user may have run before the insert.)
     if state().lock().unwrap().generations.get(&id.user).copied().unwrap_or(0) != generation_then {
         end_session(&token);
@@ -1229,17 +1261,28 @@ pub fn new_session(id: Identity) -> String {
 
 /// A session; `meta` has what is known of where it was made (created and last
 /// seen are set here).
-pub fn new_session_with(id: Identity, mut meta: SessionMeta) -> String {
+#[cfg(test)]
+pub fn new_session_with(id: Identity, meta: SessionMeta) -> String {
+    new_session_lasting(id, meta, SESSION_DAYS * 86400)
+}
+
+/// A session for `id` that lasts `secs`; `meta` has what is known of where it
+/// was made (created and last seen are set here).
+fn new_session_lasting(id: Identity, mut meta: SessionMeta, secs: i64) -> String {
     let token = random_token();
     let hash = token_hash(&token);
     let now = now_secs();
-    let expires = now + SESSION_DAYS * 86400;
+    let expires = now + secs;
     meta.created = now;
     meta.last_seen = now;
     meta.saved_seen = now;
     let mut s = state().lock().unwrap();
+    s.session_seq += 1;
+    meta.seq = s.session_seq;
     s.sessions.retain(|_, v| v.expires > now);
-    if let Some(db) = &s.store {
+    // (Demo sessions are never kept: an older version, or one with the demo
+    // off, must find nothing of them in the database.)
+    if let Some(db) = s.store.as_ref().filter(|_| !meta.demo) {
         let row = crate::db::StoredSession { hash: hash.clone(), user: id.user.clone(), admin: id.admin, expires, created: now, ip: meta.ip.map(|i| i.to_string()).unwrap_or_default(), label: meta.label.clone(), device: meta.device.clone(), last_seen: now };
         if let Err(e) = db.save_session(&row) {
             tracing::error!("could not keep a new session in the database (it ends at a restart): {e:#}");
@@ -1257,7 +1300,7 @@ pub fn session_seen(token: &str, ip: IpAddr) {
     let (store, due) = {
         let mut s = state().lock().unwrap();
         let Some(sess) = s.sessions.get_mut(&hash) else { return };
-        let due = sess.meta.note_use(ip, now);
+        let due = sess.meta.note_use(ip, now) && !sess.meta.demo;
         (s.store.clone(), due)
     };
     // (The database is written without holding the lock.)
@@ -1300,6 +1343,248 @@ pub fn session_device_from_headers(headers: &axum::http::HeaderMap, accounts: &[
     let (token, _) = session_from_headers(headers, accounts)?;
     let s = state().lock().unwrap();
     s.sessions.get(&token_hash(token)).map(|v| v.meta.device.clone()).filter(|d| !d.is_empty())
+}
+
+/// How long a demo session lasts (see `new_demo_session`).
+pub const DEMO_SESSION_SECS: i64 = 24 * 3600;
+/// Live demo sessions at most, and from one network (`demo_cap_net`): past
+/// either the least recently used goes (of that network, for the second).
+pub const MAX_DEMO_SESSIONS: usize = 200;
+pub const MAX_DEMO_SESSIONS_PER_NET: usize = 20;
+/// Demo sign-ins a minute from one address (`demo_net`), from one network
+/// (`demo_cap_net`: at most a third of all), and from everywhere.
+pub const DEMO_PER_NET_MINUTE: usize = 10;
+pub const DEMO_ALL_MINUTE: usize = 60;
+pub const DEMO_CAP_NET_MINUTE: usize = DEMO_ALL_MINUTE / 3;
+
+/// Where demo sign-ins are counted from: an IPv4 address, or an IPv6 /48
+/// (one home or site often has a whole /56 or /48 to pick addresses from).
+fn demo_net(ip: IpAddr) -> IpAddr {
+    match net_key(ip) {
+        IpAddr::V6(a) => {
+            let s = a.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0))
+        }
+        v4 => v4,
+    }
+}
+
+/// The network demo sessions are held to a share of: an IPv4 /24 or an IPv6 /48.
+fn demo_cap_net(ip: IpAddr) -> IpAddr {
+    match demo_net(ip) {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            IpAddr::V4(std::net::Ipv4Addr::new(o[0], o[1], o[2], 0))
+        }
+        v6 => v6,
+    }
+}
+
+/// What demo sign-in keeps count of.
+#[derive(Default)]
+struct DemoGate {
+    /// Sign-ins let in per address (`demo_net`), per network (`demo_cap_net`)
+    /// and from everywhere, in the last minute.
+    nets: HashMap<IpAddr, Vec<Instant>>,
+    cap_nets: HashMap<IpAddr, Vec<Instant>>,
+    all: Vec<Instant>,
+    /// Since the audit log was last told: sign-ins let in, refused, and the
+    /// refused per network.
+    signed_in: usize,
+    refused: usize,
+    refused_from: HashMap<IpAddr, usize>,
+}
+
+impl DemoGate {
+    /// See `demo_allowed`.
+    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let minute = Duration::from_secs(60);
+        let recent = |l: &mut Vec<Instant>| l.retain(|t| now.duration_since(*t) < minute);
+        recent(&mut self.all);
+        for m in [&mut self.nets, &mut self.cap_nets] {
+            if m.len() > 10_000 {
+                m.retain(|_, l| l.iter().any(|t| now.duration_since(*t) < minute));
+            }
+        }
+        let (key, cap_key) = (demo_net(ip), demo_cap_net(ip));
+        let mine = self.nets.entry(key).or_default();
+        recent(mine);
+        let mine = mine.len();
+        let network = self.cap_nets.entry(cap_key).or_default();
+        recent(network);
+        if mine >= DEMO_PER_NET_MINUTE || network.len() >= DEMO_CAP_NET_MINUTE || self.all.len() >= DEMO_ALL_MINUTE {
+            self.refused += 1;
+            if self.refused_from.len() < 10_000 || self.refused_from.contains_key(&cap_key) {
+                *self.refused_from.entry(cap_key).or_default() += 1;
+            }
+            return false;
+        }
+        network.push(now);
+        self.nets.entry(key).or_default().push(now);
+        self.all.push(now);
+        self.signed_in += 1;
+        true
+    }
+
+    /// The audit line for what happened since the last one (None: nothing),
+    /// and start counting again: "N demo sign-ins, M refused (most from
+    /// <network> (k), ...)".
+    fn take_line(&mut self) -> Option<String> {
+        if self.signed_in == 0 && self.refused == 0 {
+            return None;
+        }
+        let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+        let mut line = plural(self.signed_in, "demo sign-in", "demo sign-ins");
+        if self.refused > 0 {
+            let mut top: Vec<(IpAddr, usize)> = self.refused_from.drain().collect();
+            top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let named: Vec<String> = top.iter().take(3).map(|(n, k)| format!("{}/{} ({k})", n, if n.is_ipv4() { 24 } else { 48 })).collect();
+            line += &format!(", {} refused (most from {})", self.refused, named.join(", "));
+        }
+        self.signed_in = 0;
+        self.refused = 0;
+        self.refused_from.clear();
+        Some(line)
+    }
+}
+
+/// A demo sign-in from this address may go ahead now: `DEMO_PER_NET_MINUTE`
+/// from its address (or IPv6 /48), `DEMO_CAP_NET_MINUTE` from its network,
+/// `DEMO_ALL_MINUTE` in all. Counted either way, for the audit log.
+pub fn demo_allowed(ip: IpAddr) -> bool {
+    state().lock().unwrap().demo.allow(ip, Instant::now())
+}
+
+/// The audit line about demo sign-ins since the last one, if any (written
+/// once a minute and at shutdown, never one per sign-in: visitors must not
+/// push everything else out of the log).
+pub fn demo_audit_line() -> Option<String> {
+    state().lock().unwrap().demo.take_line()
+}
+
+#[cfg(test)]
+mod demo_gate_tests {
+    use super::*;
+
+    #[test]
+    fn demo_sign_ins_are_limited_per_address_network_and_in_all() {
+        let mut g = DemoGate::default();
+        let t0 = Instant::now();
+        let v4 = |c: u8, n: u8| IpAddr::from([10, 0, c, n]);
+        assert!((0..DEMO_PER_NET_MINUTE).all(|_| g.allow(v4(0, 1), t0)));
+        assert!(!g.allow(v4(0, 1), t0), "the 11th from one address");
+        assert!(g.allow(v4(1, 2), t0), "another address");
+        // IPv6: one /48 is one address here, whatever the rest.
+        let v6 = |s2: u16, s3: u16| IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, s2, s3, 0, 0, 0, 1));
+        assert!((0..DEMO_PER_NET_MINUTE as u16).all(|i| g.allow(v6(0x10, i), t0)));
+        assert!(!g.allow(v6(0x10, 0xffff), t0), "the same /48");
+        assert!(g.allow(v6(0x11, 0), t0), "another /48");
+        // A /24 gets a third of the minute's sign-ins at most, from however many addresses.
+        let mut g = DemoGate::default();
+        let ok = (1..=40u8).filter(|n| g.allow(IpAddr::from([10, 5, 5, *n]), t0)).count();
+        assert_eq!(ok, DEMO_CAP_NET_MINUTE);
+        assert!(g.allow(IpAddr::from([10, 5, 6, 1]), t0), "the next /24 is not held up");
+        // A minute later: again.
+        assert!(g.allow(IpAddr::from([10, 5, 5, 1]), t0 + Duration::from_secs(61)));
+        // From everywhere: DEMO_ALL_MINUTE.
+        let mut g = DemoGate::default();
+        let ok = (0..200u8).filter(|n| g.allow(IpAddr::from([10, *n, 0, 1]), t0)).count();
+        assert_eq!(ok, DEMO_ALL_MINUTE);
+    }
+
+    #[test]
+    fn demo_sign_ins_take_one_audit_line_with_the_refused() {
+        let mut g = DemoGate::default();
+        let t0 = Instant::now();
+        assert_eq!(g.take_line(), None, "nothing to say");
+        assert!(g.allow(IpAddr::from([10, 0, 0, 1]), t0));
+        assert_eq!(g.take_line().as_deref(), Some("1 demo sign-in"));
+        for n in 0..25u8 {
+            g.allow(IpAddr::from([10, 7, 7, n]), t0);
+        }
+        for _ in 0..12 {
+            g.allow(IpAddr::from([10, 8, 8, 1]), t0);
+        }
+        // 20 from 10.7.7.0/24 and 10 from 10.8.8.1 let in; 5 and 2 refused.
+        assert_eq!(g.take_line().as_deref(), Some("30 demo sign-ins, 7 refused (most from 10.7.7.0/24 (5), 10.8.8.0/24 (2))"));
+        assert_eq!(g.take_line(), None, "counted once");
+    }
+}
+
+/// The demo account changed from `old` to `new` (None: demo off): both forget
+/// their sessions and cached passwords (`forget_user`), so no session of
+/// either carries over into what the account is now. (Demo sessions are only
+/// in memory: a restart ends them all.)
+pub fn demo_changed(old: Option<&str>, new: Option<&str>) {
+    for user in [old, new].into_iter().flatten() {
+        forget_user(user, None);
+    }
+}
+
+/// A demo session for `id` (the demo account), made from `meta.ip`: kept in
+/// memory only (never in the database), `DEMO_SESSION_SECS` long. Its network
+/// keeps at most `MAX_DEMO_SESSIONS_PER_NET` (its own least recently used goes),
+/// and the account at most `MAX_DEMO_SESSIONS`. None if the account changed
+/// since `generation_then`.
+pub fn new_demo_session(id: Identity, generation_then: u64, mut meta: SessionMeta) -> Option<String> {
+    let user = id.user.clone();
+    meta.demo = true;
+    let net = meta.ip.map(demo_cap_net);
+    end_idle_sessions(&user, MAX_DEMO_SESSIONS_PER_NET.saturating_sub(1), |m| net.is_some() && m.ip_made.map(demo_cap_net) == net);
+    let token = new_session_if_current_lasting(id, generation_then, meta, DEMO_SESSION_SECS)?;
+    end_idle_sessions(&user, MAX_DEMO_SESSIONS, |_| true);
+    Some(token)
+}
+
+/// End the account's least recently used sessions among those `which` picks,
+/// until `keep` of them are left (the oldest made first among those used at
+/// the same second).
+fn end_idle_sessions(user: &str, keep: usize, which: impl Fn(&SessionMeta) -> bool) {
+    let now = now_secs();
+    let mut s = state().lock().unwrap();
+    let mut live: Vec<(i64, u64, String)> = s.sessions.iter().filter(|(_, v)| v.id.user == user && v.expires > now && which(&v.meta)).map(|(h, v)| (v.meta.last_seen.max(v.meta.created), v.meta.seq, h.clone())).collect();
+    let over = live.len().saturating_sub(keep);
+    if over == 0 {
+        return;
+    }
+    live.sort();
+    let gone: Vec<String> = live.into_iter().take(over).map(|(_, _, h)| h).collect();
+    for h in &gone {
+        s.sessions.remove(h);
+    }
+    if let Some(db) = s.store.clone() {
+        drop(s);
+        for h in &gone {
+            let _ = db.delete_session(h);
+        }
+    }
+}
+
+/// Note a use of the session of `token` at `at` (unix seconds), as tests need.
+#[cfg(test)]
+pub fn session_used_at(token: &str, at: i64) {
+    if let Some(v) = state().lock().unwrap().sessions.get_mut(&token_hash(token)) {
+        v.meta.last_seen = at;
+    }
+}
+
+/// Whether the session of `token` was made by demo sign-in.
+#[cfg(test)]
+pub fn session_is_demo(token: &str) -> bool {
+    state().lock().unwrap().sessions.get(&token_hash(token)).is_some_and(|v| v.meta.demo)
+}
+
+/// The account's live sessions: how many.
+#[cfg(test)]
+pub fn live_sessions(user: &str) -> usize {
+    let now = now_secs();
+    state().lock().unwrap().sessions.values().filter(|v| v.id.user == user && v.expires > now).count()
+}
+
+/// When the session of `token` ends (unix seconds).
+#[cfg(test)]
+pub fn session_expires(token: &str) -> Option<i64> {
+    state().lock().unwrap().sessions.get(&token_hash(token)).map(|v| v.expires)
 }
 
 /// Does the account have a live session?
@@ -1383,6 +1668,10 @@ pub fn end_session(token: &str) {
 pub fn session_identity(token: &str, accounts: &[(String, String, bool)]) -> Option<Identity> {
     let s = state().lock().unwrap();
     let sess = s.sessions.get(&token_hash(token)).filter(|v| v.expires > now_secs())?;
+    // The demo account only through demo sessions, and those only for it.
+    if sess.meta.demo != is_demo(accounts, &sess.id.user) {
+        return None;
+    }
     let (u, _, admin) = accounts.iter().find(|(u, _, _)| *u == sess.id.user)?;
     // A session never gains admin rights it was not started with (e.g. one
     // that came from a linked server as a viewer).

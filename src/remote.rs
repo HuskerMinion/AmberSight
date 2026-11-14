@@ -226,7 +226,7 @@ pub async fn share_snapshot(State(engine): State<Arc<Engine>>, h: HeaderMap, AxP
     if let Err(r) = sharing_cam(&engine, &h, id) {
         return r;
     }
-    crate::web::snapshot(State(engine), AxPath(id)).await
+    crate::web::snapshot(State(engine), None, AxPath(id)).await
 }
 
 // ------------------------------------------------------------- viewing side
