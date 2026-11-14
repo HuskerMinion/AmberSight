@@ -2792,7 +2792,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -2805,8 +2805,20 @@ fn ask_of(req: &Request) -> crate::transcode::http::Ask {
         None => Ask::Start,
         Some(r) if r == "bytes=0-0" => Ask::Headers,
         Some(r) if r == "bytes=0-" => Ask::Start,
-        Some(_) => Ask::Resume,
+        Some(r) => Ask::Resume(resume_range(&r)),
     }
+}
+
+/// `bytes=N-` or `bytes=N-M` (the forms a player resumes with); anything else
+/// (a suffix, several ranges) is None.
+fn resume_range(r: &str) -> Option<(u64, Option<u64>)> {
+    let (a, b) = r.strip_prefix("bytes=")?.split_once('-')?;
+    let from = a.trim().parse::<u64>().ok()?;
+    let to = match b.trim() {
+        "" => None,
+        t => Some(t.parse::<u64>().ok().filter(|t| *t >= from)?),
+    };
+    Some((from, to))
 }
 
 fn with_headers(mut r: Response, headers: Vec<(&'static str, String)>) -> Response {
@@ -7940,5 +7952,32 @@ mod operator_tests {
         ] {
             assert_eq!(call(m, p, "otto", None, b).await.0, StatusCode::FORBIDDEN, "{m} {p}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use crate::transcode::http::Ask;
+
+    fn ask(method: &str, range: Option<&str>) -> Ask {
+        let mut b = axum::http::Request::builder().method(method).uri("/api/clips/x");
+        if let Some(r) = range {
+            b = b.header(axum::http::header::RANGE, r);
+        }
+        super::ask_of(&b.body(axum::body::Body::empty()).unwrap())
+    }
+
+    #[test]
+    fn ranges_on_converted_answers() {
+        assert!(ask("GET", None) == Ask::Start);
+        assert!(ask("GET", Some("bytes=0-")) == Ask::Start);
+        assert!(ask("GET", Some("bytes=0-0")) == Ask::Headers, "the headers-only probe");
+        assert!(ask("HEAD", None) == Ask::Headers);
+        // AVPlayer's first request: from byte 0 with an end, which starts the conversion.
+        assert!(ask("GET", Some("bytes=0-1")) == Ask::Resume(Some((0, Some(1)))));
+        assert!(ask("GET", Some("bytes=1304-")) == Ask::Resume(Some((1304, None))));
+        assert!(ask("GET", Some("bytes=5-18446744073709551615")) == Ask::Resume(Some((5, Some(u64::MAX)))));
+        assert!(ask("GET", Some("bytes=-500")) == Ask::Resume(None));
+        assert!(ask("GET", Some("bytes=9-3")) == Ask::Resume(None));
     }
 }

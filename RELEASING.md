@@ -58,6 +58,27 @@ is built into the program (`RELEASE_PUBKEY` in `src/update.rs`).
    `SHA256SUMS` and `SHA256SUMS.sig`; it refuses a private repository. Drafts and pre-releases are never offered by the
    updater; publish a normal release.
 
+6. Update the package repository (apt and dnf):
+
+   ```sh
+   scripts/package-repo.sh 0.2.0 --commit
+   ```
+
+   (`release.sh --publish` runs this after the GitHub release exists.) It writes
+   signed metadata, and the two newest `.deb` files, into the separate repository
+   `~/projects/ambersight-packages` (`PACKAGES_REPO`) and commits it; it never
+   pushes. Push that repository's `main` branch and GitHub Pages serves it at
+   https://huskerminion.github.io/ambersight-packages/. Do this after the GitHub release
+   is public: the dnf metadata links to that release's `.rpm` files. Running it again
+   changes nothing. When `.git` there grows past a few hundred MB, squash its history
+   (the repository holds only generated files): `git checkout --orphan new && git add -A
+   && git commit -m "AmberSight <v>" && git branch -M main && git push -f origin main`.
+
+   The signing key is separate from the release key: `~/.ambersight-release/apt-repo-key`
+   (ed25519, no passphrase, mode 600; back it up offline, never commit it). A lost or
+   leaked key means a new key, a new `ambersight-archive-keyring.*` and setup run again on
+   every computer.
+
 ## Automatic checks
 
 Servers look for a new release every 12 hours (`[update] check`, on by

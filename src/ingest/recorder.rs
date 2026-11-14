@@ -739,7 +739,16 @@ impl OpenStream {
                         CodecItem::AudioFrame(f) if (self.use_audio || self.tap_audio) && Some(f.stream_id()) == *audio_i => {
                             let mut ticks = f.timestamp().elapsed();
                             let data = match g711.as_mut() {
-                                Some(c) => c.convert(f.data()),
+                                Some(c) => {
+                                    let (t, frame) = c.convert_timed(ticks, f.data());
+                                    ticks = t;
+                                    if let Some(r) = c.take_mismatch() {
+                                        tracing::warn!(
+                                            "camera audio: its timestamps pass {r:.2} times as much time as the sound it sends; timing the sound by what it holds"
+                                        );
+                                    }
+                                    frame
+                                }
                                 None => {
                                     let Some(d) = super::aac::raw_frame(f.data()) else { continue };
                                     // An AAC frame is 1024 samples. Some cameras give
@@ -765,9 +774,19 @@ impl OpenStream {
                             };
                             let Some(ts) = r.rtp_timestamp() else { continue };
                             let Some(Ok(Some(sr))) = r.pkts().next().map(|p| p.as_sender_report()) else { continue };
+                            let mut ticks = ts.elapsed();
+                            if track == 1 {
+                                // G.711 audio is timed by its samples, not the RTP clock the
+                                // report uses: placed on that timeline (or left out when it
+                                // cannot be), so alignment compares like with like.
+                                if let Some(c) = g711.as_ref() {
+                                    let Some(t) = c.timeline_of(ticks) else { continue };
+                                    ticks = t;
+                                }
+                            }
                             return Some(Ok(MediaItem::SenderReport {
                                 track,
-                                ticks: ts.elapsed(),
+                                ticks,
                                 epoch_secs: ntp_to_epoch_secs(sr.ntp_timestamp().0),
                             }));
                         }

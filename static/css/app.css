@@ -264,7 +264,7 @@ td button { padding: 3px 10px; font-size: var(--fs-s); }
 .dlg .tabs button, .st-tabs button { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted); padding: 8px 12px; cursor: pointer; font-size: var(--fs); margin-bottom: -1px; }
 .dlg .tabs button.on, .st-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
 .dlg label { display: block; margin: var(--s2) 0; font-size: var(--fs-s); color: var(--muted); }
-.dlg label input:not([type=checkbox]), .dlg label select { width: 100%; margin-top: 3px; }
+.dlg label input:not([type=checkbox]):not([type=radio]), .dlg label select { width: 100%; margin-top: 3px; }
 .dlg .sec { font-weight: 600; color: var(--text); font-size: var(--fs); margin: var(--s3) 0 var(--s1); }
 .dlg .row { margin-top: var(--s3); display: flex; gap: var(--s2); }
 .lycams { border: 1px solid var(--line); border-radius: var(--r1); max-height: 260px; overflow: auto; }

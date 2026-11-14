@@ -10,6 +10,7 @@
 //! `live.rs`); recordings and event clips are transcoded per request as
 //! fragmented MP4 (`file.rs`).
 
+pub mod cache;
 pub mod file;
 pub mod http;
 pub mod live;
@@ -42,6 +43,29 @@ pub struct TranscodeConfig {
     /// transcodes started that are still running.
     #[serde(default = "default_max_per_user")]
     pub max_per_user: usize,
+    /// A converted answer is also kept on disk for a while so a player that
+    /// asks again with a byte Range (Android's ExoPlayer does) can be
+    /// answered. Per answer, the most kept (MB; past it the answer leaves the
+    /// cache, and its conversion goes on for the players reading it).
+    #[serde(default = "default_cache_entry_mb")]
+    pub cache_entry_mb: u64,
+    /// All kept answers together (MB; the oldest unused go first, and when
+    /// none can, a new answer is streamed without a copy). 0 turns this off.
+    #[serde(default = "default_cache_total_mb")]
+    pub cache_total_mb: u64,
+    /// A kept answer is dropped this long (seconds) after it was last used.
+    #[serde(default = "default_cache_seconds")]
+    pub cache_seconds: u64,
+}
+
+fn default_cache_entry_mb() -> u64 {
+    2048
+}
+fn default_cache_total_mb() -> u64 {
+    4096
+}
+fn default_cache_seconds() -> u64 {
+    600
 }
 
 fn default_encoder() -> String {
@@ -59,7 +83,7 @@ fn default_max_per_user() -> usize {
 
 impl Default for TranscodeConfig {
     fn default() -> Self {
-        TranscodeConfig { encoder: default_encoder(), max_hardware: default_max_hardware(), max_software: default_max_software(), max_per_user: default_max_per_user() }
+        TranscodeConfig { encoder: default_encoder(), max_hardware: default_max_hardware(), max_software: default_max_software(), max_per_user: default_max_per_user(), cache_entry_mb: default_cache_entry_mb(), cache_total_mb: default_cache_total_mb(), cache_seconds: default_cache_seconds() }
     }
 }
 
@@ -83,9 +107,22 @@ impl TranscodeConfig {
                 *v = MAX_LIMIT;
             }
         }
+        for (name, v, hi) in [("cache_entry_mb", &mut c.cache_entry_mb, MAX_CACHE_MB), ("cache_total_mb", &mut c.cache_total_mb, MAX_CACHE_MB), ("cache_seconds", &mut c.cache_seconds, MAX_CACHE_SECONDS)] {
+            if *v > hi {
+                warn.push(format!("[transcode] {name} must be {hi} or less (not {v}); {hi} is used"));
+                *v = hi;
+            }
+        }
+        if c.cache_seconds == 0 {
+            warn.push("[transcode] cache_seconds must be at least 1; 1 is used".into());
+            c.cache_seconds = 1;
+        }
         (c, warn)
     }
 }
+
+const MAX_CACHE_MB: u64 = 4 * 1024 * 1024;
+const MAX_CACHE_SECONDS: u64 = 86400;
 
 const ENCODER_NAMES: [&str; 8] = ["auto", "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "software", "off"];
 const MAX_LIMIT: usize = 64;
@@ -578,6 +615,102 @@ pub fn warn_limited(key: &str, msg: &str) {
     }
 }
 
+/// Decoding on the graphics card that failed to start: skipped for an hour for the same
+/// encoder, device, source codec and bit depth, so the next start goes straight to the way
+/// that works (a failed try costs seconds before the first picture).
+pub struct HwMemory {
+    failed: Mutex<Option<std::collections::HashMap<String, std::time::Instant>>>,
+}
+
+const HW_FORGET: std::time::Duration = std::time::Duration::from_secs(3600);
+
+impl HwMemory {
+    pub const fn new() -> Self {
+        HwMemory { failed: Mutex::new(None) }
+    }
+
+    pub fn key(e: &Encoder, codec: OutCodec, src_codec: &str, depth: u8) -> String {
+        format!("{}|{}|{:?}|{src_codec}|{depth}", e.name(codec), e.device.as_deref().unwrap_or(""), codec)
+    }
+
+    pub fn skipped_at(&self, key: &str, now: std::time::Instant) -> bool {
+        let mut g = self.failed.lock().unwrap();
+        let m = g.get_or_insert_with(Default::default);
+        m.retain(|_, t| now.saturating_duration_since(*t) < HW_FORGET);
+        m.contains_key(key)
+    }
+
+    /// True when this is new (the caller logs it once).
+    pub fn failed_at(&self, key: &str, now: std::time::Instant) -> bool {
+        self.failed.lock().unwrap().get_or_insert_with(Default::default).insert(key.to_string(), now).is_none()
+    }
+
+    pub fn worked(&self, key: &str) {
+        self.failed.lock().unwrap().get_or_insert_with(Default::default).remove(key);
+    }
+}
+
+static HW_MEMORY: HwMemory = HwMemory::new();
+
+pub fn hw_skipped(key: &str) -> bool {
+    HW_MEMORY.skipped_at(key, std::time::Instant::now())
+}
+
+/// One job's tries of decoding on the graphics card that made nothing. The
+/// card is blamed (remembered in `HwMemory`) only when software decoding then
+/// works on the same input with the same encoder: a damaged clip, a slow
+/// input or an encoder that fails would fail either way, and must not turn
+/// the card's decoding off for every camera with that codec.
+#[derive(Default)]
+pub struct HwTries {
+    /// (memory key, what to log).
+    pending: Vec<(String, String)>,
+}
+
+impl HwTries {
+    /// After a try. `made_output`: it produced output; `gone`: nobody wanted
+    /// it any more (says nothing about the decoding). Returns the failures
+    /// now proven, to remember.
+    pub fn after(&mut self, key: String, what: String, hw_decode: bool, made_output: bool, gone: bool) -> Vec<(String, String)> {
+        match (hw_decode, made_output) {
+            (true, true) => {
+                self.pending.retain(|(k, _)| *k != key);
+                Vec::new()
+            }
+            (true, false) if !gone => {
+                if !self.pending.iter().any(|(k, _)| *k == key) {
+                    self.pending.push((key, what));
+                }
+                Vec::new()
+            }
+            // (The key names the encoder, not the way of decoding: the same key
+            // is the same encoder decoding in software.)
+            (false, true) => {
+                let (proven, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending).into_iter().partition(|(k, _)| *k == key);
+                self.pending = rest;
+                proven
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// `after`, with the outcome kept in the server's memory (and logged once).
+    pub fn settle(&mut self, key: String, what: String, hw_decode: bool, made_output: bool, gone: bool) {
+        self.settle_in(&HW_MEMORY, key, what, hw_decode, made_output, gone)
+    }
+
+    fn settle_in(&mut self, mem: &HwMemory, key: String, what: String, hw_decode: bool, made_output: bool, gone: bool) {
+        if hw_decode && made_output {
+            mem.worked(&key);
+        }
+        for (k, what) in self.after(key, what, hw_decode, made_output, gone) {
+            if mem.failed_at(&k, std::time::Instant::now()) {
+                tracing::warn!("transcode: decoding {what} on the graphics card failed where software decoding worked; using software decoding for the next hour");
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ffmpeg arguments
 // ---------------------------------------------------------------------------
@@ -997,6 +1130,69 @@ impl Plan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_card_is_blamed_only_when_software_decoding_then_works() {
+        use std::time::Instant;
+        let e = Encoder { hw: Some(Hw::Qsv), device: Some("/dev/dri/renderD128".into()) };
+        let k = super::HwMemory::key(&e, OutCodec::H264, "Hevc", 8);
+        let what = || "Hevc with qsv".to_string();
+        // Hardware made nothing, then software made nothing too (a damaged clip, a
+        // slow input, an encoder that fails): nothing is remembered.
+        let m = super::HwMemory::new();
+        let mut t = super::HwTries::default();
+        t.settle_in(&m, k.clone(), what(), true, false, false);
+        assert!(!m.skipped_at(&k, Instant::now()), "not yet: pending");
+        t.settle_in(&m, k.clone(), what(), false, false, false);
+        assert!(!m.skipped_at(&k, Instant::now()));
+        // Hardware made nothing, software then worked on the same input: remembered.
+        let mut t = super::HwTries::default();
+        t.settle_in(&m, k.clone(), what(), true, false, false);
+        t.settle_in(&m, k.clone(), what(), false, true, false);
+        assert!(m.skipped_at(&k, Instant::now()));
+        // The viewer left during the hardware try: proves nothing.
+        let m = super::HwMemory::new();
+        let mut t = super::HwTries::default();
+        t.settle_in(&m, k.clone(), what(), true, false, true);
+        t.settle_in(&m, k.clone(), what(), false, true, false);
+        assert!(!m.skipped_at(&k, Instant::now()));
+        // Hardware that works clears what was remembered.
+        m.failed_at(&k, Instant::now());
+        super::HwTries::default().settle_in(&m, k.clone(), what(), true, true, false);
+        assert!(!m.skipped_at(&k, Instant::now()));
+    }
+
+    #[test]
+    fn another_encoders_success_does_not_blame_the_card() {
+        let qsv = Encoder { hw: Some(Hw::Qsv), device: Some("/dev/dri/renderD128".into()) };
+        let kq = super::HwMemory::key(&qsv, OutCodec::H264, "Hevc", 8);
+        let ks = super::HwMemory::key(&Encoder::software(), OutCodec::H264, "Hevc", 8);
+        let m = super::HwMemory::new();
+        let mut t = super::HwTries::default();
+        t.settle_in(&m, kq.clone(), "x".into(), true, false, false); // qsv, card decode: nothing
+        t.settle_in(&m, kq.clone(), "x".into(), false, false, false); // qsv, software decode: nothing (the encoder)
+        t.settle_in(&m, ks.clone(), "x".into(), false, true, false); // libx264 works
+        assert!(!m.skipped_at(&kq, std::time::Instant::now()), "qsv failed with software decoding too");
+    }
+
+    #[test]
+    fn failed_hardware_decoding_is_skipped_for_an_hour() {
+        use std::time::{Duration, Instant};
+        let m = super::HwMemory::new();
+        let e = Encoder { hw: Some(Hw::Nvenc), device: None };
+        let k = super::HwMemory::key(&e, OutCodec::H264, "Hevc", 10);
+        let k8 = super::HwMemory::key(&e, OutCodec::H264, "Hevc", 8);
+        let t0 = Instant::now();
+        assert!(!m.skipped_at(&k, t0));
+        assert!(m.failed_at(&k, t0), "new: logged");
+        assert!(!m.failed_at(&k, t0), "again: not logged");
+        assert!(m.skipped_at(&k, t0 + Duration::from_secs(3599)));
+        assert!(!m.skipped_at(&k8, t0), "another depth is its own key");
+        assert!(!m.skipped_at(&k, t0 + Duration::from_secs(3601)), "forgotten after an hour");
+        m.failed_at(&k, t0);
+        m.worked(&k);
+        assert!(!m.skipped_at(&k, t0));
+    }
+
     use super::*;
 
     fn src(codec: VideoCodec, depth: u8, w: u32, h: u32, fps: f64) -> Source {

@@ -273,6 +273,7 @@ impl Engine {
         std::fs::create_dir_all(&data_dir).ok();
         std::fs::create_dir_all(data_dir.join("clips")).ok();
         std::fs::create_dir_all(data_dir.join("thumbs")).ok();
+        crate::transcode::cache::init(&data_dir, crate::transcode::cache::Limits::from_config(&config.transcode.sanitized().0));
         let db = Arc::new(crate::db::Db::open(&data_dir.join("ambersight.db"))?);
         crate::ingest::splice::open_index(&data_dir.join("layouts.db"));
         // Reviews from before the one-line verdicts were kept get theirs, a little at a time.

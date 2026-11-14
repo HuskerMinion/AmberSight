@@ -144,6 +144,17 @@ pub fn flac_frame_samples(f: &[u8]) -> Option<Vec<i16>> {
     Some(body.chunks_exact(2).map(|b| i16::from_be_bytes([b[0], b[1]])).collect())
 }
 
+/// The number of samples in a frame made by `flac_frame`, from its header
+/// alone (None for anything else).
+pub fn flac_block_size(f: &[u8]) -> Option<u32> {
+    if f.len() < 10 || f[0] != 0xff || f[1] != 0xf9 || f[2] >> 4 != 0b0111 || f[3] != 0b0000_1000 {
+        return None;
+    }
+    let lead = f[4].leading_ones() as usize;
+    let i = 4 + if lead == 0 { 1 } else { lead };
+    Some(u32::from(u16::from_be_bytes([*f.get(i)?, *f.get(i + 1)?])) + 1)
+}
+
 fn mp4_box(out: &mut Vec<u8>, kind: &[u8; 4], body: impl FnOnce(&mut Vec<u8>)) {
     let start = out.len();
     out.extend_from_slice(&[0, 0, 0, 0]);
@@ -187,12 +198,239 @@ pub struct ToFlac {
     law: Law,
     rate: u32,
     next: u64,
+    /// Timeline: a packet whose first sample is number `n` is placed at
+    /// `base + n`.
+    base: i64,
+    /// RTP time and sample count of the previous packet.
+    last: Option<(i64, u64)>,
+    /// The previous packet's timeline position.
+    last_pos: i64,
+    /// Where the timeline was last set from the RTP clock: (RTP time, sample
+    /// number) of that packet.
+    anchor: (i64, u64),
+    /// What the camera's clock is, once learnt.
+    clock: Clock,
+    /// While learning: each step's RTP time per sample.
+    steps: Vec<f64>,
+    /// The window of steps being gathered (RTP time, samples), and the RTP
+    /// time per sample of the last windows.
+    win: (i64, i64),
+    windows: std::collections::VecDeque<f64>,
+    /// Big steps (sound left out) not yet placed: RTP time, samples carried.
+    big: (i64, i64),
+    told: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Clock {
+    Learning,
+    /// Its RTP steps match its samples: timed by its clock.
+    Exact,
+    /// RTP time per sample is this (not 1): timed by its samples.
+    Odd(f64),
+}
+
+/// A window of steps, in seconds of samples.
+const WINDOW_SECS: i64 = 2;
+/// The clock is learnt over this many windows (6 s).
+const LEARN_WINDOWS: usize = 3;
+/// An odd clock's rate is the median of this many last windows (10 minutes:
+/// slow, so jittery steps do not move it).
+const RATE_WINDOWS: usize = 301;
+
+/// The median of `v` (sorted in place): with an even count, the mean of the
+/// two middle values (timestamps in pairs, 0 then twice the step, give 1).
+fn median(v: &mut [f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    let m = v.len() / 2;
+    Some(if v.len() % 2 == 0 { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
 }
 
 impl ToFlac {
     pub fn new(law: Law, rate: u32) -> ToFlac {
-        ToFlac { law, rate, next: 0 }
+        ToFlac {
+            law,
+            rate,
+            next: 0,
+            base: 0,
+            last: None,
+            last_pos: 0,
+            anchor: (0, 0),
+            clock: Clock::Learning,
+            steps: Vec::new(),
+            win: (0, 0),
+            windows: Default::default(),
+            big: (0, 0),
+            told: false,
+        }
     }
+
+    /// The camera's RTP ticks per sample, once learnt.
+    fn ticks_per_sample(&self) -> Option<f64> {
+        match self.clock {
+            Clock::Learning => None,
+            Clock::Exact => Some(1.0),
+            Clock::Odd(r) => Some(r),
+        }
+    }
+
+    /// Like `convert`, with the packet's time in the stream's clock (the
+    /// sample rate). The camera's clock is learnt over its first 6 s:
+    ///
+    /// - Most cameras' RTP steps match their samples (the middle 2-second
+    ///   window is within 0.5% of them, or the middle step is and the windows
+    ///   are within 3%): they are timed by
+    ///   their clock, as all audio was before, so sound left out (silence,
+    ///   lost packets) keeps its place. A difference of more than 30 ms (or a
+    ///   packet) between the clock and the samples moves the timeline on.
+    /// - Some cameras stamp G.711 packets with RTP steps that do not match the
+    ///   samples (600 for 320 on average, with jitter), and audio placed by
+    ///   them runs far too long. They are timed by their samples. Only an
+    ///   unmistakable gap moves the timeline: one step of more than 8 times the
+    ///   previous packet's samples, by the time it shows at the camera's rate
+    ///   (the median of its last 2-second windows). Small losses are not
+    ///   looked for (jitter must never make holes).
+    ///
+    /// A camera whose rate changes mid-stream (reconfigured) is not followed:
+    /// it reconnects, and the clock is learnt again. When packets arrive does
+    /// not matter. An RTP clock that goes back by more than a second is a
+    /// camera restart: the timeline starts again from it.
+    pub fn convert_timed(&mut self, rtp: i64, data: &[u8]) -> (i64, Vec<u8>) {
+        let one_sec = i64::from(self.rate);
+        let n = self.next;
+        match self.last {
+            None => self.restart(rtp, n),
+            Some((last_rtp, last_n)) => {
+                let step = rtp.wrapping_sub(last_rtp);
+                let last_n = last_n.min(i64::MAX as u64 / 8) as i64;
+                if step < -one_sec {
+                    self.restart(rtp, n);
+                } else {
+                    let big = step > last_n * 8;
+                    if big {
+                        self.big = (self.big.0.saturating_add(step), self.big.1 + last_n);
+                    } else {
+                        if self.clock == Clock::Learning && last_n > 0 {
+                            self.steps.push(step as f64 / last_n as f64);
+                        }
+                        self.win = (self.win.0.saturating_add(step), self.win.1 + last_n);
+                        if self.win.1 >= WINDOW_SECS * one_sec {
+                            let w = std::mem::take(&mut self.win);
+                            self.add_window(w);
+                        }
+                    }
+                    match self.clock {
+                        Clock::Learning => {}
+                        Clock::Exact => {
+                            // Timed by the clock: from the anchor, its time against the samples.
+                            let err = rtp.wrapping_sub(self.anchor.0).saturating_sub(n.saturating_sub(self.anchor.1).min(i64::MAX as u64) as i64);
+                            let threshold = (one_sec * 3 / 100).max(last_n);
+                            if err > threshold {
+                                self.base = self.base.saturating_add(err);
+                                self.anchor = (rtp, n);
+                            } else if err < -one_sec {
+                                self.anchor = (rtp, n);
+                            }
+                            self.big = (0, 0);
+                        }
+                        Clock::Odd(r) => {
+                            // A rate under 1 comes from steps too wild to learn from
+                            // (big steps left out, the short ones after them kept): never
+                            // place gaps from it.
+                            if self.big.1 > 0 && r < 1.005 {
+                                self.big = (0, 0);
+                            } else if self.big.1 > 0 {
+                                let b = std::mem::take(&mut self.big);
+                                let left_out = b.0 as f64 / r - b.1 as f64;
+                                if left_out >= 1.0 {
+                                    self.base = self.base.saturating_add(left_out.round() as i64);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let pos = self.base.saturating_add(n.min(i64::MAX as u64) as i64);
+        let frame = self.convert(data);
+        self.last = Some((rtp, data.len() as u64));
+        self.last_pos = pos;
+        (pos, frame)
+    }
+
+    fn add_window(&mut self, w: (i64, i64)) {
+        if w.1 <= 0 {
+            return;
+        }
+        self.windows.push_back(w.0 as f64 / w.1 as f64);
+        while self.windows.len() > RATE_WINDOWS {
+            self.windows.pop_front();
+        }
+        match self.clock {
+            Clock::Learning if self.windows.len() >= LEARN_WINDOWS => {
+                // Matching: the middle window within 0.5% of 1 (paired stamps, 0 then
+                // 2x, make windows of exactly 1), or the middle step within 0.5% with
+                // windows within 3% (lost packets raise a window a little). A camera
+                // stamping most packets right and then catching up in one step
+                // (320, 320, 320, 1600) has a middle step of 1 but windows of 2: odd.
+                let step = median(&mut std::mem::take(&mut self.steps)).unwrap_or(0.0);
+                let win = median(&mut self.windows.iter().copied().collect::<Vec<_>>()).unwrap_or(0.0);
+                let exact = (win - 1.0).abs() < 0.005 || ((step - 1.0).abs() < 0.005 && (win - 1.0).abs() < 0.03);
+                self.clock = if exact { Clock::Exact } else { Clock::Odd(win) };
+            }
+            Clock::Odd(_) => {
+                if let Some(m) = median(&mut self.windows.iter().copied().collect::<Vec<_>>()) {
+                    self.clock = Clock::Odd(m);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The first packet, or a camera restart: the timeline starts at its RTP
+    /// time, and the clock is learnt again.
+    fn restart(&mut self, rtp: i64, n: u64) {
+        self.base = rtp.saturating_sub(n.min(i64::MAX as u64) as i64);
+        self.anchor = (rtp, n);
+        self.clock = Clock::Learning;
+        self.steps.clear();
+        self.win = (0, 0);
+        self.windows.clear();
+        self.big = (0, 0);
+    }
+
+    /// A time in the camera's RTP clock (an RTCP sender report) on this
+    /// timeline: from the last packet, the RTP time between at the camera's
+    /// rate of RTP ticks per sample. None until that rate is learnt, or
+    /// further than a second from the last packet (it cannot be placed well).
+    pub fn timeline_of(&self, rtp: i64) -> Option<i64> {
+        let (last_rtp, _) = self.last?;
+        let d = rtp.wrapping_sub(last_rtp);
+        if d.abs() > i64::from(self.rate) {
+            return None;
+        }
+        let scaled = (d as f64 / self.ticks_per_sample()?).round() as i64;
+        Some(self.last_pos.saturating_add(scaled))
+    }
+
+    /// Once, when the camera's RTP steps and the samples it sent disagree by
+    /// more than 10% (once the rate is known): RTP time passed per sample.
+    pub fn take_mismatch(&mut self) -> Option<f64> {
+        if self.told {
+            return None;
+        }
+        let r = self.ticks_per_sample()?;
+        if (r - 1.0).abs() > 0.1 {
+            self.told = true;
+            Some(r)
+        } else {
+            None
+        }
+    }
+
     pub fn rate(&self) -> u32 {
         self.rate
     }
@@ -286,6 +524,210 @@ mod tests {
         assert_eq!(a[4], 0); // first sample 0
         assert_eq!(&b[4..6], &[0xc2, 0xa0]); // second frame starts at 160
         assert_eq!(a.len(), 8 + 1 + 320 + 2); // header, subframe byte, samples, CRC-16
+    }
+
+    /// Feed packets of `n` samples with these RTP steps (cycled), `count` of
+    /// them; returns (first position, last position, RTP time of the last).
+    fn feed(c: &mut ToFlac, rtp0: i64, n: usize, steps: &[i64], count: usize) -> (i64, i64, i64) {
+        let mut rtp = rtp0;
+        let (first, _) = c.convert_timed(rtp, &vec![0xff; n]);
+        let mut last = first;
+        for i in 0..count {
+            rtp = rtp.wrapping_add(steps[i % steps.len()]);
+            last = c.convert_timed(rtp, &vec![0xff; n]).0;
+        }
+        (first, last, rtp)
+    }
+
+    /// Feed `count` packets of `n` samples, the steps from `step(i)`; fails on
+    /// any position step other than `n` (a hole).
+    fn no_holes(c: &mut ToFlac, n: usize, count: usize, mut step: impl FnMut(usize) -> i64) {
+        let mut rtp = 1_000i64;
+        let mut prev = c.convert_timed(rtp, &vec![0xff; n]).0;
+        for i in 0..count {
+            rtp += step(i);
+            let t = c.convert_timed(rtp, &vec![0xff; n]).0;
+            assert_eq!(t - prev, n as i64, "packet {i}");
+            prev = t;
+        }
+    }
+
+    /// A small deterministic random number generator.
+    fn noise(seed: &mut u64, span: i64) -> i64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*seed >> 33) as i64 % (2 * span + 1)) - span
+    }
+
+    #[test]
+    fn audio_is_timed_by_its_samples_not_the_cameras_steps() {
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        // 320 samples per packet, RTP steps 1.875 times that (600 on average).
+        let steps = [800i64, 400, 784, 16, 48, 800, 800, 1200, 600, 552];
+        let mut rtp = 1_000_000i64;
+        let mut first = None;
+        for i in 0..400 {
+            let (t, f) = c.convert_timed(rtp, &[0xff; 320]);
+            let first = *first.get_or_insert(t);
+            assert_eq!(t - first, i * 320, "packet {i}: 320-tick steps");
+            assert_eq!(flac_frame_samples(&f).unwrap().len(), 320);
+            if i == 10 {
+                assert!(c.timeline_of(rtp).is_none(), "the rate is not known yet");
+            }
+            rtp += steps[i as usize % steps.len()];
+        }
+        assert_eq!(first, Some(1_000_000));
+        let r = c.take_mismatch().expect("a mismatch is reported");
+        assert!((r - 1.875).abs() < 0.1, "{r}");
+        assert!(c.take_mismatch().is_none(), "only once");
+        // A sender report at the camera's RTP time lands on this timeline, scaled.
+        let (last_rtp, last_pos) = (rtp - steps[399 % steps.len()], 1_000_000 + 399 * 320);
+        assert_eq!(c.timeline_of(last_rtp), Some(last_pos));
+        let p = c.timeline_of(last_rtp + 600).unwrap();
+        assert!((p - (last_pos + 320)).abs() <= 20, "{p}");
+        assert!(c.timeline_of(last_rtp + 100_000).is_none(), "too far to place");
+        // 3 s left out at that camera's rate (45000 RTP ticks): 3 s on the timeline.
+        let (t, _) = c.convert_timed(last_rtp + 45_000 + 320, &[0xff; 320]);
+        let moved = t - (last_pos + 320);
+        assert!((moved - 24_000).abs() < 800, "{moved}");
+    }
+
+    #[test]
+    fn jitter_at_an_odd_rate_never_makes_holes() {
+        // The rev3 pattern, and one of period 7 (straddling windows).
+        no_holes(&mut ToFlac::new(Law::Mu, 8000), 320, 25_000, |i| [1400, 100, 300, 600, 600, 600, 600, 600, 600, 600][i % 10]);
+        no_holes(&mut ToFlac::new(Law::Mu, 8000), 320, 25_000, |i| [1400, 100, 300, 600, 600, 600, 600][i % 7]);
+        // Random noise around 600 for 320, an hour of it.
+        for span in [300, 700, 1000] {
+            let mut seed = span as u64;
+            let mut c = ToFlac::new(Law::Mu, 8000);
+            no_holes(&mut c, 320, 90_000, |_| 600 + noise(&mut seed, span));
+            let r = c.ticks_per_sample().unwrap();
+            assert!((r - 1.875).abs() < 0.02, "±{span}: {r}");
+        }
+        // Odd steps from the very start: nothing moves.
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        let (first, last, _) = feed(&mut c, 0, 320, &[1400, 100], 24);
+        assert_eq!(last - first, 24 * 320);
+    }
+
+    #[test]
+    fn a_long_gap_at_an_odd_rate_is_kept() {
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        let mut seed = 7u64;
+        let mut rtp = 0i64;
+        let mut last = c.convert_timed(rtp, &[0xff; 320]).0;
+        for _ in 0..2000 {
+            rtp += 600 + noise(&mut seed, 300);
+            last = c.convert_timed(rtp, &[0xff; 320]).0;
+        }
+        // 3 s left out: 45000 RTP ticks at 1.875, plus the packet's own 600.
+        rtp += 45_600;
+        let t = c.convert_timed(rtp, &[0xff; 320]).0;
+        assert!(((t - last) - (320 + 24_000)).abs() < 800, "{} s", (t - last - 320) as f64 / 8000.0);
+    }
+
+    #[test]
+    fn a_camera_whose_clock_matches_keeps_lost_packets() {
+        // 1% single losses over 1000 s: within 50 ms of its RTP clock.
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        let mut rtp = 0i64;
+        let (first, _) = c.convert_timed(rtp, &[0xff; 160]);
+        let mut last = first;
+        for i in 1..50_000i64 {
+            rtp += 160;
+            if i % 100 == 0 {
+                continue;
+            }
+            last = c.convert_timed(rtp, &[0xff; 160]).0;
+        }
+        let short = (rtp - first) - (last - first);
+        assert!(short.abs() <= 400, "{} ms short", short / 8);
+        assert!(c.take_mismatch().is_none());
+        assert_eq!(c.timeline_of(rtp), Some(last), "known, and 1");
+        // Timestamps in pairs (0, then twice the step): taken as matching, no holes.
+        no_holes(&mut ToFlac::new(Law::Mu, 8000), 160, 50_000, |i| if i % 2 == 0 { 0 } else { 320 });
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        feed(&mut c, 0, 160, &[0, 320], 1000);
+        assert!(c.clock == Clock::Exact);
+    }
+
+    #[test]
+    fn a_camera_three_percent_off_gets_no_holes() {
+        no_holes(&mut ToFlac::new(Law::Mu, 8000), 160, 50_000, |i| [165, 165, 164, 165, 165][i % 5]);
+        no_holes(&mut ToFlac::new(Law::Mu, 8000), 160, 50_000, |i| if i % 2 == 0 { 159 } else { 160 });
+        no_holes(&mut ToFlac::new(Law::Mu, 8000), 320, 20_000, |_| 603);
+    }
+
+    #[test]
+    fn a_camera_that_catches_up_in_one_step_is_not_taken_as_matching() {
+        // Right stamps, then one step catching up: rate 2, middle step 1.
+        no_holes(&mut ToFlac::new(Law::Mu, 8000), 320, 20_000, |i| [320, 320, 320, 1600][i % 4]);
+    }
+
+    #[test]
+    fn wild_jitter_on_a_matching_clock_never_inserts_time() {
+        // +-1000 ticks (125 ms) on 160-sample packets: big steps get left out of
+        // the windows and the rate comes out far under 1; no gap may be placed from it.
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        let mut seed = 7u64;
+        let mut rtp = 1_000i64;
+        let first = c.convert_timed(rtp, &[0xff; 160]).0;
+        let mut last = first;
+        let count = 30 * 60 * 50;
+        for i in 0..count {
+            rtp = 1_000 + (i as i64 + 1) * 160 + noise(&mut seed, 1000);
+            last = c.convert_timed(rtp, &[0xff; 160]).0;
+        }
+        let inserted = (last - first) - count as i64 * 160;
+        assert!(inserted.abs() < 8000 * 5, "inserted {} s", inserted as f64 / 8000.0);
+    }
+
+    #[test]
+    fn gaps_and_restarts_on_a_matching_clock() {
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        let (_, t, mut rtp) = feed(&mut c, 5000, 160, &[160], 400);
+        assert_eq!(t, 5000 + 400 * 160);
+        // Nothing sent for 3 s, and the RTP clock shows it: a 3 s jump.
+        rtp += 160 + 24_000;
+        let (t2, _) = c.convert_timed(rtp, &[0xff; 160]);
+        assert_eq!(t2, t + 160 + 24_000, "the gap is kept");
+        rtp += 160;
+        let (t3, _) = c.convert_timed(rtp, &[0xff; 160]);
+        assert_eq!(t3, t2 + 160);
+        // Gaps of 0.5 s: each kept.
+        for _ in 0..3 {
+            rtp += 160;
+            let (before, _) = c.convert_timed(rtp, &[0xff; 160]);
+            rtp += 4160;
+            let (after, _) = c.convert_timed(rtp, &[0xff; 160]);
+            assert_eq!(after - before, 160 + 4000);
+        }
+        // A restart: the clock goes back, and is learnt again.
+        let (t4, _) = c.convert_timed(100, &[0xff; 160]);
+        assert_eq!(t4, 100);
+        assert!(c.timeline_of(100).is_none());
+        let (t5, _) = c.convert_timed(260, &[0xff; 160]);
+        assert_eq!(t5, 260);
+        assert!(c.take_mismatch().is_none(), "gaps do not count as a mismatch");
+        // A burst after a network stall: RTP is contiguous, so nothing moves
+        // (when packets arrive is not looked at at all).
+        let mut c = ToFlac::new(Law::Mu, 8000);
+        let (first, last, _) = feed(&mut c, 0, 160, &[160], 600);
+        assert_eq!(last - first, 600 * 160);
+    }
+
+    #[test]
+    fn rtp_times_near_the_ends_do_not_overflow() {
+        let mut c = ToFlac::new(Law::A, 8000);
+        let (a, _) = c.convert_timed(i64::MAX - 100, &[0; 160]);
+        assert_eq!(a, i64::MAX - 100);
+        let (b, _) = c.convert_timed(i64::MIN + 60, &[0; 160]);
+        let (d, _) = c.convert_timed(i64::MIN + 220_000, &[0; 160]);
+        assert!(d >= b);
+        feed(&mut c, i64::MAX - 1_000_000, 160, &[160, 1_000_000_000], 2000);
+        feed(&mut c, 0, 320, &[600, 1_000_000_000, 600, 600], 2000);
+        let _ = c.timeline_of(i64::MAX);
+        let _ = c.timeline_of(i64::MIN);
     }
 
     #[test]

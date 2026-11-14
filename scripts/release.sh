@@ -32,7 +32,8 @@
 # ($RELEASE_REPO, default HuskerMinion/AmberSight: the one the updater reads)
 # with every package plus SHA256SUMS and SHA256SUMS.sig, for the tag v<v>
 # already pushed there. It refuses a private repository (the updater could
-# not see the release).
+# not see the release). After that it also runs scripts/package-repo.sh to
+# update the apt/dnf repository (committed, not pushed).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -111,6 +112,12 @@ if [ $publish = 1 ]; then
   gh release create "v$v" --repo "$repo" $assets "$out/SHA256SUMS" "$out/SHA256SUMS.sig" \
     --title "AmberSight $v" --notes "AmberSight $v" --verify-tag
   echo "published v$v in $repo"
+  # The apt/dnf repository (its own repository; never pushed from here).
+  if [ -d "${PACKAGES_REPO:-$HOME/projects/ambersight-packages}/.git" ]; then
+    scripts/package-repo.sh "$v" --commit || echo "warning: the package repository was not updated (scripts/package-repo.sh $v --commit)" >&2
+  else
+    echo "package repository not found: run scripts/package-repo.sh $v --commit when it exists (RELEASING.md)"
+  fi
 else
   echo "not published (add --publish to publish it)"
 fi

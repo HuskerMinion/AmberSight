@@ -432,6 +432,71 @@ impl Splitter {
 
 #[cfg(test)]
 mod tests {
+
+    fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        [&((body.len() + 8) as u32).to_be_bytes()[..], kind, body].concat()
+    }
+
+    /// A header like ffmpeg's empty_moov one: movie timescale 1000, video 10240.
+    fn empty_moov() -> Vec<u8> {
+        let mut mvhd = vec![0u8; 100];
+        mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+        let tkhd = vec![0u8; 84];
+        let mut mdhd = vec![0u8; 24];
+        mdhd[12..16].copy_from_slice(&10240u32.to_be_bytes());
+        let mdia = bx(b"mdia", &bx(b"mdhd", &mdhd));
+        let trak = bx(b"trak", &[bx(b"tkhd", &tkhd), mdia].concat());
+        let mvex = bx(b"mvex", &bx(b"trex", &[0u8; 24]));
+        bx(b"moov", &[bx(b"mvhd", &mvhd), trak, mvex, bx(b"udta", &[1, 2, 3])].concat())
+    }
+
+    #[test]
+    fn the_length_is_written_into_the_header() {
+        let m = with_duration(&empty_moov(), 50_405).unwrap();
+        assert_eq!(m.len(), empty_moov().len() + 16);
+        assert_eq!(u32::from_be_bytes(m[0..4].try_into().unwrap()) as usize, m.len());
+        let body = &m[8..];
+        assert_eq!(u32_at(child(body, b"mvhd").unwrap(), 16), Some(50_405));
+        let trak = child(body, b"trak").unwrap();
+        assert_eq!(u32_at(child(trak, b"tkhd").unwrap(), 20), Some(50_405));
+        assert_eq!(u32_at(path(trak, &[b"mdia", b"mdhd"]).unwrap(), 16), Some(50_405 * 10240 / 1000));
+        let mvex = child(body, b"mvex").unwrap();
+        assert_eq!(u32_at(child(mvex, b"mehd").unwrap(), 4), Some(50_405));
+        assert!(child(mvex, b"trex").is_some() && child(body, b"udta").is_some());
+        // A second time: mehd is set, not added again.
+        let again = with_duration(&m, 1000).unwrap();
+        assert_eq!(again.len(), m.len());
+        assert_eq!(u32_at(child(child(&again[8..], b"mvex").unwrap(), b"mehd").unwrap(), 4), Some(1000));
+    }
+
+    #[test]
+    fn the_header_is_patched_however_the_output_arrives() {
+        let ftyp = bx(b"ftyp", b"isom\0\0\0\0");
+        let moof = bx(b"moof", &[7u8; 20]);
+        let all = [ftyp.clone(), empty_moov(), moof.clone(), bx(b"mdat", &[9u8; 50])].concat();
+        for step in [1usize, 7, 64, all.len()] {
+            let mut p = DurationPatch::new(Some(2000));
+            let mut out = Vec::new();
+            for c in all.chunks(step) {
+                out.extend(p.push(c));
+            }
+            out.extend(p.rest());
+            assert_eq!(out.len(), all.len() + 16, "step {step}");
+            assert_eq!(&out[..ftyp.len()], &ftyp[..]);
+            let moov = &out[ftyp.len()..];
+            let mlen = u32::from_be_bytes(moov[0..4].try_into().unwrap()) as usize;
+            assert_eq!(u32_at(child(&moov[8..mlen], b"mvhd").unwrap(), 16), Some(2000));
+            assert_eq!(&out[ftyp.len() + mlen..], &all[ftyp.len() + empty_moov().len()..]);
+        }
+        // No length, or output that is not a header first: passed on unchanged.
+        let mut p = DurationPatch::new(None);
+        assert_eq!(p.push(&all), all);
+        let odd = [moof, bx(b"mdat", &[1])].concat();
+        let mut p = DurationPatch::new(Some(5));
+        assert_eq!(p.push(&odd), odd);
+        assert!(with_duration(b"not a moov", 5).is_none());
+    }
+
     use super::*;
     use crate::ingest::fmp4::{self, Sample, TrackInfo, TrackKind, TrackRun};
 
@@ -504,5 +569,155 @@ mod tests {
         let f = fmp4::fragment(9, &[TrackRun { track_index: 0, base_decode_time: 0, samples: vec![Sample::new(3000, vec![1], true), s] }]);
         let moof = boxes(&f).into_iter().find(|(k, _)| k == b"moof").unwrap().1;
         assert!(moof_video(moof, d.track_id, d.trex_flags, d.trex_duration).reorders);
+    }
+}
+
+/// ffmpeg's `empty_moov` header says the movie lasts 0, and players that read
+/// the length from it (ExoPlayer: mehd, else the movie header) then report a
+/// 1 ms video. This writes `ms` into mvhd, every tkhd and mdhd, and adds (or
+/// sets) mvex/mehd. `moov` is the whole box with its header; the result is
+/// the new box (16 or 20 bytes longer when mehd was added). None: not a moov
+/// this can read. Byte offsets after the header move: fragments must be
+/// relative to their moof (default_base_moof) and there must be no mfra.
+pub fn with_duration(moov: &[u8], ms: i64) -> Option<Vec<u8>> {
+    if moov.len() < 8 || &moov[4..8] != b"moov" || u32::from_be_bytes(moov[0..4].try_into().ok()?) as usize != moov.len() || ms < 0 {
+        return None;
+    }
+    let mut m = moov.to_vec();
+    let scaled = |ts: u32| (ms as u128 * ts as u128 / 1000) as u64;
+    // (offset of the full box's version byte, field offset in v0, in v1, timescale)
+    let mut fields: Vec<(usize, usize, usize, u32)> = Vec::new();
+    let body = &moov[8..];
+    let mvhd = child(body, b"mvhd")?;
+    let movie_ts = full_ts(mvhd, 12, 20)?;
+    fields.push((off_in(moov, mvhd)?, 16, 24, movie_ts));
+    for (k, trak) in boxes(body) {
+        if &k != b"trak" {
+            continue;
+        }
+        let tkhd = child(trak, b"tkhd")?;
+        fields.push((off_in(moov, tkhd)?, 20, 28, movie_ts));
+        let mdhd = path(trak, &[b"mdia", b"mdhd"])?;
+        let ts = full_ts(mdhd, 12, 20)?;
+        fields.push((off_in(moov, mdhd)?, 16, 24, ts));
+    }
+    for (at, v0, v1, ts) in fields {
+        let d = scaled(ts);
+        match m.get(at)? {
+            0 => m.get_mut(at + v0..at + v0 + 4)?.copy_from_slice(&(d.min(u32::MAX as u64) as u32).to_be_bytes()),
+            1 => m.get_mut(at + v1..at + v1 + 8)?.copy_from_slice(&d.to_be_bytes()),
+            _ => return None,
+        }
+    }
+    let d = scaled(movie_ts);
+    let mvex = child(body, b"mvex")?;
+    let mvex_at = off_in(moov, mvex)? - 8;
+    if u32::from_be_bytes(moov[mvex_at..mvex_at + 4].try_into().ok()?) as usize != mvex.len() + 8 {
+        return None;
+    }
+    if let Some(mehd) = child(mvex, b"mehd") {
+        let at = off_in(moov, mehd)?;
+        match m.get(at)? {
+            0 => m.get_mut(at + 4..at + 8)?.copy_from_slice(&(d.min(u32::MAX as u64) as u32).to_be_bytes()),
+            1 => m.get_mut(at + 4..at + 12)?.copy_from_slice(&d.to_be_bytes()),
+            _ => return None,
+        }
+        return Some(m);
+    }
+    let mehd: Vec<u8> = if d <= u32::MAX as u64 {
+        [&16u32.to_be_bytes()[..], b"mehd", &[0, 0, 0, 0], &(d as u32).to_be_bytes()].concat()
+    } else {
+        [&20u32.to_be_bytes()[..], b"mehd", &[1, 0, 0, 0], &d.to_be_bytes()].concat()
+    };
+    let grow = mehd.len();
+    let mut out = Vec::with_capacity(m.len() + grow);
+    out.extend_from_slice(&m[..mvex_at + 8]);
+    out.extend_from_slice(&mehd);
+    out.extend_from_slice(&m[mvex_at + 8..]);
+    let set = |out: &mut Vec<u8>, at: usize| {
+        let s = u32::from_be_bytes(out[at..at + 4].try_into().unwrap()) + grow as u32;
+        out[at..at + 4].copy_from_slice(&s.to_be_bytes());
+    };
+    set(&mut out, 0);
+    set(&mut out, mvex_at);
+    Some(out)
+}
+
+/// Offset of `inner`'s body (a slice of `outer`) in `outer`.
+fn off_in(outer: &[u8], inner: &[u8]) -> Option<usize> {
+    let o = (inner.as_ptr() as usize).checked_sub(outer.as_ptr() as usize)?;
+    (o + inner.len() <= outer.len()).then_some(o)
+}
+
+/// A full box's timescale: at `v0` (version 0) or `v1` (version 1) in its body.
+fn full_ts(b: &[u8], v0: usize, v1: usize) -> Option<u32> {
+    let at = match b.first()? {
+        0 => v0,
+        1 => v1,
+        _ => return None,
+    };
+    Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?)).filter(|t| *t > 0)
+}
+
+/// Holds ffmpeg's output until its header (ftyp and moov) is complete,
+/// writes the length into it, then passes everything on unchanged.
+pub struct DurationPatch {
+    ms: Option<i64>,
+    held: Vec<u8>,
+}
+
+impl DurationPatch {
+    pub fn new(ms: Option<i64>) -> Self {
+        DurationPatch { ms: ms.filter(|m| *m > 0), held: Vec::new() }
+    }
+
+    /// The bytes to send now (maybe none while the header is incomplete).
+    pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
+        let Some(ms) = self.ms else { return data.to_vec() };
+        self.held.extend_from_slice(data);
+        // Find moov among the leading boxes.
+        let mut p = 0usize;
+        loop {
+            if p + 8 > self.held.len() {
+                if self.held.len() > 1 << 20 {
+                    return self.give_up();
+                }
+                return Vec::new();
+            }
+            let size = u32::from_be_bytes(self.held[p..p + 4].try_into().unwrap()) as usize;
+            let kind = &self.held[p + 4..p + 8];
+            if size < 8 || kind == b"moof" || kind == b"mdat" {
+                return self.give_up();
+            }
+            if p + size > self.held.len() {
+                if size > 1 << 20 {
+                    return self.give_up();
+                }
+                return Vec::new();
+            }
+            if kind == b"moov" {
+                let mut out = self.held[..p].to_vec();
+                match with_duration(&self.held[p..p + size], ms) {
+                    Some(m) => out.extend_from_slice(&m),
+                    None => out.extend_from_slice(&self.held[p..p + size]),
+                }
+                out.extend_from_slice(&self.held[p + size..]);
+                self.ms = None;
+                self.held = Vec::new();
+                return out;
+            }
+            p += size;
+        }
+    }
+
+    /// Not a header this can change: send it as it is.
+    fn give_up(&mut self) -> Vec<u8> {
+        self.ms = None;
+        std::mem::take(&mut self.held)
+    }
+
+    /// Whatever is still held when the output ends.
+    pub fn rest(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.held)
     }
 }

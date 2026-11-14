@@ -493,6 +493,8 @@ fn path_stem(p: &std::path::Path) -> String {
 
 /// Delete an event's clip, thumbnail and AI review frames.
 fn remove_event_files(dir: &std::path::Path, id: &str) {
+    // Converted answers kept from its clip go too.
+    crate::transcode::cache::forget_event(id);
     let _ = std::fs::remove_file(dir.join("clips").join(format!("{id}.mp4")));
     let _ = std::fs::remove_file(dir.join("thumbs").join(format!("{id}.jpg")));
     if !id.is_empty() && !id.contains(['/', '\\', '.']) {

@@ -86,20 +86,64 @@ For Debian, Ubuntu, Linux Mint and Raspberry Pi OS (`.deb`), and Fedora (`.rpm`)
 `x86_64` on a PC and `arm64` / `aarch64` on a Raspberry Pi with the 64-bit OS (see
 [Raspberry Pi](#raspberry-pi)).
 
-**Debian, Ubuntu, Mint, Raspberry Pi OS:**
+**Recommended: add the AmberSight repository once.** Then `sudo apt upgrade` or
+`sudo dnf upgrade` (or unattended upgrades) bring new releases. The repository is signed; setup
+installs the signing key and one repository file, nothing else:
 
 ```
-sudo apt install ./ambersight_<version>_amd64.deb
+curl -fsSL https://huskerminion.github.io/ambersight-packages/setup.sh | sudo sh
 ```
 
-(on a Raspberry Pi: `sudo apt install ./ambersight_<version>_arm64.deb`). This also installs
-ffmpeg.
-
-**Fedora:** first add RPM Fusion (https://rpmfusion.org/Configuration) for the full ffmpeg, then:
+Then, on Debian, Ubuntu, Mint, Raspberry Pi OS:
 
 ```
-sudo dnf install ./ambersight-<version>-1.x86_64.rpm --allowerasing
+sudo apt update && sudo apt install ambersight
 ```
+
+On Fedora, first add RPM Fusion (https://rpmfusion.org/Configuration) for the full ffmpeg, then:
+
+```
+sudo dnf install ambersight --allowerasing
+```
+
+By hand instead of the script (Debian and relatives): put the key at
+`/etc/apt/keyrings/ambersight.gpg` and write `/etc/apt/sources.list.d/ambersight.sources`:
+
+```
+sudo mkdir -p /etc/apt/keyrings
+sudo curl -fsSL https://huskerminion.github.io/ambersight-packages/ambersight-archive-keyring.gpg \
+  -o /etc/apt/keyrings/ambersight.gpg
+sudo tee /etc/apt/sources.list.d/ambersight.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://huskerminion.github.io/ambersight-packages
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/ambersight.gpg
+EOF
+```
+
+On Fedora, write `/etc/yum.repos.d/ambersight.repo`:
+
+```
+[ambersight]
+name=AmberSight
+baseurl=https://huskerminion.github.io/ambersight-packages/rpm/$basearch
+enabled=1
+gpgcheck=0
+repo_gpgcheck=1
+gpgkey=https://huskerminion.github.io/ambersight-packages/ambersight-archive-keyring.asc
+```
+
+The repository's metadata is signed and lists the checksum of each package. The `.rpm` files
+themselves are not signed, so `gpgcheck` is off. The apt side keeps the two newest versions
+(`sudo apt install ambersight=<version>` goes back one release); the dnf side has the newest
+only. The signing key's fingerprint is `5433 0C65 BECD 2BBF 8F7B 12FD DF5E 8B45 1B6B EC76`.
+
+**Without the repository:** download the package from the
+[releases page](https://github.com/HuskerMinion/AmberSight/releases) and install the file:
+`sudo apt install ./ambersight_<version>_amd64.deb` (on a Raspberry Pi, `_arm64.deb`), or on Fedora
+`sudo dnf install ./ambersight-<version>-1.x86_64.rpm --allowerasing`. This also installs ffmpeg.
+Later releases are installed the same way.
 
 What it sets up:
 
@@ -115,7 +159,7 @@ What it sets up:
 Then open **http://localhost:8090**. If a firewall is on, open port 8090 (see
 [Firewall](#5-firewall)). Day to day: `sudo systemctl stop ambersight` / `start` / `status`.
 
-To update, install the newer package the same way. To remove it: `sudo apt remove ambersight`
+To update, run `sudo apt update && sudo apt upgrade` (or `sudo dnf upgrade`) when you use the repository, or install the newer package file. To remove it: `sudo apt remove ambersight`
 or `sudo dnf remove ambersight`. The recordings in `/var/lib/ambersight` are kept (and the
 settings too, unless you use `apt purge`).
 
@@ -654,7 +698,8 @@ On a computer without a browser, the same from a terminal:
 over the program next to it, start the service.
 
 **Installed with a .deb or .rpm package?** The updater refuses (the program
-lives under `/usr`); update with `sudo apt upgrade` or `sudo dnf upgrade`.
+lives under `/usr`); update with `sudo apt update && sudo apt upgrade` or `sudo dnf upgrade` (with the
+repository set up as above, the panel says so; otherwise it shows the package's link).
 It also refuses when it cannot write to the program's folder; then update
 by hand as below.
 
@@ -978,4 +1023,5 @@ packages described above. The installers are built on a 64-bit x86 Linux compute
 | `scripts/build-linux-x86_64.sh` | the x86_64 Linux program, built in Debian 13 so it also runs on older systems than the build computer |
 | `scripts/package-linux-arm64.sh` | the Raspberry Pi program and `.tar.gz` |
 | `scripts/package-linux-deb-rpm.sh` | the `.deb` and `.rpm` packages from those two programs |
+| `scripts/package-repo.sh` | the signed apt and dnf repository for a release (see `RELEASING.md`) |
 | `scripts/package-windows-installer.sh` | `setup.exe` (NSIS) from the folder `scripts/package.ps1` made on Windows, copied into `dist/` |

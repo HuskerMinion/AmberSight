@@ -6,7 +6,7 @@
 use crate::digest::Digest;
 use crate::engine::Engine;
 use crate::web::Access;
-use axum::extract::{Path as AxPath, State};
+use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -93,8 +93,15 @@ fn for_caller(mut d: Digest, access: &Access) -> Digest {
     d
 }
 
+/// `quiet=1`: none is 204 instead of 404 (the page's own request: no console error).
+#[derive(serde::Deserialize, Default)]
+pub struct GetQuery {
+    #[serde(default)]
+    quiet: String,
+}
+
 /// `GET /api/digests/:id` (`latest` for the newest).
-pub async fn get(State(engine): State<Arc<Engine>>, axum::Extension(access): axum::Extension<Access>, AxPath(id): AxPath<String>) -> Response {
+pub async fn get(State(engine): State<Arc<Engine>>, axum::Extension(access): axum::Extension<Access>, AxPath(id): AxPath<String>, Query(q): Query<GetQuery>) -> Response {
     match blocking(move || {
         let id = if id == "latest" { engine.db.digest_latest_id()? } else { id.parse::<i64>().ok() };
         let Some(id) = id else { return Ok(None) };
@@ -106,6 +113,7 @@ pub async fn get(State(engine): State<Arc<Engine>>, axum::Extension(access): axu
             let d = for_caller(d, &access);
             Json(shown(&d, Some(id))).into_response()
         }
+        Ok(None) if q.quiet == "1" => StatusCode::NO_CONTENT.into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such summary"),
         Err(r) => r,
     }

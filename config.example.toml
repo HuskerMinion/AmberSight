@@ -52,6 +52,11 @@ port = 8090
 # max_hardware = 6     # at a time on the graphics card
 # max_software = 1     # at a time in software (several CPU cores each)
 # max_per_user = 4     # per account: transcoded streams watched, and live transcodes started
+# cache_seconds = 600  # a converted clip or playback is kept on disk this long after its last use (players
+#                      # resume with Range); recordings still being made are not kept
+# cache_entry_mb = 2048  # past this a copy leaves the cache; its conversion goes on for the players reading it
+# cache_total_mb = 4096  # all copies together (the oldest unused go first; when full of copies in use, new
+#                        # answers are streamed without one); 0 keeps nothing
 
 # SIGN-IN: with no accounts, ANYONE who can reach this port can watch every
 # camera and change every setting. Add an account (Settings > Users & security, or below)

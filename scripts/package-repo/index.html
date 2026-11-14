@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AmberSight packages</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 16px}pre{background:#f2f2f2;padding:.8rem;overflow-x:auto}@media(prefers-color-scheme:dark){body{background:#161616;color:#ddd}pre{background:#252525}a{color:#8ab4f8}}</style>
+</head><body>
+<h1>AmberSight package repository</h1>
+<p>Signed apt (Debian, Ubuntu, Raspberry Pi OS) and dnf (Fedora) repository for
+<a href="https://github.com/HuskerMinion/AmberSight">AmberSight</a>. Add it once; new releases then
+arrive with <code>apt upgrade</code> or <code>dnf upgrade</code>.</p>
+<h2>One line</h2>
+<pre>curl -fsSL https://huskerminion.github.io/ambersight-packages/setup.sh | sudo sh</pre>
+<p>It installs the signing key and the repository file, nothing else. Read it first:
+<a href="setup.sh">setup.sh</a>.</p>
+<h2>Debian, Ubuntu, Raspberry Pi OS by hand</h2>
+<pre>sudo mkdir -p /etc/apt/keyrings
+sudo curl -fsSL https://huskerminion.github.io/ambersight-packages/ambersight-archive-keyring.gpg \
+  -o /etc/apt/keyrings/ambersight.gpg
+sudo tee /etc/apt/sources.list.d/ambersight.sources &gt;/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: https://huskerminion.github.io/ambersight-packages
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/ambersight.gpg
+EOF
+sudo apt update &amp;&amp; sudo apt install ambersight</pre>
+<h2>Fedora by hand</h2>
+<pre>sudo tee /etc/yum.repos.d/ambersight.repo &gt;/dev/null &lt;&lt;'EOF'
+[ambersight]
+name=AmberSight
+baseurl=https://huskerminion.github.io/ambersight-packages/rpm/$basearch
+enabled=1
+gpgcheck=0
+repo_gpgcheck=1
+gpgkey=https://huskerminion.github.io/ambersight-packages/ambersight-archive-keyring.asc
+EOF
+sudo dnf install ambersight</pre>
+<p>Signing key: <a href="ambersight-archive-keyring.asc">ambersight-archive-keyring.asc</a>
+(<a href="ambersight-archive-keyring.gpg">binary</a>). Fingerprint:
+<code>5433 0C65 BECD 2BBF 8F7B  12FD DF5E 8B45 1B6B EC76</code></p>
+</body></html>

@@ -131,7 +131,9 @@ async function show() {
   const id = new URLSearchParams(location.hash.split('?')[1] || '').get('id') || 'latest';
   root.innerHTML = '<div class="ac dg-page"><p class="empty">Loading...</p></div>';
   try {
-    const r = await api('/api/digests/' + encodeURIComponent(id));
+    const r = await api('/api/digests/' + encodeURIComponent(id) + '?quiet=1');
+    // quiet=1: none is 204 (an empty answer), so the console shows no 404.
+    if (!r || !Object.keys(r).length) throw Object.assign(new Error('gone'), { status: 404 });
     root.innerHTML = '<div class="ac dg-page"><h3>Morning summary</h3>' + digestHtml(r) + '</div>';
   } catch (e) {
     root.innerHTML = '<div class="ac dg-page"><h3>Morning summary</h3><p class="hint">' + (e && e.status === 404 ? 'That summary is gone or does not exist.' : esc(errText(e))) + '</p></div>';

@@ -109,7 +109,8 @@ function syncShieldBtn() {
   if (armingUntil && !left) { armingUntil = 0; refreshStatus(); }
   l.textContent = armedCache ? 'Armed' : left ? 'Arming in ' + (left < 100 ? left + ' s' : Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0')) : 'Disarmed';
   b.className = 'btn shieldbtn ' + (armedCache ? 'armedbtn' : left ? 'armingbtn' : 'shieldedbtn');
-  b.title = armedCache ? 'Armed: click to disarm (no motion, no new events)' : left ? 'Arming soon: click to cancel' :
+  b.title = !can('arm') ? (armedCache ? 'Armed' : left ? 'Arming soon' : 'Disarmed') + ' (an admin or operator can change this)' :
+    armedCache ? 'Armed: click to disarm (no motion, no new events)' : left ? 'Arming soon: click to cancel' :
     'Disarmed: click to arm' + (armDelay ? ' (after ' + armDelay + ' s, so you can leave)' : '');
 }
 

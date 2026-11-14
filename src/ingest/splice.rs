@@ -115,6 +115,9 @@ struct TrafInfo {
     /// First sample's composition offset (shown this long after it is
     /// decoded: B-frames), in the track's timescale.
     first_cto: i32,
+    /// Every sample lasts the same (known from the file; false when not, or
+    /// not known: layouts saved before this was kept).
+    even: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -254,9 +257,13 @@ fn parse_moof(moof: &[u8]) -> Result<(usize, Vec<TrafInfo>)> {
         let mut duration = 0u64;
         let mut sample0_flags = None;
         let mut first_cto = 0i32;
+        let mut even = true;
+        let mut d0 = None;
         for k in 0..count {
             if flags & 0x100 != 0 {
-                duration += be32(moof, p)? as u64;
+                let d = be32(moof, p)?;
+                even &= *d0.get_or_insert(d) == d;
+                duration += d as u64;
                 p += 4;
             }
             if flags & 0x200 != 0 {
@@ -287,7 +294,7 @@ fn parse_moof(moof: &[u8]) -> Result<(usize, Vec<TrafInfo>)> {
             (false, Some(off), Some(sz)) if off > 0 && count > 0 => Some((off as u64, sz)),
             _ => None,
         };
-        trafs.push(TrafInfo { track_id, tfdt_pos, tfdt, duration, first_is_sync, first_sample, first_cto });
+        trafs.push(TrafInfo { track_id, tfdt_pos, tfdt, duration, first_is_sync, first_sample, first_cto, even });
     }
     Ok((seq_pos, trafs))
 }
@@ -809,6 +816,10 @@ impl VirtualClip {
         // Per (segment, track): output decode time of that track's first
         // fragment in the segment, and its source tfdt.
         let mut seg_base: std::collections::HashMap<(usize, u32), (u64, u64)> = Default::default();
+        // Per (segment, track): how far FLAC audio served with its samples'
+        // lengths has moved from the decode times recorded (see flac_fix).
+        let mut flac_shift: std::collections::HashMap<(usize, u32), i64> = Default::default();
+        let audio_flac = header.init.windows(4).any(|w| w == b"fLaC");
         let mut seq = 0u32;
         let mut end_ms = clip_start;
         let vid = tracks.iter().position(|t| t.video);
@@ -837,9 +848,24 @@ impl VirtualClip {
                     let want = ((wall - clip_start).max(0.0) * ts / 1000.0).round() as u64;
                     (want.max(running_end[ti]), t.tfdt)
                 });
-                let out = (out_base + t.tfdt.saturating_sub(src_base)).max(running_end[ti]);
+                // FLAC audio whose recorded durations are not its samples'
+                // (see flac_fix): served with the samples' lengths, and later
+                // decode times moved by what that changed (real gaps stay).
+                // Samples all of one length need nothing (new recordings).
+                let fix = if audio_flac && !tracks[ti].video && !t.even { flac_fix(&segments[c.seg].path, &c.frag, t.track_id, tracks[ti].timescale) } else { None };
+                let shift = flac_shift.entry((c.seg, t.track_id)).or_insert(0);
+                let src_off = (t.tfdt.saturating_sub(src_base) as i64).saturating_add(*shift).max(0) as u64;
+                let duration = match &fix {
+                    Some(fx) => {
+                        patches.extend(fx.patches.iter().copied());
+                        *shift = shift.saturating_add(fx.total as i64 - t.duration as i64);
+                        fx.total
+                    }
+                    None => t.duration,
+                };
+                let out = (out_base + src_off).max(running_end[ti]);
                 patches.push((t.tfdt_pos as u32, out, 8u8));
-                running_end[ti] = out + t.duration;
+                running_end[ti] = out + duration;
                 if Some(ti) == vid {
                     if index.is_empty() {
                         first_cto = t.first_cto;
@@ -1244,6 +1270,151 @@ pub fn key_picture(segments: &[SourceSegment], at_ms: i64) -> Result<Option<KeyP
     Ok(None)
 }
 
+/// What a recording's FLAC audio really holds in one fragment, for audio
+/// recorded when its sample durations came from the camera's RTP steps (a
+/// camera whose steps do not match its samples recorded audio 1.875 times too
+/// long: ExoPlayer clocks playback from audio and stutters). Each sample's
+/// duration becomes the block size in its FLAC frame header, except one that
+/// lasts more than half a second longer than its samples: that is a real gap
+/// (lost packets) and stays.
+struct FlacFix {
+    /// Duration fields to write: (offset in the fragment, value, 4 bytes).
+    patches: Vec<(u32, u64, u8)>,
+    /// The fragment's audio length (samples).
+    total: u64,
+}
+
+/// The largest moof read to check FLAC durations (a real one is a few KB).
+const MAX_FLAC_MOOF: usize = 16 << 20;
+
+fn flac_fix(path: &Path, frag: &FragmentInfo, track_id: u32, timescale: u32) -> Option<FlacFix> {
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(frag.offset)).ok()?;
+    let mut sz = [0u8; 4];
+    f.read_exact(&mut sz).ok()?;
+    let moof_len = u32::from_be_bytes(sz) as usize;
+    if moof_len < 16 || moof_len > MAX_FLAC_MOOF || moof_len as u64 > frag.len {
+        return None;
+    }
+    f.seek(SeekFrom::Start(frag.offset)).ok()?;
+    let mut moof = vec![0u8; moof_len];
+    f.read_exact(&mut moof).ok()?;
+    flac_fix_from(&moof, track_id, u64::from(timescale) / 2, |start, n| {
+        if start as u64 + n as u64 > frag.len {
+            return None;
+        }
+        let mut buf = vec![0u8; n];
+        f.seek(SeekFrom::Start(frag.offset + start as u64)).ok()?;
+        f.read_exact(&mut buf).ok()?;
+        Some(buf)
+    })
+}
+
+/// `read(from, len)` gives bytes of the fragment (offsets from its moof).
+/// `gap`: a sample lasting this much longer than its samples is a real gap.
+/// None: nothing to change.
+fn flac_fix_from(moof: &[u8], track_id: u32, gap: u64, mut read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<FlacFix> {
+    for (kind, s, e) in children(moof, 8, moof.len()).ok()? {
+        if &kind != b"traf" {
+            continue;
+        }
+        let (hs, _) = find(moof, s + 8, e, b"tfhd").ok()??;
+        if be32(moof, hs + 12).ok()? != track_id {
+            continue;
+        }
+        let tfhd_flags = be32(moof, hs + 8).ok()? & 0x00ff_ffff;
+        let mut q = hs + 16;
+        if tfhd_flags & 0x1 != 0 {
+            return None; // an explicit base offset: not our layout
+        }
+        for (bit, n) in [(0x2u32, 4usize), (0x8, 4)] {
+            if tfhd_flags & bit != 0 {
+                q += n;
+            }
+        }
+        let default_size = if tfhd_flags & 0x10 != 0 { Some(be32(moof, q).ok()?) } else { None };
+        let (rs, _) = find(moof, s + 8, e, b"trun").ok()??;
+        let flags = be32(moof, rs + 8).ok()? & 0x00ff_ffff;
+        let count = be32(moof, rs + 12).ok()? as usize;
+        if flags & 0x100 == 0 || flags & 0x1 == 0 || count == 0 {
+            return None;
+        }
+        let mut p = rs + 16;
+        let data_offset = be32(moof, p).ok()? as i32;
+        p += 4;
+        if flags & 0x4 != 0 {
+            p += 4;
+        }
+        if data_offset <= 0 {
+            return None;
+        }
+        // Every sample's fields must be inside the moof before anything is
+        // allocated for them (a damaged count could be billions).
+        let stride = 4 * (flags & 0xf00).count_ones() as usize;
+        if count > moof.len() || count.checked_mul(stride)?.checked_add(p)? > moof.len() {
+            return None;
+        }
+        let mut durs = Vec::with_capacity(count);
+        let mut sizes = Vec::with_capacity(count);
+        for _ in 0..count {
+            durs.push((p, be32(moof, p).ok()? as u64));
+            p += 4;
+            if flags & 0x200 != 0 {
+                sizes.push(be32(moof, p).ok()? as usize);
+                p += 4;
+            } else {
+                sizes.push(default_size? as usize);
+            }
+            if flags & 0x400 != 0 {
+                p += 4;
+            }
+            if flags & 0x800 != 0 {
+                p += 4;
+            }
+        }
+        // All of one length: what new recordings write (nothing to read).
+        if durs.iter().all(|d| d.1 == durs[0].1) {
+            return None;
+        }
+        let all: usize = sizes.iter().sum();
+        if all > 64 << 20 {
+            return None;
+        }
+        let data = read(data_offset as usize, all)?;
+        let mut blocks = Vec::with_capacity(count);
+        let mut at = 0usize;
+        for &n in &sizes {
+            let frame = data.get(at..at + n)?;
+            at += n;
+            blocks.push(crate::ingest::g711::flac_block_size(frame)? as u64);
+        }
+        // Timed by its samples (or by an RTP clock that matches them), a sample
+        // never lasts less than it holds, and the fragment lasts about what it
+        // holds: a longer sample is sound left out (lost packets), kept. A
+        // fragment with a shorter sample, or lasting over 1.1 times its samples
+        // (real gaps left out), was timed by a camera's wrong steps.
+        let shorter = durs.iter().zip(&blocks).any(|(d, b)| d.1 < *b);
+        let (rec, held) = durs.iter().zip(&blocks).filter(|(d, b)| d.1 <= **b + gap).fold((0u64, 0u64), |(r, h), (d, b)| (r + d.1, h + b));
+        let long = held > 0 && rec as f64 > held as f64 * 1.1;
+        if !shorter && !long {
+            return None;
+        }
+        let mut patches = Vec::new();
+        let mut total = 0u64;
+        for (k, &block) in blocks.iter().enumerate() {
+            let (pos, d) = durs[k];
+            // Longer than its samples by more than `gap`: a real gap, kept.
+            let want = if d > block + gap { d } else { block };
+            if want != d {
+                patches.push((pos as u32, want, 4u8));
+            }
+            total += want;
+        }
+        return (!patches.is_empty()).then_some(FlacFix { patches, total });
+    }
+    None
+}
+
 /// Write `patches` (offsets within a fragment) into `buf`, which holds the
 /// fragment's bytes from offset `at`.
 fn apply_patches(buf: &mut [u8], at: u64, patches: &[(u32, u64, u8)]) {
@@ -1551,7 +1722,7 @@ mod tests {
     #[test]
     fn damaged_picture_sizes_are_ignored_not_read() {
         // Sizes that do not fit inside their fragment are forgotten.
-        let traf = |off: u64, size: u32| TrafInfo { track_id: 1, tfdt_pos: 0, tfdt: 0, duration: 1, first_is_sync: true, first_sample: Some((off, size)), first_cto: 0 };
+        let traf = |off: u64, size: u32| TrafInfo { track_id: 1, tfdt_pos: 0, tfdt: 0, duration: 1, first_is_sync: true, first_sample: Some((off, size)), first_cto: 0, even: true };
         let f = FragmentInfo { offset: 0, len: 1000, seq_pos: 0, trafs: vec![traf(100, 900), traf(100, 901), traf(u64::MAX, 10), traf(0, 0), traf(8, u32::MAX)] }.checked();
         let kept: Vec<_> = f.trafs.iter().map(|t| t.first_sample).collect();
         assert_eq!(kept, vec![Some((100, 900)), None, None, None, None]);
@@ -1683,5 +1854,205 @@ mod tests {
         assert!(!c.sub);
         assert_eq!(c.frame_times[0] - t0, 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn flac_audio_is_served_with_the_length_of_its_samples() {
+        use crate::ingest::g711::{flac_frame, flac_sample_entry};
+        let dir = std::env::temp_dir().join(format!("amber-splice-flac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let audio = TrackInfo { kind: TrackKind::Audio, timescale: 8000, sample_entry: flac_sample_entry(8000), width: 0, height: 0 };
+        let mut w = SegmentWriter::new(&dir, "cam-1", vec![video_track(), audio], 3).unwrap();
+        // 320 samples per packet (40 ms), but RTP steps that are all over the place.
+        let steps = [480i64, 160, 464, 16, 48, 480, 480, 640, 320, 112];
+        let (mut rtp, mut n, mut packets) = (0i64, 0u64, 0u64);
+        for i in 0..100i64 {
+            w.push_video(i * 9000, vec![(i % 251) as u8; 40], i % 10 == 0).unwrap();
+            // 100 ms of video holds 2.5 packets: add them as they fall due.
+            while (packets as i64) * 40 <= (i + 1) * 100 {
+                w.push_audio(rtp, flac_frame(&[0i16; 320], n, 8000));
+                rtp += steps[packets as usize % steps.len()];
+                n += 320;
+                packets += 1;
+            }
+        }
+        w.finish().unwrap();
+        let segs: Vec<SourceSegment> =
+            w.take_closed().into_iter().map(|s| SourceSegment { path: s.path, start_ms: s.start_ms, end_ms: s.end_ms, low: false, sub: false }).collect();
+        // As recorded, audio durations are the camera's steps, not 320.
+        let odd = segs.iter().any(|sg| {
+            let raw = parse_segment(&sg.path).unwrap();
+            raw.fragments.iter().flat_map(|f| f.trafs.iter()).filter(|t| t.track_id == 2).any(|t| t.duration % 320 != 0)
+        });
+        assert!(odd, "test data has the fault");
+        let t0 = segs[0].start_ms;
+        let clip = VirtualClip::plan(&segs, t0, t0 + 20_000).unwrap().unwrap();
+        let out = dir.join("served.mp4");
+        clip.write_file(&out).unwrap();
+        let p = parse_segment_file(&out).unwrap();
+        let mut next = None;
+        let (mut a_sum, mut v_sum) = (0u64, 0u64);
+        for f in &p.fragments {
+            for t in &f.trafs {
+                if t.track_id == 2 {
+                    if let Some(nx) = next {
+                        assert_eq!(t.tfdt, nx, "audio decode times follow on");
+                    }
+                    assert_eq!(t.duration % 320, 0);
+                    next = Some(t.tfdt + t.duration);
+                    a_sum += t.duration;
+                } else {
+                    v_sum += t.duration;
+                }
+            }
+        }
+        assert!(a_sum > 0);
+        let (a_s, v_s) = (a_sum as f64 / 8000.0, v_sum as f64 / 90000.0);
+        assert!((a_s - v_s).abs() < 0.2, "audio {a_s} s, video {v_s} s");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flac_fix_reads_block_sizes_from_frame_headers() {
+        use crate::ingest::g711::flac_frame;
+        // One moof (video-less) with 3 FLAC samples of 100, 320 and 7 samples.
+        let frames: Vec<Vec<u8>> = [100usize, 320, 7].iter().scan(0u64, |n, &k| {
+            let f = flac_frame(&vec![1i16; k], *n, 8000);
+            *n += k as u64;
+            Some(f)
+        }).collect();
+        let be = |v: u32| v.to_be_bytes().to_vec();
+        let bx = |k: &[u8; 4], b: Vec<u8>| [be(b.len() as u32 + 8), k.to_vec(), b].concat();
+        let mfhd = bx(b"mfhd", [be(0), be(1)].concat());
+        let tfhd = bx(b"tfhd", [be(0x02_0000), be(2)].concat());
+        let tfdt = bx(b"tfdt", [be(0x0100_0000), 0u64.to_be_bytes().to_vec()].concat());
+        let mut run = [be(0), be(3), be(0)].concat(); // flags patched below, count, data offset
+        run[..4].copy_from_slice(&be(0x000301));
+        for (f, step) in frames.iter().zip([600u32, 160, 720]) {
+            run.extend(be(step)); // the camera's steps
+            run.extend(be(f.len() as u32));
+        }
+        let moof_len = 8 + mfhd.len() + 8 + tfhd.len() + tfdt.len() + 8 + run.len();
+        run[8..12].copy_from_slice(&be(moof_len as u32 + 8));
+        let moof = bx(b"moof", [mfhd, bx(b"traf", [tfhd, tfdt, bx(b"trun", run)].concat())].concat());
+        assert_eq!(moof.len(), moof_len);
+        let mdat: Vec<u8> = frames.concat();
+        let frag = [moof.clone(), bx(b"mdat", mdat)].concat();
+        let rd = |at: usize, n: usize| frag.get(at..at + n).map(|b| b.to_vec());
+        let fix = flac_fix_from(&moof, 2, 4000, rd).expect("fixes");
+        assert_eq!(fix.total, 427);
+        let mut buf = frag.clone();
+        apply_patches(&mut buf, 0, &fix.patches);
+        let (_, trafs) = parse_moof(&buf[..moof_len]).unwrap();
+        assert_eq!(trafs[0].duration, 427);
+        assert!(!trafs[0].even);
+        assert!(flac_fix_from(&moof, 1, 4000, |_, _| None).is_none(), "another track is left alone");
+        // A sample far longer than its samples is a real gap: it stays.
+        let with_step = |steps: [u32; 3]| {
+            let mut m = moof.clone();
+            let trun = m.windows(4).position(|w| w == b"trun").unwrap() - 4;
+            for (k, st) in steps.iter().enumerate() {
+                let at = trun + 20 + k * 8;
+                m[at..at + 4].copy_from_slice(&st.to_be_bytes());
+            }
+            m
+        };
+        let m = with_step([600, 100 + 24_000, 3]);
+        let fix = flac_fix_from(&m, 2, 4000, rd).expect("fixes the first");
+        assert_eq!(fix.total, 100 + (100 + 24_000) + 7);
+        assert_eq!(fix.patches.len(), 2, "only the camera's steps are changed");
+        // Only longer than their samples (lost packets in a recording timed by
+        // its samples or a matching RTP clock), and about as long in all: kept.
+        assert!(flac_fix_from(&with_step([100, 640, 7]), 2, 4000, rd).is_some(), "640 for 320 is 1.4 times in all");
+        assert!(flac_fix_from(&with_step([100, 330, 8]), 2, 4000, rd).is_none(), "1.03 times: as recorded");
+        // A camera's steps all at or above the samples, 1.875 times in all: fixed.
+        let fix = flac_fix_from(&with_step([188, 600, 13]), 2, 4000, rd).expect("fixed");
+        assert_eq!(fix.total, 427);
+        // Durations that already match: nothing to change.
+        assert!(flac_fix_from(&with_step([100, 320, 7]), 2, 4000, rd).is_none());
+        // All of one length (new recordings): the frames are not even read.
+        assert!(flac_fix_from(&with_step([600, 600, 600]), 2, 4000, |_, _| panic!("read")).is_none());
+    }
+
+    #[test]
+    fn a_damaged_sample_count_is_refused_before_allocating() {
+        let be = |v: u32| v.to_be_bytes().to_vec();
+        let bx = |k: &[u8; 4], b: Vec<u8>| [be(b.len() as u32 + 8), k.to_vec(), b].concat();
+        let mk = |count: u32, tfhd_flags: u32| {
+            let tfhd = bx(b"tfhd", [be(tfhd_flags), be(2), be(10)].concat());
+            let tfdt = bx(b"tfdt", [be(0x0100_0000), 0u64.to_be_bytes().to_vec()].concat());
+            let run = bx(b"trun", [be(0x000101), be(count), be(100), be(600), be(480)].concat());
+            bx(b"moof", [bx(b"mfhd", [be(0), be(1)].concat()), bx(b"traf", [tfhd, tfdt, run].concat())].concat())
+        };
+        // Sizes from tfhd (0x10), durations per sample: billions of samples in a tiny moof.
+        assert!(flac_fix_from(&mk(u32::MAX, 0x02_0010), 2, 4000, |_, _| panic!("read")).is_none());
+        assert!(flac_fix_from(&mk(1 << 30, 0x02_0010), 2, 4000, |_, _| panic!("read")).is_none());
+        // A count that fits is read.
+        let mut asked = false;
+        flac_fix_from(&mk(2, 0x02_0010), 2, 4000, |_, n| {
+            asked = n == 20;
+            None
+        });
+        assert!(asked);
+    }
+
+    #[test]
+    fn a_real_audio_gap_in_a_new_recording_is_kept() {
+        use crate::ingest::g711::{flac_frame, flac_sample_entry};
+        let dir = std::env::temp_dir().join(format!("amber-splice-flacgap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let audio = TrackInfo { kind: TrackKind::Audio, timescale: 8000, sample_entry: flac_sample_entry(8000), width: 0, height: 0 };
+        let mut w = SegmentWriter::new(&dir, "cam-g", vec![video_track(), audio], 60).unwrap();
+        // 10 s of video; audio packets of 320 samples (40 ms) in real time, none from 2 s to 5 s.
+        let (mut packets, mut n) = (0i64, 0u64);
+        for i in 0..100i64 {
+            w.push_video(i * 9000, vec![(i % 251) as u8; 40], i % 10 == 0).unwrap();
+            while packets * 40 <= (i + 1) * 100 {
+                let ms = packets * 40;
+                if !(2000..5000).contains(&ms) {
+                    w.push_audio(ms * 8, flac_frame(&[0i16; 320], n, 8000));
+                    n += 320;
+                }
+                packets += 1;
+            }
+        }
+        w.finish().unwrap();
+        let segs: Vec<SourceSegment> = w.take_closed().into_iter().map(|s| SourceSegment { path: s.path, start_ms: s.start_ms, end_ms: s.end_ms, low: false, sub: false }).collect();
+        assert_eq!(segs.len(), 1);
+        let t0 = segs[0].start_ms;
+        let clip = VirtualClip::plan(&segs, t0, t0 + 20_000).unwrap().unwrap();
+        let out = dir.join("served.mp4");
+        clip.write_file(&out).unwrap();
+        let p = parse_segment_file(&out).unwrap();
+        let (mut a_end, mut v_end) = (0u64, 0u64);
+        for f in &p.fragments {
+            for t in &f.trafs {
+                if t.track_id == 2 {
+                    a_end = a_end.max(t.tfdt + t.duration);
+                } else {
+                    v_end = v_end.max(t.tfdt + t.duration);
+                }
+            }
+        }
+        let (a_s, v_s) = (a_end as f64 / 8000.0, v_end as f64 / 90000.0);
+        assert!((a_s - v_s).abs() < 0.5, "audio after the gap moved: audio ends {a_s} s, video {v_s} s");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Serve recordings from a folder (`AMBER_SPLICE_DIR`) as a clip would be
+    /// (each to `<name>.served.mp4` there), for checking real files by hand.
+    #[test]
+    #[ignore]
+    fn serve_recordings_from_a_folder() {
+        let Ok(dir) = std::env::var("AMBER_SPLICE_DIR") else { return };
+        for f in std::fs::read_dir(&dir).unwrap() {
+            let path = f.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".mp4") || name.ends_with(".served.mp4") {
+                continue;
+            }
+            let segs = vec![SourceSegment { path: path.clone(), start_ms: 0, end_ms: 3_600_000, low: false, sub: false }];
+            let clip = VirtualClip::plan(&segs, 0, 3_600_000).unwrap().unwrap();
+            clip.write_file(&path.with_file_name(format!("{name}.served.mp4"))).unwrap();
+        }
     }
 }

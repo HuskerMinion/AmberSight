@@ -214,9 +214,15 @@ fn run(sess: Arc<Session>, key: Key, camera: String, source: Arc<LiveHub>, encod
     // Set once the stream showed reordered frames: no low-delay decoding.
     let mut plain = false;
     let mut first = true;
+    let mut tries = super::HwTries::default();
+    let (src_codec, src_depth) = source.init().and_then(|i| mp4::probe(&i)).map(|d| (format!("{:?}", d.codec), d.bit_depth)).unwrap_or_default();
     loop {
         if sess.stop.load(Ordering::SeqCst) {
             break;
+        }
+        // Decoding on the graphics card that failed to start lately is not tried again yet.
+        while i < list.len() && list[i].1 && super::hw_skipped(&super::HwMemory::key(&list[i].0, key.codec, &src_codec, src_depth)) {
+            i += 1;
         }
         // Before another try: nobody watching, and nobody found it within the time a viewer
         // waits for the first picture (they have all been sent another stream): stop rather
@@ -237,14 +243,26 @@ fn run(sess: Arc<Session>, key: Key, camera: String, source: Arc<LiveHub>, encod
         }
         let (e, hw_decode) = list[i].clone();
         *listed.0.encoder.lock().unwrap() = e.name(key.codec).to_string();
-        match attempt(&sess, &key, &camera, &source, &e, hw_decode, fps, plain, &listed) {
+        let mem_key = super::HwMemory::key(&e, key.codec, &src_codec, src_depth);
+        let what = format!("{src_codec} with {}", e.name(key.codec));
+        // Settled as soon as it makes pictures, not when it ends.
+        let mut worked = || tries.settle(mem_key.clone(), what.clone(), hw_decode, true, false);
+        let outcome = attempt(&sess, &key, &camera, &source, &e, hw_decode, fps, plain, &listed, &mut worked);
+        match outcome {
             Outcome::Ran | Outcome::NoSource => break,
+            Outcome::Stopped => {
+                // Nobody wanted it any more: says nothing about the decoding.
+                tries.settle(mem_key, what, hw_decode, false, true);
+                break;
+            }
             Outcome::Reordered => {
                 tracing::info!("transcode: {camera}: the stream reorders frames; decoding again without low delay");
                 plain = true;
             }
             Outcome::Failed(why) => {
                 let how = if hw_decode { "decoding on the graphics card" } else { "decoding in software" };
+                // Remembered only if software decoding then works (see HwTries).
+                tries.settle(mem_key, what, hw_decode, false, sess.stop.load(Ordering::SeqCst));
                 super::warn_limited(&format!("live {camera} {} {hw_decode}", e.name(key.codec)), &format!("transcode: {camera}: {} ({how}) did not start: {why}", e.name(key.codec)));
                 i += 1;
             }
@@ -259,11 +277,26 @@ fn run(sess: Arc<Session>, key: Key, camera: String, source: Arc<LiveHub>, encod
 enum Outcome {
     /// It made pictures (and has ended now).
     Ran,
+    /// Stopped (nobody watching) before it made pictures.
+    Stopped,
     Failed(String),
     /// The camera's stream is not running.
     NoSource,
     /// Decoding with low delay, a reordered frame came: again without.
     Reordered,
+}
+
+/// How an attempt that ended went, when it was not a failure: it made
+/// pictures, or the viewers stopped it before it did (which says nothing about
+/// the way it decoded).
+fn finished(frags: usize, stopped: bool) -> Option<Outcome> {
+    if frags >= MIN_FRAGMENTS {
+        Some(Outcome::Ran)
+    } else if stopped {
+        Some(Outcome::Stopped)
+    } else {
+        None
+    }
 }
 
 /// The ffmpeg arguments for a live transcode reading fragments on stdin.
@@ -302,7 +335,7 @@ fn reorders(f: &[u8], d: &mp4::VideoDesc) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attempt(sess: &Arc<Session>, key: &Key, camera: &str, source: &Arc<LiveHub>, e: &Encoder, hw_decode: bool, fps: f64, plain: bool, listed: &super::Listed) -> Outcome {
+fn attempt(sess: &Arc<Session>, key: &Key, camera: &str, source: &Arc<LiveHub>, e: &Encoder, hw_decode: bool, fps: f64, plain: bool, listed: &super::Listed, worked: &mut dyn FnMut()) -> Outcome {
     let Some((init, gop, rx)) = source.subscribe_for(!key.audio) else { return Outcome::NoSource };
     let src_info = source.info();
     let desc = mp4::probe(&init);
@@ -441,7 +474,9 @@ fn attempt(sess: &Arc<Session>, key: &Key, camera: &str, source: &Arc<LiveHub>, 
                     let Some(v) = video.as_ref() else { continue };
                     let key_frame = mp4::boxes(&f).into_iter().find(|(k, _)| k == b"moof").map(|(_, m)| mp4::moof_video(m, v.track_id, v.trex_flags, v.trex_duration)).is_some_and(|fv| fv.has_video && fv.first_sync);
                     sess.hub.publish(f, key_frame);
-                    frags.fetch_add(1, Ordering::Relaxed);
+                    if frags.fetch_add(1, Ordering::Relaxed) + 1 == MIN_FRAGMENTS {
+                        worked();
+                    }
                 }
             }
         }
@@ -455,8 +490,8 @@ fn attempt(sess: &Arc<Session>, key: &Key, camera: &str, source: &Arc<LiveHub>, 
     if reordered.load(Ordering::SeqCst) && !sess.stop.load(Ordering::SeqCst) {
         return Outcome::Reordered;
     }
-    if frags.load(Ordering::Relaxed) >= MIN_FRAGMENTS || sess.stop.load(Ordering::SeqCst) {
-        return Outcome::Ran;
+    if let Some(o) = finished(frags.load(Ordering::Relaxed), sess.stop.load(Ordering::SeqCst)) {
+        return o;
     }
     // The camera's stream ended (restart): not this encoder's fault.
     if got_init.load(Ordering::SeqCst) && source.info().is_none() {
@@ -516,4 +551,27 @@ pub(crate) fn tail(errs: &Mutex<String>) -> String {
 pub(crate) fn stop_child(c: &mut std::process::Child) {
     let _ = c.kill();
     let _ = c.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_try_the_viewers_stopped_is_not_one_that_worked() {
+        assert!(matches!(finished(0, true), Some(Outcome::Stopped)), "no pictures yet: says nothing");
+        assert!(matches!(finished(MIN_FRAGMENTS - 1, true), Some(Outcome::Stopped)));
+        assert!(matches!(finished(MIN_FRAGMENTS, true), Some(Outcome::Ran)));
+        assert!(matches!(finished(MIN_FRAGMENTS, false), Some(Outcome::Ran)));
+        assert!(finished(0, false).is_none(), "a failure");
+        // Stopped is settled as gone: a remembered card failure is not cleared,
+        // and a pending one is not proven.
+        let e = Encoder { hw: Some(super::super::Hw::Qsv), device: None };
+        let k = super::super::HwMemory::key(&e, OutCodec::H264, "Hevc", 8);
+        let m = super::super::HwMemory::new();
+        m.failed_at(&k, Instant::now());
+        let mut t = super::super::HwTries::default();
+        t.settle_in(&m, k.clone(), "x".into(), true, false, true);
+        assert!(m.skipped_at(&k, Instant::now()));
+    }
 }

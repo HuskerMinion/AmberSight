@@ -275,9 +275,27 @@ fn in_container() -> bool {
     Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
 }
 
-/// How to update a deb/rpm install to release `r`: the package's own link
-/// and the command, so nobody has to hunt for them.
-fn package_steps(r: &Release, debian: bool) -> String {
+/// Where the AmberSight package repository (apt and dnf) is described.
+const REPO_PAGE: &str = "https://huskerminion.github.io/ambersight-packages/";
+
+/// True when the apt source or dnf repository file made by the repository's
+/// setup script exists, so `apt upgrade` / `dnf upgrade` bring new releases.
+fn repo_configured(debian: bool) -> bool {
+    let file = if debian { "/etc/apt/sources.list.d/ambersight.sources" } else { "/etc/yum.repos.d/ambersight.repo" };
+    Path::new(file).exists()
+}
+
+/// How to update a deb/rpm install to release `r`: the repository command
+/// when the repository is set up, else the package's own link and the
+/// command (and a hint about the repository), so nobody has to hunt for them.
+fn package_steps(r: &Release, debian: bool, repo: bool) -> String {
+    if repo {
+        let cmd = if debian { "sudo apt update && sudo apt upgrade" } else { "sudo dnf upgrade --refresh" };
+        return format!(
+            "AmberSight was installed as a package from the AmberSight repository, so the package manager updates it: run: {cmd} (version {} appears there shortly after its release)",
+            r.version
+        );
+    }
     let arm = cfg!(target_arch = "aarch64");
     let name = if debian {
         format!("ambersight_{}_{}.deb", r.version, if arm { "arm64" } else { "amd64" })
@@ -286,7 +304,9 @@ fn package_steps(r: &Release, debian: bool) -> String {
     };
     let url = r.asset(&name).map(|a| a.url.clone()).unwrap_or_else(|| r.notes_url.clone());
     let cmd = if debian { format!("sudo apt install ./{name}") } else { format!("sudo dnf install ./{name}") };
-    format!("AmberSight was installed as a package, so the package manager updates it: download {name} ({url}) and run: {cmd}")
+    format!(
+        "AmberSight was installed as a package, so the package manager updates it: download {name} ({url}) and run: {cmd}. To get updates with apt/dnf from now on, set up the AmberSight repository once: {REPO_PAGE}"
+    )
 }
 
 /// Why this program cannot replace itself, if it cannot.
@@ -517,7 +537,8 @@ fn release_blocker(r: &Release) -> Option<String> {
     };
     if let Some(why) = path_blocker(&exe) {
         if why == PACKAGED {
-            return Some(package_steps(r, std::path::Path::new("/etc/debian_version").exists()));
+            let debian = std::path::Path::new("/etc/debian_version").exists();
+            return Some(package_steps(r, debian, repo_configured(debian)));
         }
         return Some(why);
     }
@@ -1291,10 +1312,15 @@ mod tests {
             Asset { name: "ambersight-9.9.9-1.x86_64.rpm".into(), url: "https://example.org/a.rpm".into(), size: 1 },
             Asset { name: "ambersight-9.9.9-1.aarch64.rpm".into(), url: "https://example.org/b.rpm".into(), size: 1 },
         ] };
-        let deb = package_steps(&r, true);
-        assert!(deb.contains("sudo apt install ./ambersight_9.9.9_") && deb.contains("https://example.org/"), "{deb}");
-        let rpm = package_steps(&r, false);
-        assert!(rpm.contains("sudo dnf install ./ambersight-9.9.9-1.") && rpm.contains(".rpm"), "{rpm}");
+        let deb = package_steps(&r, true, false);
+        assert!(deb.contains("sudo apt install ./ambersight_9.9.9_") && deb.contains("https://example.org/") && deb.contains(REPO_PAGE), "{deb}");
+        let rpm = package_steps(&r, false, false);
+        assert!(rpm.contains("sudo dnf install ./ambersight-9.9.9-1.") && rpm.contains(".rpm") && rpm.contains(REPO_PAGE), "{rpm}");
+        // With the repository set up, the upgrade command is all that is needed.
+        let deb = package_steps(&r, true, true);
+        assert!(deb.contains("sudo apt update && sudo apt upgrade") && !deb.contains(".deb"), "{deb}");
+        let rpm = package_steps(&r, false, true);
+        assert!(rpm.contains("sudo dnf upgrade") && !rpm.contains(".rpm"), "{rpm}");
         // A folder we can write to is fine.
         let dir = temp("writable");
         assert!(path_blocker(&dir.join(program_name())).is_none());

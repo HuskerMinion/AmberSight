@@ -305,7 +305,7 @@ can do the same to notice that the server was updated, or ignore it.
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
-| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -907,7 +907,17 @@ encoder = "auto"      # or "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "soft
 max_hardware = 6      # transcodes at a time on the graphics card (the whole server)
 max_software = 1      # transcodes at a time in software
 max_per_user = 4      # per account: transcoded streams watched, and live transcodes started
+cache_seconds = 600   # a converted clip or playback is kept on disk this long after its last use
+cache_entry_mb = 2048 # past this a copy leaves the cache (its conversion goes on for its players)
+cache_total_mb = 4096 # all copies together; 0 keeps none
 ```
+
+When decoding on the graphics card fails to start for a source while software decoding of the
+same input with the same encoder then works, the server uses software decoding for that
+encoder, card, source codec and bit depth for the next hour (one warning in the log), so the
+next start does not lose seconds on the failed try. It is settled as soon as the software try
+makes its first output. A start where both fail with that encoder (a damaged clip, or an encoder
+that fails, even if another encoder then works), or one the viewer left, changes nothing.
 
 Limits per account (on a server without sign-in all players count as one account):
 
@@ -984,9 +994,59 @@ take `caps`; linked-server cameras ignore it.
 - **Reading the headers only:** `Range: bytes=0-0` (or `HEAD`) with `caps`, when it would be
   transcoded, answers **200 with an empty body** (`Content-Length: 0`) and all the headers
   above; no transcode starts. (Untouched answers are as before: 206 with one byte.)
-- A `Range` that does not start at byte 0 cannot be answered by a transcode: it gets the
-  untouched choice (as for `busy_fallback`), so a player that seeks by bytes in an untouched
-  answer keeps getting the same file.
+- **Range on a converted answer.** A conversion has no byte positions of its own, so the server
+  keeps a copy of each converted answer on disk for a while (10 minutes after its last use, at
+  most 2 GB each and 4 GB together; the `[transcode]` settings `cache_seconds`, `cache_entry_mb`
+  and `cache_total_mb`, and `cache_total_mb = 0` turns it off). ExoPlayer reopens the same URL
+  with `Range: bytes=N-` (N is often the first fragment's offset); that works:
+  - The copy is found by account, recording, `caps`, `start` and `quality`, so send the same
+    URL. A range from another account, or with other `caps` or `start`, is a different answer.
+  - Answers read from the copy send `Accept-Ranges: bytes`. Answers streamed straight from the
+    conversion (no copy is kept) send `Accept-Ranges: none`.
+  - Once the conversion has finished: **206** with `Content-Range: bytes N-M/total` and
+    `Content-Length`. A repeat of the request from the start is **200** with `Content-Length`.
+  - While it is still running, the size is not known. A range whose first byte is already
+    written is **206** with `Content-Range: bytes N-*/*` and no `Content-Length` (chunked); the
+    body follows the conversion to its end. (`N-*/*` is not valid HTTP; players that read to the
+    end of the body, as ExoPlayer does, take the length as unknown.) A range past what is written
+    waits for it (see the waits below), then **416**; a far seek moves the conversion on to it. A repeat of the request from the start joins
+    the running conversion; so does a second request made at the same moment as the first (one
+    conversion, not two).
+  - A bounded range (`bytes=N-M`) waits for byte M. When it comes in time: **206**
+    `bytes N-M/*` with `Content-Length`; when not, **206** `bytes N-*/*` with no length, and the
+    body still ends after byte M.
+  - A range from byte 0 with an end (`bytes=0-1`, as AVPlayer sends, or `bytes=0-N`) starts the
+    conversion like a request without a Range and is answered **206** from its new copy.
+    `bytes=0-0` is still the headers-only request above (never read from a copy).
+  - Waits: while nothing is written yet, a request waits as long as every way the conversion
+    may try can take (when decoding or encoding on the graphics card fails to start, the next
+    way is tried, each given 15 seconds); once bytes have come, up to 30 seconds for more. A
+    request waiting for its bytes counts as a reader, so the conversion keeps running for it.
+  - The conversion keeps running after the first connection closes, as long as someone is
+    reading the copy, and stops about 10 seconds after the last reader goes (then its encoder
+    place and account count are free). It runs at most about 64 MB ahead of the furthest
+    reader.
+  - A copy whose conversion failed or was stopped answers only a range inside what it wrote.
+    A request from the start, or a range past what it wrote, drops it: from the start, a new
+    conversion begins; a range from further in is **416**.
+  - A copy that reaches `cache_entry_mb`, or the total when nothing older can be dropped, leaves
+    the cache: its conversion goes on for the players reading it, but later requests do not find
+    it. When the total is full of copies in use, a new answer is streamed without a copy.
+  - Recordings that may still grow are not kept, since a later request would get more: a
+    playback window whose `to`, or an event clip whose event end with its post-roll, is in the
+    future or less than a recording segment's length (`segment_seconds`) plus 15 seconds ago.
+    They are streamed. A Range from byte 0 on them (`bytes=0-1`) gets the whole answer as a
+    **200** (the range is ignored); a Range from further in is **416**. A deleted event's copies
+    are dropped.
+  - No copy (expired, never made, not kept, caching off or full): **416**
+    (`Content-Range: bytes */*`, `x-as-transcoded: 1`): ask again with `start=`. (0.9.0 sent the
+    untouched file's bytes from that offset instead, which broke a player that began on the
+    converted stream.)
+  - All of these carry the same `x-as-*` and `x-clip-*` headers as the first answer. A range
+    served from the copy needs no encoder place and counts against no account limit. When the
+    answer would be untouched (the video already fits, or no encoder works), ranges work as
+    usual. A server that was busy at the first request and sent the untouched file can answer a
+    later range with 416 once it has room again; treat 416 the same way.
 - `info=1` (with the same `caps`/`start`/`quality`; also without `caps`) answers JSON instead
   of video: the live fields above plus
 
@@ -1855,7 +1915,8 @@ that cannot be saved is not sent.
 `POST /api/digest/send` (admin) builds and sends one now through the chosen services (also while
 `enabled` is false) and answers like the preview plus `sent`: `[{"service": "ntfy", "ok": true}]`.
 `GET /api/digests` lists the summaries kept (`id`, `created_ms`, `from_ms`, `to_ms`, `auto`,
-`range`); `GET /api/digests/:id` (or `latest`) returns one, for the cameras the account may see:
+`range`); `GET /api/digests/:id` (or `latest`) returns one, for the cameras the account may see
+(404 when there is none; with `quiet=1`, 204 instead):
 
 ```json
 { "id": 7, "title": "Morning summary: 2 unknown people, 1 package delivered",
@@ -2545,6 +2606,30 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.9.1**
+
+- Converted (`caps`) clips and playback and `Range`: with no copy kept, a Range from further in
+  is **416** (0.9.0 sent the untouched file's bytes there). A short-lived copy of each converted
+  answer is kept on disk, and a Range is answered from it (**206**); `bytes=0-1` and `bytes=0-N`
+  start the conversion and are answered from the copy. Answers from the copy send
+  `Accept-Ranges: bytes`, answers streamed without one `Accept-Ranges: none`. Recordings that may
+  still grow are not kept. See [Best quality on every device](#best-quality-on-every-device-caps).
+- New `[transcode]` settings `cache_seconds`, `cache_entry_mb`, `cache_total_mb`.
+- Converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and a
+  new mvex/mehd; ffmpeg's streamed header said 0, so ExoPlayer showed a 1 ms video), and no
+  longer end with an `mfra` box. whoami feature `fit_recordings`.
+- G.711 camera audio (served as FLAC): cameras whose RTP clock matches their audio are timed by
+  their clock, as before, so silence and lost packets keep their place. Cameras whose clock does
+  not match their audio (some step 600 for 320 samples, which made audio 1.875 times too long)
+  are timed by their samples, and keep only clear gaps (a step of more than 8 times a packet).
+  Recordings made before, where a fragment's samples last less than they hold or over 1.1
+  times as long in all, are served with each FLAC sample lasting the samples it holds, in clips,
+  playback and exports; real gaps (over half a second) stay, and fragments that last about what
+  they hold (lost packets kept) are left as they are.
+- Decoding on the graphics card that failed where software decoding with the same encoder then
+  worked is remembered for an hour per encoder, card, source codec and bit depth (live and
+  recordings), so the next start goes straight to software decoding.
 
 **New in 0.9.0**
 

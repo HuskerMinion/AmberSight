@@ -275,7 +275,7 @@ fn encode(p: &ParsedSegment) -> Vec<u8> {
             put(&mut o, t.tfdt_pos as u64);
             put(&mut o, t.tfdt);
             put(&mut o, t.duration);
-            put(&mut o, t.first_is_sync as u64 | (t.first_sample.is_some() as u64) << 1);
+            put(&mut o, t.first_is_sync as u64 | (t.first_sample.is_some() as u64) << 1 | (t.even as u64) << 2);
             // (Zigzag: the offset can be negative.)
             put(&mut o, ((t.first_cto << 1) ^ (t.first_cto >> 31)) as u32 as u64);
             if let Some((off, size)) = t.first_sample {
@@ -314,7 +314,8 @@ fn decode(b: &[u8], init: Vec<u8>) -> Option<ParsedSegment> {
             let z = small(get(b, at)?)?;
             let first_cto = ((z >> 1) as i32) ^ -((z & 1) as i32);
             let first_sample = if flags & 2 != 0 { Some((get(b, at)?, small(get(b, at)?)?)) } else { None };
-            trafs.push(TrafInfo { track_id, tfdt_pos, tfdt, duration, first_is_sync: flags & 1 != 0, first_sample, first_cto });
+            // (Layouts saved before `even` was kept read as not even: checked.)
+            trafs.push(TrafInfo { track_id, tfdt_pos, tfdt, duration, first_is_sync: flags & 1 != 0, first_sample, first_cto, even: flags & 4 != 0 });
         }
         fragments.push(FragmentInfo { offset, len, seq_pos, trafs }.checked());
     }
@@ -336,8 +337,8 @@ mod tests {
                     len: 123_456,
                     seq_pos: 20,
                     trafs: vec![
-                        TrafInfo { track_id: 1, tfdt_pos: 60, tfdt: 1 << 40, duration: 90000, first_is_sync: true, first_sample: Some((300, 40_000)), first_cto: -3000 },
-                        TrafInfo { track_id: 2, tfdt_pos: 160, tfdt: 7, duration: 8000, first_is_sync: false, first_sample: None, first_cto: 6000 },
+                        TrafInfo { track_id: 1, tfdt_pos: 60, tfdt: 1 << 40, duration: 90000, first_is_sync: true, first_sample: Some((300, 40_000)), first_cto: -3000, even: true },
+                        TrafInfo { track_id: 2, tfdt_pos: 160, tfdt: 7, duration: 8000, first_is_sync: false, first_sample: None, first_cto: 6000, even: false },
                     ],
                 },
                 FragmentInfo { offset: 124_156, len: 99, seq_pos: 20, trafs: vec![] },
@@ -352,6 +353,7 @@ mod tests {
         assert_eq!((t.tfdt, t.duration, t.first_is_sync, t.first_sample), (1 << 40, 90000, true, Some((300, 40_000))));
         assert!(!q.fragments[0].trafs[1].first_is_sync);
         assert_eq!((q.fragments[0].trafs[0].first_cto, q.fragments[0].trafs[1].first_cto), (-3000, 6000));
+        assert_eq!((q.fragments[0].trafs[0].even, q.fragments[0].trafs[1].even), (true, false));
         // Damaged data is refused, not misread.
         let mut bad = encode(&p);
         bad.truncate(bad.len() - 1);
