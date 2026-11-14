@@ -142,16 +142,26 @@ fn start_in_background() -> Result<()> {
     c.spawn().map(|_| ()).map_err(Into::into)
 }
 
+/// The helper's lock; unlocked explicitly when dropped, since a child process being started
+/// (forked, not yet running its program) holds a copy of the descriptor.
+struct InstanceLock(std::fs::File);
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        let _ = fs4::fs_std::FileExt::unlock(&self.0);
+    }
+}
+
 /// Hold a lock so only one helper runs per user; waits a while for an
 /// older one to exit (after re-pairing, the old one exits on its own).
-fn single_instance(dir: &Path) -> Result<std::fs::File> {
+fn single_instance(dir: &Path) -> Result<InstanceLock> {
     use fs4::fs_std::FileExt;
     std::fs::create_dir_all(dir)?;
     let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("capture.lock"))?;
     let until = Instant::now() + Duration::from_secs(45);
     loop {
         if f.try_lock_exclusive().unwrap_or(false) {
-            return Ok(f);
+            return Ok(InstanceLock(f));
         }
         if Instant::now() > until {
             anyhow::bail!("AmberSight Capture is already running for this user");

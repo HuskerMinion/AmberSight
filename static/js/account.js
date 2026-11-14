@@ -181,10 +181,10 @@ function newRecovery(refresh) {
 }
 
 function addToken(acct, refresh) {
-  const scope = acct.admin
+  const scope = acct.admin || acct.role === 'operator'
     ? '<div class="sec">What it may do</div>' +
       '<label class="asys-chk"><input type="radio" name="tkScope" value="viewer" checked> Watch only (recommended): live video, events, clips and recordings</label>' +
-      '<label class="asys-chk"><input type="radio" name="tkScope" value="admin"> Also day-to-day control: arm and disarm, profiles and pausing notifications (for a day at most), moving cameras, recording a clip, reviewing events. Admins are told when it disarms or pauses. Not for RTSP</label>'
+      '<label class="asys-chk"><input type="radio" name="tkScope" value="admin"> Also day-to-day control: arm and disarm, profiles and pausing notifications (for a day at most), moving cameras, recording a clip, reviewing events' + (acct.role === 'operator' ? ' (as far as your account may)' : '') + '. Admins are told when it disarms or pauses. Not for RTSP</label>'
     : '';
   proofDlg({
     title: 'New device token',

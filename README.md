@@ -183,12 +183,17 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   grids and slow links. Corner labels (name, site, date, time) and AI detection
   chips on each tile. Layouts, groups, paging, full screen, a phone layout, and
   a Data saver mode that plays the sub stream.
+- **Streams that fit the device:** apps get the best quality their device can
+  decode: streams too big or in a codec the device can't play are converted on
+  the graphics card (or in software when there is none).
 - **Recording:** continuous segments per camera, or a sub stream all the time
   with the main stream only around events. Motion clips with pre-roll and
   post-roll. By default recordings use what the disk can spare and keep 10% of
   it free, deleting the oldest first; or give each folder a fixed size. Several
   storage folders, an archive tier, and retention in days. Footage around
-  events is deleted last.
+  events is deleted last. A camera can also save each event's clip (or only
+  events AI confirmed) as an .mp4 to a second folder, such as a OneDrive or Google Drive
+  folder, shortly after the event: off-site copies from the same stream.
 - **Timeline:** all cameras in sync, alert markers by kind, fast and reverse
   playback, and export of a time range.
 - **Events:** a list beside the player, filters, false alarms, protect (kept
@@ -217,7 +222,10 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   list, sign-in with your usual camera login, and an optional hourly check
   that tells you when a new camera appears.
 - **Linked servers:** several sites in one interface.
-- **Users and per-camera access.** Two-step codes (authenticator app, with recovery
+- **Users and per-camera access.** Three roles: viewers watch; operators also arm and
+  disarm, move PTZ cameras, talk, record clips, keep and mark events and tune their cameras'
+  detection and alerts (each right can be turned off); admins do everything. Viewers and operators
+  can be limited to some cameras. Two-step codes (authenticator app, with recovery
   codes) and per-device tokens for apps and RTSP. HTTPS with a private certificate authority.
 - **Updates:** signed self-update. AmberSight checks for new releases every
   12 hours (it asks api.github.com and sends only `AmberSight/<version>`;

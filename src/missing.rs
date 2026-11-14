@@ -672,7 +672,16 @@ pub fn recover_marked(db: &Db, data_dir: &Path, rolls: Rolls) -> Result<(u64, u6
 // ---- one at a time ----
 
 /// Held while a check or removal runs (server or command line).
-pub struct JobLock(#[allow(dead_code)] std::fs::File);
+pub struct JobLock(std::fs::File);
+
+impl Drop for JobLock {
+    // Unlocked here rather than by closing the file: a child process another thread is just
+    // starting (forked, not yet running its program) holds a copy of the descriptor, and the
+    // lock would last until that copy is closed.
+    fn drop(&mut self) {
+        let _ = fs4::fs_std::FileExt::unlock(&self.0);
+    }
+}
 
 pub fn lock(data_dir: &Path) -> Result<JobLock> {
     use fs4::fs_std::FileExt;
@@ -1695,6 +1704,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_is_released_while_a_starting_child_still_holds_a_copy() {
+        // A child forked by another thread holds a copy of the descriptor until it runs its
+        // program; a duplicate descriptor stands for it (same open file).
+        use std::os::fd::AsRawFd;
+        let d = tmp("lockcopy");
+        let l = lock(&d).unwrap();
+        // SAFETY: dup of a descriptor that is open; closed below.
+        let copy = unsafe { libc::dup(l.0.as_raw_fd()) };
+        assert!(copy >= 0);
+        drop(l);
+        let again = lock(&d);
+        // SAFETY: the copy made above, closed once.
+        unsafe { libc::close(copy) };
+        assert!(again.is_ok(), "the lock lingered while a copy of the descriptor was open");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
     #[test]
     fn a_folder_that_holds_none_of_its_recordings_needs_naming() {
         let d = tmp("allgone");
@@ -1816,7 +1844,7 @@ mod tests {
         use tower::ServiceExt;
         let mut cfg: Config = toml::from_str("").unwrap();
         for (name, admin) in [("ann", true), ("bob", false)] {
-            cfg.server.users.push(crate::config::UserConfig { disabled: false, username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: Vec::new() });
+            cfg.server.users.push(crate::config::UserConfig { disabled: false, username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: Vec::new(), ..Default::default() });
         }
         let e = crate::engine::Engine::for_test(cfg);
         let app = crate::web::build_router(e.clone());

@@ -71,6 +71,10 @@ export function applyWho(who) {
   state.signedIn = !!who.signed_in;
   state.user = who.user || '';
   state.isAdmin = !!who.admin;
+  // (An older server sends no role: admin or viewer from the flag.)
+  state.role = who.role || (who.admin ? 'admin' : 'viewer');
+  state.perms = who.perms || null;
+  state.limited = !!who.limited;
   renderUserMenu();
 }
 
@@ -81,9 +85,10 @@ function renderUserMenu() {
   const authed = state.authRequired && state.signedIn;
   wrap.hidden = !authed && state.authRequired;   // (the sign-in gate is showing)
   wrap.classList.toggle('noauth', !state.authRequired);
-  $('userName').textContent = authed ? state.user + (state.isAdmin ? '' : ' (view only)') : '';
+  const what = state.isAdmin ? '' : state.role === 'operator' ? ' (operator)' : ' (view only)';
+  $('userName').textContent = authed ? state.user + what : '';
   const info = $('acctInfo');
-  if (authed) info.innerHTML = '<div>Signed in as <b>' + esc(state.user) + '</b>' + (state.isAdmin ? '' : ' (view only)') + '</div>';
+  if (authed) info.innerHTML = '<div>Signed in as <b>' + esc(state.user) + '</b>' + what + '</div>';
   else if (!state.authRequired) {
     info.innerHTML = '<div><b>Not signed in</b> &middot; anyone on your network can use this</div>' +
       (state.isAdmin ? '<a class="btn" href="#settings/users/users" data-addpw>Add a password</a>' : '');

@@ -6,6 +6,8 @@ export const state = {
   signedIn: false,
   user: '',
   isAdmin: true,        // refined by /api/whoami
+  role: 'admin',        // 'viewer' | 'operator' | 'admin' (from /api/whoami)
+  perms: null,          // an operator's rights: { ptz, talk_clip, arm, events, camera_detection }
   authRequired: false,  // false = open-LAN mode: no sign-in UI
   cams: [],             // last /api/cameras result
   overlayVars: {},      // named overlay variables (name -> value) from /api/cameras
@@ -213,13 +215,25 @@ export function playVideo(v) {
   });
 }
 
+// What this account may do beyond watching: admins everything, operators what their rights say
+// (the server checks again; this only decides which buttons show). The server gives what this
+// session may do now: 'arm' (arming and profiles) is off for an operator limited to some cameras,
+// who may still 'pause' notifications of their cameras.
+export function can(perm) {
+  if (state.isAdmin) return true;
+  return state.role === 'operator' && !!(state.perms && state.perms[perm]);
+}
+export const isOperator = () => !state.isAdmin && state.role === 'operator';
+
 // A view-only account tried something only an admin can do (a key such as S, P, X): say so once
 // per page session, quietly, instead of a dialog every time.
 let viewOnlyTold = false;
-export function viewOnlyNote() {
+export function viewOnlyNote(what) {
+  // (Arming by an operator limited to some cameras: said every time, it is not a missing right.)
+  if (what === 'arm' && isOperator() && state.limited && state.perms && state.perms.pause) { toast('This account sees only some cameras, so it cannot arm, disarm or switch profiles: those change every camera.'); return; }
   if (viewOnlyTold) return;
   viewOnlyTold = true;
-  toast('This account is view-only: arming, keeping and marking events need an administrator.');
+  toast(isOperator() ? 'This account may not do that: an admin can allow it in Settings, Users.' : 'This account is view-only: an admin can give it more rights in Settings, Users.');
 }
 
 export function toast(msg, onClick, opts) {

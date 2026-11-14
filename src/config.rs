@@ -43,7 +43,12 @@ pub struct AuthConfig {
 /// everything but cannot change settings, add/remove cameras, protect events,
 /// or alter alerts. The legacy single [server.auth] block is treated as one
 /// admin user.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// An operator is `admin = false` with `role = "operator"`: day-to-day
+/// control (see `OperatorPerms`), never settings or accounts. An older
+/// AmberSight ignores `role` and `perms`, so it treats an operator as a viewer
+/// (never as an admin).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserConfig {
     pub username: String,
     pub password: String,
@@ -56,6 +61,78 @@ pub struct UserConfig {
     /// and only another admin can turn it back on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// "operator" for an operator (with `admin = false`); empty for viewers and
+    /// admins. Anything else is a viewer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    /// What an operator may do (all of it unless turned off here).
+    #[serde(default, skip_serializing_if = "OperatorPerms::all_on")]
+    pub perms: OperatorPerms,
+}
+
+impl UserConfig {
+    /// An operator account: not an admin, and marked as one.
+    pub fn is_operator(&self) -> bool {
+        !self.admin && self.role == "operator"
+    }
+}
+
+/// An operator's rights, each on unless turned off. Saving and deleting
+/// presets, settings other than a camera's detection and alerts, accounts,
+/// storage and the rest stay with admins whatever these say.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperatorPerms {
+    /// Move PTZ cameras, go to presets, click to aim.
+    #[serde(default = "yes")]
+    pub ptz: bool,
+    /// Talk through a camera's speaker, record a clip now.
+    #[serde(default = "yes")]
+    pub talk_clip: bool,
+    /// Arm and disarm, switch profiles, pause a camera's notifications.
+    #[serde(default = "yes")]
+    pub arm: bool,
+    /// Keep events forever (and undo it), mark them "not a real alert" or "looks fine".
+    #[serde(default = "yes")]
+    pub events: bool,
+    /// Change the detection and alert settings of the cameras they may see.
+    #[serde(default = "yes")]
+    pub camera_detection: bool,
+}
+
+impl Default for OperatorPerms {
+    fn default() -> Self {
+        OperatorPerms { ptz: true, talk_clip: true, arm: true, events: true, camera_detection: true }
+    }
+}
+
+impl OperatorPerms {
+    pub fn all_on(&self) -> bool {
+        *self == OperatorPerms::default()
+    }
+}
+
+/// Accounts written by hand that do not mean what they seem: an admin also
+/// marked an operator (it is an admin), a role that is not one (a viewer),
+/// and rights that are not ones (ignored, so the real one stays on).
+pub fn account_warnings(text: &str) -> Vec<String> {
+    let Ok(v) = text.parse::<toml::Table>() else { return Vec::new() };
+    let users = v.get("server").and_then(|s| s.get("users")).and_then(|u| u.as_array()).cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for u in &users {
+        let name = u.get("username").and_then(|x| x.as_str()).unwrap_or("?");
+        let admin = u.get("admin").and_then(|x| x.as_bool()).unwrap_or(true);
+        match u.get("role").and_then(|x| x.as_str()) {
+            Some("operator") if admin => out.push(format!("account {name} has role = \"operator\" and admin = true: it is an admin (set admin = false for an operator)")),
+            Some("") | Some("operator") | None => {}
+            Some(r) => out.push(format!("account {name} has role = \"{r}\", which is not one: it is a viewer (the role can be \"operator\")")),
+        }
+        if let Some(p) = u.get("perms").and_then(|x| x.as_table()) {
+            for k in p.keys().filter(|k| !matches!(k.as_str(), "ptz" | "talk_clip" | "arm" | "events" | "camera_detection")) {
+                out.push(format!("account {name}: \"{k}\" in perms is not a right (ptz, talk_clip, arm, events, camera_detection); it does nothing"));
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,6 +495,23 @@ pub struct CameraConfig {
     /// Recording folder name from [[storage.folders]]; unset = data_dir.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// Also save each event's clip as an .mp4 in this folder (e.g. one a
+    /// OneDrive or Google Drive app syncs), as
+    /// `<Camera>/<YYYY-MM-DD>/<HH-MM-SS> <labels>.mp4`, shortly after the
+    /// event ends. Recording itself is unchanged. Outside recording caps and
+    /// clean-up (engine/event_copy.rs). Unset or empty = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_events_to: Option<String>,
+    /// Delete the copies after this many days (only files AmberSight wrote
+    /// there); 0 = keep them.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub copy_events_keep_days: u32,
+    /// Copy only the events that count by what was detected: an object AI
+    /// confirmed, a sound, the camera's own detection (with AI off: every
+    /// event). Notification settings (alerts off, schedules, pauses, limits,
+    /// "notify me for", areas that don't notify) play no part.
+    #[serde(default, alias = "copy_events_only_alerts", skip_serializing_if = "std::ops::Not::not")]
+    pub copy_events_only_confirmed: bool,
     /// Device credentials for the stream itself (separate from app users).
     /// Injected into the URL as scheme://user:pass@host when username is set
     /// and the URL has no userinfo yet. On PUT, an empty password keeps the
@@ -1206,7 +1300,16 @@ impl PowerSwitch {
 /// Notification services a camera can choose from.
 pub const ALERT_CHANNELS: &[&str] = &["push", "email", "telegram", "ntfy", "pushover", "webhook", "home_assistant", "image_post", "action"];
 
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 impl CameraConfig {
+    /// The folder event clips are also saved to, when that is on.
+    pub fn copy_folder(&self) -> Option<&str> {
+        self.copy_events_to.as_deref().map(str::trim).filter(|p| !p.is_empty())
+    }
+
     /// Fold the older single `group` into `groups`; trim, drop blanks and repeats.
     pub fn normalize_groups(&mut self) {
         let legacy = std::mem::take(&mut self.group);
@@ -2167,6 +2270,9 @@ pub struct Config {
     /// Sharing camera streams with other apps over RTSP (see restream/).
     #[serde(default, skip_serializing_if = "crate::restream::RestreamConfig::is_default")]
     pub restream: crate::restream::RestreamConfig,
+    /// Re-encoding for players that cannot decode a stream as it is (see transcode/).
+    #[serde(default, skip_serializing_if = "crate::transcode::TranscodeConfig::is_default")]
+    pub transcode: crate::transcode::TranscodeConfig,
     /// Looking for new versions on GitHub (see update.rs).
     #[serde(default, skip_serializing_if = "crate::update::UpdateConfig::is_default")]
     pub update: crate::update::UpdateConfig,
@@ -2315,6 +2421,9 @@ impl Config {
                 }
             }
         };
+        for w in account_warnings(&text) {
+            tracing::warn!("{path}: {w}");
+        }
         for c in cfg.cameras.iter_mut() {
             c.normalize_groups();
         }
@@ -2324,6 +2433,12 @@ impl Config {
             tracing::warn!("server.users: {name} is listed more than once; only the first entry that can sign in is used");
         }
         cfg.presence.sanitize();
+        // A bad value is used corrected and kept as written, so the rest of the section stays
+        // (and is saved back as it was).
+        for w in cfg.transcode.sanitized().1 {
+            tracing::warn!("{path}: {w}");
+        }
+        crate::transcode::set_config(&cfg.transcode);
         // A push server entry that is not a host name, or one past the
         // most allowed, is left out (and said).
         for w in cfg.push.sanitize_at_load() {
@@ -2430,6 +2545,24 @@ mod tests {
         // The starter config for new installs is automatic.
         let starter: Config = toml::from_str(include_str!("../config.example.toml")).unwrap();
         assert_eq!((starter.storage.max_mb, starter.storage.min_free_percent), (0, 10));
+    }
+
+    #[test]
+    fn a_bad_transcode_value_keeps_the_rest_of_the_section() {
+        // (Config::load is not used: it sets the transcode settings in use for the whole
+        // process, which other tests rely on.)
+        let c: Config = toml::from_str("[server]\n[transcode]\nencoder = \"nvidia\"\nmax_hardware = 500\nmax_software = 0\nmax_per_user = 2\n").unwrap();
+        let (used, warn) = c.transcode.sanitized();
+        assert_eq!((used.encoder.as_str(), used.max_hardware, used.max_software, used.max_per_user), ("auto", 64, 0, 2));
+        assert_eq!(warn.len(), 2, "{warn:?}");
+        assert!(warn[0].contains("encoder") && warn[1].contains("max_hardware"), "{warn:?}");
+        // Kept as written, so a save writes the section back unchanged.
+        let text = toml::to_string(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.transcode, c.transcode);
+        assert_eq!((back.transcode.encoder.as_str(), back.transcode.max_hardware), ("nvidia", 500));
+        let (ok, none) = crate::transcode::TranscodeConfig::default().sanitized();
+        assert!(none.is_empty() && ok.is_default());
     }
 
     #[test]
@@ -2634,6 +2767,78 @@ url = "rtsp://y"
 
 fn default_smtp_port() -> u16 { 587 }
 fn default_smtp_tls() -> String { "starttls".into() }
+
+#[cfg(test)]
+mod operator_config_tests {
+    use super::{Config, OperatorPerms};
+
+    #[test]
+    fn old_accounts_load_as_they_were_and_operators_are_written_so_older_versions_see_viewers() {
+        let old = "[[server.users]]\nusername = \"a\"\npassword = \"x\"\n[[server.users]]\nusername = \"v\"\npassword = \"x\"\nadmin = false\ncameras = [\"Porch\"]\n";
+        let cfg: Config = toml::from_str(old).unwrap();
+        assert!(cfg.server.users[0].admin && !cfg.server.users[0].is_operator());
+        assert!(!cfg.server.users[1].admin && !cfg.server.users[1].is_operator());
+        // Nothing new is written for them.
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("role") && !text.contains("perms"), "{text}");
+        // An operator: admin = false always written, its rights only when some are off.
+        let mut cfg = cfg;
+        cfg.server.users[1].role = "operator".into();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("admin = false") && text.contains("role = \"operator\"") && !text.contains("perms"), "{text}");
+        cfg.server.users[1].perms = OperatorPerms { arm: false, ..Default::default() };
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.server.users[1].is_operator());
+        assert_eq!(back.server.users[1].perms, OperatorPerms { arm: false, ..Default::default() });
+        // An older version reads it with its own (smaller) account type: a viewer.
+        #[derive(serde::Deserialize)]
+        struct OldUser {
+            #[serde(default = "super::yes")]
+            admin: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct OldServer {
+            users: Vec<OldUser>,
+        }
+        #[derive(serde::Deserialize)]
+        struct OldConfig {
+            server: OldServer,
+        }
+        let seen: OldConfig = toml::from_str(&text).unwrap();
+        assert!(!seen.server.users[1].admin);
+        // An admin is never an operator, whatever else the file says.
+        let odd: Config = toml::from_str("[[server.users]]\nusername = \"a\"\npassword = \"x\"\nrole = \"operator\"\n").unwrap();
+        assert!(odd.server.users[0].admin && !odd.server.users[0].is_operator());
+        // Rights left out are on.
+        let p: OperatorPerms = toml::from_str("ptz = false").unwrap();
+        assert_eq!(p, OperatorPerms { ptz: false, ..Default::default() });
+        // Hand edits that do not mean what they seem are warned about at load.
+        let w = super::account_warnings("[[server.users]]\nusername = \"a\"\npassword = \"x\"\nrole = \"operator\"\n[[server.users]]\nusername = \"b\"\npassword = \"x\"\nadmin = false\nrole = \"boss\"\nperms = { arms = false, ptz = false }\n[[server.users]]\nusername = \"c\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\nperms = { arm = false }\n");
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("account a") && w[1].contains("\"boss\"") && w[2].contains("\"arms\""), "{w:?}");
+    }
+
+    #[test]
+    fn roles_of_signed_in_callers() {
+        use crate::auth::{role_of, Role};
+        let cfg: Config = toml::from_str(
+            "[[server.users]]\nusername = \"a\"\npassword = \"x\"\n\
+             [[server.users]]\nusername = \"o\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\n\
+             [[server.users]]\nusername = \"off\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\ndisabled = true\n\
+             [[server.users]]\nusername = \"v\"\npassword = \"x\"\nadmin = false\n",
+        )
+        .unwrap();
+        assert_eq!(role_of(&cfg, "a", true, true), Role::Admin);
+        assert_eq!(role_of(&cfg, "a", false, true), Role::Viewer, "a session of an admin's account held to a viewer's rights");
+        assert_eq!(role_of(&cfg, "o", false, true), Role::Operator(OperatorPerms::default()));
+        assert_eq!(role_of(&cfg, "o", false, false), Role::Viewer, "a watch-only token");
+        assert_eq!(role_of(&cfg, "off", false, true), Role::Viewer);
+        assert_eq!(role_of(&cfg, "v", false, true), Role::Viewer);
+        assert_eq!(role_of(&cfg, "nobody", false, true), Role::Viewer);
+        assert!(crate::auth::is_operator(&cfg, "o") && !crate::auth::is_operator(&cfg, "a") && !crate::auth::is_operator(&cfg, "v"));
+    }
+}
 
 #[cfg(test)]
 mod alert_channel_tests {

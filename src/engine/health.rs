@@ -97,6 +97,15 @@ impl Engine {
                 "live_viewers": h.live_main.viewers() + h.live_sub.viewers(),
             }));
         }
+        // Event clips that cannot be saved to a camera's copy folder.
+        {
+            let cams = self.config.lock().unwrap().cameras.clone();
+            for p in super::event_copy::problems(&cams, now) {
+                problem(p.key, &p.text);
+                shorts.push(p.short);
+                warnings.push(p.warning);
+            }
+        }
         let offsite = self.config.lock().unwrap().offsite.clone();
         if let Some(w) = crate::offsite::problem(&offsite) {
             problem("offsite".into(), &w);

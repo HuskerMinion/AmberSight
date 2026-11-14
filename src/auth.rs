@@ -70,7 +70,7 @@ const MAX_PASSWORD_CHECKS: usize = 4;
 const MAX_PASSWORD_WAITING: usize = 32;
 /// How long a check waits for its turn.
 const PASSWORD_WAIT: Duration = Duration::from_secs(15);
-/// Device tokens start with this, so they can be recognised (in a leak, or in
+/// Device tokens start with this, so they can be recognized (in a leak, or in
 /// a password field).
 pub const TOKEN_PREFIX: &str = "ast_";
 pub const MAX_TOKENS: usize = 20;
@@ -173,6 +173,95 @@ pub fn still_allowed(cfg: &crate::config::Config, user: &str, generation_then: u
 /// that began before the change can tell.
 pub fn generation(user: &str) -> u64 {
     state().lock().unwrap().generations.get(user).copied().unwrap_or(0)
+}
+
+/// What a signed-in caller may do. Admins: everything. Operators: day-to-day
+/// control, as far as their `OperatorPerms` go (and only on the cameras they
+/// may see). Viewers: watching. Anything not known to be more: viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Viewer,
+    Operator(crate::config::OperatorPerms),
+    Admin,
+}
+
+impl Role {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Operator(_) => "operator",
+            Role::Admin => "admin",
+        }
+    }
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Role::Admin)
+    }
+    pub fn is_operator(&self) -> bool {
+        matches!(self, Role::Operator(_))
+    }
+    /// Admins may do all of these; viewers none.
+    pub fn may(&self, perm: Perm) -> bool {
+        match self {
+            Role::Admin => true,
+            Role::Viewer => false,
+            Role::Operator(p) => match perm {
+                Perm::Ptz => p.ptz,
+                Perm::TalkClip => p.talk_clip,
+                Perm::Arm => p.arm,
+                Perm::Events => p.events,
+                Perm::CameraDetection => p.camera_detection,
+            },
+        }
+    }
+    /// For /api/whoami and the sign-in answers: what this session may do
+    /// now, each true or false. `limited`: the account sees only some cameras
+    /// (no arming, disarming or profiles: they change every camera; pausing
+    /// its cameras' notifications is `pause`). `by_token`: a device token
+    /// (never camera settings or talk).
+    pub fn perms_json(&self, limited: bool, by_token: bool) -> serde_json::Value {
+        let m = |p| self.may(p);
+        serde_json::json!({
+            "ptz": m(Perm::Ptz),
+            "talk_clip": m(Perm::TalkClip) && !by_token,
+            "arm": m(Perm::Arm) && (self.is_admin() || !limited),
+            "pause": m(Perm::Arm),
+            "events": m(Perm::Events),
+            "camera_detection": m(Perm::CameraDetection) && !by_token,
+        })
+    }
+}
+
+/// One of an operator's rights (see `OperatorPerms`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Perm {
+    Ptz,
+    TalkClip,
+    Arm,
+    Events,
+    CameraDetection,
+}
+
+/// The role of `user`, signed in with these rights: `admin` is the
+/// identity's (a session or token never has more than its account). An
+/// operator's rights come from the account as it is now; `control` false (a
+/// device token made without control rights) leaves an operator a viewer.
+pub fn role_of(cfg: &crate::config::Config, user: &str, admin: bool, control: bool) -> Role {
+    if admin {
+        return Role::Admin;
+    }
+    // (A legacy [server.auth] account of that name is an admin: never an operator.)
+    if cfg.server.auth.as_ref().is_some_and(|a| a.username.trim() == user) {
+        return Role::Viewer;
+    }
+    match cfg.server.users.iter().find(|u| u.username.trim() == user) {
+        Some(u) if control && !u.disabled && u.is_operator() => Role::Operator(u.perms),
+        _ => Role::Viewer,
+    }
+}
+
+/// Whether `user` has an operator account (whatever one session of it may do).
+pub fn is_operator(cfg: &crate::config::Config, user: &str) -> bool {
+    role_of(cfg, user, false, true).is_operator()
 }
 
 /// Camera slugs a non-admin user is limited to (None = all cameras).
@@ -872,6 +961,13 @@ pub fn add_token(user: &str, name: &str, admin: bool, generation_then: u64) -> R
 pub fn token_name(header: &str) -> Option<String> {
     let (_, value) = token_in_header(header)?;
     state().lock().unwrap().tokens.get(&token_hash(&value)).map(|t| t.name.clone())
+}
+
+/// Whether the token in this header was made with control rights (its
+/// scope; what the account may do now is checked separately).
+pub fn token_control(header: &str) -> bool {
+    let Some((_, value)) = token_in_header(header) else { return false };
+    state().lock().unwrap().tokens.get(&token_hash(&value)).is_some_and(|t| t.admin)
 }
 
 /// The tokens of an account, oldest first.

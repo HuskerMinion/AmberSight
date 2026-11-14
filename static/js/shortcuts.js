@@ -1,6 +1,6 @@
 // shortcuts.js - keyboard shortcuts, the "?" sheet, and the header theme/shortcut buttons.
 
-import { $, state, openDlg, cycleTheme, topDlgOpen, overlayOpen } from './core.js';
+import { $, state, openDlg, cycleTheme, topDlgOpen, overlayOpen, can } from './core.js';
 import { showTab, isActive, goTab, GO_KEYS } from './nav.js';
 import { timelineKey, enterFromFull, isOn as tlIsOn, toggle as toggleTl, setSolo as tlSolo } from './livetl.js';
 import { shieldKey } from './status.js';
@@ -14,7 +14,7 @@ const KEYS = [
   [K('G') + ' then ' + K('L') + K('E') + K('T') + K('S') + K('H'), 'Go to Live / Events / the timeline / Settings / Help'],
   [K('Ctrl') + ' ' + K('K'), 'Search pages, settings, cameras and actions'],
   [K('/'), 'Search events'],
-  [K('S'), 'Disarm motion detection on every camera (asks first); again to arm'],
+  [K('S'), 'Disarm motion detection on every camera (asks first); again to arm', 'arm'],
   [K('Esc'), 'Close dialog / full screen; clear the selection; cancel arranging'],
   [K('?'), 'This sheet'],
   'Live',
@@ -57,7 +57,8 @@ const KEYS = [
 ];
 
 function sheet() {
-  openDlg('Keyboard shortcuts', '<div class="keys">' + KEYS.map(k => typeof k === 'string' ? '<h4>' + k + '</h4>' : '<span>' + k[0] + '</span><span>' + k[1] + '</span>').join('') + '</div>');
+  // (A row tied to a right is listed only for accounts that have it.)
+  openDlg('Keyboard shortcuts', '<div class="keys">' + KEYS.filter(k => typeof k === 'string' || !k[2] || can(k[2])).map(k => typeof k === 'string' ? '<h4>' + k + '</h4>' : '<span>' + k[0] + '</span><span>' + k[1] + '</span>').join('') + '</div>');
 }
 
 // letter -> page id, for the pages that exist

@@ -275,6 +275,20 @@ fn in_container() -> bool {
     Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
 }
 
+/// How to update a deb/rpm install to release `r`: the package's own link
+/// and the command, so nobody has to hunt for them.
+fn package_steps(r: &Release, debian: bool) -> String {
+    let arm = cfg!(target_arch = "aarch64");
+    let name = if debian {
+        format!("ambersight_{}_{}.deb", r.version, if arm { "arm64" } else { "amd64" })
+    } else {
+        format!("ambersight-{}-1.{}.rpm", r.version, if arm { "aarch64" } else { "x86_64" })
+    };
+    let url = r.asset(&name).map(|a| a.url.clone()).unwrap_or_else(|| r.notes_url.clone());
+    let cmd = if debian { format!("sudo apt install ./{name}") } else { format!("sudo dnf install ./{name}") };
+    format!("AmberSight was installed as a package, so the package manager updates it: download {name} ({url}) and run: {cmd}")
+}
+
 /// Why this program cannot replace itself, if it cannot.
 fn path_blocker(exe: &Path) -> Option<String> {
     if in_container() {
@@ -502,6 +516,9 @@ fn release_blocker(r: &Release) -> Option<String> {
         Err(e) => return Some(e.to_string()),
     };
     if let Some(why) = path_blocker(&exe) {
+        if why == PACKAGED {
+            return Some(package_steps(r, std::path::Path::new("/etc/debian_version").exists()));
+        }
         return Some(why);
     }
     let (os, arch) = machine();
@@ -1268,6 +1285,16 @@ mod tests {
         }
         assert_eq!(path_blocker(Path::new("/usr/bin/ambersight")).unwrap(), PACKAGED);
         assert!(PACKAGED.contains("apt/dnf"));
+        let r = Release { tag: "v9.9.9".into(), version: "9.9.9".into(), notes_url: "https://example.org/notes".into(), assets: vec![
+            Asset { name: "ambersight_9.9.9_amd64.deb".into(), url: "https://example.org/a.deb".into(), size: 1 },
+            Asset { name: "ambersight_9.9.9_arm64.deb".into(), url: "https://example.org/b.deb".into(), size: 1 },
+            Asset { name: "ambersight-9.9.9-1.x86_64.rpm".into(), url: "https://example.org/a.rpm".into(), size: 1 },
+            Asset { name: "ambersight-9.9.9-1.aarch64.rpm".into(), url: "https://example.org/b.rpm".into(), size: 1 },
+        ] };
+        let deb = package_steps(&r, true);
+        assert!(deb.contains("sudo apt install ./ambersight_9.9.9_") && deb.contains("https://example.org/"), "{deb}");
+        let rpm = package_steps(&r, false);
+        assert!(rpm.contains("sudo dnf install ./ambersight-9.9.9-1.") && rpm.contains(".rpm"), "{rpm}");
         // A folder we can write to is fine.
         let dir = temp("writable");
         assert!(path_blocker(&dir.join(program_name())).is_none());

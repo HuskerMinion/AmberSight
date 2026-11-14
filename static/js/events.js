@@ -3,7 +3,7 @@
 // bulk actions, and the keyboard moves through the events.
 
 import { renderVerdict, aiFrames } from './ai_review.js';
-import { $, state, api, esc, fmtTime, stillWaiting, openDlg, msgDlg, toast, lowQ, enc, topDlgOpen, overlayOpen, backLayer, overlaysChanged, afterOverlayClose, returnOnBack, viewOnlyNote, downloadUrl, speedOptions, applySpeed, safeRate, MAX_RATE } from './core.js';
+import { $, state, api, esc, fmtTime, stillWaiting, openDlg, msgDlg, toast, lowQ, enc, topDlgOpen, overlayOpen, backLayer, overlaysChanged, afterOverlayClose, returnOnBack, viewOnlyNote, downloadUrl, speedOptions, applySpeed, safeRate, MAX_RATE, can } from './core.js';
 import { isActive, showTab } from './nav.js';
 import { openFullCam, closeFull } from './live.js';
 
@@ -562,7 +562,7 @@ function paintPlayer(e) {
     '<div class="evp-vid">' + (e.clip ? '<video controls playsinline preload="auto" poster="' + (e.thumb ? '/api/events/' + enc(e.id) + '/thumb' : '') + '"></video>' : (e.thumb ? '<img src="/api/events/' + enc(e.id) + '/thumb" alt="">' : '') + '<span class="nc">No clip</span>') + '</div>' +
     (e.clip ? '<div class="evp-ctl"><div class="evp-mtl" title="Click to jump"><i></i><b></b></div><label class="evp-speed">Speed <select aria-label="Playback speed">' + speedOptions(state.speed, MAX_RATE) + '</select></label></div>' : '') +
     '<div class="evp-acts"></div>' +
-    '<div class="evp-keys"><kbd>↑</kbd><kbd>↓</kbd> or <kbd>J</kbd><kbd>K</kbd> next and previous · <kbd>Space</kbd> play · ' + (state.isAdmin ? '<kbd>P</kbd> keep forever · <kbd>X</kbd> not a real alert · ' : '') + '<kbd>O</kbd> looks fine · <kbd>Enter</kbd> open on the timeline</div>' +
+    '<div class="evp-keys"><kbd>↑</kbd><kbd>↓</kbd> or <kbd>J</kbd><kbd>K</kbd> next and previous · <kbd>Space</kbd> play · ' + (can('events') ? '<kbd>P</kbd> keep forever · <kbd>X</kbd> not a real alert · ' : '') + '<kbd>O</kbd> looks fine · <kbd>Enter</kbd> open on the timeline</div>' +
     '<div class="evv" data-verdict></div><div data-evfaces></div><div data-evplates></div>';
   box.querySelector('.evp-back').onclick = () => setPanel(false);
   const v = box.querySelector('video');
@@ -592,13 +592,13 @@ function paintActions(e) {
   const a = $('evPlayer').querySelector('.evp-acts');
   if (!a || selId !== e.id) return;
   const fa = e.review === 'false_alarm', ok = isOk(e);
-  const cam = state.isAdmin ? state.cams.find(c => c.id === e.camera_id && !c.remote) : null;
+  const cam = can('pause') ? state.cams.find(c => c.id === e.camera_id && !c.remote) : null;
   a.innerHTML = (e.clip ? '<a class="btn" data-a="save" href="/api/clips/' + enc(e.id) + '?download=1" download title="Download this clip">' + ico('dl') + '<span>Save</span></a>' +
       '<button type="button" class="btn" data-a="share" title="Share this clip">' + ico('share') + '<span>Share</span></button>' : '') +
-    // (Keeping and "not a real alert" change the event for everyone: admins only, as in the bulk bar.)
-    (!state.isAdmin ? '' : '<button type="button" class="btn' + (e.protect ? ' on' : '') + '" data-a="p" aria-pressed="' + !!e.protect + '" title="' + (e.protect ? 'Kept: it will not be deleted. Click to let it expire normally (P)' : 'Keep this clip forever, even when old recordings are cleared (P)') + '">' + ico('lock') + '<span>' + (e.protect ? 'Kept' : 'Keep forever') + '</span></button>') +
+    // (Keeping and "not a real alert" change the event for everyone: admins and operators allowed to, as in the bulk bar.)
+    (!can('events') ? '' : '<button type="button" class="btn' + (e.protect ? ' on' : '') + '" data-a="p" aria-pressed="' + !!e.protect + '" title="' + (e.protect ? 'Kept: it will not be deleted. Click to let it expire normally (P)' : 'Keep this clip forever, even when old recordings are cleared (P)') + '">' + ico('lock') + '<span>' + (e.protect ? 'Kept' : 'Keep forever') + '</span></button>') +
     '<button type="button" class="btn ok' + (ok ? ' on' : '') + '" data-a="ok" aria-pressed="' + ok + '" title="' + (ok ? 'Marked as looks fine. Click to undo (O)' : 'You looked at it and it is fine (O)') + '">' + ico('check') + '<span>Looks fine</span></button>' +
-    (!state.isAdmin ? '' : '<button type="button" class="btn fa' + (fa ? ' on' : '') + '" data-a="fa" aria-pressed="' + fa + '" title="' + (fa ? 'Marked as not a real alert. Click to undo (X)' : 'Nothing was there: mark as not a real alert (X)') + '">' + ico('x') + '<span>Not a real alert</span></button>') +
+    (!can('events') ? '' : '<button type="button" class="btn fa' + (fa ? ' on' : '') + '" data-a="fa" aria-pressed="' + fa + '" title="' + (fa ? 'Marked as not a real alert. Click to undo (X)' : 'Nothing was there: mark as not a real alert (X)') + '">' + ico('x') + '<span>Not a real alert</span></button>') +
     (!cam ? '' : '<button type="button" class="btn' + (cam.alerts_paused ? ' on' : '') + '" data-a="np" aria-pressed="' + !!cam.alerts_paused + '" title="' + (cam.alerts_paused ? 'Notifications from this camera are paused; it is still recording. Click to resume.' : 'Stop notifications from this camera for an hour. It keeps recording and detecting.') + '">' + ico('belloff') + '<span>' + (cam.alerts_paused ? 'Resume notifications' : 'Pause notifications 1 h') + '</span></button>') +
     (smartOn && classesOf(e).some(c => c === 'person' || c === 'vehicle') ? '<button type="button" class="btn" data-a="fw" title="Find this person or vehicle on other cameras around this time">' + ico('person') + '<span>Follow</span></button>' : '') +
     '<button type="button" class="btn" data-a="tl" title="Play the recording around this event (Enter)">' + ico('timeline') + '<span>Open on timeline</span></button>';
@@ -684,7 +684,7 @@ async function showPlates(e, box) {
 }
 
 async function setProtect(id, val, quiet) {
-  if (!state.isAdmin) { if (!quiet) viewOnlyNote(); return false; }
+  if (!can('events')) { if (!quiet) viewOnlyNote(); return false; }
   try {
     await api('/api/events/' + enc(id) + '/protect', { json: { protect: val } });
     const e = byId.get(id); if (e) e.protect = val;
@@ -697,9 +697,9 @@ async function toggleProtect(e) {
 
 // ---------- verdicts: false alarm / reviewed OK ----------
 // OK is kept on the server for accounts that may change events; a view-only account keeps it in this browser.
-const isOk = (e) => e.review === 'ok' || (!state.isAdmin && reviewed.has(e.id));
+const isOk = (e) => e.review === 'ok' || (!can('events') && reviewed.has(e.id));
 async function setReview(id, verdict, quiet) {
-  if (!state.isAdmin) { if (!quiet) viewOnlyNote(); return false; }
+  if (!can('events')) { if (!quiet) viewOnlyNote(); return false; }
   try {
     const r = await api('/api/events/' + enc(id) + '/review', { json: { verdict } });
     const e = byId.get(id); if (e) { e.review = r.review || null; e.reviewed_at = r.reviewed_at || null; }
@@ -716,7 +716,7 @@ function dropItem(id) {
   }
 }
 async function toggleReview(e, verdict) {
-  if (verdict === 'ok' && !state.isAdmin) {
+  if (verdict === 'ok' && !can('events')) {
     if (reviewed.has(e.id)) reviewed.delete(e.id); else reviewed.add(e.id);
     saveReviewed(); lastRender = ''; render(); paintActions(e); return;
   }
@@ -788,8 +788,8 @@ function paintBulk() {
   const b = $('evBulk'); if (!b) return;
   b.hidden = !checks.size;
   if (!checks.size) return;
-  b.innerHTML = '<b>' + checks.size + ' selected</b>' + (state.isAdmin ? '<button type="button" class="btn" data-b="p">' + ico('lock') + ' Keep selected forever</button>' : '') +
-    (state.isAdmin ? '<button type="button" class="btn" data-b="fa">' + ico('x') + ' Not a real alert</button>' : '') + '<button type="button" class="btn" data-b="x">' + ico('dl') + ' Export selected</button><button type="button" class="btn" data-b="c">Clear</button>';
+  b.innerHTML = '<b>' + checks.size + ' selected</b>' + (can('events') ? '<button type="button" class="btn" data-b="p">' + ico('lock') + ' Keep selected forever</button>' : '') +
+    (can('events') ? '<button type="button" class="btn" data-b="fa">' + ico('x') + ' Not a real alert</button>' : '') + '<button type="button" class="btn" data-b="x">' + ico('dl') + ' Export selected</button><button type="button" class="btn" data-b="c">Clear</button>';
   b.querySelector('[data-b=c]').onclick = () => { checks.clear(); lastRender = ''; render(); };
   // One ZIP of the selected events (clips + events.csv); a big selection comes as several.
   b.querySelector('[data-b=x]').onclick = async () => {

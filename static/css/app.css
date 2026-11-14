@@ -965,6 +965,8 @@ rect.air-faint { stroke: rgba(255,255,255,.45); stroke-dasharray: 2 3; }
 .st-upd .st-upd-txt { flex: 1 1 260px; min-width: 0; }
 .st-upd .st-upd-txt .muted { font-size: var(--fs-s); }
 .st-upd .asys-bar { flex: 1 1 100%; margin: 0; }
+.upd-steps { margin-top: 6px; }
+.upd-cmd { margin: 6px 0 0; padding: 6px 10px; background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; white-space: pre-wrap; word-break: break-all; user-select: all; }
 .st-upd .st-upd-err { flex: 1 1 100%; color: var(--bad); font-size: var(--fs-s); }
 .asys-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s2); }
 .asys-tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r2); padding: var(--s3); }

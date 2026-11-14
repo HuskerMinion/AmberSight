@@ -19,7 +19,7 @@ const MAX_NAME: usize = 64;
 pub(crate) fn migrate_legacy(cfg: &mut crate::config::Config) {
     if let Some(a) = cfg.server.auth.take() {
         if !cfg.server.users.iter().any(|u| u.username == a.username) {
-            cfg.server.users.insert(0, UserConfig { disabled: false, username: a.username, password: a.password, admin: true, cameras: Vec::new() });
+            cfg.server.users.insert(0, UserConfig { disabled: false, username: a.username, password: a.password, admin: true, cameras: Vec::new(), ..Default::default() });
         }
     }
 }
@@ -65,11 +65,14 @@ pub async fn list_users(State(engine): State<Arc<Engine>>) -> Json<serde_json::V
     let mut users: Vec<serde_json::Value> = Vec::new();
     if let Some(a) = &cfg.server.auth {
         let (two_step, tokens) = extra(&a.username);
-        users.push(serde_json::json!({ "username": a.username, "admin": true, "cameras": [], "disabled": false, "two_step": two_step, "tokens": tokens }));
+        users.push(serde_json::json!({ "username": a.username, "admin": true, "role": "admin", "perms": serde_json::Value::Null, "cameras": [], "disabled": false, "two_step": two_step, "tokens": tokens }));
     }
     for u in &cfg.server.users {
         let (two_step, tokens) = extra(&u.username);
-        users.push(serde_json::json!({ "username": u.username, "admin": u.admin, "cameras": u.cameras, "disabled": u.disabled, "two_step": two_step, "tokens": tokens }));
+        let role = if u.admin { "admin" } else if u.is_operator() { "operator" } else { "viewer" };
+        // (An operator's own rights; null for others.)
+        let perms = if u.is_operator() { serde_json::to_value(u.perms).unwrap_or_default() } else { serde_json::Value::Null };
+        users.push(serde_json::json!({ "username": u.username, "admin": u.admin, "role": role, "perms": perms, "cameras": u.cameras, "disabled": u.disabled, "two_step": two_step, "tokens": tokens }));
     }
     Json(serde_json::json!({ "users": users, "auth_required": !users.is_empty() }))
 }
@@ -81,6 +84,12 @@ pub struct UserReq {
     password: Option<String>,
     #[serde(default)]
     admin: Option<bool>,
+    /// "viewer", "operator" or "admin" (instead of `admin`, or agreeing with it).
+    #[serde(default)]
+    role: Option<String>,
+    /// An operator's rights; one left out is on.
+    #[serde(default)]
+    perms: Option<PermsReq>,
     #[serde(default)]
     cameras: Option<Vec<String>>,
     /// true: this account can no longer sign in or do anything; false: it can again.
@@ -89,6 +98,25 @@ pub struct UserReq {
     /// The caller's own password and code, for what `needs_my_proof` says.
     #[serde(flatten)]
     proof: crate::account_http::MyProof,
+}
+
+/// An operator's rights as asked for: a name that is not one is refused (400),
+/// so a typo does not quietly leave a right on.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermsReq {
+    ptz: Option<bool>,
+    talk_clip: Option<bool>,
+    arm: Option<bool>,
+    events: Option<bool>,
+    camera_detection: Option<bool>,
+}
+
+impl From<PermsReq> for crate::config::OperatorPerms {
+    fn from(p: PermsReq) -> Self {
+        let on = |x: Option<bool>| x.unwrap_or(true);
+        crate::config::OperatorPerms { ptz: on(p.ptz), talk_clip: on(p.talk_clip), arm: on(p.arm), events: on(p.events), camera_detection: on(p.camera_detection) }
+    }
 }
 
 /// A change that will be refused whoever asks for it.
@@ -144,6 +172,81 @@ fn needs_my_proof(cfg: &crate::config::Config, who: &str, name: &str, admin: Opt
     (admin == Some(true) && !is_admin) || enabling_admin || (password && who != name)
 }
 
+/// `role` and `admin` of a request as (admin, operator): None leaves it as it
+/// is. `admin: true` alone makes an admin (no longer an operator); `admin:
+/// false` alone takes admin rights away and leaves the rest (an older page
+/// knows nothing of operators).
+fn wanted_role(role: Option<&str>, admin: Option<bool>) -> Result<(Option<bool>, Option<bool>), &'static str> {
+    let (a, o) = match role.map(str::trim) {
+        None => return Ok((admin, admin.filter(|a| *a).map(|_| false))),
+        Some("admin") => (true, false),
+        Some("operator") => (false, true),
+        Some("viewer") => (false, false),
+        Some(_) => return Err("role must be viewer, operator or admin"),
+    };
+    if admin.is_some_and(|x| x != a) {
+        return Err("role and admin disagree: send one of them");
+    }
+    Ok((Some(a), Some(o)))
+}
+
+/// How a change gives an account operator rights it does not have now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperatorGain {
+    None,
+    /// A new operator, a viewer made one, a right turned on, or more cameras
+    /// (fewer limits, or none).
+    More,
+    /// A disabled operator enabled.
+    Enabled,
+}
+
+/// See `OperatorGain`. Like making an admin, any gain takes the caller's own
+/// password (`needs_my_proof`): a stolen session must not be able to give
+/// itself a way back in that can disarm the system.
+fn operator_gain(cfg: &crate::config::Config, name: &str, w: &Wanted, disabled: Option<bool>) -> OperatorGain {
+    let legacy = cfg.server.auth.as_ref().is_some_and(|a| a.username.trim() == name);
+    let target = cfg.server.users.iter().find(|u| u.username.trim() == name);
+    let was_admin = legacy || target.is_some_and(|u| u.admin);
+    let was_op = !legacy && target.is_some_and(|u| u.is_operator());
+    // Making an admin is needs_my_proof's; an admin made an operator has less.
+    if w.admin.unwrap_or(was_admin) || was_admin {
+        return OperatorGain::None;
+    }
+    if !w.operator.unwrap_or(was_op) {
+        return OperatorGain::None;
+    }
+    if !was_op {
+        return OperatorGain::More;
+    }
+    let old = target.map(|u| u.perms).unwrap_or_default();
+    let new = w.perms.unwrap_or(old);
+    let gained = (new.ptz && !old.ptz) || (new.talk_clip && !old.talk_clip) || (new.arm && !old.arm) || (new.events && !old.events) || (new.camera_detection && !old.camera_detection);
+    // More cameras: limits taken away, or a camera added to them.
+    let old_cams = target.map(|u| u.cameras.clone()).unwrap_or_default();
+    let wider = w.cameras.as_ref().is_some_and(|c| (c.is_empty() && !old_cams.is_empty()) || (!old_cams.is_empty() && c.iter().any(|x| !old_cams.contains(x))));
+    if gained || wider {
+        OperatorGain::More
+    } else if disabled == Some(false) && target.is_some_and(|u| u.disabled) {
+        OperatorGain::Enabled
+    } else {
+        OperatorGain::None
+    }
+}
+
+/// What a request asks for, read once.
+struct Wanted {
+    admin: Option<bool>,
+    operator: Option<bool>,
+    perms: Option<crate::config::OperatorPerms>,
+    cameras: Option<Vec<String>>,
+}
+
+/// `needs_my_proof`, and giving operator rights.
+fn needs_proof(cfg: &crate::config::Config, who: &str, name: &str, w: &Wanted, password: bool, disabled: Option<bool>) -> bool {
+    needs_my_proof(cfg, who, name, w.admin, password, disabled) || (who != "(open)" && operator_gain(cfg, name, w, disabled) != OperatorGain::None)
+}
+
 /// `POST /api/users {"username", "password"?, "admin"?, "cameras"?, "disabled"?}`:
 /// create (password required) or update an account. Admins only (see
 /// admin_only_path and viewer_may_write in web.rs).
@@ -152,8 +255,13 @@ pub async fn save_user(
     caller: Option<axum::Extension<crate::web::Caller>>,
     headers: axum::http::HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    Json(req): Json<UserReq>,
+    body: axum::body::Bytes,
 ) -> Response {
+    // (Read here, so a mistake in it, such as a right's name misspelled, is a 400 that says what.)
+    let mut req: UserReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("bad request: {e}")).into_response(),
+    };
     let name = req.username.trim().to_string();
     let who = caller.as_ref().map(|c| c.0 .0.clone()).unwrap_or_default();
     let generation = caller.as_ref().map(|c| c.0 .1).unwrap_or(0);
@@ -183,12 +291,20 @@ pub async fn save_user(
     // The slow check after all that costs nothing to check, so that no code is
     // used up on a change that would be refused anyway. The account is checked
     // again under the lock below.
-    let (proved, gives_admin) = {
+    let w = match wanted_role(req.role.as_deref(), req.admin) {
+        Ok((admin, operator)) => Wanted { admin, operator, perms: req.perms.take().map(Into::into), cameras: req.cameras.clone() },
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    let (proved, gives_admin, op_gain) = {
         let cfg = engine.config.lock().unwrap();
-        if let Some(why) = plain_refusal(&cfg, &name, req.admin, req.disabled, req.password.is_some()) {
+        if let Some(why) = plain_refusal(&cfg, &name, w.admin, req.disabled, req.password.is_some()) {
             return (StatusCode::BAD_REQUEST, why).into_response();
         }
-        (needs_my_proof(&cfg, &who, &name, req.admin, req.password.is_some(), req.disabled), needs_my_proof(&cfg, &who, &name, req.admin, false, req.disabled))
+        (
+            needs_proof(&cfg, &who, &name, &w, req.password.is_some(), req.disabled),
+            needs_my_proof(&cfg, &who, &name, w.admin, false, req.disabled),
+            operator_gain(&cfg, &name, &w, req.disabled),
+        )
     };
     if proved {
         if let Err(r) = crate::account_http::prove_admin(&engine, &who, peer.ip(), &headers, &req.proof, generation).await {
@@ -222,7 +338,7 @@ pub async fn save_user(
         if proved && crate::auth::generation(&who) != generation {
             return (StatusCode::UNAUTHORIZED, "authentication required").into_response();
         }
-        if !proved && needs_my_proof(&cfg, &who, &name, req.admin, req.password.is_some(), req.disabled) {
+        if !proved && needs_proof(&cfg, &who, &name, &w, req.password.is_some(), req.disabled) {
             return (StatusCode::CONFLICT, "this account changed meanwhile: try again").into_response();
         }
         let before = cfg.server.users.clone();
@@ -232,26 +348,40 @@ pub async fn save_user(
         let mut turned = None;
         let mut changed = true;
         let mut lost_admin = false;
+        let mut lost_operator = false;
         match cfg.server.users.iter_mut().find(|u| u.username.trim() == name) {
             Some(u) => {
                 // The server always keeps an admin who can sign in.
                 if u.admin && !u.disabled && was_admins <= 1 {
-                    if req.admin == Some(false) {
+                    if w.admin == Some(false) {
                         return (StatusCode::BAD_REQUEST, "cannot remove admin rights from the last admin").into_response();
                     }
                     if req.disabled == Some(true) {
                         return (StatusCode::BAD_REQUEST, "cannot disable the last admin who can sign in").into_response();
                     }
                 }
-                // (Only a real change ends what the account has open.)
-                changed = hash.is_some() || req.admin.is_some_and(|a| a != u.admin) || req.cameras.as_ref().is_some_and(|c| *c != u.cameras) || req.disabled.is_some_and(|d| d != u.disabled);
-                lost_admin = u.admin && req.admin == Some(false);
+                let was = u.clone();
+                lost_admin = u.admin && w.admin == Some(false);
                 if let Some(h) = hash {
                     u.password = h;
                 }
-                if let Some(a) = req.admin {
+                if let Some(a) = w.admin {
                     u.admin = a;
                 }
+                // (An admin is never also marked an operator; one that stops
+                // being an admin is a viewer unless made an operator.)
+                if u.admin || (was.admin && w.operator.is_none()) {
+                    u.role.clear();
+                } else if let Some(o) = w.operator {
+                    u.role = if o { "operator".into() } else { String::new() };
+                }
+                // (Rights are kept for operators only.)
+                if let Some(p) = w.perms.filter(|_| u.is_operator()) {
+                    u.perms = p;
+                }
+                lost_operator = was.is_operator() && !u.is_operator() && !u.admin;
+                // (Only a real change ends what the account has open.)
+                changed = was.password != u.password || was.admin != u.admin || was.role != u.role || was.perms != u.perms || req.cameras.as_ref().is_some_and(|c| *c != u.cameras) || req.disabled.is_some_and(|d| d != u.disabled);
                 if let Some(c) = req.cameras {
                     u.cameras = c;
                 }
@@ -277,8 +407,10 @@ pub async fn save_user(
                 }
                 // The first account is always an admin (it turns sign-in on), and can sign in.
                 let first = cfg.server.users.is_empty();
-                let admin = req.admin.unwrap_or(false) || first;
-                cfg.server.users.push(UserConfig { username: name.clone(), password: h, admin, cameras: req.cameras.unwrap_or_default(), disabled: req.disabled.unwrap_or(false) && !first });
+                let admin = w.admin.unwrap_or(false) || first;
+                let role = if !admin && w.operator == Some(true) { "operator".to_string() } else { String::new() };
+                let perms = if role.is_empty() { Default::default() } else { w.perms.unwrap_or_default() };
+                cfg.server.users.push(UserConfig { username: name.clone(), password: h, admin, cameras: req.cameras.unwrap_or_default(), disabled: req.disabled.unwrap_or(false) && !first, role, perms });
                 created = true;
             }
         }
@@ -295,12 +427,12 @@ pub async fn save_user(
         if turned == Some(true) {
             crate::account_http::supersede_requests(&engine, &name, "enable");
         }
-        // In the same step: a demoted admin's control tokens go for good, and a
-        // disabled account's tokens all go (two-step codes stay for when it is
-        // enabled again). If they cannot, the change is taken back.
+        // In the same step: a demoted admin's or operator's control tokens go
+        // for good, and a disabled account's tokens all go (two-step codes stay
+        // for when it is enabled again). If they cannot, the change is taken back.
         let tokens_gone = if turned == Some(true) {
             crate::auth::delete_user_tokens(&name)
-        } else if lost_admin {
+        } else if lost_admin || lost_operator {
             crate::auth::delete_admin_tokens(&name)
         } else {
             true
@@ -316,10 +448,13 @@ pub async fn save_user(
     if pw_changed && !created {
         crate::account_http::tell_of_password_change(&engine, &name, &format!("by {who}"));
     }
+    let gives_operator = op_gain == OperatorGain::More;
     if proved {
-        let what = match (gives_admin, pw_changed && !created) {
-            (true, true) => "admin rights given and password set for another account, confirmed with own password",
-            (true, false) => "admin rights given, confirmed with own password",
+        let what = match (gives_admin, gives_operator, pw_changed && !created) {
+            (true, _, true) => "admin rights given and password set for another account, confirmed with own password",
+            (true, _, false) => "admin rights given, confirmed with own password",
+            (false, true, true) => "operator rights given and password set for another account, confirmed with own password",
+            (false, true, false) => "operator rights given, confirmed with own password",
             _ => "password set for another account, confirmed with own password",
         };
         let _ = engine.db.insert_audit(&who, &peer.ip().to_string(), what, &name, 200);
@@ -380,14 +515,22 @@ pub async fn save_user(
         let every = 60;
         // A burst of new viewers is one message; a new admin is always its own,
         // so a viewer created just before cannot hide it.
-        if created && req.admin == Some(true) {
+        if created && w.admin == Some(true) {
             crate::account_http::tell_admins(&engine, format!("new account {name}"), format!("{who} created the account {name}, an admin."));
+        } else if created && gives_operator {
+            crate::account_http::tell_admins(&engine, format!("new account {name}"), format!("{who} created the account {name}, an operator (can arm and disarm, and control cameras)."));
         } else if created {
             crate::account_http::tell_new_account(&engine, &who, &name);
         }
         // (A proof was given, but a stolen password and code can give that: never held back.)
-        if !created && !target_was_admin && req.admin == Some(true) {
+        if !created && !target_was_admin && w.admin == Some(true) {
             crate::account_http::tell_admins(&engine, format!("admin rights given to {name}"), format!("{who} made {name} an admin (from {}). If that was not meant to happen, take the rights away in Users.", peer.ip()));
+        }
+        if !created && gives_operator {
+            crate::account_http::tell_admins(&engine, format!("operator rights given to {name}"), format!("{who} gave {name} more operator rights or cameras (from {}). If that was not meant to happen, change them in Users.", peer.ip()));
+        }
+        if op_gain == OperatorGain::Enabled {
+            crate::account_http::tell_admins(&engine, format!("operator {name} enabled"), format!("{who} enabled the operator account {name} (from {}). If that was not meant to happen, disable it again in Users.", peer.ip()));
         }
         if turned == Some(false) && target_was_admin {
             crate::account_http::tell_admins(&engine, format!("admin {name} enabled"), format!("{who} enabled the admin account {name}. If that was not meant to happen, disable it again in Users."));
@@ -584,11 +727,11 @@ pub async fn pair_code(State(engine): State<Arc<Engine>>, caller: Option<axum::E
     if !ok_origin {
         return (StatusCode::BAD_REQUEST, "origin must look like https://host:port").into_response();
     }
-    // A code for an admin account is that admin's rights, and for an account
+    // A code for an admin (or operator) account is those rights, and for an account
     // with two-step codes it skips those, with no password or code: either takes
     // the caller's own. The slow check first, then again below.
     let is_admin = |cfg: &crate::config::Config| crate::auth::accounts(cfg).iter().any(|(u, _, a)| *u == name && *a);
-    let sensitive = |cfg: &crate::config::Config| is_admin(cfg) || crate::auth::two_step_on(&name) != Ok(false);
+    let sensitive = |cfg: &crate::config::Config| is_admin(cfg) || crate::auth::is_operator(cfg, &name) || crate::auth::two_step_on(&name) != Ok(false);
     // (Read before looking: if it changes after this, no code is made below.)
     let target_generation = crate::auth::generation(&name);
     let proved = sensitive(&engine.config.lock().unwrap());
@@ -665,6 +808,73 @@ mod tests {
         assert_eq!(r.password.as_deref(), Some("new-one-123"), "the other account's password is another field");
         let p: super::PairCodeReq = serde_json::from_str(r#"{"origin":"https://x:1"}"#).unwrap();
         assert!(p.proof.my_password.is_none());
+        // Role and rights come along too; a right left out is on.
+        let r: super::UserReq = serde_json::from_str(r#"{"username":"a","role":"operator","perms":{"arm":false},"my_password":"mine"}"#).unwrap();
+        assert_eq!(r.role.as_deref(), Some("operator"));
+        assert_eq!(r.perms.map(crate::config::OperatorPerms::from), Some(crate::config::OperatorPerms { arm: false, ..Default::default() }));
+        // A right's name misspelled: refused, not quietly on.
+        assert!(serde_json::from_str::<super::UserReq>(r#"{"username":"a","perms":{"arms":false}}"#).is_err());
+        assert_eq!(r.proof.my_password.as_deref(), Some("mine"));
+    }
+
+    #[test]
+    fn role_and_admin_are_read_together() {
+        use super::wanted_role as w;
+        assert_eq!(w(None, None), Ok((None, None)), "left as it is");
+        assert_eq!(w(None, Some(true)), Ok((Some(true), Some(false))), "an admin is no operator");
+        assert_eq!(w(None, Some(false)), Ok((Some(false), None)), "an older page: an operator stays one");
+        assert_eq!(w(Some("operator"), None), Ok((Some(false), Some(true))));
+        assert_eq!(w(Some("viewer"), Some(false)), Ok((Some(false), Some(false))));
+        assert_eq!(w(Some("admin"), Some(true)), Ok((Some(true), Some(false))));
+        assert!(w(Some("operator"), Some(true)).is_err(), "they disagree");
+        assert!(w(Some("admin"), Some(false)).is_err());
+        assert!(w(Some("root"), None).is_err());
+        assert!(w(Some(""), None).is_err());
+    }
+
+    #[test]
+    fn giving_operator_rights_takes_the_callers_own_password() {
+        use super::{needs_proof, Wanted};
+        use crate::config::OperatorPerms;
+        let cfg: crate::config::Config = toml::from_str(
+            "[server.auth]\nusername = \"old\"\npassword = \"x\"\n\
+             [[server.users]]\nusername = \"boss\"\npassword = \"x\"\n\
+             [[server.users]]\nusername = \"view\"\npassword = \"x\"\nadmin = false\n\
+             [[server.users]]\nusername = \"op\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\nperms = { arm = false }\n\
+             [[server.users]]\nusername = \"opoff\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\ndisabled = true\n\
+             [[server.users]]\nusername = \"lim\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\ncameras = [\"Porch\"]\n",
+        )
+        .unwrap();
+        let w = |role: Option<&str>, admin: Option<bool>, perms: Option<OperatorPerms>| {
+            let (admin, operator) = super::wanted_role(role, admin).unwrap();
+            Wanted { admin, operator, perms, cameras: None }
+        };
+        let needs = |name: &str, x: Wanted, disabled: Option<bool>| needs_proof(&cfg, "boss", name, &x, false, disabled);
+        let no_arm = Some(OperatorPerms { arm: false, ..Default::default() });
+        let none = Some(OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false });
+        assert!(needs("new", w(Some("operator"), None, None), None), "a new operator");
+        assert!(needs("new", w(Some("operator"), None, none), None), "even with no rights: it is made an operator");
+        assert!(needs("view", w(Some("operator"), None, None), None), "a viewer made an operator");
+        assert!(needs("op", w(None, None, Some(OperatorPerms::default())), None), "a right turned on");
+        assert!(needs("opoff", w(None, None, None), Some(false)), "a disabled operator enabled");
+        assert!(!needs("op", w(None, None, no_arm), None), "the same rights");
+        assert!(!needs("op", w(None, None, none), None), "rights taken away");
+        assert!(!needs("op", w(Some("viewer"), None, None), None), "made a viewer");
+        assert!(!needs("op", w(None, None, None), Some(true)), "disabled");
+        assert!(!needs("new", w(Some("viewer"), None, None), None), "a new viewer");
+        assert!(!needs("view", w(None, None, Some(OperatorPerms::default())), None), "rights of a viewer do nothing");
+        assert!(!needs("boss", w(Some("operator"), None, None), None), "an admin made an operator has less");
+        assert!(!needs("old", w(Some("operator"), None, None), None), "the old-style admin too");
+        assert!(needs("op", w(Some("admin"), None, None), None), "an operator made an admin");
+        // Cameras: more of them is more rights; fewer is not.
+        let cams = |c: &[&str]| Wanted { admin: None, operator: None, perms: None, cameras: Some(c.iter().map(|x| x.to_string()).collect()) };
+        assert!(!needs("lim", cams(&["Porch"]), None), "the same");
+        assert!(needs("lim", cams(&["Porch", "Gate"]), None), "one more");
+        assert!(needs("lim", cams(&[]), None), "all of them");
+        assert_eq!(super::operator_gain(&cfg, "opoff", &w(None, None, None), Some(false)), super::OperatorGain::Enabled);
+        assert_eq!(super::operator_gain(&cfg, "op", &w(None, None, Some(OperatorPerms::default())), None), super::OperatorGain::More);
+        // A server with no accounts: nothing to prove.
+        assert!(!needs_proof(&cfg, "(open)", "new", &w(Some("operator"), None, None), false, None));
     }
 
     #[test]

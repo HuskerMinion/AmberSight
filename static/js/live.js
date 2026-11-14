@@ -1,7 +1,7 @@
 // live.js - Live tab: grid with paging/layouts/cycle, MSE player, MJPEG fallback, full screen
 // (swipe / arrows), motion boxes, zone drawing.
 
-import { savedToast, $, state, bus, api, refreshCameras, sleep, esc, msgDlg, toast, camFromId, ic, downloadUrl, bigQ, lowQ, openDlg, overlayOpen, backLayer, overlaysChanged, playVideo } from './core.js';
+import { savedToast, $, state, bus, api, refreshCameras, sleep, esc, msgDlg, toast, camFromId, ic, downloadUrl, bigQ, lowQ, openDlg, overlayOpen, backLayer, overlaysChanged, playVideo, can } from './core.js';
 import { isActive } from './nav.js';
 import { tvOn, tvOne, enterTv, setOne, onTvChange } from './fullscreen.js';
 import * as Layouts from './layouts.js';
@@ -370,20 +370,26 @@ function tileMenu(ev, c, anchor) {
     sep();
     items.push(['timeline', 'Open on ' + c.remote.site, () => openOnSite(c)]);
   } else {
-  if (state.isAdmin) items.push(['rec', 'Record a 20 s clip', () => clipNow(c.id)]);
+  if (can('talk_clip')) items.push(['rec', 'Record a 20 s clip', () => clipNow(c.id)]);
   sep();
   items.push(['timeline', 'Timeline', () => bus.emit('timeline-for', c.id)]);
   items.push(['play', 'Clips', () => { if (inFull) closeFull(); openClipsFor(c); }]);
   items.push(['expand', 'Double-click opens: ' + (dblOpens(c) === 'timeline' ? 'Timeline' : 'Full view') + '...', () => dblClickDlg(c)]);
   }
-  if (state.isAdmin && !c.remote) {
+  if ((can('pause') || can('camera_detection')) && !c.remote) {
     sep();
-    if (c.alerts_paused) items.push(['play', 'Resume notifications (paused ' + pausedText(c) + ')', () => resumeAlerts(c)]);
-    else items.push(['pause', 'Pause notifications...', () => pauseAlertsDlg(c)]);
-    if (!inFull) items.push(['zone', 'Draw a motion zone', () => { setSelected(c.id); import('./zones.js').then(m => m.openZoneEditor(c.id)); }]);
-    items.push(['gear', 'Camera settings...', () => openCameraDialog(c.id)]);
-    if (canReboot(c)) items.push(['power', 'Reboot camera...', () => rebootDlg(c)]);
-    items.push([c.enabled === false ? 'play' : 'pause', c.enabled === false ? 'Enable camera' : 'Disable camera', () => setCameraEnabled(c.id, c.enabled === false)]);
+    if (can('pause')) {
+      if (c.alerts_paused) items.push(['play', 'Resume notifications (paused ' + pausedText(c) + ')', () => resumeAlerts(c)]);
+      else items.push(['pause', 'Pause notifications...', () => pauseAlertsDlg(c)]);
+    }
+    if (can('camera_detection')) {
+      if (!inFull) items.push(['zone', 'Draw a motion zone', () => { setSelected(c.id); import('./zones.js').then(m => m.openZoneEditor(c.id)); }]);
+      items.push(['gear', state.isAdmin ? 'Camera settings...' : 'Detection and alert settings...', () => openCameraDialog(c.id)]);
+    }
+    if (state.isAdmin) {
+      if (canReboot(c)) items.push(['power', 'Reboot camera...', () => rebootDlg(c)]);
+      items.push([c.enabled === false ? 'play' : 'pause', c.enabled === false ? 'Enable camera' : 'Disable camera', () => setCameraEnabled(c.id, c.enabled === false)]);
+    }
   }
   const m = document.createElement('div');
   m.className = 'ctxmenu'; m.setAttribute('role', 'menu');
@@ -469,7 +475,7 @@ export function snapshot(id) {
   downloadUrl('/api/snapshot/' + id + '?download=1&t=' + Date.now(), ((c && c.name) || 'camera') + '-' + new Date().toISOString().replace(/[:.]/g, '-') + '.jpg');
 }
 export async function clipNow(id) {
-  if (!state.isAdmin) { msgDlg('view-only account: sign in as an admin to record clips'); return; }
+  if (!can('talk_clip')) { msgDlg('This account cannot record clips'); return; }
   try {
     const r = await api('/api/clips/record', { json: { camera: id, seconds: 20 } });
     if (r.error) { msgDlg(r.error); return; }
@@ -1328,7 +1334,7 @@ export function renderLive() {
       act.appendChild(b);
     };
     mk('camera', 'Save snapshot (P)', () => snapshot(c.id));
-    if (state.isAdmin && !c.remote) mk('rec', 'Record a 20 s clip now (C)', () => clipNow(c.id));
+    if (can('talk_clip') && !c.remote) mk('rec', 'Record a 20 s clip now (C)', () => clipNow(c.id));
     mk('expand', 'Full screen', () => enterTv(c.id));
     const gear = document.createElement('button');
     gear.className = 'btn glass'; gear.title = 'Camera menu (or right-click the picture)'; gear.setAttribute('aria-label', 'Camera menu');
@@ -1605,8 +1611,8 @@ function mountFull() {
   $('fullName').hidden = false;
   // Another server's camera: its recordings and clips are on that server.
   for (const b of ['fullTl', 'fullClips', 'fullClip']) $(b).hidden = !!(c && c.remote);
-  // Recording a clip is for admins (as in the tile menus).
-  if (!state.isAdmin) $('fullClip').hidden = true;
+  // Recording a clip: admins and operators allowed to (as in the tile menus).
+  if (!can('talk_clip')) $('fullClip').hidden = true;
   fullSpk = Speaker.attach(content, { id: fullCamId, q: bigQ(), videos: () => [$('fullVid')] });
   if (keepAudio && c && c.audio) fullSpk.unmute();
   fullPlayer = startLive(video, fullCamId, bigQ(), () => {

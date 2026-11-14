@@ -614,7 +614,10 @@ pub async fn signin(State(engine): State<Arc<Engine>>, req: Request) -> Response
     // Nor is anyone let into an admin's account without those rights: it sees
     // every camera and gets that admin's alerts. They go to this server's own
     // sign-in instead (a browser already signed in here stays as it is).
-    if *is_admin && !admin_ok {
+    // An operator's account likewise (a session cannot be held to a viewer's
+    // rights in an operator's account: it would have the operator's).
+    let is_operator = crate::auth::is_operator(&engine.config.lock().unwrap(), name);
+    if (*is_admin || is_operator) && !admin_ok {
         let _ = engine.db.insert_audit("(linked server)", "", "sign-in to an admin account not carried over", &l.name, 200);
         return Json(serde_json::json!({ "code": null })).into_response();
     }

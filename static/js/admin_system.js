@@ -7,6 +7,27 @@ const errText = (e) => (e && e.body) ? e.body : (e && e.message) || String(e);
 const wrap = (html) => '<div class="asys-scroll">' + html + '</div>';
 
 // ---------------------------------------------------------------- Users
+const ROLES = [
+  ['viewer', 'Viewer', 'watch live video, events and recordings'],
+  ['operator', 'Operator', 'also day-to-day control, as ticked below'],
+  ['admin', 'Admin', 'everything, including settings and users (all cameras)'],
+];
+// An operator's rights (the server's names), each on unless unticked.
+const PERMS = [
+  ['ptz', 'Move PTZ cameras, go to presets, click to aim'],
+  ['talk_clip', 'Talk through a camera’s speaker, record a clip now'],
+  ['arm', 'Arm and disarm, switch profiles, pause notifications (an operator limited to some cameras can only pause theirs: arming and profiles change every camera)'],
+  ['events', 'Keep events forever, mark them “not a real alert” or “looks fine”'],
+  ['camera_detection', 'Change detection and alert settings of their cameras (zones, sensitivity, AI, alert times)'],
+];
+const ALL_PERMS = Object.fromEntries(PERMS.map(([k]) => [k, true]));
+// (A server before operators sends no role.)
+const roleOf = (u) => u.role || (u.admin ? 'admin' : 'viewer');
+function permsText(p) {
+  const on = PERMS.filter(([k]) => !p || p[k] !== false);
+  return on.length === PERMS.length ? 'All operator rights' : on.length ? on.map(([, t]) => t).join('; ') : 'No operator rights ticked';
+}
+
 function usersPage(el) {
   el.innerHTML = '<div class="asys">' + lead('Who can sign in, and which cameras each person can see.', 'Give everyone their own account, and make most of them Viewers.') +
     '<div class="asys-head"><span class="hint" id="usHint"></span>' +
@@ -55,13 +76,13 @@ function usersPage(el) {
       body.querySelector('#usFirst').onclick = () => edit(null, true);
       return;
     }
-    body.innerHTML = '<div class="hint us-legend"><b>Admin</b>: everything, including settings and users. <b>Viewer</b>: watch and review, cannot change settings.' + (users.some(u => u.admin && !u.disabled && !u.two_step) ? ' We recommend two-step codes for admins: each person turns them on in <b>Your account</b>, in the menu at the top.' : '') + '</div>' + wrap('<table class="asys-tbl us-tbl"><thead><tr><th>User</th><th>Role</th><th>Cameras</th><th></th></tr></thead><tbody>' +
+    body.innerHTML = '<div class="hint us-legend"><b>Admin</b>: everything, including settings and users. <b>Operator</b>: day-to-day control (arming, moving cameras, talking, keeping events, detection and alert settings of their cameras), as far as their rights go; no other settings. <b>Viewer</b>: watch and review, cannot change anything.' + (users.some(u => u.admin && !u.disabled && !u.two_step) ? ' We recommend two-step codes for admins: each person turns them on in <b>Your account</b>, in the menu at the top.' : '') + '</div>' + wrap('<table class="asys-tbl us-tbl"><thead><tr><th>User</th><th>Role</th><th>Cameras</th><th></th></tr></thead><tbody>' +
       users.map((u, i) => {
         const me = u.username === state.user;
         const cams = u.admin ? '<span class="muted">All (admin)</span>'
           : (u.cameras && u.cameras.length ? camChips(u.cameras) : '<span class="muted">All cameras</span>');
         return '<tr' + (u.disabled ? ' class="us-off"' : '') + '><td class="us-name"><b>' + esc(u.username) + '</b>' + (me ? ' <span class="badge info">you</span>' : '') + (u.disabled ? ' <span class="badge off">Disabled</span>' : '') + (u.two_step ? ' <span class="badge on" title="Signing in also takes a code from an app">Two-step on</span>' : '') + '</td>' +
-          '<td>' + (u.admin ? '<span class="badge on">Admin</span>' : '<span class="badge">Viewer</span>') + '</td>' +
+          '<td>' + (u.admin ? '<span class="badge on">Admin</span>' : roleOf(u) === 'operator' ? '<span class="badge info" title="' + esc(permsText(u.perms)) + '">Operator</span>' : '<span class="badge">Viewer</span>') + '</td>' +
           '<td class="asys-cams">' + cams + '</td>' +
           '<td class="asys-act"><button class="btn" data-qr="' + i + '"' + (u.disabled ? ' disabled' : '') + ' title="Show a QR code to sign in on a phone" aria-label="Phone sign-in: show a QR code to sign in on a phone">' + ic('qr') + ' Phone sign-in</button> <button class="btn" data-ed="' + i + '">Edit</button> ' +
           '<button class="btn" data-off="' + i + '"' + (me ? ' disabled title="You cannot disable your own account"' : '') + '>' + (u.disabled ? 'Enable' : 'Disable') + '</button>' +
@@ -77,6 +98,8 @@ function usersPage(el) {
   function edit(u, first) {
     const isNew = !u;
     u = u || { username: '', admin: !!first, cameras: [] };
+    const role0 = roleOf(u);
+    const perms0 = Object.assign({}, ALL_PERMS, u.perms || {});
     const me = !isNew && u.username === state.user;
     const lastAdmin = !isNew && u.admin && users.filter(x => x.admin).length <= 1;
     const lock = me || lastAdmin || !!first;
@@ -86,16 +109,21 @@ function usersPage(el) {
       '<label>Username<input id="ufName" autocomplete="off" value="' + esc(u.username) + '"' + (isNew ? '' : ' disabled') + '></label>' +
       (me ? '<div class="hint">To change your own password, use Change password in the menu at the top.</div>'
         : '<label>' + (isNew ? 'Password' : 'New password') + '<input id="ufPw" type="password" autocomplete="new-password" placeholder="' + (isNew ? 'at least 8 characters' : 'leave empty to keep the current one') + '"></label>') +
-      '<label class="asys-chk"><input type="checkbox" id="ufAdmin"' + (u.admin ? ' checked' : '') + (lock ? ' disabled' : '') + '> Administrator (full access, all cameras)</label>' +
-      (lock ? '<div class="hint">' + (first ? 'The first account is always an admin.' : me ? 'You cannot remove your own admin rights.' : 'This is the last admin; make another user an admin first.') + '</div>' : '') +
+      '<fieldset class="us-role"><legend class="sec">Role</legend>' + ROLES.map(([v, t, h]) =>
+        '<label class="asys-chk"><input type="radio" name="ufRole" value="' + v + '"' + (role0 === v ? ' checked' : '') + (lock ? ' disabled' : '') + '> <span><b>' + t + '</b> <span class="muted">' + h + '</span></span></label>').join('') + '</fieldset>' +
+      (lock && u.admin ? '<div class="hint">' + (first ? 'The first account is always an admin.' : me ? 'You cannot remove your own admin rights.' : 'This is the last admin; make another user an admin first.') + '</div>' : '') +
+      '<div id="ufPermsBox"><div class="sec">What this operator may do</div><div class="hint">Everything ticked by default. Saving presets, other settings, users and storage stay with admins.</div>' +
+      PERMS.map(([k, t]) => '<label class="asys-chk"><input type="checkbox" data-perm="' + k + '"' + (perms0[k] ? ' checked' : '') + '> ' + t + '</label>').join('') + '</div>' +
       (!isNew ? '<div id="ufAcct"></div>' : '') +
-      '<div id="ufCamsBox"><div class="sec">Cameras this user may see</div><div class="hint">None ticked = all cameras.</div>' +
+      '<div id="ufCamsBox"><div class="sec">Cameras this user may see</div><div class="hint">None ticked = all cameras. An operator controls only these too.</div>' +
       '<div class="asys-camlist">' + (camNames.length ? camNames.map(n => '<label class="asys-chk"><input type="checkbox" data-cam="' + esc(n) + '"' + ((u.cameras || []).includes(n) ? ' checked' : '') + '> ' + esc(n) + '</label>').join('') : '<span class="muted">No cameras configured.</span>') + '</div></div>' +
       '<div class="asys-err" id="ufErr"></div>' +
       '<div class="row"><button class="primary" id="ufSave">' + (isNew ? 'Add user' : 'Save') + '</button><button class="btn" id="ufCancel">Cancel</button></div>');
-    const adm = d.querySelector('#ufAdmin'), box = d.querySelector('#ufCamsBox');
-    const sync = () => { box.hidden = adm.checked; };
-    adm.onchange = sync; sync();
+    const box = d.querySelector('#ufCamsBox'), pbox = d.querySelector('#ufPermsBox');
+    const roleNow = () => { const r = d.querySelector('input[name="ufRole"]:checked'); return r ? r.value : role0; };
+    const sync = () => { box.hidden = roleNow() === 'admin'; pbox.hidden = roleNow() !== 'operator'; };
+    d.querySelectorAll('input[name="ufRole"]').forEach(r => { r.onchange = sync; });
+    sync();
     d.querySelector('#ufCancel').onclick = () => d.__close();
     if (!isNew) accountBox(d.querySelector('#ufAcct'), u, me, () => { load(); });
     if (me) twoStepBox = d.querySelector('#ufAcct');
@@ -106,17 +134,24 @@ function usersPage(el) {
       const pw = me ? '' : d.querySelector('#ufPw').value;
       if (!name) { err.textContent = 'Enter a username.'; return; }
       if (isNew && !pw) { err.textContent = 'Enter a password.'; return; }
-      const payload = { username: name, admin: adm.checked, cameras: adm.checked ? [] : [...d.querySelectorAll('[data-cam]:checked')].map(x => x.dataset.cam) };
+      const role = roleNow(), isAdm = role === 'admin';
+      const perms = {};
+      d.querySelectorAll('[data-perm]').forEach(x => { perms[x.dataset.perm] = x.checked; });
+      const payload = { username: name, role, cameras: isAdm ? [] : [...d.querySelectorAll('[data-cam]:checked')].map(x => x.dataset.cam) };
+      if (role === 'operator') payload.perms = perms;
       if (pw) payload.password = pw;
+      // (As the server judges it: more operator rights than now take your own password.)
+      const morePerms = role === 'operator' && (role0 !== 'operator' || PERMS.some(([k]) => perms[k] && !perms0[k]));
       const save = async (proof) => {
         await api('/api/users', { json: Object.assign({}, payload, proof) });
         d.__close();
         load();
-        if (isNew) toast('User added. Tap here to sign them in on their phone.', () => phoneQr({ username: name, admin: adm.checked }));
+        if (isNew) toast('User added. Tap here to sign them in on their phone.', () => phoneQr({ username: name, admin: isAdm, role }));
         else toast('User saved');
       };
       // Making an admin, or setting someone else's password, takes your own password.
-      const reason = users.length && adm.checked && (isNew || !u.admin) ? 'Making ' + name + ' an admin gives them everything, so it takes your own password.'
+      const reason = users.length && isAdm && (isNew || !u.admin) ? 'Making ' + name + ' an admin gives them everything, so it takes your own password.'
+        : users.length && morePerms && !u.admin ? 'Giving ' + name + ' operator rights lets them disarm and control cameras, so it takes your own password.'
         : !isNew && !me && pw ? 'Setting the password of ' + name + ' takes your own password.' : '';
       if (reason) {
         (await import('./account.js')).confirmWithPassword({ reason, ok: 'Confirm', call: save });
@@ -239,8 +274,8 @@ function usersPage(el) {
           clearInterval(timer); timer = setInterval(tickLeft, 1000); tickLeft();
         };
         // A code for an admin account signs in with all those rights, and no password.
-        if (u.admin || u.two_step) {
-          (await import('./account.js')).confirmWithPassword({ reason: 'This QR code signs in as ' + u.username + (u.admin ? ', an admin,' : '') + ' with no password or code, so it takes your own password.', ok: 'Make code', call: get });
+        if (u.admin || roleOf(u) === 'operator' || u.two_step) {
+          (await import('./account.js')).confirmWithPassword({ reason: 'This QR code signs in as ' + u.username + (u.admin ? ', an admin,' : roleOf(u) === 'operator' ? ', an operator,' : '') + ' with no password or code, so it takes your own password.', ok: 'Make code', call: get });
           return;
         }
         await get({});

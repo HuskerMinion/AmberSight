@@ -6,7 +6,7 @@
 // a phone held upright. The drawer and the sheet close with their X, Esc, Back, a tap
 // outside or a swipe towards their edge.
 
-import { $, state, bus, api, esc, ic, toast, msgDlg, camFromId, backLayer, overlaysChanged } from './core.js';
+import { $, state, bus, api, esc, ic, toast, msgDlg, camFromId, backLayer, overlaysChanged, can } from './core.js';
 import { dockMode, onDeviceChange } from './device.js';
 import * as Prefs from './prefs.js';
 import * as Layouts from './layouts.js';
@@ -252,8 +252,8 @@ function renderProfile() {
     prof.profiles.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
   if (sel.dataset.h !== html) { sel.innerHTML = html; sel.dataset.h = html; }
   if (holdFor === null) sel.value = cur;
-  sel.disabled = !state.isAdmin;
-  sel.title = state.isAdmin ? 'Switch the active profile' : 'View-only account: sign in as an admin to change the profile';
+  sel.disabled = !can('arm');
+  sel.title = can('arm') ? 'Switch the active profile' : 'This account cannot change the profile';
   let note;
   if (prof.manual) note = 'Held: ' + esc(prof.manual.name) + (prof.manual.until ? ' until ' + fmtUntil(prof.manual.until) : ' until changed');
   else note = prof.active ? 'Following the schedule: ' + esc(prof.active) : 'Following the schedule';
@@ -323,9 +323,11 @@ function renderCam(force) {
   const caps = ptzCaps(c);
   const tool = Live.getTool();
   const admin = state.isAdmin;
+  // (Operators: what their rights allow. The server checks again.)
+  const mayClip = can('talk_clip'), mayPtz = can('ptz'), mayZones = can('camera_detection');
   const secure = window.isSecureContext;
   const talking = !!(talk && talk.id === c.id);
-  const key = JSON.stringify([c.id, c.name, c.online, full, tool, admin, secure, caps, talking, presetOpen]);
+  const key = JSON.stringify([c.id, c.name, c.online, full, tool, admin, mayClip, mayPtz, mayZones, secure, caps, talking, presetOpen]);
   if (!force && key === sec.dataset.key) return;
   sec.dataset.key = key;
   sec.hidden = false;
@@ -337,14 +339,14 @@ function renderCam(force) {
       '<button type="button" class="btn" data-act="snap" title="Save a snapshot (P)">' + ic('camera') + '<span>Snapshot</span></button>' +
       // Another server's camera: its recordings and clips are there.
       (c.remote ? '' :
-      '<button type="button" class="btn" data-act="clip" title="' + (admin ? 'Record a 20 s clip now (C)' : 'View-only account') + '"' + (admin ? '' : ' disabled') + '>' + ic('rec') + '<span>Clip</span></button>' +
+      '<button type="button" class="btn" data-act="clip" title="' + (mayClip ? 'Record a 20 s clip now (C)' : 'This account cannot record clips') + '"' + (mayClip ? '' : ' disabled') + '>' + ic('rec') + '<span>Clip</span></button>' +
       '<button type="button" class="btn" data-act="tl" title="Play back this camera\'s recordings (L in full size)">' + ic('timeline') + '<span>Timeline</span></button>' +
       '<button type="button" class="btn" data-act="clips" title="Clips from this camera">' + ic('play') + '<span>Clips</span></button>') +
       (full ? '' : '<button type="button" class="btn" data-act="full" title="Open full size (Enter)">' + ic('expand') + '<span>Full size</span></button>') +
-      (secure && admin && !c.remote ? '<button type="button" class="btn' + (talking ? ' on' : '') + '" data-act="talk" aria-pressed="' + talking + '" title="Talk through the camera speaker (needs a microphone)">' + ic('mic') + '<span>' + (talking ? 'Stop talking' : 'Talk') + '</span></button>' : '') +
+      (secure && mayClip && !c.remote ? '<button type="button" class="btn' + (talking ? ' on' : '') + '" data-act="talk" aria-pressed="' + talking + '" title="Talk through the camera speaker (needs a microphone)">' + ic('mic') + '<span>' + (talking ? 'Stop talking' : 'Talk') + '</span></button>' : '') +
     '</div>';
   if (ptzOn) {
-    const dis = !admin;
+    const dis = !mayPtz;
     h += '<div class="dk-lbl">Pan / tilt / zoom</div><div class="dk-ptz" id="dkPtz" data-ptz="1">' +
       '<div class="dpad" tabindex="0" role="group" aria-label="Pan and tilt. Hold an arrow key while this is focused.">' +
         padBtn('-1,1,0', 'up', 'Up and left', dis, 'diag ul') + padBtn('0,1,0', 'up', 'Tilt up', dis) + padBtn('1,1,0', 'up', 'Up and right', dis, 'diag ur') +
@@ -354,7 +356,7 @@ function renderCam(force) {
         padBtn('-1,-1,0', 'down', 'Down and left', dis, 'diag dl') + padBtn('0,-1,0', 'down', 'Tilt down', dis) + padBtn('1,-1,0', 'down', 'Down and right', dis, 'diag dr') + '</div>' +
       (caps.zoom ? '<div class="zoomcol">' + padBtn('0,0,1', 'plus', 'Zoom in', dis) + padBtn('0,0,-1', 'minus', 'Zoom out', dis) + '</div>' : '') +
       '</div>';
-    if (dis) h += '<div class="dk-note">View-only account: PTZ needs an admin sign-in.</div>';
+    if (dis) h += '<div class="dk-note">' + (state.role === 'operator' ? 'This account cannot move cameras.' : 'View-only account: moving cameras needs an operator or admin account.') + '</div>';
     const pr = caps.presets || [];
     h += '<div class="dk-row">' +
       (pr.length ? '<select id="dkPresets" aria-label="Presets"' + (dis ? ' disabled' : '') + '><option value="">Presets (go to)</option>' +
@@ -374,7 +376,7 @@ function renderCam(force) {
   } else if (caps && caps.error && c.ptz) {
     h += '<div class="dk-note">PTZ: ' + esc(caps.error) + '</div>';
   }
-  if (admin && !full && !c.remote) {
+  if (mayZones && !full && !c.remote) {
     h += '<div class="dk-lbl">Motion zones</div><div class="dk-btns">' +
       '<button type="button" class="btn" data-act="zedit" title="Draw, move, resize and delete motion zones and ignore zones">' + ic('zone') + '<span>Edit zones</span></button></div>';
   }
@@ -438,7 +440,7 @@ function sendHeld() {
 }
 function startMove(pan, tilt, zoom) {
   const id = Live.dockCam();
-  if (id === null || !state.isAdmin) return;
+  if (id === null || !can('ptz')) return;
   endMove();
   Object.assign(hold, { id, pan: pan * 0.5, tilt: tilt * 0.5, zoom: zoom * 0.5, warned: false });
   sendHeld();
@@ -475,7 +477,7 @@ function keyVector() {
   for (const k of keysDown) { p += ARROWS[k][0]; t += ARROWS[k][1]; }
   return [Math.sign(p), Math.sign(t)];
 }
-function ptzUsable() { return state.isAdmin && !!$('dkPtz'); }
+function ptzUsable() { return can('ptz') && !!$('dkPtz'); }
 function onDockKey(ev) {
   const mv = ARROWS[ev.key];
   const tg = ev.target;

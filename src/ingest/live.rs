@@ -44,6 +44,12 @@ struct HubState {
     quiet_init: Option<Arc<Vec<u8>>>,
     quiet_low_delay: Option<Arc<Vec<u8>>>,
     info: Option<LiveInfo>,
+    /// Average time between video frames (seconds) and how many were seen,
+    /// for the frame rate a transcode is planned with.
+    frame_secs: f64,
+    frames: u32,
+    /// A frame was shown later than decoded (B-frames) since the start.
+    reordered: bool,
     /// Fragments since the most recent keyframe (bounded).
     gop: Vec<Arc<Vec<u8>>>,
     gop_bytes: usize,
@@ -68,11 +74,44 @@ impl Default for LiveHub {
 impl LiveHub {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(256);
-        LiveHub { tx, state: Mutex::new(HubState { init: None, low_delay: None, quiet_init: None, quiet_low_delay: None, info: None, gop: Vec::new(), gop_bytes: 0 }) }
+        LiveHub { tx, state: Mutex::new(HubState { init: None, low_delay: None, quiet_init: None, quiet_low_delay: None, info: None, frame_secs: 0.0, frames: 0, reordered: false, gop: Vec::new(), gop_bytes: 0 }) }
     }
 
     pub fn info(&self) -> Option<LiveInfo> {
         self.state.lock().unwrap().info.clone()
+    }
+
+    /// The stream's own init segment (None while it is not running).
+    pub fn init(&self) -> Option<Arc<Vec<u8>>> {
+        self.state.lock().unwrap().init.clone()
+    }
+
+    /// Video frames a second, once a few frames have shown it.
+    pub fn fps(&self) -> Option<f64> {
+        let st = self.state.lock().unwrap();
+        (st.frames >= 10 && st.frame_secs > 0.0).then(|| 1.0 / st.frame_secs)
+    }
+
+    /// The stream has shown at least `min` frames since it started and
+    /// none of them reordered (a decoder may then hand each frame on at
+    /// once). Reordering is recognized within 90 frames of RTSP (see
+    /// dts.rs), so ask for more than that.
+    pub fn never_reordered(&self, min: u32) -> bool {
+        let st = self.state.lock().unwrap();
+        st.frames >= min && !st.reordered
+    }
+
+    fn note_reorder(&self) {
+        self.state.lock().unwrap().reordered = true;
+    }
+
+    fn note_frame(&self, secs: f64) {
+        if !(0.001..=10.0).contains(&secs) {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        st.frame_secs = if st.frames == 0 { secs } else { st.frame_secs * 0.9 + secs * 0.1 };
+        st.frames = st.frames.saturating_add(1);
     }
 
     /// Subscribe: returns the init segment and cached fragments to send
@@ -105,9 +144,12 @@ impl LiveHub {
         Some((init, st.gop.clone(), rx))
     }
 
-    fn start(&self, init: Vec<u8>, info: LiveInfo, quiet_init: Option<Vec<u8>>) {
+    pub(crate) fn start(&self, init: Vec<u8>, info: LiveInfo, quiet_init: Option<Vec<u8>>) {
         let mut st = self.state.lock().unwrap();
         let had = st.init.is_some();
+        st.frame_secs = 0.0;
+        st.frames = 0;
+        st.reordered = false;
         st.init = Some(Arc::new(init));
         st.low_delay = None;
         st.quiet_init = quiet_init.map(Arc::new);
@@ -120,7 +162,7 @@ impl LiveHub {
         }
     }
 
-    fn publish(&self, frag: Vec<u8>, keyframe: bool) {
+    pub(crate) fn publish(&self, frag: Vec<u8>, keyframe: bool) {
         let frag = Arc::new(frag);
         let mut st = self.state.lock().unwrap();
         if keyframe {
@@ -199,6 +241,7 @@ pub struct LiveMuxer {
     /// Facts about the first audio frames, for one log line (see aac.rs).
     diag: Option<super::aac::Diag>,
     audio_entry: Option<Vec<u8>>,
+    video_ts: u32,
 }
 
 /// Frames (two keyframes among them) a live stream must show in decode
@@ -241,6 +284,7 @@ impl LiveMuxer {
             quiet_ld,
             diag: None,
             audio_entry: audio.map(|a| tracks[a].sample_entry.clone()),
+            video_ts: tracks[0].timescale.max(1),
         }
     }
 
@@ -269,7 +313,11 @@ impl LiveMuxer {
         if let Some(prev) = self.pending.take() {
             let d = (ticks - prev.ticks).clamp(1, u32::MAX as i64) as u32;
             self.last_video_dur = d;
+            self.hub.note_frame(d as f64 / self.video_ts as f64);
             self.emit(prev, d);
+        }
+        if cts != 0 {
+            self.hub.note_reorder();
         }
         self.watch_order(data, cts);
         self.pending = Some(PendingVideo { ticks, cts, data: data.to_vec(), key });
@@ -385,6 +433,9 @@ mod tests {
         let (init, gop, mut rx) = hub.subscribe().unwrap();
         assert_eq!(&init[4..8], b"ftyp");
         assert_eq!(gop.len(), 3);
+        // 9000 ticks at 90 kHz: 10 frames a second.
+        assert!((hub.fps().unwrap() - 10.0).abs() < 0.01);
+        assert_eq!(hub.init().unwrap(), init);
         // A new frame reaches the live receiver.
         m.push_video(1000 + 14 * 9000, 0, &[1; 10], false);
         match rx.try_recv().unwrap() {
@@ -512,7 +563,7 @@ mod tests {
         m.finish();
         let t = video_timing(&collect(&mut rx));
         assert_eq!(t.len(), pts.len());
-        // Reordering is recognised at the third group of B-frames (frame 8);
+        // Reordering is recognized at the third group of B-frames (frame 8);
         // the frames before pass through as sent.
         for w in t[7..].windows(2) {
             assert!(w[1].0 > w[0].0, "decode times increase: {t:?}");

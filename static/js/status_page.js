@@ -323,7 +323,7 @@ function statusPage(el) {
     } else if (u.available) {
       const notes = /^https:\/\//.test(u.notes_url || '') ? ' <a href="' + esc(u.notes_url) + '" target="_blank" rel="noopener">What\'s new</a>' : '';
       txt = '<b>' + v(u.latest) + ' is available</b> <span class="muted">(this is ' + v(u.current) + ')</span>' + notes +
-        (u.why_not ? '<div class="muted">' + esc(u.why_not) + '</div>' : '');
+        (u.why_not ? whyNotHtml(u.why_not) : '');
       if (u.can_install) act = '<button class="primary" data-updinstall>Update to ' + v(u.latest) + '</button>';
     } else {
       txt = '<b>' + v(u.current) + '</b> <span class="muted">' +
@@ -617,6 +617,15 @@ function statusPage(el) {
       c.clients.map(x => '<tr><td><b>' + esc(x.user) + '</b></td><td>' + esc(x.ip) + '</td><td>' + esc(x.agent) + '</td><td>' + esc(x.watching || '') + '</td>' +
         '<td>' + (x.active ? '<span class="badge on dot">now</span>' : ago(x.last)) + '</td><td class="num">' + x.requests + '</td></tr>').join('') + '</tbody></table>')
       : '<p class="empty">Nobody else in the last hour.</p>';
+    const tc = c.transcodes || {};
+    const tcEnc = tc.encoders ? ((tc.encoders.working || []).concat(tc.encoders.software || []).join(', ') || 'none found') : 'not checked yet';
+    html += '<h4 class="asys-sub">Transcoding for players</h4>';
+    html += '<p class="hint">Setting: ' + esc(tc.setting || 'auto') + '. Encoders: ' + esc(tcEnc) + '. In use: ' + ((tc.hardware || {}).running || 0) + ' of ' + ((tc.hardware || {}).max || 0) + ' on the graphics card, ' +
+      ((tc.software || {}).running || 0) + ' of ' + ((tc.software || {}).max || 0) + ' in software.</p>';
+    html += (tc.active || []).length ? wrap('<table class="asys-tbl"><thead><tr><th>Camera</th><th>What</th><th>Size</th><th>Encoder</th><th class="num">Viewers</th><th class="num">CPU</th><th>For</th></tr></thead><tbody>' +
+      tc.active.map(x => '<tr><td><b>' + esc(x.camera) + '</b></td><td>' + esc(x.what) + '</td><td>' + x.width + 'x' + x.height + ' ' + esc(x.codec) + (x.fps ? ' @' + x.fps : '') + ' <span class="muted">' + Math.round(x.bitrate_kbps / 100) / 10 + ' Mbit/s</span></td>' +
+        '<td>' + esc(x.encoder || '-') + '</td><td class="num">' + x.viewers + '</td><td class="num">' + (x.cpu_percent != null ? x.cpu_percent + '%' : '-') + '</td><td>' + dur(x.seconds) + '</td></tr>').join('') + '</tbody></table>')
+      : '<p class="empty">No transcodes running.</p>';
     html += '<h4 class="asys-sub">Computers sending their screen</h4>';
     html += (c.helpers || []).length ? wrap('<table class="asys-tbl"><thead><tr><th>Computer</th><th>State</th><th>Connected for</th><th>Version</th></tr></thead><tbody>' +
       c.helpers.map(x => '<tr><td><b>' + esc(x.name) + '</b></td><td>' + (x.online ? '<span class="badge on dot">online</span>' : '<span class="badge off dot">offline</span>') + '</td>' +
@@ -704,3 +713,12 @@ function statusPage(el) {
 function statusLeave() { clearInterval(timer); timer = null; }
 
 registerAdminPage({ id: 'status', title: 'Status', order: 5, render: statusPage, leave: statusLeave });
+
+// Why the update can't be installed from here. A package install gets its own steps: the command on
+// its own line to copy, and the download as a link (both from the server's text).
+function whyNotHtml(why) {
+  const m = /^(.*?download )(\S+) \((https:\/\/[^)\s]+)\) and run: (.+)$/.exec(why);
+  if (!m) return '<div class="muted">' + esc(why) + '</div>';
+  return '<div class="upd-steps">' + esc(m[1]) + '<a href="' + esc(m[3]) + '" target="_blank" rel="noopener">' + esc(m[2]) + '</a> and run:' +
+    '<pre class="upd-cmd">' + esc(m[4]) + '</pre></div>';
+}

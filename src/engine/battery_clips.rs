@@ -39,8 +39,16 @@ pub(super) fn spawn_lead_in(engine: Arc<Engine>, handle: Arc<CameraHandle>, push
     if !card_worth_asking(&uid, None) {
         return;
     }
+    let name = handle.cfg.read().unwrap().name.clone();
+    pending(&name, true);
     thread::spawn(move || {
-        let name = handle.cfg.read().unwrap().name.clone();
+        struct Done(String);
+        impl Drop for Done {
+            fn drop(&mut self) {
+                pending(&self.0, false);
+            }
+        }
+        let _done = Done(name.clone());
         match lead_in(&engine, &handle, push_ms) {
             Ok(()) => {
                 card_worth_asking(&uid, Some(true));
@@ -52,6 +60,25 @@ pub(super) fn spawn_lead_in(engine: Arc<Engine>, handle: Arc<CameraHandle>, push
             Err(LeadIn::Skipped(e)) => info!("camera '{name}': no recording from the camera's own card for this event ({e:#})"),
         }
     });
+}
+
+/// Cameras whose lead-in is being fetched now (by name): their event copies
+/// wait for it (event_copy.rs).
+static PENDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn pending(name: &str, on: bool) {
+    let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    if on {
+        p.push(name.to_string());
+    } else if let Some(i) = p.iter().position(|n| n == name) {
+        p.remove(i);
+    }
+}
+
+/// A lead-in for this camera is still being fetched from its card.
+pub(super) fn lead_in_pending(name: &str) -> bool {
+    let on = PENDING.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|n| n == name);
+    on
 }
 
 /// After this many events in a row with nothing on the card (no card, or

@@ -517,7 +517,9 @@ ticks itself off when it is done; the checklist is also under Help.
    ways (Telegram, email, ntfy, Pushover, Home Assistant) are in **Settings > Detection & alerts >
    Alerts**.
 3. **Add a sign-in account.** Go to **Settings > Users & security**. Until you do, anyone who can
-   reach this computer can watch every camera and change every setting.
+   reach this computer can watch every camera and change every setting. The first account is an
+   admin. Give everyone else their own account, with the least they need (see **Accounts: viewers,
+   operators and admins** below).
 4. **Choose where recordings go.** **Settings > Recording > Drives & folders** picks the drive;
    **Settings > Recording > Storage & retention** sets how long recordings are kept and how much
    space they may use. By default (Automatic) they use what the drive can spare and keep 10% of
@@ -807,6 +809,92 @@ trusted_proxies = ["127.0.0.1"]   # the proxy's address as AmberSight sees it
 Without `trusted_proxies`, everyone behind the proxy shares one address as described above. The alert
 for a password sent directly by a program (HTTP Basic or RTSP) is once per account and network, so
 behind a proxy that is not listed it sees only one network.
+
+### Event clips not saved to the copy folder
+
+A camera's **Also save event clips to** folder (camera settings, Recording) shows its last copy or
+what is wrong under the field; **Test** writes and removes a test file there. When copies keep
+failing, Status lists it and a system alert goes out; copies wait (up to 3 days, also over a
+restart) and are made once the folder works again.
+
+**Where to put it.** Pick a folder other users of the computer cannot rename or delete: inside your
+own user folder (your OneDrive or Google Drive folder, for example), or a folder you have locked
+down. On Windows, any local user may create and rename folders at the top of a second drive (`D:\`)
+by default; for a folder there, take that away, for example (in an Administrator terminal):
+`icacls "D:\Camera copies" /inheritance:r /grant:r SYSTEM:(OI)(CI)F Administrators:(OI)(CI)F "%USERNAME%":(OI)(CI)F`.
+
+- **"The copy folder was replaced".** The folder at that path is not the same folder as when you saved
+  or tested it (deleted and made again, restored from a backup, or swapped for another). AmberSight
+  stops copying there until you open the camera and press **Test**, which accepts the folder now there.
+
+- **The folder is missing or offline.** AmberSight never creates the folder, so an unplugged drive or
+  a share that is down is noticed instead of filling the system drive. Plug it in or create it.
+- **Windows: not allowed to write there.** The AmberSight service runs as the Local System account,
+  not as you. A folder in your own user folder (`C:\Users\you\OneDrive\Cameras`) usually works,
+  since Local System may write to user folders, and OneDrive uploads the files while you are signed in
+  to Windows. If it does not: in the folder's Properties, Security, give SYSTEM "Modify"; in OneDrive,
+  set the folder to "Always keep on this device"; or use a folder outside your user folder (such as
+  `D:\Camera copies`) and have your sync app sync that one (Google Drive for desktop and Dropbox can
+  sync any folder). A network share needs to let this computer's account in (Local System uses the
+  computer's account on the network).
+- **Linux and macOS: not allowed to write there.** The package install runs as the `ambersight`
+  account: `sudo chown ambersight: /path/to/folder`, or give that account write access through a
+  group. In Docker, mount the folder into the container (for example `-v /mnt/cloud/cams:/copies`)
+  and set `/copies`.
+- **The drive is full.** Free space there or set **Keep copies** to a number of days. AmberSight stops
+  copying while that drive has less than 2 GB (or 5%) free, 10 GB (or 10%) when it is the system drive
+  or the drive of AmberSight's data. The copy folder is not part of the space for recordings, so
+  recording clean-up does not free it.
+- **Windows: a mapped drive letter.** The service does not see drive letters mapped in your own
+  sign-in (`Z:`): use the share's own name (`\\nas\share\cameras`).
+- **Linux and macOS: "anyone on this computer may change things in the folder".** AmberSight does not
+  write into a folder every user may write to (`/tmp`, a folder with mode 777): take away other users'
+  write access (`chmod o-w`) or pick another folder.
+- **The copy folder is not responding.** A copy has been running for minutes: a network share or a
+  drive stopped answering. Other cameras' copies to other folders carry on, and recording is not
+  affected.
+- A renamed camera saves into a new folder; its old folder is no longer trimmed by **Keep copies**.
+  In Docker the file names use the container's time zone (`TZ`).
+
+### An app gets the sub stream instead of a converted stream
+
+An app that says what its device can decode gets streams that fit, converted on the graphics card
+when needed. When it gets the sub stream (or a smaller stream) instead, the app is told why: `busy_fallback`
+means every conversion slot was in use, `off` means conversion is turned off. Check
+**Settings > System > Status**, **Connections** tab: it lists the encoders found and the running
+conversions (camera, size, encoder, viewers). NVIDIA consumer cards allow only a few encodes at a
+time; lower `max_hardware` in `[transcode]` if conversions fail to start. To turn conversion off
+entirely, set `[transcode] encoder = "off"` in config.toml (apps then get the best stream that fits
+as it is).
+
+### Accounts: viewers, operators and admins
+
+**Settings > Users & security** gives each account a **Role**:
+
+- **Viewer**: watches live video, events, clips and recordings, and marks events "looks fine" in
+  their own browser. Changes nothing.
+- **Operator**: a viewer who can also do the day-to-day things. Each of these is ticked for a new
+  operator and can be unticked: moving PTZ cameras (go to presets, click to aim; saving presets
+  stays with admins), talking through a camera and recording a clip now, arming and disarming,
+  switching profiles and pausing notifications, keeping events forever and marking them "not a real
+  alert", and changing the detection and alert settings of their cameras (zones, areas that don't
+  notify, motion sensitivity, AI objects and confidence, alert times and limits, loud sounds). An
+  operator never sees or changes anything else: no stream addresses or camera passwords, recording
+  and storage, other settings, users, automations, updates or restarts.
+- **Admin**: everything, on every camera.
+
+Viewers and operators can be limited to some cameras: they then see, and control, only those. A
+camera-limited operator can't arm, disarm or switch profiles (those change every camera); they can
+still pause notifications of their own cameras.
+Making an operator, or giving one more rights or cameras, asks for your own password, as making an
+admin does, and the other admins are told. **Every change an operator makes to a camera's detection
+or alert settings is reported to the admins** (one message per camera every few minutes, naming
+what changed, such as "detection zones, alert schedule"), and so is marking an event "not a person"
+(or car ...) so that spot stops alerting. What operators do is also in the audit log (Settings >
+System > Audit). An operator pauses a camera's notifications for a day at most, and their changes
+can restart a camera at most 3 times in 10 minutes.
+An operator can make a device token with control rights in **Your account**; it does what the
+operator may.
 
 ### Who is signed in, and new device alerts
 

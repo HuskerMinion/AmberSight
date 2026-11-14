@@ -41,6 +41,7 @@ mod db;
 mod email;
 mod engine;
 mod live_http;
+mod transcode;
 mod local_source;
 mod logbuf;
 mod missing;

@@ -19,7 +19,7 @@ const SAFARI_IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS
 fn engine(users: &[&str]) -> Arc<Engine> {
     let mut cfg: crate::config::Config = toml::from_str("").unwrap();
     for u in users {
-        cfg.server.users.push(crate::config::UserConfig { disabled: false, username: (*u).into(), password: crate::auth::hash_password("pw-test-1"), admin: false, cameras: Vec::new() });
+        cfg.server.users.push(crate::config::UserConfig { disabled: false, username: (*u).into(), password: crate::auth::hash_password("pw-test-1"), admin: false, cameras: Vec::new(), ..Default::default() });
     }
     Engine::for_test(cfg)
 }
@@ -70,7 +70,7 @@ fn sessions_json(v: &serde_json::Value) -> Vec<serde_json::Value> {
 }
 
 async fn account_of(e: &Arc<Engine>, user: &str, token: &str) -> serde_json::Value {
-    let r = me_account(State(e.clone()), Extension(Caller(user.into(), 0)), Extension(IsAdmin(false)), session_header(token)).await;
+    let r = me_account(State(e.clone()), Extension(Caller(user.into(), 0)), Extension(IsAdmin(false)), None, session_header(token)).await;
     assert_eq!(r.status(), StatusCode::OK);
     serde_json::from_str(&text(r).await).unwrap()
 }
@@ -407,7 +407,7 @@ async fn a_password_change_makes_every_other_browser_new_again() {
 
 fn admin_engine(user: &str) -> Arc<Engine> {
     let mut cfg: crate::config::Config = toml::from_str("").unwrap();
-    cfg.server.users.push(crate::config::UserConfig { disabled: false, username: user.into(), password: crate::auth::hash_password("pw-test-1"), admin: true, cameras: Vec::new() });
+    cfg.server.users.push(crate::config::UserConfig { disabled: false, username: user.into(), password: crate::auth::hash_password("pw-test-1"), admin: true, cameras: Vec::new(), ..Default::default() });
     Engine::for_test(cfg)
 }
 

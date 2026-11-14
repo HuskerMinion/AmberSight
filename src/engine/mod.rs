@@ -7,6 +7,8 @@ pub mod notify;
 pub mod health;
 pub mod camera_events;
 mod clip;
+mod copy_fs;
+pub mod event_copy;
 mod creds;
 pub(crate) mod export;
 mod native;
@@ -57,6 +59,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use tracing::{info, warn};
+
+/// Kept events' clips waiting to be saved, and the threads saving them (see
+/// `Engine::queue_clip_save`).
+static CLIP_QUEUE: Mutex<(std::collections::VecDeque<String>, usize)> = Mutex::new((std::collections::VecDeque::new(), 0));
+const CLIP_SAVERS: usize = 2;
+const CLIP_WAITING_MAX: usize = 10_000;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClipInfo {
@@ -437,6 +445,8 @@ impl Engine {
             let eng = engine.clone();
             thread::spawn(move || system_alerts::system_alert_loop(eng));
         }
+        // Event clips also saved to a camera's copy folder.
+        event_copy::start(engine.clone());
         {
             let eng = engine.clone();
             thread::spawn(move || newcams::watch_loop(eng));
@@ -788,18 +798,36 @@ impl Engine {
 
     /// Replace a live camera's config in place (zones, sensitivity, direct,
     /// url...). The old worker parks and exits; a fresh one starts in the slot.
-    pub fn update_camera(self: &Arc<Engine>, id: usize, mut cfg: CameraConfig) -> bool {
-        normalize_creds(&mut cfg);
-        let replaced = {
+    pub fn update_camera(self: &Arc<Engine>, id: usize, cfg: CameraConfig) -> bool {
+        self.update_camera_checked(id, |_| Ok::<_, ()>(cfg), |_| Ok(())).is_ok()
+    }
+
+    /// As `update_camera`, with the new settings made from the camera's
+    /// settings as they are, under the cameras lock (no change made meanwhile
+    /// is lost): `edit` gets the current settings and gives the new ones, and
+    /// `may_restart` sees which settings would restart the camera (none: it
+    /// keeps running). Either can refuse; then nothing changes. Ok: (before,
+    /// after); Err(None): no such camera.
+    pub fn update_camera_checked<E>(
+        self: &Arc<Engine>,
+        id: usize,
+        edit: impl FnOnce(&CameraConfig) -> Result<CameraConfig, E>,
+        may_restart: impl FnOnce(&[String]) -> Result<(), E>,
+    ) -> Result<(CameraConfig, CameraConfig), Option<E>> {
+        let (before, after) = {
             let mut cams = self.cameras.write().unwrap();
             if id >= cams.len() || cams[id].is_none() {
-                return false;
+                return Err(None);
             }
             // Only notification and grouping settings changed: the stream keeps
             // running (no seconds of lost recording, no reconnect), and the new
             // values are read from the handle and the config as they are needed.
             let h = cams[id].as_ref().unwrap().clone();
-            let differs = restart_fields(&h.cfg.read().unwrap(), &cfg);
+            let before = h.cfg.read().unwrap().clone();
+            let mut cfg = edit(&before).map_err(Some)?;
+            normalize_creds(&mut cfg);
+            let differs = restart_fields(&before, &cfg);
+            may_restart(&differs).map_err(Some)?;
             if differs.is_empty() {
                 for slot in [&h.cfg, &h.running] {
                     let mut c = slot.write().unwrap();
@@ -807,17 +835,17 @@ impl Engine {
                 }
                 drop(cams);
                 self.sync_config_cameras();
-                return true;
+                return Ok((before, cfg));
             }
             tracing::info!("camera '{}': restarting for a change in {}", cfg.name, differs.join(", "));
             cams[id].as_ref().unwrap().active.store(false, Ordering::Relaxed);
             let h = make_handle(id, cfg.clone());
             cams[id] = Some(h.clone());
-            spawn_worker(self.clone(), h.clone(), cfg);
-            true
+            spawn_worker(self.clone(), h.clone(), cfg.clone());
+            (before, cfg)
         };
         self.sync_config_cameras();
-        replaced
+        Ok((before, after))
     }
 
     /// A camera is being renamed: move its "also trigger" links, profile
@@ -825,6 +853,7 @@ impl Engine {
     /// new name (the caller then saves the camera itself).
     pub fn rename_camera_refs(&self, old: &str, new: &str) {
         self.rename_alert_pause(old, new);
+        event_copy::rename_camera(old, new);
         {
             let mut c = self.config.lock().unwrap();
             for cam in c.cameras.iter_mut() {
@@ -1086,17 +1115,57 @@ impl Engine {
             false
         });
         if found && val {
-            let engine = self.clone();
-            let id = id.to_string();
-            thread::spawn(move || {
+            self.queue_clip_save(id);
+        }
+        found
+    }
+
+    /// No room to queue another kept clip for saving now (the keep request is
+    /// then answered "busy", and changes nothing).
+    pub fn clip_saves_full(&self) -> bool {
+        CLIP_QUEUE.lock().unwrap_or_else(|p| p.into_inner()).0.len() >= CLIP_WAITING_MAX
+    }
+
+    /// Kept events' clips are saved by at most `CLIP_SAVERS` threads at a
+    /// time, in turn: many kept at once (by hand or by a program) do not each
+    /// start a thread. A save that panics is logged and the next one goes on.
+    fn queue_clip_save(self: &Arc<Engine>, id: &str) {
+        {
+            let mut q = CLIP_QUEUE.lock().unwrap_or_else(|p| p.into_inner());
+            if q.0.len() >= CLIP_WAITING_MAX {
+                warn!("protect {id}: too many clips waiting to be saved; it is kept, but its clip is not saved now");
+                return;
+            }
+            if !q.0.iter().any(|x| x == id) {
+                q.0.push_back(id.to_string());
+            }
+            if q.1 >= CLIP_SAVERS {
+                return;
+            }
+            q.1 += 1;
+        }
+        let engine = self.clone();
+        thread::spawn(move || loop {
+            let next = {
+                let mut q = CLIP_QUEUE.lock().unwrap_or_else(|p| p.into_inner());
+                let n = q.0.pop_front();
+                if n.is_none() {
+                    q.1 -= 1;
+                }
+                n
+            };
+            let Some(id) = next else { return };
+            let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if let Ok(Some(ev)) = engine.db.get_event(&id) {
                     if let Err(e) = engine.save_clip_file(&ev) {
                         warn!("protect {id}: could not save clip file: {e:#}");
                     }
                 }
-            });
-        }
-        found
+            }));
+            if saved.is_err() {
+                warn!("protect {id}: saving its clip failed unexpectedly");
+            }
+        });
     }
 
     pub fn total_events(self: &Engine) -> usize {
@@ -1176,6 +1245,10 @@ fn copy_light_fields(to: &mut CameraConfig, from: &CameraConfig) {
     to.alert_priority = from.alert_priority.clone();
     to.groups = from.groups.clone();
     to.group = from.group.clone();
+    // Event copies are read from the config when an event is queued and copied.
+    to.copy_events_to = from.copy_events_to.clone();
+    to.copy_events_keep_days = from.copy_events_keep_days;
+    to.copy_events_only_confirmed = from.copy_events_only_confirmed;
 }
 
 /// True when `new` differs from `old` in anything but the light fields.

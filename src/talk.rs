@@ -748,21 +748,23 @@ async fn close_with(mut ws: WebSocket, code: u16, reason: &str) {
     let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
 }
 
-/// `GET /api/cameras/:id/talk?rate=48000` (WebSocket upgrade). Admin only.
+/// `GET /api/cameras/:id/talk?rate=48000` (WebSocket upgrade). Admins, and operators with the talk right.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle(
     engine: Arc<Engine>,
     id: usize,
     access: crate::web::Access,
     caller: crate::web::Caller,
-    admin: bool,
+    allowed: bool,
+    ip: String,
     rate: Option<u32>,
     ws: WebSocketUpgrade,
 ) -> Response {
     // The session's own rights (a session can have fewer than its account,
     // e.g. one opened from a linked server).
     let _ = &caller;
-    if !admin {
-        return (StatusCode::FORBIDDEN, "admin access required for talk").into_response();
+    if !allowed {
+        return (StatusCode::FORBIDDEN, "this account may not talk through cameras").into_response();
     }
     let Some(handle) = engine.camera(id) else {
         return (StatusCode::NOT_FOUND, "no such camera").into_response();
@@ -779,6 +781,10 @@ pub async fn handle(
         return (StatusCode::BAD_REQUEST, "rate must be between 8000 and 96000").into_response();
     }
     let slot = TalkSlot::claim(&name);
+    // (A GET, so the sign-in layer does not log it: talking is logged here.)
+    if slot.is_some() {
+        let _ = engine.db.insert_audit(&caller.0, &ip, "talk through the camera's speaker", &name, 200);
+    }
     let who = Some((engine.clone(), caller.0.clone(), caller.1));
     ws.on_upgrade(move |socket| crate::web::while_account_allowed(who, async move {
         match slot {

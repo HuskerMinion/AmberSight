@@ -201,6 +201,11 @@ body[data-tab="settings"] #dock { display: none; }
 .sh-more { margin: 0 0 var(--s2); }
 .sh-more > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-s); padding: 2px 0; }
 .us-legend { margin: 0 0 var(--s3); }
+.us-role { border: 0; padding: 0; margin: 0 0 var(--s2); min-width: 0; }
+.us-role legend { padding: 0; }
+.dlg .us-role label input[type=radio] { width: 15px; height: 15px; min-height: 0; flex: none; margin: 3px 0 0; accent-color: var(--accent); }
+.us-role .asys-chk { align-items: flex-start; text-align: left; }
+#ufPermsBox { margin: 0 0 var(--s2); }
 .us-why { margin-top: 4px; }
 
 /* System > Status: the banner and the word on each card */

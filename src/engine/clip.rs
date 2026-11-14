@@ -140,6 +140,8 @@ pub(super) fn finalize_event(
     let mut alert_ok = (!ai.ran || ai.confirmed || ai.sound) && alerts_on;
     let by_sound = ai.sound;
     let mut odt_quiet = false;
+    // The external detector found nothing it knows (what was detected, not a notification setting).
+    let mut odt_nothing = false;
     ev.objects = ai.labels.clone();
     if ai.ran {
         info!(
@@ -162,6 +164,7 @@ pub(super) fn finalize_event(
             }
         }
         if odt.enabled && odt.alert_only_known && ev.objects.is_empty() {
+            odt_nothing = true;
             odt_quiet = alert_ok;
             alert_ok = false;
         }
@@ -298,6 +301,10 @@ pub(super) fn finalize_event(
         }
     }
     engine.record_event_as(ev, alert_ok, headline.as_deref());
+    // Also saved to the camera's copy folder (on its own threads, later). By
+    // what was detected, never by notification settings: a copy must not be
+    // lost to "alerts off", a schedule, a pause or a limit.
+    super::event_copy::queue_event(engine, &cfg.name, &ev_id, !unconfirmed && !odt_nothing);
     if unconfirmed {
         if let Err(e) = engine.db.set_event_unconfirmed(&ev_id) {
             warn!("could not mark event {ev_id}: {e:#}");

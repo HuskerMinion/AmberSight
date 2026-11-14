@@ -127,6 +127,8 @@ fn escape(rbsp: &[u8]) -> Vec<u8> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sps {
     pub profile: u8,
+    /// Luma bit depth (8 unless a High profile says otherwise).
+    pub bit_depth: u8,
     pub separate_colour_plane: bool,
     pub log2_max_frame_num: u32,
     pub poc_type: u32,
@@ -171,12 +173,13 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
         return None;
     }
     let mut separate_colour_plane = false;
+    let mut bit_depth = 8u8;
     if HIGH_PROFILES.contains(&profile) {
         let chroma = r.ue()?;
         if chroma == 3 {
             separate_colour_plane = r.flag()?;
         }
-        r.ue()?;
+        bit_depth = 8u8.saturating_add(r.ue()?.min(8) as u8);
         r.ue()?;
         r.skip(1)?;
         if r.flag()? {
@@ -287,7 +290,7 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
     if last_one < r.p || last_one - r.p > 7 || (r.p..last_one).any(|i| rbsp[i >> 3] & (0x80 >> (i & 7)) != 0) {
         return None;
     }
-    Some(Sps { profile, separate_colour_plane, log2_max_frame_num, poc_type, log2_max_poc_lsb, max_num_ref_frames, frame_mbs_only, vui, max_num_reorder, vui_flag_at, restriction_flag_at })
+    Some(Sps { profile, bit_depth, separate_colour_plane, log2_max_frame_num, poc_type, log2_max_poc_lsb, max_num_ref_frames, frame_mbs_only, vui, max_num_reorder, vui_flag_at, restriction_flag_at })
 }
 
 /// True when the SPS already tells a decoder it never has to wait for

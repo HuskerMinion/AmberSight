@@ -10,6 +10,7 @@ use axum::{
 use std::sync::{Arc, Mutex};
 use tower_http::services::ServeFile;
 
+use crate::auth::{Perm, Role};
 use crate::config::{AlertConfig, CameraConfig, MotionConfig, OdtConfig, StorageConfig};
 use crate::engine::Engine;
 
@@ -22,7 +23,9 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
     let api = Router::new()
         .route("/cameras", get(list_cameras).post(add_camera))
         .route("/cameras/:id", put(update_camera).delete(remove_camera))
+        .route("/camera-defaults", get(camera_defaults))
         .route("/cameras/:id/enable", post(set_enabled))
+        .route("/event-copy/test", post(event_copy_test))
         .route("/cameras/:id/ptz", post(ptz_action))
         .route("/cameras/:id/timesync", post(camera_timesync))
         .route("/timesync/all", post(timesync_all))
@@ -926,6 +929,49 @@ fn viewer_may_write(path: &str, method: &axum::http::Method) -> bool {
         || matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(), ["links", id, "open"] if !id.is_empty())
 }
 
+/// The changes an operator may make, and the right each needs: nothing but
+/// these (beyond what any viewer may do). `gate` keeps arming and profiles
+/// (all cameras) from operators limited to some; the handlers check more: the
+/// camera (limited accounts), what a camera edit touches
+/// (`operator_update_camera`), no saving or deleting presets.
+fn operator_route(path: &str, method: &axum::http::Method) -> Option<Perm> {
+    let parts: Vec<&str> = path.strip_prefix('/')?.split('/').collect();
+    let cam = |id: &str| id.parse::<usize>().is_ok();
+    match (method.as_str(), parts.as_slice()) {
+        ("POST", ["cameras", id, "ptz"] | ["cameras", id, "ptz", "aim"]) if cam(id) => Some(Perm::Ptz),
+        ("POST", ["clips", "record"]) => Some(Perm::TalkClip),
+        ("POST", ["shield"] | ["profile"]) => Some(Perm::Arm),
+        ("POST", ["cameras", id, "pause"]) if cam(id) => Some(Perm::Arm),
+        ("POST", ["events", id, "protect" | "review"]) if !id.is_empty() => Some(Perm::Events),
+        ("PUT", ["cameras", id]) if cam(id) => Some(Perm::CameraDetection),
+        _ => None,
+    }
+}
+
+/// Whether the sign-in layer lets this caller's request through (handlers
+/// may refuse more). Default: admins only.
+fn gate(path: &str, method: &axum::http::Method, role: &Role, limited: bool) -> Result<(), &'static str> {
+    if role.is_admin() {
+        return Ok(());
+    }
+    let is_write = method != axum::http::Method::GET && method != axum::http::Method::HEAD;
+    if is_write && !viewer_may_write(path, method) {
+        match operator_route(path, method) {
+            // Arming and profiles change every camera.
+            Some(Perm::Arm) if limited && matches!(path, "/shield" | "/profile") => {
+                return Err("an account limited to some cameras cannot arm, disarm or switch profiles: those change every camera");
+            }
+            Some(p) if role.may(p) => {}
+            Some(_) if role.is_operator() => return Err("this account may not do that: an admin can allow it in Settings, Users"),
+            _ => return Err("admin access required for changes"),
+        }
+    }
+    if admin_only_path(path) {
+        return Err("admin access required");
+    }
+    Ok(())
+}
+
 /// API paths only admins may read too (settings, logs, health, accounts,
 /// network scans, restarting the server ...).
 fn admin_only_path(path: &str) -> bool {
@@ -936,6 +982,7 @@ fn admin_only_path(path: &str) -> bool {
         || path.starts_with("/faces")
         || path.starts_with("/people")
         || path.starts_with("/offsite")
+        || path.starts_with("/event-copy")
         || path.starts_with("/digest/")
         || path == "/noisy"
         || path.starts_with("/update")
@@ -974,6 +1021,7 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
     // No users configured: open-LAN mode allows everything.
     let mut access = Access::default();
     let mut is_admin = true;
+    let mut role = Role::Admin;
     let mut generation_read = None;
     let mut with_token = false;
     let mut token_used: Option<String> = None;
@@ -989,7 +1037,14 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
         }
         match identify(&acc, req.headers(), ip).await {
             Ok(Authed { id, by_token, generation, basic }) => {
-                if by_token && !token_may(&path, req.method(), id.admin) {
+                // An operator's device token has the operator's rights only
+                // when it was made with control rights.
+                let control = !by_token || req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).is_some_and(crate::auth::token_control);
+                let (r, limits) = {
+                    let cfg = engine.config.lock().unwrap();
+                    (crate::auth::role_of(&cfg, &id.user, id.admin, control), crate::auth::camera_limits(&cfg, &id.user))
+                };
+                if by_token && !token_may(&path, req.method(), r != Role::Viewer) {
                     return (StatusCode::FORBIDDEN, "sign in with a password for this").into_response();
                 }
                 // Where and when a session was last used (in memory; the database
@@ -1005,15 +1060,14 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
                 if by_token {
                     token_used = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(crate::auth::token_name);
                 }
-                if is_write && !id.admin && !viewer_may_write(&path, req.method()) {
-                    return (StatusCode::FORBIDDEN, "admin access required for changes").into_response();
-                }
+                // Changes: admins, and what viewers and operators may do.
                 // Settings, logs, health, accounts and network scans: admins only.
-                if !id.admin && admin_only_path(&path) {
-                    return (StatusCode::FORBIDDEN, "admin access required").into_response();
+                if let Err(why) = gate(&path, req.method(), &r, limits.is_some()) {
+                    return (StatusCode::FORBIDDEN, why).into_response();
                 }
-                access = Access(crate::auth::camera_limits(&engine.config.lock().unwrap(), &id.user));
+                access = Access(limits);
                 is_admin = id.admin;
+                role = r;
                 id.user
             }
             Err(NotAuthed::NotChecked(why)) => return not_checked(why),
@@ -1040,6 +1094,8 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
     // (Handlers use this to leave out camera logins, folder paths and such. A
     // token is let through by the list above, and never sees those.)
     req.extensions_mut().insert(IsAdmin(is_admin && !with_token));
+    // (What the caller may do; a device token's role is capped by its scope.)
+    req.extensions_mut().insert(role);
     if let Some(n) = &token_used {
         req.extensions_mut().insert(TokenUsed(n.clone()));
     }
@@ -1109,6 +1165,15 @@ fn end_stream_with_account(engine: &Arc<Engine>, user: &str, generation: u64, re
 /// server, which has its own check) until it finishes or the account is
 /// disabled, deleted or changed since the request was let in; dropping the
 /// session closes the connection.
+/// Completes when this account may no longer watch (never for None: a
+/// linked server, which has its own check).
+pub async fn account_gone(who: Who) {
+    match who {
+        None => std::future::pending::<()>().await,
+        Some((engine, user, generation)) => account_ended(engine, user, generation).await,
+    }
+}
+
 pub async fn while_account_allowed<F: std::future::Future<Output = ()>>(who: Who, session: F) {
     match who {
         None => session.await,
@@ -1153,11 +1218,32 @@ async fn whoami(State(engine): State<Arc<Engine>>, req: Request) -> Response {
             None
         }
     };
+    // The same role the sign-in layer will give this caller's requests.
+    let role = match &id {
+        Some(i) => {
+            let control = !by_token || req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).is_some_and(crate::auth::token_control);
+            let cfg = engine.config.lock().unwrap();
+            Some((crate::auth::role_of(&cfg, &i.user, i.admin, control), crate::auth::camera_limits(&cfg, &i.user).is_some()))
+        }
+        None if acc.is_empty() => Some((Role::Admin, false)),
+        None => None,
+    };
     Json(serde_json::json!({
         "signed_in": id.is_some() || acc.is_empty(),
         "user": id.as_ref().map(|i| i.user.clone()).unwrap_or_default(),
+        // (Operators are not admins: an app that knows only this flag shows them a viewer's buttons.)
         "admin": id.as_ref().map(|i| i.admin).unwrap_or(acc.is_empty()),
+        // "viewer", "operator" or "admin"; null when not signed in.
+        "role": role.map(|r| r.0.name()),
+        // What this session may do now beyond watching (all true for an admin's
+        // session, all false for viewers).
+        "perms": role.map(|r| r.0.perms_json(r.1, by_token)),
+        // Limited to some cameras (an admin never is).
+        "limited": role.is_some_and(|r| r.1),
         "auth_required": !acc.is_empty(),
+        // What this server can do, for apps to check before asking (also
+        // before sign-in): "caps" = transcoding for players (see transcode/).
+        "features": FEATURES,
         // The right password in Basic for an account that needs a device token.
         "two_step_required": two_step_needed,
         // Came with a device token, so account changes are refused with 403.
@@ -1231,7 +1317,7 @@ pub(crate) async fn login(State(engine): State<Arc<Engine>>, req: Request) -> Re
         Some((id, started)) => {
             crate::auth::record_success(ip);
             let _ = engine.db.insert_audit(&id.user, &ip.to_string(), "sign-in", "", 200);
-            signed_in_response(id, started, secure)
+            signed_in_response(&engine, id, started, secure)
         }
         None => {
             let locked = crate::auth::record_failure(ip);
@@ -1266,8 +1352,21 @@ pub(crate) fn session_cookie(token: &str, max_age: u64, secure: bool) -> String 
 
 /// A new session for `id`, as a cookie on a JSON `{user, admin}` answer.
 /// `secure`: the request came over HTTPS (see `arrived_secure`).
-fn signed_in_response(id: crate::auth::Identity, started: crate::devices::Started, secure: bool) -> Response {
-    signed_in_with(serde_json::json!({ "user": id.user, "admin": id.admin }), started, secure)
+fn signed_in_response(engine: &Engine, id: crate::auth::Identity, started: crate::devices::Started, secure: bool) -> Response {
+    let mut answer = serde_json::json!({ "user": id.user, "admin": id.admin });
+    add_role(engine, &mut answer, &id.user, id.admin);
+    signed_in_with(answer, started, secure)
+}
+
+/// A sign-in answer's `role`, `perms` and `limited`, as /api/whoami gives them
+/// for the new session.
+pub(crate) fn add_role(engine: &Engine, answer: &mut serde_json::Value, user: &str, admin: bool) {
+    let cfg = engine.config.lock().unwrap();
+    let role = crate::auth::role_of(&cfg, user, admin, true);
+    let limited = crate::auth::camera_limits(&cfg, user).is_some();
+    answer["role"] = role.name().into();
+    answer["perms"] = role.perms_json(limited, false);
+    answer["limited"] = limited.into();
 }
 
 /// `answer` (at least `{user, admin}`) with the cookies of a new session and
@@ -1312,7 +1411,7 @@ pub(crate) async fn pair(State(engine): State<Arc<Engine>>, req: Request) -> Res
         Some((id, started)) => {
             crate::auth::record_success(ip);
             let _ = engine.db.insert_audit(&id.user, &ip.to_string(), if from_link { "sign-in (linked server)" } else { "sign-in (QR code)" }, "", 200);
-            signed_in_response(id, started, secure)
+            signed_in_response(&engine, id, started, secure)
         }
         None => {
             crate::auth::record_failure(ip);
@@ -1504,6 +1603,31 @@ async fn set_overlay_var_http(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// What GET /api/cameras leaves out for anyone not an admin (viewers and
+/// operators alike): logins, folders, event copies, capture helpers, pushed
+/// senders, hardware and the watchdog.
+const HIDDEN_FROM_NON_ADMINS: [&str; 12] = ["username", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "has_password", "watchdog"];
+
+/// `GET /api/camera-defaults`: the shared detection and alert settings a
+/// camera uses where it sets none of its own (motion, AI, alert priority and
+/// interval), for showing "Default (...)" in a camera's settings. Nothing in
+/// it is secret; the rest of the settings stay with admins.
+async fn camera_defaults(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
+    let c = engine.config.lock().unwrap();
+    Json(serde_json::json!({
+        "motion": c.motion,
+        "ai": {
+            "enabled": c.ai.enabled,
+            "labels": c.ai.labels,
+            "min_score": crate::config::f32_json(c.ai.min_score),
+            "strict": c.ai.strict,
+            "ignore_parked": c.ai.ignore_parked,
+            "hide_unconfirmed": c.ai.hide_unconfirmed,
+        },
+        "alerts": { "priority": c.alerts.priority, "min_interval": c.alerts.min_interval },
+    }))
+}
+
 async fn list_cameras(
     State(engine): State<Arc<Engine>>,
     axum::Extension(access): axum::Extension<Access>,
@@ -1625,13 +1749,18 @@ async fn list_cameras(
             if let (Some(a), serde_json::Value::Object(b)) = (v.as_object_mut(), extra) {
                 a.extend(b);
             }
+            // Event clips also saved to a folder (admins only, below).
+            v["copy_events_to"] = cfg.copy_events_to.clone().into();
+            v["copy_events_keep_days"] = cfg.copy_events_keep_days.into();
+            v["copy_events_only_confirmed"] = cfg.copy_events_only_confirmed.into();
+            v["copy_events_status"] = cfg.copy_folder().map(|_| crate::engine::event_copy::status_json(&cfg.name)).into();
             // Viewers see what a camera is, not how to reach or impersonate it
             // (a push key is the only secret guarding its stream input).
             if !admin.0 {
                 if let Some(o) = v.as_object_mut() {
                     o.insert("url".into(), viewer_url(&cfg.url).into());
                     o.insert("sub_url".into(), cfg.sub_url.as_deref().map(viewer_url).into());
-                    for k in ["username", "folder", "capture", "capture_status", "push_sender", "hwaccel", "has_password", "watchdog"] {
+                    for k in HIDDEN_FROM_NON_ADMINS {
                         o.remove(k);
                     }
                 }
@@ -1666,6 +1795,93 @@ fn camera_clash(engine: &Engine, cam: &CameraConfig, except: Option<usize>) -> O
         }
     }
     None
+}
+
+/// Most zones of one kind (rectangles or polygons) and corners of one polygon.
+const MAX_ZONES: usize = 32;
+const MAX_POINTS: usize = 64;
+
+/// Two settings values the same, numbers to within float noise (a value
+/// read from the config and sent back by a page need not be bit for bit equal).
+fn json_close(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value as V;
+    match (a, b) {
+        (V::Number(x), V::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(1.0),
+            _ => x == y,
+        },
+        (V::Array(x), V::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| json_close(p, q)),
+        (V::Object(x), V::Object(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| json_close(v, w))),
+        _ => a == b,
+    }
+}
+
+/// Longest text in a camera's detection and alert settings.
+const MAX_TEXT: usize = 200;
+/// Most sounds a loud-sound trigger may name.
+const MAX_SOUNDS: usize = 20;
+
+/// "HH:MM-HH:MM" and nothing more.
+fn strict_schedule(t: &str) -> bool {
+    t.trim().split('-').count() == 2 && crate::config::parse_schedule(t).is_some()
+}
+
+/// Sizes, ranges and lengths of zones, lists and texts, checked when saving a
+/// value that changed (a camera saved before these limits keeps saving as
+/// long as that value is unchanged).
+fn check_camera_sizes(cam: &CameraConfig, old: Option<&CameraConfig>) -> Result<(), String> {
+    let changed = |f: &dyn Fn(&CameraConfig) -> serde_json::Value| old.is_none_or(|o| !json_close(&f(o), &f(cam)));
+    const EPS: f64 = 1e-6;
+    let inside = |q: &[f64; 2]| (-EPS..=1.0 + EPS).contains(&q[0]) && (-EPS..=1.0 + EPS).contains(&q[1]);
+    let rect_ok = |r: &crate::config::ZoneRect| r.x >= -EPS && r.y >= -EPS && r.w > 0.0 && r.h > 0.0 && r.x + r.w <= 1.0 + EPS && r.y + r.h <= 1.0 + EPS;
+    for (what, list, f) in [
+        ("Zones", &cam.zones, (|c: &CameraConfig| serde_json::json!(c.zones)) as fn(&CameraConfig) -> serde_json::Value),
+        ("Ignore zones", &cam.ignore_zones, |c: &CameraConfig| serde_json::json!(c.ignore_zones)),
+        ("Privacy masks", &cam.privacy_masks, |c: &CameraConfig| serde_json::json!(c.privacy_masks)),
+    ] {
+        if (list.len() > MAX_ZONES || !list.iter().all(rect_ok)) && changed(&f) {
+            return Err(format!("{what}: at most {MAX_ZONES} rectangles, each inside the picture and not empty"));
+        }
+    }
+    for (what, v, f) in [
+        ("Arm window", &cam.schedule, (|c: &CameraConfig| serde_json::json!(c.schedule)) as fn(&CameraConfig) -> serde_json::Value),
+        ("Alert window", &cam.alert_schedule, |c: &CameraConfig| serde_json::json!(c.alert_schedule)),
+        ("No-motion watch window", &cam.no_motion_schedule, |c: &CameraConfig| serde_json::json!(c.no_motion_schedule)),
+    ] {
+        if v.as_deref().is_some_and(|t| !t.trim().is_empty() && (t.chars().count() > MAX_TEXT || !strict_schedule(t))) && changed(&f) {
+            return Err(format!("{what}: write it like 07:00-21:00"));
+        }
+    }
+    if cam.motion_algorithm.as_deref().is_some_and(|a| !matches!(a, "objects" | "frame-diff")) && changed(&|c: &CameraConfig| serde_json::json!(c.motion_algorithm)) {
+        return Err("Algorithm: objects or frame-diff".into());
+    }
+    if cam.alert_priority.as_deref().is_some_and(|p| !matches!(p, "low" | "normal" | "high" | "urgent")) && changed(&|c: &CameraConfig| serde_json::json!(c.alert_priority)) {
+        return Err("Priority: low, normal, high or urgent".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    if (cam.audio_sounds.len() > MAX_SOUNDS || !cam.audio_sounds.iter().all(|x| seen.insert(x.trim().to_lowercase())) || cam.audio_sounds.iter().any(|x| x.chars().count() > 40))
+        && changed(&|c: &CameraConfig| serde_json::json!(c.audio_sounds))
+    {
+        return Err(format!("Only these sounds: at most {MAX_SOUNDS}, each once"));
+    }
+    for (what, list, f) in [
+        ("Zones", &cam.zone_polys, (|c: &CameraConfig| serde_json::json!(c.zone_polys)) as fn(&CameraConfig) -> serde_json::Value),
+        ("Ignore zones", &cam.ignore_polys, |c: &CameraConfig| serde_json::json!(c.ignore_polys)),
+    ] {
+        if (list.len() > MAX_ZONES || list.iter().any(|p| p.points.len() < 3 || p.points.len() > MAX_POINTS || !p.points.iter().all(inside))) && changed(&f) {
+            return Err(format!("{what}: at most {MAX_ZONES} shapes, each with 3 to {MAX_POINTS} corners inside the picture"));
+        }
+    }
+    let nz = &cam.named_zones;
+    if (nz.len() > MAX_ZONES || nz.iter().any(|z| z.points.len() < 2 || z.points.len() > MAX_POINTS || !z.points.iter().all(inside) || z.labels.len() > 30 || z.name.chars().count() > 60))
+        && changed(&|c: &CameraConfig| serde_json::json!(c.named_zones))
+    {
+        return Err(format!("Alert zones: at most {MAX_ZONES}, each with up to {MAX_POINTS} points inside the picture, 30 objects and a name of up to 60 characters"));
+    }
+    if cam.ai_labels.as_ref().is_some_and(|l| l.len() > 64 || l.iter().any(|x| x.trim().is_empty() || x.chars().count() > 40)) && changed(&|c: &CameraConfig| serde_json::json!(c.ai_labels)) {
+        return Err("Objects that count: at most 64, each up to 40 characters".into());
+    }
+    Ok(())
 }
 
 /// Checks of a camera's settings shared by adding and changing one.
@@ -1729,11 +1945,14 @@ async fn add_camera(
     if let Err(e) = check_local_url(&cam.url) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
-    if let Err(e) = check_camera_fields(&cam) {
+    if let Err(e) = check_camera_fields(&cam).and_then(|_| check_camera_sizes(&cam, None)) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
     if let Some(e) = camera_clash(&engine, &cam, None) {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": e })));
+    }
+    if let Err(e) = check_copy_folder(&engine, &mut cam, None, None).await {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
     let id = engine.add_camera_arc(cam);
     crate::helpers::sync_all(&engine);
@@ -1741,6 +1960,78 @@ async fn add_camera(
         StatusCode::CREATED,
         Json(serde_json::json!({ "id": id, "result": "success" })),
     )
+}
+
+/// The folder event clips are also saved to: one AmberSight may use (not a
+/// system folder, not its own folders), keep days in range. Checked off the
+/// async workers (it looks at the disk, which may be a slow share).
+async fn check_copy_folder(engine: &Arc<Engine>, cam: &mut CameraConfig, id: Option<usize>, before: Option<&CameraConfig>) -> Result<(), String> {
+    // An empty folder is "off": not written as copy_events_to = "".
+    cam.copy_events_to = cam.copy_folder().map(str::to_string);
+    if cam.copy_events_keep_days > 3650 {
+        return Err("Keep copies: at most 3650 days (0 = keep them)".into());
+    }
+    let Some(path) = cam.copy_folder().map(str::to_string) else { return Ok(()) };
+    // Two cameras would share one <Camera> folder in the same place.
+    let others: Vec<CameraConfig> = engine.cameras.read().unwrap().iter().enumerate().filter(|(i, _)| Some(*i) != id).filter_map(|(_, h)| h.as_ref().map(|h| h.cfg.read().unwrap().clone())).collect();
+    if let Some(o) = crate::engine::event_copy::name_clash(cam, others.iter()) {
+        return Err(format!("Also save event clips to: \"{o}\" saves to this folder under the same name; rename one of the cameras or pick another folder"));
+    }
+    // Looked at on the disk only when it changed (every copy checks it again,
+    // so one edited into the config file is caught too), and never for long:
+    // a share that does not answer must not hold the page.
+    if before.and_then(|b| b.copy_folder()) == Some(path.as_str()) {
+        return Ok(());
+    }
+    // One check of a folder at a time (a hung share must not pile up threads).
+    let Some(guard) = crate::engine::event_copy::begin_check(&path) else {
+        return Err("Also save event clips to: still checking this folder (it may not be answering); try again in a moment".into());
+    };
+    let eng = engine.clone();
+    let job = tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        let g = crate::engine::event_copy::guards(&eng);
+        let r = crate::engine::event_copy::refusal(&path, &g);
+        // Saved by the owner: this is the folder copies go to from now on.
+        if r.is_none() {
+            crate::engine::event_copy::accept_folder(&path, &g);
+        }
+        r
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(10), job).await {
+        Err(_) => Err("Also save event clips to: the folder did not answer within 10 seconds (a network share or drive that is offline?)".into()),
+        Ok(r) => match r.unwrap_or_else(|_| Some("could not check the folder".into())) {
+            Some(r) => Err(format!("Also save event clips to: {r}")),
+            None => Ok(()),
+        },
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CopyTestBody {
+    path: String,
+}
+
+/// `POST /api/event-copy/test {"path"}` (admin): whether event clips can be
+/// saved to this folder now (a test file is written and removed there).
+/// `{ok, message}`; the folder is never created.
+async fn event_copy_test(State(engine): State<Arc<Engine>>, Json(b): Json<CopyTestBody>) -> Json<serde_json::Value> {
+    let Some(guard) = crate::engine::event_copy::begin_check(&b.path) else {
+        return Json(serde_json::json!({ "ok": false, "message": "Still checking this folder from before: it may not be answering (an offline share or drive). Try again in a moment." }));
+    };
+    let job = tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        let g = crate::engine::event_copy::guards(&engine);
+        crate::engine::event_copy::test_folder(&b.path, &g)
+    });
+    let res = match tokio::time::timeout(std::time::Duration::from_secs(15), job).await {
+        Err(_) => Err("The folder did not answer within 15 seconds: a network share or a drive may be offline or very slow.".into()),
+        Ok(r) => r.unwrap_or_else(|_| Err("could not check the folder".into())),
+    };
+    Json(match res {
+        Ok(m) => serde_json::json!({ "ok": true, "message": m }),
+        Err(m) => serde_json::json!({ "ok": false, "message": m }),
+    })
 }
 
 /// A device:// or screen:// URL must build valid ffmpeg input arguments.
@@ -1830,11 +2121,233 @@ fn merge_camera_json(cur: &CameraConfig, body: serde_json::Value) -> Result<Came
     Ok(c)
 }
 
+/// What an operator with the camera_detection right may change in a camera's
+/// settings: when and where motion counts, AI, and when and how it alerts.
+/// Never how the camera is reached (URLs, logins, ingest), where or whether it
+/// records, commands, folders, the watchdog, overlays, privacy masks, its name
+/// or groups, or turning it on or off.
+const OPERATOR_CAMERA_FIELDS: &[&str] = &[
+    // Motion detection.
+    "motion",
+    "sensitivity",
+    "min_object",
+    "max_object",
+    "contrast",
+    "min_travel",
+    "min_frames",
+    "break_time",
+    "motion_algorithm",
+    "schedule",
+    // Zones and ignore areas.
+    "zones",
+    "ignore_zones",
+    "zone_polys",
+    "ignore_polys",
+    "named_zones",
+    // Alerts.
+    "alerts",
+    "alert_interval",
+    "alert_schedule",
+    "alert_labels",
+    "alert_ignore_polys",
+    "alert_priority",
+    "no_motion_minutes",
+    "no_motion_schedule",
+    // Sound trigger.
+    "audio_trigger",
+    "audio_margin_db",
+    "audio_min_db",
+    "audio_sounds",
+    // AI.
+    "ai",
+    "ai_labels",
+    "ai_min_score",
+    "ai_ignore_parked",
+    "ai_strict",
+    "ai_hide_unconfirmed",
+    "ai_confirm_camera",
+];
+
+/// The settings an edit from `cur` to `new` changes outside what an operator
+/// may change (empty: none), compared as stored.
+fn operator_edit_outside(cur: &CameraConfig, new: &CameraConfig) -> Vec<String> {
+    let (Ok(serde_json::Value::Object(a)), Ok(serde_json::Value::Object(b))) = (serde_json::to_value(cur), serde_json::to_value(new)) else {
+        return vec!["(the settings could not be compared)".into()];
+    };
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    keys.into_iter().filter(|k| !OPERATOR_CAMERA_FIELDS.contains(&k.as_str()) && a.get(*k) != b.get(*k)).cloned().collect()
+}
+
+/// The settings that differ between two versions of a camera (as stored).
+fn changed_fields(a: &CameraConfig, b: &CameraConfig) -> Vec<String> {
+    let (Ok(serde_json::Value::Object(a)), Ok(serde_json::Value::Object(b))) = (serde_json::to_value(a), serde_json::to_value(b)) else { return Vec::new() };
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    keys.into_iter().filter(|k| a.get(*k) != b.get(*k)).cloned().collect()
+}
+
+/// A camera setting an operator may change, in plain words (for admins).
+fn setting_words(field: &str) -> &'static str {
+    match field {
+        "motion" => "motion detection on or off",
+        "sensitivity" | "min_object" | "max_object" | "contrast" | "min_travel" | "min_frames" | "break_time" | "motion_algorithm" => "motion sensitivity",
+        "schedule" => "arm window",
+        "zones" | "zone_polys" => "detection zones",
+        "ignore_zones" | "ignore_polys" => "ignore zones",
+        "named_zones" => "alert zones",
+        "alerts" => "notifications on or off",
+        "alert_interval" => "alert interval",
+        "alert_schedule" => "alert schedule",
+        "alert_labels" => "objects that notify",
+        "alert_ignore_polys" => "areas that don't notify",
+        "alert_priority" => "alert priority",
+        "no_motion_minutes" | "no_motion_schedule" => "no-motion alert",
+        "audio_trigger" | "audio_margin_db" | "audio_min_db" | "audio_sounds" => "loud-sound trigger",
+        "ai" => "AI on or off",
+        "ai_labels" => "AI objects",
+        "ai_min_score" => "AI confidence",
+        _ => "AI confirmation",
+    }
+}
+
+/// The changed settings in plain words, each once, in order.
+fn changes_in_words(fields: &[String]) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for f in fields {
+        let w = setting_words(f);
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out.join(", ")
+}
+
+/// One message per camera for what operators do to it in this long.
+const OPERATOR_NOTE_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Tell admins what an operator changed on a camera: every change, gathered
+/// into one message per camera every few minutes. `what` reads after the
+/// operator's name ("changed Porch: alert schedule").
+fn tell_operator_change(engine: &Arc<Engine>, user: &str, camera: &str, what: &str) {
+    let c = camera.to_string();
+    crate::account_http::tell_gathered(
+        engine,
+        format!("operator-camera:{camera}"),
+        format!("{user} {what}"),
+        OPERATOR_NOTE_WINDOW,
+        (format!("{camera}: changed by operator {user}"), format!("{user} {what}. Every change an operator makes is reported; if one was not meant to happen, change it back in the camera's settings.")),
+        move |items, n| (format!("{c}: more changes by operators"), format!("{n} more change(s) to {c} by operators in the last minutes: {items}")),
+    );
+}
+
+/// Restarts of one camera that operators' edits may cause in `RESTART_BUDGET_WINDOW`.
+const RESTART_BUDGET: usize = 3;
+const RESTART_BUDGET_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// An operator's edit of `cur` with `body`, checked: the new settings, or the answer.
+fn operator_edit(cur: &CameraConfig, body: &serde_json::Value) -> Result<CameraConfig, (StatusCode, serde_json::Value)> {
+    let new = merge_camera_json(cur, body.clone()).map_err(|e| (StatusCode::BAD_REQUEST, serde_json::json!({ "error": e })))?;
+    let mut base = cur.clone();
+    base.normalize_groups();
+    // Nothing else (the same values sent back unchanged are fine).
+    let outside = operator_edit_outside(&base, &new);
+    if !outside.is_empty() {
+        return Err((StatusCode::FORBIDDEN, serde_json::json!({ "error": format!("only an admin can change these settings of a camera: {}", outside.join(", ")), "fields": outside })));
+    }
+    check_camera_fields(&new).and_then(|_| check_camera_sizes(&new, Some(cur))).map_err(|e| (StatusCode::BAD_REQUEST, serde_json::json!({ "error": e })))?;
+    // A camera that records only on motion would stop recording.
+    if cur.motion && !new.motion && cur.record_motion_only {
+        return Err((StatusCode::FORBIDDEN, serde_json::json!({ "error": "this camera records only when there is motion: turning motion detection off would stop its recording, so only an admin can do that", "fields": ["motion"] })));
+    }
+    Ok(new)
+}
+
+/// `PUT /api/cameras/:id` from an operator: only `OPERATOR_CAMERA_FIELDS`, on
+/// the settings as they are when saved (under the cameras lock), and only the
+/// keys sent.
+async fn operator_update_camera(engine: Arc<Engine>, id: usize, body: serde_json::Value, user: String, ip: String) -> (StatusCode, Json<serde_json::Value>) {
+    type Refusal = (StatusCode, serde_json::Value);
+    if !body.is_object() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "expected a JSON object" })));
+    }
+    // The work and the checks first, on the settings as they are now; under
+    // the cameras lock only a quick look that nothing changed meanwhile.
+    let Some(snap) = engine.camera(id).map(|h| h.cfg.read().unwrap().clone()) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "camera not found" })));
+    };
+    let new = match operator_edit(&snap, &body) {
+        Ok(n) => n,
+        Err((s, j)) => return (s, Json(j)),
+    };
+    let snap_v = serde_json::to_value(&snap).ok();
+    let edit = move |cur: &CameraConfig| -> Result<CameraConfig, Refusal> {
+        if snap_v.is_some() && serde_json::to_value(cur).ok() == snap_v {
+            Ok(new)
+        } else {
+            Err((StatusCode::CONFLICT, serde_json::json!({ "error": "the camera's settings changed meanwhile: load them again and save" })))
+        }
+    };
+    let (e2, name, who) = (engine.clone(), snap.name.clone(), user.clone());
+    let may_restart = move |differs: &[String]| -> Result<(), Refusal> {
+        if differs.is_empty() {
+            return Ok(());
+        }
+        static RESTARTS: Mutex<Option<std::collections::HashMap<usize, std::collections::VecDeque<std::time::Instant>>>> = Mutex::new(None);
+        let mut m = RESTARTS.lock().unwrap_or_else(|p| p.into_inner());
+        let m = m.get_or_insert_with(Default::default);
+        let now = std::time::Instant::now();
+        let q = m.entry(id).or_default();
+        while q.front().is_some_and(|t| now.duration_since(*t) >= RESTART_BUDGET_WINDOW) {
+            q.pop_front();
+        }
+        if q.len() >= RESTART_BUDGET {
+            let wait = q.front().map_or(RESTART_BUDGET_WINDOW, |t| RESTART_BUDGET_WINDOW.saturating_sub(now.duration_since(*t))).as_secs().max(1);
+            crate::account_http::tell_admins_once(&e2, &format!("operator-restarts:{id}"), RESTART_BUDGET_WINDOW.as_secs(), format!("{name}: operators' changes held back"), format!("{who} tried to change {name} again; operators' changes restarted it {RESTART_BUDGET} times in the last 10 minutes, so more that restart it wait about {} minutes.", wait.div_ceil(60)));
+            return Err((StatusCode::TOO_MANY_REQUESTS, serde_json::json!({ "error": format!("this camera restarted {RESTART_BUDGET} times for operators' changes in the last 10 minutes: wait {} minutes and save again", wait.div_ceil(60)), "retry_after": wait })));
+        }
+        q.push_back(now);
+        Ok(())
+    };
+    let e = engine.clone();
+    let r = tokio::task::spawn_blocking(move || e.update_camera_checked(id, edit, may_restart)).await;
+    match r {
+        Ok(Ok((before, after))) => {
+            let fields = changed_fields(&before, &after);
+            if !fields.is_empty() {
+                let _ = engine.db.insert_audit(&user, &ip, &format!("camera settings changed: {}", fields.join(", ")), &after.name, 200);
+            }
+            if !fields.is_empty() {
+                tell_operator_change(&engine, &user, &after.name, &format!("changed {}: {}", after.name, changes_in_words(&fields)));
+            }
+            crate::helpers::sync_all(&engine);
+            (StatusCode::OK, Json(serde_json::json!({ "id": id, "result": "updated" })))
+        }
+        Ok(Err(Some((s, j)))) => (s, Json(j)),
+        Ok(Err(None)) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "camera not found" }))),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "internal error" }))),
+    }
+}
+
 async fn update_camera(
     State(engine): State<Arc<Engine>>,
+    axum::Extension(role): axum::Extension<Role>,
+    caller: Option<axum::Extension<Caller>>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     AxPath(id): AxPath<usize>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // (The sign-in layer lets only admins and operators with this right here.)
+    let operator = !role.is_admin();
+    if operator && !role.may(Perm::CameraDetection) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "admin access required for changes" })));
+    }
+    if operator && crate::remote::is_remote(id) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "only an admin can change the groups of another server's camera" })));
+    }
+    if operator {
+        let user = caller.map(|c| c.0 .0.clone()).unwrap_or_default();
+        let ip = peer.map(|p| p.0.ip().to_string()).unwrap_or_default();
+        return operator_update_camera(engine, id, body, user, ip).await;
+    }
     if crate::remote::is_remote(id) {
         return match crate::remote::set_groups(&engine, id, &body) {
             Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "id": id, "result": "updated" }))),
@@ -1846,7 +2359,7 @@ async fn update_camera(
     let Some(cur) = engine.camera(id).map(|h| h.cfg.read().unwrap().clone()) else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "camera not found" })));
     };
-    let cam = match merge_camera_json(&cur, body) {
+    let mut cam = match merge_camera_json(&cur, body) {
         Ok(c) => c,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
     };
@@ -1859,11 +2372,14 @@ async fn update_camera(
     if let Err(e) = check_local_url(&cam.url) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
-    if let Err(e) = check_camera_fields(&cam) {
+    if let Err(e) = check_camera_fields(&cam).and_then(|_| check_camera_sizes(&cam, Some(&cur))) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
     if let Some(e) = camera_clash(&engine, &cam, Some(id)) {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": e })));
+    }
+    if let Err(e) = check_copy_folder(&engine, &mut cam, Some(id), Some(&cur)).await {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
     // Renamed: everything that refers to the camera by name follows it.
     if cur.name != cam.name {
@@ -2004,13 +2520,16 @@ async fn noisy_dismiss(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usi
 }
 
 /// `POST /api/cameras/:id/pause {minutes}`: pause this camera's
-/// notifications (admin). Motion, recording and events carry on.
-async fn pause_alerts(State(engine): State<Arc<Engine>>, axum::Extension(caller): axum::Extension<Caller>, token: Option<axum::Extension<TokenUsed>>, AxPath(id): AxPath<usize>, Json(body): Json<PauseBody>) -> Response {
+/// notifications (admins; operators with the arm right and device tokens for
+/// a day at most). Motion, recording and events carry on.
+async fn pause_alerts(State(engine): State<Arc<Engine>>, axum::Extension(caller): axum::Extension<Caller>, token: Option<axum::Extension<TokenUsed>>, role: Option<axum::Extension<Role>>, AxPath(id): AxPath<usize>, Json(body): Json<PauseBody>) -> Response {
     let Some(h) = engine.camera(id) else {
         return (StatusCode::NOT_FOUND, "camera not found").into_response();
     };
     let name = h.cfg.read().unwrap().name.clone();
-    let minutes = if token.is_some() { token_pause(body.minutes) } else { body.minutes };
+    // A device token, or an operator: a day at most, never "until resumed".
+    let capped = token.is_some() || role.as_ref().is_some_and(|r| r.0.is_operator());
+    let minutes = if capped { token_pause(body.minutes) } else { body.minutes };
     if let (Some(t), true) = (&token, minutes != Some(0)) {
         let (u, t2, n2) = (caller.0.clone(), t.0 .0.clone(), name.clone());
         crate::account_http::tell_gathered(
@@ -2028,8 +2547,14 @@ async fn pause_alerts(State(engine): State<Arc<Engine>>, axum::Extension(caller)
 
 async fn record_clip(
     State(engine): State<Arc<Engine>>,
+    axum::Extension(access): axum::Extension<Access>,
     Json(body): Json<RecordBody>,
 ) -> Json<serde_json::Value> {
+    // (The camera is named in the body, not the path: checked here for
+    // accounts limited to some cameras, answered as if it did not exist.)
+    if !engine.camera(body.camera).is_some_and(|h| access.can_name(&h.cfg.read().unwrap().name)) {
+        return Json(serde_json::json!({ "error": "camera not found" }));
+    }
     // Manual clip: force motion on one camera for N seconds.
     let secs = record_seconds(body.seconds);
     if engine.manual_clip(body.camera, secs) {
@@ -2244,6 +2769,53 @@ struct DownloadQ {
     /// "low": the sub stream where it was recorded (data saver).
     #[serde(default)]
     quality: String,
+    /// What the player decodes (see transcode/): transcoded when the
+    /// clip does not fit. Not with `download`.
+    #[serde(default)]
+    caps: Option<String>,
+    /// With caps: ms from the clip's start.
+    #[serde(default)]
+    start: Option<i64>,
+    /// With caps, "1": what would be sent, as JSON.
+    #[serde(default)]
+    info: String,
+}
+
+/// `caps` of a request (None: not given or a download); Err: malformed.
+fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transcode::Caps>, Response> {
+    match caps.as_deref().filter(|_| !download).map(crate::transcode::Caps::parse) {
+        None => Ok(None),
+        Some(Ok(c)) => Ok(Some(c)),
+        Some(Err(e)) => Err((StatusCode::BAD_REQUEST, e).into_response()),
+    }
+}
+
+/// `GET /api/whoami` `features`: abilities apps can test for (the version
+/// string is for the updater).
+const FEATURES: &[&str] = &["caps", "operator", "event_copy"];
+
+/// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
+/// (headers only), a range from further in, or from the start.
+fn ask_of(req: &Request) -> crate::transcode::http::Ask {
+    use crate::transcode::http::Ask;
+    if req.method() == axum::http::Method::HEAD {
+        return Ask::Headers;
+    }
+    match req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()).map(|r| r.trim().to_string()) {
+        None => Ask::Start,
+        Some(r) if r == "bytes=0-0" => Ask::Headers,
+        Some(r) if r == "bytes=0-" => Ask::Start,
+        Some(_) => Ask::Resume,
+    }
+}
+
+fn with_headers(mut r: Response, headers: Vec<(&'static str, String)>) -> Response {
+    for (k, v) in headers {
+        if let Ok(v) = HeaderValue::from_str(&v) {
+            r.headers_mut().insert(k, v);
+        }
+    }
+    r
 }
 
 #[derive(serde::Deserialize)]
@@ -2561,9 +3133,13 @@ async fn protect_event(
     State(engine): State<Arc<Engine>>,
     AxPath(id): AxPath<String>,
     Json(req): Json<ProtectReq>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    // (Too many clips waiting to be saved: nothing changes; try again later.)
+    if req.protect && engine.clip_saves_full() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "id": id, "error": "too many kept clips are waiting to be saved: try again in a few minutes" }))).into_response();
+    }
     let ok = engine.set_protect(&id, req.protect);
-    Json(serde_json::json!({ "id": id, "protect": req.protect, "found": ok }))
+    Json(serde_json::json!({ "id": id, "protect": req.protect, "found": ok })).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2588,6 +3164,7 @@ struct ReviewReq {
 async fn review_event(
     State(engine): State<Arc<Engine>>,
     axum::Extension(caller): axum::Extension<Caller>,
+    role: Option<axum::Extension<Role>>,
     req_parts: axum::http::request::Parts,
     AxPath(id): AxPath<String>,
     Json(req): Json<ReviewReq>,
@@ -2624,6 +3201,10 @@ async fn review_event(
         };
         if let Some(m) = marked.as_ref().filter(|m| m.spots > 0) {
             let _ = e.db.insert_audit(&caller.0, &ip, &format!("marked not a {}: {} spot{} remembered for 30 days", m.label, m.spots, if m.spots == 1 { "" } else { "s" }), &format!("{} ({id2})", m.camera), 200);
+            // (An operator muting a spot: admins hear of it.)
+            if role.as_ref().is_some_and(|r| r.0.is_operator()) {
+                tell_operator_change(&e, &caller.0, &m.camera, &format!("marked an event of {} \"not a {}\" ({id2}): a {} in the same spot{} will not alert for 30 days unless it moves", m.camera, m.label, m.label, if m.spots == 1 { "" } else { "s" }));
+            }
         }
         Ok(Some(marked))
     })
@@ -2683,6 +3264,7 @@ async fn clip_file(
     State(engine): State<Arc<Engine>>,
     AxPath(id): AxPath<String>,
     Query(dl): Query<DownloadQ>,
+    caller: Option<axum::Extension<Caller>>,
     req: Request,
 ) -> Response {
     if !id
@@ -2693,6 +3275,36 @@ async fn clip_file(
     }
     let path = engine.clip_file_path(&id);
     let download = dl.download == "1" || dl.download == "true";
+    let caps = match caps_of(&dl.caps, download) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    if caps.is_some() || (dl.info == "1" && !download) {
+        // What the player decodes: untouched when the clip fits, else
+        // transcoded (from `start` ms into it). info=1: what, as JSON.
+        let src = crate::transcode::http::ClipSrc::Event { id: id.clone(), offset: dl.start.unwrap_or(0).max(0) };
+        let user = caller.map(|c| c.0 .0.clone()).unwrap_or_default();
+        let ask = ask_of(&req);
+        return match crate::transcode::http::handle(engine.clone(), src, caps, dl.info == "1", ask, dl.quality == "low", user).await {
+            crate::transcode::http::Outcome::Done(r) => r,
+            crate::transcode::http::Outcome::Untouched { low, headers } => {
+                let r = if low || !path.is_file() {
+                    virtual_clip_response(engine, id, false, low, req).await
+                } else {
+                    match tower::ServiceExt::oneshot(ServeFile::new(path), req).await {
+                        Ok(r) => {
+                            let mut r = r.into_response();
+                            r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
+                            r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                            r
+                        }
+                        Err(_) => (StatusCode::NOT_FOUND, "clip not found").into_response(),
+                    }
+                };
+                with_headers(r, headers)
+            }
+        };
+    }
     if !path.is_file() {
         // No saved file: assemble the event's video from the recordings.
         return virtual_clip_response(engine, id, download, dl.quality == "low", req).await;
@@ -2943,6 +3555,17 @@ struct PlaybackQ {
     quality: String,
     #[serde(default)]
     download: String,
+    /// What the player decodes (see transcode/): transcoded when the
+    /// recording does not fit. Not with download, speed or reverse.
+    #[serde(default)]
+    caps: Option<String>,
+    /// Play from this moment (ms; within from..to; a value below `from` is
+    /// taken as ms after it).
+    #[serde(default)]
+    start: Option<i64>,
+    /// With caps, "1": what would be sent, as JSON.
+    #[serde(default)]
+    info: String,
     /// "1": the window played backwards (at most 10 s; see Engine::reverse_clip).
     #[serde(default)]
     reverse: String,
@@ -3095,7 +3718,7 @@ async fn playback_picture(State(engine): State<Arc<Engine>>, Query(q): Query<Pic
     }
 }
 
-async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>, req: Request) -> Response {
+async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>, caller: Option<axum::Extension<Caller>>, req: Request) -> Response {
     let (Some(camera), Some(from), Some(to)) = (q.camera, q.from, q.to) else {
         return (StatusCode::BAD_REQUEST, "camera, from and to are required").into_response();
     };
@@ -3107,7 +3730,36 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
     let trick = q.speed.filter(|s| *s >= 2 && !reverse).map(|s| s.min(1024));
     let to = to.min(from + if trick.is_some() { crate::engine::playback::MAX_TRICK_WINDOW_MS } else { crate::engine::playback::MAX_WINDOW_MS });
     let download = q.download == "1" || q.download == "true";
-    let low = q.quality == "low";
+    let mut low = q.quality == "low";
+    let caps = match caps_of(&q.caps, download || trick.is_some() || reverse) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let mut caps_headers = Vec::new();
+    let mut from = from;
+    if caps.is_some() || (q.info == "1" && !(download || trick.is_some() || reverse)) {
+        // `start`: a moment (epoch ms) within the window; a value no
+        // larger than the window's length is ms after its start; an
+        // earlier moment is the window's start.
+        let start = match q.start {
+            Some(s) if s >= from => s.min(to - 1),
+            Some(s) if s > 0 && s <= to - from => (from + s).min(to - 1),
+            _ => from,
+        };
+        let src = crate::transcode::http::ClipSrc::Window { camera: camera.clone(), from, to, start };
+        let user = caller.map(|c| c.0 .0.clone()).unwrap_or_default();
+        let ask = ask_of(&req);
+        match crate::transcode::http::handle(engine.clone(), src, caps, q.info == "1", ask, low, user).await {
+            crate::transcode::http::Outcome::Done(r) => return r,
+            crate::transcode::http::Outcome::Untouched { low: l, headers } => {
+                low = l;
+                caps_headers = headers;
+                from = start;
+            }
+        }
+    }
+    let low = low;
+    let from = from;
     let cam = camera.clone();
     let frame_ms = q.frame_ms.unwrap_or(crate::engine::playback::TRICK_FRAME_MS).clamp(100, 1000);
     let t0 = std::time::Instant::now();
@@ -3151,7 +3803,7 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
             } else {
                 clip
             };
-            let extra = vec![
+            let mut extra = vec![
                 ("x-clip-start-ms", clip.start_ms.to_string()),
                 ("x-clip-end-ms", clip.end_ms.to_string()),
                 ("x-clip-sub", (clip.sub as u8).to_string()),
@@ -3160,6 +3812,7 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
                 // and how far apart its keyframes are).
                 ("x-clip-frames", clip.frame_times.len().to_string()),
             ];
+            extra.append(&mut caps_headers);
             let name = format!("{}-{from}.mp4", crate::config::slug(&camera));
             serve_clip(clip, name, extra, download, req).await
         }
@@ -4947,6 +5600,7 @@ async fn connections(State(engine): State<Arc<Engine>>) -> Json<serde_json::Valu
         .collect();
     Json(serde_json::json!({
         "clients": crate::conns::list(&names),
+        "transcodes": crate::transcode::status(),
         "helpers": crate::helpers::list(&engine)["helpers"],
         "pushes": pushes,
     }))
@@ -5969,11 +6623,14 @@ enum PtzReq {
 }
 
 /// `POST /api/cameras/:id/ptz`. A write, so the middleware makes it admin-only.
-async fn ptz_action(State(engine): State<Arc<Engine>>, token: Option<axum::Extension<TokenUsed>>, AxPath(id): AxPath<usize>, Json(req): Json<PtzReq>) -> Response {
+async fn ptz_action(State(engine): State<Arc<Engine>>, token: Option<axum::Extension<TokenUsed>>, axum::Extension(role): axum::Extension<Role>, AxPath(id): AxPath<usize>, Json(req): Json<PtzReq>) -> Response {
     use crate::onvif_ptz as p;
     // Moving is day-to-day; what stays set up on the camera is not.
     if token.is_some() && matches!(&req, PtzReq::SetPreset { .. } | PtzReq::RemovePreset { .. } | PtzReq::Tour { .. }) {
         return (StatusCode::FORBIDDEN, "sign in with a password for this").into_response();
+    }
+    if !role.is_admin() && matches!(&req, PtzReq::SetPreset { .. } | PtzReq::RemovePreset { .. }) {
+        return (StatusCode::FORBIDDEN, "only an admin can save or delete presets").into_response();
     }
     let t = match ptz_target(&engine, id) {
         Ok(t) => t,
@@ -6048,10 +6705,16 @@ async fn camera_talk(
     axum::Extension(access): axum::Extension<Access>,
     axum::Extension(caller): axum::Extension<Caller>,
     axum::Extension(admin): axum::Extension<IsAdmin>,
+    axum::Extension(role): axum::Extension<Role>,
+    token: Option<axum::Extension<TokenUsed>>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Query(q): Query<TalkQ>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
-    crate::talk::handle(engine, id, access, caller, admin.0, q.rate, ws).await
+    // Admins, and operators with the talk right (never with a device token).
+    let may = admin.0 || (role.is_operator() && role.may(Perm::TalkClip) && token.is_none());
+    let ip = peer.map(|p| p.0.ip().to_string()).unwrap_or_default();
+    crate::talk::handle(engine, id, access, caller, may, ip, q.rate, ws).await
 }
 
 #[cfg(test)]
@@ -6155,6 +6818,7 @@ mod viewer_write_tests {
     /// in neither this list nor `TOKEN_ROUTES` fails the test below.
     const TOKEN_REFUSED: &[&str] = &[
         "/cameras/:id",
+        "/camera-defaults",
         "/cameras/:id/enable",
         "/cameras/:id/timesync",
         "/timesync/all",
@@ -6285,6 +6949,7 @@ mod viewer_write_tests {
         "/settings",
         "/offsite",
         "/offsite/test",
+        "/event-copy/test",
         "/offsite/run",
         "/update",
         "/update/check",
@@ -6345,6 +7010,337 @@ mod viewer_write_tests {
             assert_eq!(ch(p.clone()), vec![k], "{p}");
         }
         assert!(ch(j!(5)).is_empty(), "no merge: refused later");
+    }
+
+    /// Who gets past the sign-in layer, for every route and method of the API:
+    /// "viewer" (everyone signed in), "operator:<right>" (operators with that
+    /// right, and admins) or "admin". A route left out fails the test below,
+    /// so none becomes an operator's (or a viewer's) without a decision.
+    /// (Handlers refuse more: talk takes the talk right; presets are saved
+    /// and deleted by admins only; an operator's camera edit is held to
+    /// OPERATOR_CAMERA_FIELDS; netinfo, watchdog, sound meter and audit check
+    /// for an admin themselves.)
+    const ROLE_TABLE: &[(&str, &str, &str)] = &[
+        ("/cameras", "GET", "viewer"),
+        ("/cameras", "POST", "admin"),
+        ("/cameras/:id", "PUT", "operator:camera_detection"),
+        ("/camera-defaults", "GET", "viewer"),
+        ("/cameras/:id", "DELETE", "admin"),
+        ("/cameras/:id/enable", "POST", "admin"),
+        ("/cameras/:id/ptz", "POST", "operator:ptz"),
+        ("/cameras/:id/timesync", "POST", "admin"),
+        ("/timesync/all", "POST", "admin"),
+        ("/cameras/:id/reboot", "POST", "admin"),
+        ("/cameras/:id/powercycle", "POST", "admin"),
+        ("/cameras/:id/watchdog", "GET", "viewer"),
+        ("/cameras/:id/netinfo", "GET", "viewer"),
+        ("/cameras/:id/tamper", "GET", "admin"),
+        ("/cameras/:id/tamper/reference", "POST", "admin"),
+        ("/cameras/:id/tamper/ref/:light", "GET", "viewer"),
+        ("/cameras/:id/tamper/incidents/:incident/:which", "GET", "viewer"),
+        ("/cameras/:id/unusual", "GET", "admin"),
+        ("/cameras/:id/unusual/refresh", "POST", "admin"),
+        ("/cameras/:id/spots", "GET", "admin"),
+        ("/cameras/:id/spots/forget", "POST", "admin"),
+        ("/cameras/:id/ptz/presets", "GET", "viewer"),
+        ("/cameras/:id/ptz/caps", "GET", "viewer"),
+        ("/cameras/:id/onvif", "GET", "admin"),
+        ("/cameras/:id/onvif/find", "POST", "admin"),
+        ("/cameras/:id/ptz/aim", "POST", "operator:ptz"),
+        ("/ui/prefs", "GET", "viewer"),
+        ("/ui/prefs", "PUT", "viewer"),
+        ("/ui/prefs", "PATCH", "viewer"),
+        ("/ui/orders", "GET", "viewer"),
+        ("/ui/diag", "POST", "viewer"),
+        ("/ui/orders/:key", "PUT", "admin"),
+        ("/discover", "GET", "admin"),
+        ("/devices", "GET", "admin"),
+        ("/discover/inspect", "POST", "admin"),
+        ("/discover/autologin", "POST", "admin"),
+        ("/discover/preview", "POST", "admin"),
+        ("/ai/model", "GET", "viewer"),
+        ("/ai/model", "POST", "admin"),
+        ("/alerts/system_test", "POST", "admin"),
+        ("/helpers", "GET", "admin"),
+        ("/helpers/pair", "POST", "admin"),
+        ("/helpers/:id", "PUT", "admin"),
+        ("/helpers/:id", "DELETE", "admin"),
+        ("/helpers/:id/sources", "POST", "admin"),
+        ("/helpers/:id/thumb", "POST", "admin"),
+        ("/discover/logins", "GET", "admin"),
+        ("/discover/logins", "PUT", "admin"),
+        ("/discover/watch", "GET", "admin"),
+        ("/discover/watch", "PUT", "admin"),
+        ("/discover/ignore", "POST", "admin"),
+        ("/cameras/:id/talk", "GET", "viewer"),
+        ("/shield", "POST", "operator:arm"),
+        ("/cameras/:id/pause", "POST", "operator:arm"),
+        ("/noisy", "GET", "admin"),
+        ("/noisy/:id/dismiss", "POST", "admin"),
+        ("/profiles", "GET", "viewer"),
+        ("/profile", "POST", "operator:arm"),
+        ("/clips/record", "POST", "operator:talk_clip"),
+        ("/status", "GET", "viewer"),
+        ("/stats", "GET", "viewer"),
+        ("/whoami", "GET", "viewer"),
+        ("/login", "POST", "admin"),
+        ("/login/totp", "POST", "admin"),
+        ("/pair", "POST", "admin"),
+        ("/logout", "POST", "admin"),
+        ("/audit", "GET", "viewer"),
+        ("/users", "GET", "admin"),
+        ("/users", "POST", "admin"),
+        ("/users/:name", "DELETE", "admin"),
+        ("/users/:name/pair", "POST", "admin"),
+        ("/users/:name/tokens", "GET", "admin"),
+        ("/users/:name/tokens/:id", "DELETE", "admin"),
+        ("/users/:name/two-step/off", "POST", "admin"),
+        ("/me/password", "POST", "viewer"),
+        ("/me/account", "GET", "viewer"),
+        ("/me/sessions/sign-out-others", "POST", "viewer"),
+        ("/me/sessions/:id/sign-out", "POST", "viewer"),
+        ("/me/two-step/start", "POST", "viewer"),
+        ("/me/two-step/confirm", "POST", "viewer"),
+        ("/me/two-step/cancel", "POST", "viewer"),
+        ("/me/two-step/off", "POST", "viewer"),
+        ("/me/two-step/recovery", "POST", "viewer"),
+        ("/me/tokens", "POST", "viewer"),
+        ("/me/tokens/:id", "DELETE", "viewer"),
+        ("/push/key", "GET", "viewer"),
+        ("/push/subscribe", "POST", "viewer"),
+        ("/push/unsubscribe", "POST", "viewer"),
+        ("/push/devices", "GET", "viewer"),
+        ("/push/test", "POST", "viewer"),
+        ("/restream", "GET", "admin"),
+        ("/restream", "PUT", "admin"),
+        ("/presence", "GET", "viewer"),
+        ("/presence", "POST", "viewer"),
+        ("/presence/:device_id", "DELETE", "viewer"),
+        ("/health", "GET", "admin"),
+        ("/connections", "GET", "admin"),
+        ("/links", "GET", "viewer"),
+        ("/links", "POST", "admin"),
+        ("/links/code", "POST", "admin"),
+        ("/links/probe", "POST", "admin"),
+        ("/links/:id", "PUT", "admin"),
+        ("/links/:id", "DELETE", "admin"),
+        ("/links/:id/open", "POST", "viewer"),
+        ("/links/:id/stats", "GET", "viewer"),
+        ("/storage/plan", "GET", "admin"),
+        ("/drives", "GET", "admin"),
+        ("/event-copy/test", "POST", "admin"),
+        ("/storage/privacy", "GET", "admin"),
+        ("/storage/missing", "GET", "admin"),
+        ("/storage/missing/scan", "POST", "admin"),
+        ("/storage/missing/apply", "POST", "admin"),
+        ("/tls", "GET", "viewer"),
+        ("/addresses", "GET", "admin"),
+        ("/logs", "GET", "admin"),
+        ("/events", "GET", "viewer"),
+        ("/timeline/events", "GET", "viewer"),
+        ("/events/:id/thumb", "GET", "viewer"),
+        ("/events/:id/protect", "POST", "operator:events"),
+        ("/events/:id/review", "POST", "operator:events"),
+        ("/events/:id/ai", "GET", "viewer"),
+        ("/events/:id/track", "GET", "viewer"),
+        ("/signals", "GET", "viewer"),
+        ("/signals", "POST", "viewer"),
+        ("/signals/:name", "DELETE", "admin"),
+        ("/events/:id/ai/recheck", "POST", "admin"),
+        ("/events/:id/ai/:n", "GET", "viewer"),
+        ("/ai/reviews", "GET", "admin"),
+        ("/seek", "GET", "viewer"),
+        ("/clips", "GET", "viewer"),
+        ("/clips/:id", "GET", "viewer"),
+        ("/export", "GET", "viewer"),
+        ("/recordings", "GET", "viewer"),
+        ("/recordings/days", "GET", "viewer"),
+        ("/playback", "GET", "viewer"),
+        ("/playback/picture", "GET", "viewer"),
+        ("/still", "GET", "viewer"),
+        ("/preview", "GET", "viewer"),
+        ("/filmstrip", "GET", "viewer"),
+        ("/timelapse", "GET", "viewer"),
+        ("/timelapse", "POST", "admin"),
+        ("/timelapse/:slug/:date", "GET", "viewer"),
+        ("/faces", "GET", "admin"),
+        ("/faces/status", "GET", "admin"),
+        ("/smart/status", "GET", "viewer"),
+        ("/sound/status", "GET", "admin"),
+        ("/cameras/:id/sound", "GET", "viewer"),
+        ("/smart/search", "GET", "viewer"),
+        ("/smart/pic/:id", "GET", "viewer"),
+        ("/smart/follow", "GET", "viewer"),
+        ("/alert-rules", "GET", "admin"),
+        ("/alert-rules", "POST", "admin"),
+        ("/alert-rules/preview", "POST", "admin"),
+        ("/alert-rules/:id", "DELETE", "admin"),
+        ("/faces/models", "POST", "admin"),
+        ("/faces/import", "POST", "admin"),
+        ("/faces/:id/img", "GET", "admin"),
+        ("/faces/:id/name", "POST", "admin"),
+        ("/faces/:id", "DELETE", "admin"),
+        ("/digest/preview", "GET", "admin"),
+        ("/digest/send", "POST", "admin"),
+        ("/digests", "GET", "viewer"),
+        ("/digests/:id", "GET", "viewer"),
+        ("/plates", "GET", "viewer"),
+        ("/plates/recent", "GET", "viewer"),
+        ("/plates/status", "GET", "admin"),
+        ("/plates/models", "POST", "admin"),
+        ("/plates/known", "GET", "admin"),
+        ("/plates/known", "POST", "admin"),
+        ("/plates/known/:id", "PUT", "admin"),
+        ("/plates/known/:id", "DELETE", "admin"),
+        ("/plates/:id/img", "GET", "viewer"),
+        ("/plates/:id", "DELETE", "admin"),
+        ("/people", "GET", "admin"),
+        ("/people/:id", "PUT", "admin"),
+        ("/people/:id", "DELETE", "admin"),
+        ("/snapshot/:id", "GET", "viewer"),
+        ("/cameras/:id/wake", "POST", "viewer"),
+        ("/live/:id", "GET", "viewer"),
+        ("/live/:id/info", "GET", "viewer"),
+        ("/live/:id/stream", "GET", "viewer"),
+        ("/live/:id/ws", "GET", "viewer"),
+        ("/live/:id/jpeg", "GET", "viewer"),
+        ("/settings", "GET", "admin"),
+        ("/settings", "POST", "admin"),
+        ("/offsite", "GET", "admin"),
+        ("/offsite", "PUT", "admin"),
+        ("/offsite/test", "POST", "admin"),
+        ("/offsite/run", "POST", "admin"),
+        ("/update", "GET", "admin"),
+        ("/update/check", "POST", "admin"),
+        ("/update/install", "POST", "admin"),
+        ("/system/restart", "POST", "admin"),
+        ("/overlay", "GET", "viewer"),
+        ("/overlay/:name", "POST", "admin"),
+    ];
+
+    /// The methods a route line has (`get(..).post(..)`).
+    fn route_methods(how: &str) -> Vec<&'static str> {
+        ["GET", "POST", "PUT", "PATCH", "DELETE"]
+            .into_iter()
+            .filter(|m| {
+                let pat = format!("{}(", m.to_ascii_lowercase());
+                how.match_indices(&pat).any(|(i, _)| i == 0 || matches!(how.as_bytes()[i - 1], b' ' | b'.' | b':' | b'('))
+            })
+            .collect()
+    }
+
+    fn perms_without(p: &str) -> crate::config::OperatorPerms {
+        let mut x = crate::config::OperatorPerms::default();
+        match p {
+            "ptz" => x.ptz = false,
+            "talk_clip" => x.talk_clip = false,
+            "arm" => x.arm = false,
+            "events" => x.events = false,
+            "camera_detection" => x.camera_detection = false,
+            other => panic!("no such right: {other}"),
+        }
+        x
+    }
+
+    #[test]
+    fn every_route_is_classified_for_viewers_operators_and_admins() {
+        use super::{gate, Role};
+        use axum::http::Method;
+        let routes = api_routes();
+        let mut pairs = Vec::new();
+        for (route, how) in &routes {
+            let ms = route_methods(how);
+            assert!(!ms.is_empty(), "{route}: no method found in {how}");
+            for m in ms {
+                pairs.push((route.clone(), m));
+            }
+        }
+        assert!(pairs.len() > 180, "the list was read: {}", pairs.len());
+        for (route, m) in &pairs {
+            assert!(ROLE_TABLE.iter().any(|t| t.0 == route && t.1 == *m), "{route} {m}: add it to ROLE_TABLE (viewer, operator:<right> or admin)");
+        }
+        for (route, m, _) in ROLE_TABLE {
+            assert!(pairs.iter().any(|p| p.0 == *route && p.1 == *m), "{route} {m} is no route");
+        }
+        let none = crate::config::OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false };
+        let sample = |route: &str| route.split('/').map(|p| if p.starts_with(':') { "1" } else { p }).collect::<Vec<_>>().join("/");
+        for (route, m, who) in ROLE_TABLE {
+            let p = sample(route);
+            let method = Method::from_bytes(m.as_bytes()).unwrap();
+            let ok = |r: Role| gate(&p, &method, &r, false).is_ok();
+            assert!(ok(Role::Admin), "{route} {m}: admin");
+            let viewer = *who == "viewer";
+            assert_eq!(ok(Role::Viewer), viewer, "{route} {m}: viewer");
+            assert_eq!(ok(Role::Operator(none)), viewer, "{route} {m}: operator with no rights");
+            match who.strip_prefix("operator:") {
+                Some(right) => {
+                    assert!(ok(Role::Operator(Default::default())), "{route} {m}: operator");
+                    assert!(!ok(Role::Operator(perms_without(right))), "{route} {m}: operator without {right}");
+                    for other in ["ptz", "talk_clip", "arm", "events", "camera_detection"].into_iter().filter(|o| o != &right) {
+                        assert!(ok(Role::Operator(perms_without(other))), "{route} {m}: operator without {other} only");
+                    }
+                }
+                None => {
+                    assert!(viewer || *who == "admin", "{route} {m}: {who}?");
+                    assert_eq!(ok(Role::Operator(Default::default())), viewer, "{route} {m}: operator");
+                }
+            }
+            // HEAD is GET.
+            if *m == "GET" {
+                assert_eq!(gate(&p, &Method::HEAD, &Role::Viewer, false).is_ok(), viewer, "{route} HEAD");
+            }
+        }
+    }
+
+    #[test]
+    fn operators_get_nothing_by_path_tricks() {
+        use super::{gate, operator_route, Role};
+        use axum::http::Method;
+        let op = Role::Operator(Default::default());
+        for (p, m) in [
+            ("/cameras/x/ptz", Method::POST),
+            ("/cameras//ptz", Method::POST),
+            ("/cameras/1/ptz/", Method::POST),
+            ("/cameras/1/ptz/presets", Method::POST),
+            ("/cameras/1/ptz", Method::PUT),
+            ("/cameras/1/ptz", Method::DELETE),
+            ("/cameras/1", Method::DELETE),
+            ("/cameras/1", Method::POST),
+            ("/cameras", Method::POST),
+            ("/cameras/1/enable", Method::POST),
+            ("/cameras/1/reboot", Method::POST),
+            ("/cameras/1/spots/forget", Method::POST),
+            ("/cameras/1/tamper/reference", Method::POST),
+            ("/events//protect", Method::POST),
+            ("/events/1/ai/recheck", Method::POST),
+            ("/settings", Method::POST),
+            ("/users", Method::POST),
+            ("/overlay/x", Method::POST),
+            ("/noisy/1/dismiss", Method::POST),
+            ("/timesync/all", Method::POST),
+            ("/system/restart", Method::POST),
+            ("cameras/1/ptz", Method::POST),
+            ("/%63ameras/1/ptz", Method::POST),
+            ("/cameras/1/../../settings", Method::POST),
+            ("/brand-new", Method::POST),
+        ] {
+            assert!(operator_route(p, &m).is_none(), "{p} {m}");
+            assert!(gate(p, &m, &op, false).is_err(), "{p} {m}");
+        }
+        // Reads an operator has a viewer's answer for: still admin only.
+        for p in ["/settings", "/users", "/logs", "/health", "/cameras/1/tamper", "/cameras/1/onvif", "/cameras/1/spots", "/storage/plan", "/offsite", "/update", "/alert-rules"] {
+            assert!(gate(p, &Method::GET, &op, false).is_err(), "{p}");
+        }
+        // Limited to some cameras: no arming or profiles (every camera), the rest as before.
+        for p in ["/shield", "/profile"] {
+            assert!(gate(p, &Method::POST, &op, false).is_ok(), "{p}");
+            assert!(gate(p, &Method::POST, &op, true).is_err(), "{p} limited");
+            assert!(gate(p, &Method::POST, &Role::Admin, true).is_ok(), "{p} admin");
+        }
+        for p in ["/cameras/1/pause", "/cameras/1/ptz", "/clips/record", "/events/x-1/protect"] {
+            assert!(gate(p, &Method::POST, &op, true).is_ok(), "{p} limited");
+        }
+        assert!(gate("/cameras/1", &Method::PUT, &op, true).is_ok());
     }
 
     #[test]
@@ -6578,7 +7574,7 @@ mod https_settings_tests {
         // would drop the cookie and sign-in would never stick.
         let mut cfg: crate::config::Config = toml::from_str("").unwrap();
         cfg.server.tls = true;
-        cfg.server.users.push(crate::config::UserConfig { disabled: false, username: "ann".into(), password: crate::auth::hash_password("pw-ann-1"), admin: false, cameras: Vec::new() });
+        cfg.server.users.push(crate::config::UserConfig { disabled: false, username: "ann".into(), password: crate::auth::hash_password("pw-ann-1"), admin: false, cameras: Vec::new(), ..Default::default() });
         let e = Engine::for_test(cfg);
         for secure in [false, true] {
             let code = crate::auth::new_pair_code("ann");
@@ -6673,5 +7669,276 @@ mod folder_wait_tests {
         std::thread::sleep(Duration::from_millis(1000));
         let ok = BoundedFolder::start(slow, || serde_json::json!({ "state": "private", "detail": "" })).finish(Instant::now() + Duration::from_secs(2));
         assert_eq!(ok["state"], "private");
+    }
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::{operator_edit_outside, CameraConfig};
+
+    fn cam() -> CameraConfig {
+        toml::from_str(
+            r#"
+            name = "Porch"
+            url = "rtsp://admin:secret@192.0.2.10/main"
+            sub_url = "rtsp://admin:secret@192.0.2.10/sub"
+            username = "admin"
+            password = "secret"
+            folder = "/mnt/rec"
+            ai_min_score = 0.55
+            audio_margin_db = 12.5
+            alert_labels = ["person"]
+            groups = ["Outside"]
+            "#,
+        )
+        .unwrap()
+    }
+
+    fn edit(cur: &CameraConfig, patch: serde_json::Value) -> CameraConfig {
+        super::merge_camera_json(cur, patch).unwrap()
+    }
+
+    #[test]
+    fn an_operator_changes_detection_and_alerts_only() {
+        use serde_json::json as j;
+        let cur = cam();
+        // Nothing changed: the whole camera sent back as it is is fine, floats and all.
+        let same = serde_json::to_value(&cur).unwrap();
+        assert!(operator_edit_outside(&cur, &edit(&cur, same)).is_empty());
+        for p in [
+            j!({"motion": false}),
+            j!({"sensitivity": 0.02, "min_object": 0.01, "max_object": 0.4, "contrast": 30, "min_travel": 0.05, "min_frames": 3, "break_time": 9, "motion_algorithm": "frame-diff", "schedule": "20:00-07:00"}),
+            j!({"zones": [{"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}], "ignore_zones": []}),
+            j!({"alerts": false, "alert_interval": 60, "alert_schedule": "08:00-17:00", "alert_labels": ["car"], "alert_priority": "high"}),
+            j!({"no_motion_minutes": 30, "no_motion_schedule": "09:00-17:00"}),
+            j!({"audio_trigger": true, "audio_margin_db": 20.0, "audio_min_db": -40.0, "audio_sounds": ["dog"]}),
+            j!({"ai": true, "ai_labels": ["person", "dog"], "ai_min_score": 0.7, "ai_ignore_parked": false, "ai_strict": true, "ai_hide_unconfirmed": true, "ai_confirm_camera": true}),
+        ] {
+            assert!(operator_edit_outside(&cur, &edit(&cur, p.clone())).is_empty(), "{p}");
+        }
+        // Everything else: refused, by name.
+        for (p, k) in [
+            (j!({"url": "rtsp://evil/"}), "url"),
+            (j!({"sub_url": null}), "sub_url"),
+            (j!({"username": "x"}), "username"),
+            (j!({"password": ""}), "password"),
+            (j!({"name": "Back"}), "name"),
+            (j!({"short_name": "B"}), "short_name"),
+            (j!({"groups": []}), "groups"),
+            (j!({"folder": "/tmp/x"}), "folder"),
+            (j!({"enabled": false}), "enabled"),
+            (j!({"record": false}), "record"),
+            (j!({"record_motion_only": true}), "record_motion_only"),
+            (j!({"hwaccel": "vaapi"}), "hwaccel"),
+            (j!({"ingest": "ffmpeg"}), "ingest"),
+            (j!({"fps": 30}), "fps"),
+            (j!({"privacy_masks": [{"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}]}), "privacy_masks"),
+            (j!({"also_trigger": ["Garage"]}), "also_trigger"),
+            (j!({"overlay": true}), "overlay"),
+            (j!({"overlay_text": "{v:x}"}), "overlay_text"),
+            (j!({"onvif_port": 8000}), "onvif_port"),
+            (j!({"watchdog": {"reboot": "onvif"}}), "watchdog"),
+            (j!({"packages": true}), "packages"),
+            (j!({"share": true}), "share"),
+            (j!({"alert_channels": ["push"]}), "alert_channels"),
+            (j!({"copy_events_to": "/tmp/evil"}), "copy_events_to"),
+            (j!({"copy_events_keep_days": 1}), "copy_events_keep_days"),
+            (j!({"copy_events_only_confirmed": true}), "copy_events_only_confirmed"),
+            (j!({"copy_events_only_alerts": true}), "copy_events_only_confirmed"),
+        ] {
+            let new = edit(&cur, p.clone());
+            let out = operator_edit_outside(&cur, &new);
+            assert!(out.iter().any(|x| x == k), "{p}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn event_copies_are_an_admins() {
+        // Never in what an operator may change, and hidden from operators as from viewers.
+        assert!(!super::OPERATOR_CAMERA_FIELDS.iter().any(|f| f.starts_with("copy_")));
+        for k in ["copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "folder", "username", "has_password"] {
+            assert!(super::HIDDEN_FROM_NON_ADMINS.contains(&k), "{k}");
+        }
+    }
+
+    #[test]
+    fn every_change_is_told_in_plain_words() {
+        use super::{changed_fields, changes_in_words as words};
+        let cur = cam();
+        let f = |p| changed_fields(&cur, &edit(&cur, p));
+        assert_eq!(words(&f(serde_json::json!({"alert_schedule": "08:00-17:00", "zone_polys": [{"points": [[0.1, 0.1], [0.5, 0.1], [0.5, 0.5]]}]}))), "alert schedule, detection zones");
+        assert_eq!(words(&f(serde_json::json!({"min_object": 0.02, "contrast": 40, "motion": false}))), "motion sensitivity, motion detection on or off");
+        assert_eq!(words(&f(serde_json::json!({"ai_strict": true, "ai_hide_unconfirmed": true}))), "AI confirmation");
+        assert_eq!(words(&f(serde_json::json!({"alert_ignore_polys": [{"points": [[0.1, 0.1], [0.5, 0.1], [0.5, 0.5]]}]}))), "areas that don't notify");
+        // Every field an operator may change has words of its own (not the catch-all) unless it is AI.
+        for k in super::OPERATOR_CAMERA_FIELDS {
+            assert!(super::setting_words(k) != "AI confirmation" || k.starts_with("ai_"), "{k}");
+        }
+    }
+
+    #[test]
+    fn zone_sizes_are_held_to_limits_when_they_change() {
+        use super::check_camera_sizes as sizes;
+        let cur = cam();
+        let poly = |n: usize| serde_json::json!({"points": (0..n).map(|i| { let a = i as f64 / n as f64 * 6.28; [0.5 + 0.4 * a.cos(), 0.5 + 0.4 * a.sin()] }).collect::<Vec<_>>()});
+        let rect = serde_json::json!({"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1});
+        assert!(sizes(&edit(&cur, serde_json::json!({"zone_polys": [poly(64)], "zones": vec![rect.clone(); 32]})), Some(&cur)).is_ok());
+        for p in [
+            serde_json::json!({"zone_polys": [poly(65)]}),
+            serde_json::json!({"ignore_polys": vec![poly(4); 33]}),
+            serde_json::json!({"ignore_polys": [{"points": [[0.1, 0.1], [2.0, 0.1], [0.5, 0.5]]}]}),
+            serde_json::json!({"zones": vec![rect.clone(); 33]}),
+            serde_json::json!({"ai_labels": vec!["x"; 65]}),
+            serde_json::json!({"ai_labels": [""]}),
+        ] {
+            assert!(sizes(&edit(&cur, p.clone()), Some(&cur)).is_err(), "{p}");
+            assert!(sizes(&edit(&cur, p.clone()), None).is_err(), "{p} new");
+        }
+        // Saved before the limits: still saves while unchanged.
+        let big = edit(&cur, serde_json::json!({"zones": vec![rect.clone(); 40]}));
+        assert!(sizes(&edit(&big, serde_json::json!({"motion": false})), Some(&big)).is_ok());
+        // Unchanged also when a page sends the numbers back with float noise.
+        let mut noisy = serde_json::to_value(&big).unwrap()["zones"].clone();
+        for z in noisy.as_array_mut().unwrap() {
+            z["x"] = serde_json::json!(z["x"].as_f64().unwrap() + 1e-12);
+        }
+        assert!(sizes(&edit(&big, serde_json::json!({"zones": noisy})), Some(&big)).is_ok());
+        // Rectangles inside the picture and not empty; schedules strictly; known values; sounds once.
+        for p in [
+            serde_json::json!({"zones": [{"x": 0.9, "y": 0.1, "w": 0.2, "h": 0.1}]}),
+            serde_json::json!({"ignore_zones": [{"x": -0.1, "y": 0.1, "w": 0.2, "h": 0.1}]}),
+            serde_json::json!({"privacy_masks": [{"x": 0.1, "y": 0.1, "w": 0.0, "h": 0.1}]}),
+            serde_json::json!({"schedule": "08:00-17:00-x"}),
+            serde_json::json!({"alert_schedule": "08:00-17:00-09:00"}),
+            serde_json::json!({"schedule": "nonsense"}),
+            serde_json::json!({"motion_algorithm": "magic"}),
+            serde_json::json!({"alert_priority": "loud"}),
+            serde_json::json!({"audio_sounds": ["dog bark", "Dog bark"]}),
+        ] {
+            assert!(sizes(&edit(&cur, p.clone()), Some(&cur)).is_err(), "{p}");
+        }
+        for p in [
+            serde_json::json!({"zones": [{"x": 0.8, "y": 0.0, "w": 0.2, "h": 1.0}]}),
+            serde_json::json!({"schedule": "20:00-07:00", "motion_algorithm": "frame-diff", "alert_priority": "urgent"}),
+            serde_json::json!({"schedule": null, "alert_schedule": ""}),
+        ] {
+            assert!(sizes(&edit(&cur, p.clone()), Some(&cur)).is_ok(), "{p}");
+        }
+        assert!(super::json_close(&serde_json::json!([0.1, {"a": 0.3}]), &serde_json::json!([0.1000000000001, {"a": 0.3}])));
+        assert!(!super::json_close(&serde_json::json!([0.1]), &serde_json::json!([0.11])));
+    }
+
+    #[tokio::test]
+    async fn operators_through_the_whole_stack() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        let mut cfg: crate::config::Config = toml::from_str("").unwrap();
+        let no_arm = crate::config::OperatorPerms { arm: false, ..Default::default() };
+        let users: [(&str, bool, &str, crate::config::OperatorPerms, Vec<String>); 6] = [
+            ("ann", true, "", Default::default(), vec![]),
+            ("otto", false, "operator", Default::default(), vec![]),
+            ("olga", false, "operator", no_arm, vec!["Porch".to_string()]),
+            ("vic", false, "", Default::default(), vec![]),
+            ("odd", false, "superuser", Default::default(), vec![]),
+            ("lim", false, "operator", Default::default(), vec!["Porch".to_string()]),
+        ];
+        for (name, admin, role, perms, cams) in users {
+            cfg.server.users.push(crate::config::UserConfig { username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: cams, disabled: false, role: role.into(), perms });
+        }
+        let e = crate::engine::Engine::for_test(cfg);
+        let app = super::build_router(e.clone());
+        let call = |method: &str, path: &str, who: &str, origin: Option<&str>, body: &str| {
+            let mut b = Request::builder().method(method).uri(path).header(header::HOST, "localhost:8090").header(header::CONTENT_TYPE, "application/json");
+            b = b.header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{who}:pw-{who}-1"))));
+            if let Some(o) = origin {
+                b = b.header(header::ORIGIN, o);
+            }
+            let req = b.body(Body::from(body.to_string())).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let s = r.status();
+                let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+                (s, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+        // whoami tells each its role and rights; an operator is no admin.
+        let (_, w) = call("GET", "/api/whoami", "olga", None, "").await;
+        let w: serde_json::Value = serde_json::from_str(&w).unwrap();
+        assert_eq!((w["admin"].as_bool(), w["role"].as_str(), w["perms"]["arm"].as_bool(), w["perms"]["ptz"].as_bool()), (Some(false), Some("operator"), Some(false), Some(true)), "{w}");
+        for (who, role) in [("ann", "admin"), ("otto", "operator"), ("vic", "viewer"), ("odd", "viewer")] {
+            let (_, w) = call("GET", "/api/whoami", who, None, "").await;
+            assert!(w.contains(&format!("\"role\":\"{role}\"")), "{who}: {w}");
+        }
+        // Arming: admins and operators with the right.
+        let disarm = r#"{"armed":false}"#;
+        assert_eq!(call("POST", "/api/shield", "ann", None, disarm).await.0, StatusCode::OK);
+        assert_eq!(call("POST", "/api/shield", "otto", None, disarm).await.0, StatusCode::OK);
+        assert_eq!(call("POST", "/api/shield", "olga", None, disarm).await.0, StatusCode::FORBIDDEN, "right turned off");
+        assert_eq!(call("POST", "/api/shield", "vic", None, disarm).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call("POST", "/api/shield", "odd", None, disarm).await.0, StatusCode::FORBIDDEN, "an unknown role is a viewer");
+        // Limited to some cameras: no arming or profiles, which change every camera.
+        assert_eq!(call("POST", "/api/shield", "lim", None, disarm).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call("POST", "/api/profile", "lim", None, r#"{"name":null}"#).await.0, StatusCode::FORBIDDEN);
+        let (_, w) = call("GET", "/api/whoami", "lim", None, "").await;
+        assert!(w.contains("\"arm\":false") && w.contains("\"pause\":true") && w.contains("\"limited\":true"), "{w}");
+        assert_eq!(call("GET", "/api/camera-defaults", "vic", None, "").await.0, StatusCode::OK);
+        // The sign-in answer says the same as whoami for the new session.
+        let (s, b) = call("POST", "/api/login", "lim", None, r#"{"username":"lim","password":"pw-lim-1"}"#).await;
+        let b: serde_json::Value = serde_json::from_str(&b).unwrap_or_default();
+        assert_eq!((s, b["role"].as_str(), b["perms"]["arm"].as_bool(), b["perms"]["pause"].as_bool(), b["limited"].as_bool(), b["admin"].as_bool()), (StatusCode::OK, Some("operator"), Some(false), Some(true), Some(true), Some(false)), "{b}");
+        let (_, b) = call("POST", "/api/login", "vic", None, r#"{"username":"vic","password":"pw-vic-1"}"#).await;
+        assert!(b.contains("\"role\":\"viewer\"") && b.contains("\"camera_detection\":false"), "{b}");
+        // A device token's session: no camera settings or talk, whatever the account may do.
+        let (tok, _) = crate::auth::add_token("otto", "app", true, crate::auth::generation("otto")).unwrap().unwrap();
+        let req = Request::builder().uri("/api/whoami").header(header::HOST, "localhost:8090").header(header::AUTHORIZATION, format!("Bearer {tok}")).body(Body::empty()).unwrap();
+        let r = app.clone().oneshot(req).await.unwrap();
+        let w: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert_eq!((w["role"].as_str(), w["perms"]["arm"].as_bool(), w["perms"]["ptz"].as_bool(), w["perms"]["camera_detection"].as_bool(), w["perms"]["talk_clip"].as_bool()), (Some("operator"), Some(true), Some(true), Some(false), Some(false)), "{w}");
+        assert_eq!(call("POST", "/api/shield", "otto", Some("http://evil.example"), disarm).await.0, StatusCode::FORBIDDEN, "another site");
+        assert_eq!(call("POST", "/api/cameras/0/pause", "olga", None, "{}").await.0, StatusCode::FORBIDDEN);
+        // Events of their cameras only.
+        let keep = r#"{"protect":true}"#;
+        assert_eq!(call("POST", "/api/events/porch-1700000000/protect", "olga", None, keep).await.0, StatusCode::OK);
+        assert_eq!(call("POST", "/api/events/garage-1700000000/protect", "olga", None, keep).await.0, StatusCode::NOT_FOUND, "another camera");
+        assert_eq!(call("POST", "/api/events/garage-1700000000/protect", "otto", None, keep).await.0, StatusCode::OK);
+        assert_eq!(call("POST", "/api/events/garage-1700000000/protect", "vic", None, keep).await.0, StatusCode::FORBIDDEN);
+        // A clip of a camera they cannot see (or that is not there): not found.
+        let (s, b) = call("POST", "/api/clips/record", "olga", None, r#"{"camera":0}"#).await;
+        assert!(s == StatusCode::OK && b.contains("camera not found"), "{s} {b}");
+        assert_eq!(call("POST", "/api/clips/record", "vic", None, r#"{"camera":0}"#).await.0, StatusCode::FORBIDDEN);
+        // Camera settings: through to the handler (no such camera here) for
+        // operators; never adding or removing cameras.
+        assert_eq!(call("PUT", "/api/cameras/0", "otto", None, r#"{"motion":false}"#).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call("PUT", "/api/cameras/0", "vic", None, r#"{"motion":false}"#).await.0, StatusCode::FORBIDDEN);
+        // Admin-only, whatever an operator may do.
+        for (m, p, b) in [
+            ("GET", "/api/settings", ""),
+            ("POST", "/api/settings", "{}"),
+            ("GET", "/api/users", ""),
+            ("POST", "/api/users", r#"{"username":"otto","role":"admin"}"#),
+            ("POST", "/api/users", r#"{"username":"otto","perms":{"ptz":true}}"#),
+            ("POST", "/api/users", r#"{"username":"otto","cameras":[]}"#),
+            ("GET", "/api/users/ann/tokens", ""),
+            ("POST", "/api/cameras", r#"{"name":"x","url":"rtsp://x/"}"#),
+            ("DELETE", "/api/cameras/0", ""),
+            ("POST", "/api/cameras/0/enable", r#"{"enabled":false}"#),
+            ("POST", "/api/overlay/x", "1"),
+            ("POST", "/api/system/restart", ""),
+            ("GET", "/api/logs", ""),
+            ("GET", "/api/health", ""),
+            ("GET", "/api/audit", ""),
+            ("POST", "/api/alert-rules", "{}"),
+            ("GET", "/api/offsite", ""),
+            ("POST", "/api/update/install", ""),
+            ("POST", "/api/storage/missing/scan", ""),
+            ("POST", "/api/links/code", "{}"),
+            ("POST", "/api/events/porch-1700000000/ai/recheck", ""),
+            ("POST", "/api/event-copy/test", r#"{"path":"/tmp"}"#),
+        ] {
+            assert_eq!(call(m, p, "otto", None, b).await.0, StatusCode::FORBIDDEN, "{m} {p}");
+        }
     }
 }

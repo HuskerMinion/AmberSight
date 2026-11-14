@@ -1,6 +1,6 @@
 // palette.js - command palette. Ctrl/Cmd+K opens it (or call open()). Self-installing on import.
 // Modules are imported on first use of a command so the palette itself stays light.
-import { state, $, ic, api, toast, setTheme, backLayer, overlaysChanged, afterOverlayClose } from './core.js';
+import { state, $, ic, api, toast, setTheme, backLayer, overlaysChanged, afterOverlayClose, can } from './core.js';
 import { savedFilters } from './events.js';
 
 const RECENT_KEY = 'ambersight.palette.recent';
@@ -49,6 +49,8 @@ function link(h) { return () => { if (location.hash !== h) location.hash = h; };
 
 function build() {
   const admin = state.isAdmin !== false, out = [];
+  // (Operators: the actions their rights allow; adminOnly entries stay hidden.)
+  const may = (perm) => admin || can(perm);
   const add = (id, group, icon, label, hint, run, keys, adminOnly, kw) => { if (adminOnly && !admin) return; out.push({ id, group, icon, label, hint: hint || '', run, keys: keys || [], kw: (kw || '').toLowerCase() }); };
 
   add('go:live', 'Go to', 'live', 'Go to Live', 'Camera grid', () => goTab('live'), ['G', 'L']);
@@ -64,14 +66,14 @@ function build() {
     add('cam:full:' + id, 'Cameras', 'expand', n, 'Open full screen on Live', async () => { await goTab('live'); (await imp.live()).openFullCam(id); }, [], false, 'camera full screen live view');
     add('cam:play:' + id, 'Cameras', 'timeline', 'Play back ' + n, 'Recordings', async () => { await goTab('live'); (await imp.tl()).openAt(id, Date.now() - 60000); }, [], false, 'recordings rewind history');
     add('cam:snap:' + id, 'Cameras', 'camera', 'Snapshot ' + n, n, async () => (await imp.live()).snapshot(id));
-    add('cam:set:' + id, 'Cameras', 'gear', n + ' settings', 'Camera settings', async () => (await imp.cams()).openCameraDialog(id), [], true);
-    add('cam:zones:' + id, 'Cameras', 'zone', 'Zones for ' + n, 'Motion zones and masks', async () => (await imp.zones()).openZoneEditor(id), [], true);
+    add('cam:set:' + id, 'Cameras', 'gear', n + ' settings', 'Camera settings', async () => (await imp.cams()).openCameraDialog(id), [], !may('camera_detection'));
+    add('cam:zones:' + id, 'Cameras', 'zone', 'Zones for ' + n, 'Motion zones and masks', async () => (await imp.zones()).openZoneEditor(id), [], !may('camera_detection'));
   }
 
-  add('act:shield', 'Actions', 'shield', 'Arm / disarm', 'Turn motion detection on or off for all cameras', async () => (await imp.status()).toggleShield(true), ['S'], true, 'armed disarmed shield detection on off');
+  add('act:shield', 'Actions', 'shield', 'Arm / disarm', 'Turn motion detection on or off for all cameras', async () => (await imp.status()).toggleShield(true), ['S'], !may('arm'), 'armed disarmed shield detection on off');
   for (const p of profileNames) add('act:profile:' + p, 'Actions', 'user', 'Switch profile to ' + p, profileActive === p ? 'Active now' : 'Profile', async () => {
     try { await api('/api/profile', { json: { name: p, minutes: null } }); toast('Profile: ' + p); } catch (e) { toast(e.message, { kind: 'err' }); }
-  }, [], true);
+  }, [], !may('arm'));
   add('act:timeline', 'Actions', 'timeline', 'Timeline on / off', 'Live timeline mode', async () => { await goTab('live'); (await imp.tl()).toggle(); }, ['T']);
   add('act:view', 'Actions', 'v-grid', 'Change layout', 'Grid, Fit, Focus, Focus 2', async () => { await goTab('live'); (await imp.live()).cycleViewStyle(); }, ['V'], false, 'view style tiles');
   for (const [m, label] of [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']]) add('act:theme:' + m, 'Actions', m === 'light' ? 'sun' : m === 'dark' ? 'moon' : 'auto', 'Theme: ' + label, m === 'auto' ? 'Follow this device' : '', () => setTheme(m), [], false, 'dark mode light mode appearance');

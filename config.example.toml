@@ -42,6 +42,17 @@ port = 8090
 # enabled = true
 # port = 8554
 
+# TRANSCODING for players that cannot decode a stream as it is (a TV whose
+# decoder stops at 4096 wide, a phone without H.265): an app that sends what
+# it can decode gets the stream re-encoded to the largest size it takes, on
+# the graphics card when there is one (NVIDIA, Intel Quick Sync, VAAPI, Mac,
+# AMD), else in software. Streams that fit are always sent untouched.
+# [transcode]
+# encoder = "auto"     # or "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "software", "off"
+# max_hardware = 6     # at a time on the graphics card
+# max_software = 1     # at a time in software (several CPU cores each)
+# max_per_user = 4     # per account: transcoded streams watched, and live transcodes started
+
 # SIGN-IN: with no accounts, ANYONE who can reach this port can watch every
 # camera and change every setting. Add an account (Settings > Users & security, or below)
 # before using AmberSight on a shared network.
@@ -61,6 +72,14 @@ port = 8090
 # password = "look-only"
 # admin = false
 # # disabled = true       # turned off: cannot sign in or do anything until an admin turns it on again
+#
+# [[server.users]]
+# username = "sitter"
+# password = "day-to-day"
+# admin = false
+# role = "operator"         # arm and disarm, PTZ, talk, keep events, detection settings of its cameras
+# cameras = ["Front Door"]  # (viewers and operators can be limited to some cameras)
+# perms = { talk_clip = false }   # any right left out is on: ptz, talk_clip, arm, events, camera_detection
 
 [storage]
 data_dir = "amberdata"
@@ -241,6 +260,15 @@ post_roll = 10          # seconds of footage after the trigger
 # # hwaccel = "vaapi"
 # # Record into a [[storage.folders]] entry instead of data_dir.
 # # folder = "main"
+# # Also save each event's clip as an .mp4 in this folder (it must exist), e.g.
+# # one OneDrive, Google Drive or Dropbox syncs: <folder>/<Camera>/<YYYY-MM-DD>/
+# # <HH-MM-SS> <labels>.mp4 with a .jpg beside it, a few seconds after the event
+# # ends. Recording is unchanged; the folder is outside the recording caps and
+# # clean-up. Not a system folder, nor AmberSight's own folders.
+# # copy_events_to = "D:/OneDrive/Cameras"
+# # copy_events_keep_days = 30         # delete copies after this many days; 0 = keep
+# # copy_events_only_confirmed = false  # true: only events AI confirmed (AI off: all);
+# #                                     # notification settings never leave one out
 # # Device credentials, separate from app users: injected into the URL as
 # # scheme://user:pass@host when username is set and the URL has no userinfo.
 # # The API never echoes the password back; on PUT a blank password keeps the

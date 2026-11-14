@@ -179,7 +179,7 @@ pub async fn share_live_info(State(engine): State<Arc<Engine>>, h: HeaderMap, Ax
     if let Err(r) = sharing_cam(&engine, &h, id) {
         return r;
     }
-    crate::live_http::live_info(State(engine), AxPath(id)).await
+    crate::live_http::live_info(State(engine), AxPath(id), Query(crate::live_http::StreamQ::default()), None).await
 }
 
 /// `GET /link/live/:id/ws` (WebSocket, fMP4 fragments)

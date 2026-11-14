@@ -509,8 +509,9 @@ impl Conn {
                 Ok((id.user, Some(generation)))
             }
             // RTSP here is not encrypted: anyone on the way can read the header.
-            // That must never be a token with control rights.
-            crate::auth::Cred::Token(id, _) if id.admin => {
+            // That must never be a token with control rights (an admin's, or an
+            // operator's: its scope, whatever the account is now).
+            crate::auth::Cred::Token(id, _) if id.admin || crate::auth::token_control(h) => {
                 let _ = self.engine.db.insert_audit(&id.user, &ip.to_string(), "RTSP refused a device token with control rights", "", 403);
                 Err((response(403, cseq, &[], Some(("text/plain", "RTSP is not encrypted: use a watch-only device token here"))), true))
             }
@@ -889,7 +890,7 @@ mod tests {
     async fn a_password_on_rtsp_is_noted_once_per_network_like_a_basic_one() {
         use base64::Engine as _;
         let mut cfg: crate::config::Config = toml::from_str("").unwrap();
-        cfg.server.users.push(crate::config::UserConfig { disabled: false, username: "rt-ann".into(), password: crate::auth::hash_password("pw-rt-ann-1"), admin: false, cameras: Vec::new() });
+        cfg.server.users.push(crate::config::UserConfig { disabled: false, username: "rt-ann".into(), password: crate::auth::hash_password("pw-rt-ann-1"), admin: false, cameras: Vec::new(), ..Default::default() });
         let e = Engine::for_test(cfg);
         // The account has a browser known already, so a new network is news.
         e.db.device_seen("rt-ann", "web", "Edge on Windows", 1, 50).unwrap();
@@ -912,6 +913,26 @@ mod tests {
         assert_eq!(told.len(), 1, "{told:?}");
         assert!(told[0].1.contains("192.0.2.44") && told[0].1.contains("sent directly by a program") && !told[0].1.contains("sign that device out"), "{}", told[0].1);
         assert_eq!(e.db.known_device_count("rt-ann"), 2);
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn an_operators_control_token_is_refused_on_rtsp_too() {
+        let mut cfg: crate::config::Config = toml::from_str("").unwrap();
+        cfg.server.users.push(crate::config::UserConfig { username: "rt-op".into(), password: crate::auth::hash_password("pw-rt-op-1"), admin: false, role: "operator".into(), ..Default::default() });
+        let e = Engine::for_test(cfg);
+        let g = crate::auth::generation("rt-op");
+        let (control, _) = crate::auth::add_token("rt-op", "cam app", true, g).unwrap().unwrap();
+        let (watch, _) = crate::auth::add_token("rt-op", "player", false, g).unwrap().unwrap();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
+        let (sock, _) = l.accept().await.unwrap();
+        let (rd, wr) = sock.into_split();
+        let mut conn = Conn { engine: e.clone(), peer: "192.0.2.45:5000".parse().unwrap(), rd, wr, buf: Vec::new(), user: None, user_generation: 0, target: None, tracks: [None, None], session: String::new(), play: None };
+        let req = |t: &str| Request { method: "DESCRIBE".into(), url: "rtsp://h/x".into(), headers: vec![("authorization".into(), format!("Bearer {t}"))] };
+        let refused = conn.authenticate(&req(&control), "1").await.unwrap_err();
+        assert!(String::from_utf8_lossy(&refused.0).starts_with("RTSP/1.0 403"));
+        assert_eq!(conn.authenticate(&req(&watch), "2").await.ok().map(|x| x.0), Some("rt-op".to_string()));
         drop(client);
     }
 }

@@ -1,6 +1,6 @@
 // status.js - header status text, lamp, clock and the Armed / Disarmed button.
 
-import { $, state, api, fmtSize, msgDlg, toast, viewOnlyNote, confirmDialog } from './core.js';
+import { $, state, api, fmtSize, msgDlg, toast, viewOnlyNote, confirmDialog, can } from './core.js';
 
 let armedCache;
 let armingUntil = 0;   // ms; an arm delay is running until then
@@ -116,7 +116,7 @@ function syncShieldBtn() {
 // Arm or disarm from anywhere. Disarming never happens silently: a toast offers Undo for 6 s,
 // which arms again at once (no arm delay).
 export async function toggleShield(quiet) {
-  if (!state.isAdmin) { viewOnlyNote(); return; }
+  if (!can('arm')) { viewOnlyNote('arm'); return; }
   try {
     const s = await api('/api/status');
     // Armed or arming: disarm (cancels the arm delay). Disarmed: arm, after the delay.
@@ -137,7 +137,7 @@ export async function toggleShield(quiet) {
 // The S key: a stray key press must not turn detection off for a whole site, so
 // disarming asks first. (Arming does not, and the header button is one deliberate click.)
 export async function shieldKey() {
-  if (!state.isAdmin) { viewOnlyNote(); return; }
+  if (!can('arm')) { viewOnlyNote('arm'); return; }
   try {
     const s = await api('/api/status');
     if (s.armed || s.arming_until) {

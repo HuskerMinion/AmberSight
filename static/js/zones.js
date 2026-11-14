@@ -5,7 +5,7 @@
 // crossing alerts), each with a name and options (objects, seconds or direction, alert, record, window).
 // Opened from the camera panel's Motion section and from the Live dock.
 
-import { topDlgOpen, state, api, esc, toast, camFromId, refreshCameras, msgDlg, backLayer, overlaysChanged } from './core.js';
+import { topDlgOpen, state, api, esc, toast, camFromId, refreshCameras, msgDlg, backLayer, overlaysChanged, can } from './core.js';
 
 const MIN = 0.01;
 const MIN_AREA = 0.0005;    // smallest polygon area (fraction of the frame)           // smallest side of a zone (fraction of the frame)
@@ -44,7 +44,9 @@ const pc = (v) => (Math.round(v * 1000) / 10).toString();
 export async function openZoneEditor(id, opts) {
   opts = opts || {};
   if (open) return;
-  if (!state.isAdmin) { msgDlg('View-only account: zones need an admin sign-in'); return; }
+  if (!can('camera_detection')) { msgDlg('This account cannot change zones: an admin can allow it'); return; }
+  // (Privacy masks are an admin's: an operator neither sees them here nor sends them.)
+  const masksToo = state.isAdmin;
   let c0 = camFromId(id);
   if (!c0) { msgDlg('That camera no longer exists'); return; }
   if (c0.remote) { msgDlg('Zones of a camera on another server are edited on that server'); return; }
@@ -64,7 +66,7 @@ export async function openZoneEditor(id, opts) {
   // They are ignore-style shapes here and saved to that field instead of the motion zones.
   const Q = opts.mode === 'quiet';
   let zones = Q ? (c0.alert_ignore_polys || []).map(P('ignore')) : [].concat((c0.zones || []).map(R('detect')), (c0.ignore_zones || []).map(R('ignore')),
-    (c0.zone_polys || []).map(P('detect')), (c0.ignore_polys || []).map(P('ignore')), (c0.privacy_masks || []).map(R('mask')), (c0.named_zones || []).map(NZ));
+    (c0.zone_polys || []).map(P('detect')), (c0.ignore_polys || []).map(P('ignore')), (masksToo ? c0.privacy_masks || [] : []).map(R('mask')), (c0.named_zones || []).map(NZ));
   const hadMasks = (c0.privacy_masks || []).length > 0;
   const key = () => JSON.stringify(zones);
   let saved = key();
@@ -86,7 +88,7 @@ export async function openZoneEditor(id, opts) {
         '<div class="ze-seg" role="group" aria-label="New zone type"' + (Q ? ' hidden' : '') + '>' +
           '<button type="button" data-type="detect" aria-pressed="true" title="Motion counts only inside detect zones (if there are any)">Detect zone</button>' +
           '<button type="button" data-type="ignore" aria-pressed="false" title="Motion inside an ignore zone never counts">Ignore zone</button>' +
-          '<button type="button" data-type="mask" aria-pressed="false" title="Blacked out in recordings, live view and snapshots">Privacy mask</button>' +
+          (masksToo ? '<button type="button" data-type="mask" aria-pressed="false" title="Blacked out in recordings, live view and snapshots">Privacy mask</button>' : '') +
           '<button type="button" data-type="area" aria-pressed="false" title="A named area: alerts when someone stays inside too long (loitering). Needs AI.">Alert area</button>' +
           '<button type="button" data-type="line" aria-pressed="false" title="A named line with a direction arrow: alerts when someone crosses it. Needs AI.">Alert line</button></div>' +
         '<div class="ze-seg" role="group" aria-label="Shape tool">' +
@@ -709,7 +711,8 @@ export async function openZoneEditor(id, opts) {
       seconds: Math.max(1, Math.min(3600, Math.round(+z.seconds) || 30)), direction: z.direction || 'both', alert: !!z.alert, record: !!z.record, ignore_parked: z.ignore_parked !== false, schedule: (z.schedule || '').trim() || null }));
     // (A rectangle drawn for a quiet area is saved as a four-corner polygon.)
     const quiet = () => polys('ignore').concat(rects('ignore').map(r => ({ points: [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]].map(q => [r4(q[0]), r4(q[1])]) })));
-    const body = Q ? { alert_ignore_polys: quiet() } : { zones: rects('detect'), ignore_zones: rects('ignore'), zone_polys: polys('detect'), ignore_polys: polys('ignore'), privacy_masks: rects('mask'), named_zones: named };
+    const body = Q ? { alert_ignore_polys: quiet() } : { zones: rects('detect'), ignore_zones: rects('ignore'), zone_polys: polys('detect'), ignore_polys: polys('ignore'), named_zones: named };
+    if (!Q && masksToo) body.privacy_masks = rects('mask');
     saving = true; saveBtn.textContent = 'Saving...'; status();
     try {
       await api('/api/cameras/' + id, { method: 'PUT', json: body });

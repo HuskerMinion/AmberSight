@@ -3,7 +3,36 @@
 // and adding a camera. PUT /api/cameras/:id merges, so fields this window does not
 // show (zones, ONVIF port, folder ...) keep their stored values.
 
-import { state, bus, api, esc, ic, msgDlg, toast, openDlg, raiseDlg, refreshCameras, camFromId, backLayer, overlaysChanged, topDlgOpen, paletteOpen } from './core.js';
+import { state, bus, api, esc, ic, msgDlg, toast, openDlg, raiseDlg, refreshCameras, camFromId, backLayer, overlaysChanged, topDlgOpen, paletteOpen, can } from './core.js';
+
+// An operator (not an admin) with the camera_detection right edits only a camera's detection and
+// alert settings: the panel shows those sections alone and saves only these keys, those that changed.
+// (The server holds them to the same list; see OPERATOR_CAMERA_FIELDS in web.rs.)
+let OP = false;
+const OP_KEYS = ['motion', 'sensitivity', 'min_object', 'max_object', 'contrast', 'min_travel', 'min_frames', 'break_time', 'motion_algorithm', 'schedule',
+  'alerts', 'alert_interval', 'alert_schedule', 'alert_labels', 'alert_priority', 'no_motion_minutes', 'no_motion_schedule',
+  'audio_trigger', 'audio_margin_db', 'audio_min_db', 'audio_sounds',
+  'ai', 'ai_labels', 'ai_min_score', 'ai_ignore_parked', 'ai_strict', 'ai_hide_unconfirmed', 'ai_confirm_camera'];
+// (Numbers the form shows as percentages come back with float noise: equal to 1e-9 counts as the same.)
+const same = (a, b) => {
+  if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => same(x, b[i]));
+  return JSON.stringify(a == null ? null : a) === JSON.stringify(b == null ? null : b);
+};
+function operatorBody(d, c) {
+  const o = readOverrides(d);
+  const all = Object.assign({}, o.motion, o.alerts, o.ai);
+  const v = (k) => { const el = d.querySelector('[data-k="' + k + '"]'); return el ? el.value.trim() : null; };
+  const body = {};
+  for (const k of OP_KEYS) {
+    if (k === 'motion') { const m = v('motion'); if (m !== null && m !== (c.motion_enabled !== false ? '1' : '0')) body.motion = m === '1'; continue; }
+    if (!(k in all) || all[k] === undefined) continue;
+    if (k === 'audio_sounds' && (!d.querySelector('[data-sndlist]') || same([...all[k]].sort(), [...(c[k] || [])].sort()))) continue;
+    if (k === 'audio_trigger' && !d.querySelector('[data-snd]')) continue;
+    if (!same(all[k], c[k])) body[k] = all[k];
+  }
+  return body;
+}
 import { helperHtml, wireHelper, readHelper, pairDialog, helpersListHtml } from './helperpick.js';
 import { helpButton } from './help.js';
 import { netinfoHtml, wireNetinfo } from './netinfo.js';
@@ -365,7 +394,8 @@ function groupsHtml(c) {
 }
 function readGroups(d) {
   const out = [...d.querySelectorAll('[data-groups] .chip.on')].map(b => b.dataset.g);
-  const extra = d.querySelector('[data-k="newgroup"]').value.split(',').map(x => x.trim()).filter(Boolean);
+  const ng = d.querySelector('[data-k="newgroup"]');   // (not on an operator's panel)
+  const extra = ng ? ng.value.split(',').map(x => x.trim()).filter(Boolean) : [];
   for (const g of extra) if (!out.some(x => x.toLowerCase() === g.toLowerCase())) out.push(g);
   return out;
 }
@@ -388,13 +418,13 @@ function wireGroups(d) {
 function alertsHtml(c, multi) {
   const chans = (D && D.alert_channels) || [];
   const all = c.alert_channels == null;
-  const arm = multi || !c.name ? '' : '<div class="cs-arm"><div class="sec" style="margin-top:0">When this camera watches</div><div class="hint" style="margin-top:0">From the active profile and schedule, whether you are Armed and this camera\'s windows. Includes your unsaved changes.</div><div data-armhost><span class="muted">Loading...</span></div></div>';
+  const arm = multi || !c.name || OP ? '' : '<div class="cs-arm"><div class="sec" style="margin-top:0">When this camera watches</div><div class="hint" style="margin-top:0">From the active profile and schedule, whether you are Armed and this camera\'s windows. Includes your unsaved changes.</div><div data-armhost><span class="muted">Loading...</span></div></div>';
   return [arm +
     ovSel('alerts', 'Notifications', [['1', 'on'], ['0', 'off']], c.alerts == null ? null : c.alerts ? '1' : '0', 'on',
       'Off: events are still recorded and still reported over MQTT, just not sent anywhere.') +
     timeRange('alert_schedule', 'Alert window', c.alert_schedule, '07:00', '22:00', 'Notify only during these hours. Recording is not affected.') +
     (multi ? '' : notifyForHtml(c)) +
-    (multi ? '' : '<div class="cs-f"><span>Send through</span><div class="cs-chans">' +
+    (multi || OP ? '' : '<div class="cs-f"><span>Send through</span><div class="cs-chans">' +
     '<label class="asys-chk"><input type="checkbox" data-chall' + (all ? ' checked' : '') + '> All services that are set up (default)</label>' +
     chans.map(ch => '<label class="asys-chk' + (ch.configured ? '' : ' muted') + '"><input type="checkbox" data-ch="' + ch.id + '"' +
       (all ? ' checked disabled' : (c.alert_channels.includes(ch.id) ? ' checked' : '')) + '> ' + esc(CH_LABEL[ch.id] || ch.id) + (ch.configured ? '' : ' (not set up)') + '</label>').join('') +
@@ -402,7 +432,7 @@ function alertsHtml(c, multi) {
     ovSel('alert_priority', 'Priority', [['low', 'low (quiet)'], ['normal', 'normal'], ['high', 'high'], ['urgent', 'urgent']], c.alert_priority, (D && D.alerts.priority) || 'normal',
       'For ntfy and Pushover. High usually gets through Do Not Disturb; urgent makes Pushover repeat until you acknowledge it.') +
     ovNum('alert_interval', 'At most one alert every (s)', c.alert_interval, D ? (D.alerts.min_interval || 0) + ' s' : '', 'type="number" min="0" step="5"', '0 = no limit.') +
-    (multi ? '' : strangersHtml(c)) +
+    (multi || OP ? '' : strangersHtml(c)) +
     '<div class="sec">No-motion alert</div>' +
     field('Alert after no motion for (min)', text('no_motion_minutes', c.no_motion_minutes || '', 'type="number" min="0" max="10080" step="5" placeholder="off"'),
       'For a pet or a person living alone: a message when nothing has moved here for this long, and another once something moves again. Empty or 0 = off. Works even when you are Disarmed.') +
@@ -463,7 +493,7 @@ function soundHtml(c) {
     '<span class="sw-text"><b>A loud sound starts an event</b><small>A sudden sound much louder than usual here (glass, a bang, a shout, a dog) is recorded and alerts like motion, in the same arm window. The camera must send sound; the Audio setting can stay off.</small></span></label>' +
     ovNum('audio_margin_db', 'Louder than usual by (dB)', c.audio_margin_db, '20 dB', 'type="number" min="3" max="60" step="1"', 'Lower hears quieter sounds, and gives more false alarms.') +
     ovNum('audio_min_db', 'And at least (dB)', c.audio_min_db, '-45 dB', 'type="number" min="-90" max="0" step="1"', 'How loud in itself: 0 is the loudest the microphone reports, a quiet room is about -60.') +
-    (c.id == null ? '' : '<div class="snd-meter" data-sndm><div class="snd-bar" title="Sound level now (bar), usual level (gray line), loud from (amber line)"><span class="snd-lvl"></span><span class="snd-bg"></span><span class="snd-thr"></span></div><div class="hint" data-sndt>Listening...</div></div>') +
+    (c.id == null || OP ? '' : '<div class="snd-meter" data-sndm><div class="snd-bar" title="Sound level now (bar), usual level (gray line), loud from (amber line)"><span class="snd-lvl"></span><span class="snd-bg"></span><span class="snd-thr"></span></div><div class="hint" data-sndt>Listening...</div></div>') +
     '<div class="cs-f"><span>Only these sounds</span><div class="cs-groups" data-sndlist>' +
     SOUND_NAMES.map(n => '<button type="button" class="chip' + (mine.has(n) ? ' on' : '') + '" data-sn="' + esc(n) + '" aria-pressed="' + mine.has(n) + '">' + esc(n) + '</button>').join('') +
     '</div></div><div class="hint" data-sndhint>None picked: any loud sound counts. Picking some needs sound names on (Settings &rsaquo; Smart features &rsaquo; Sounds).</div>';
@@ -473,7 +503,7 @@ const dbNum = (x) => Math.round(x) + ' dB';
 function wireSound(d, c) {
   const box = d.querySelector('[data-sndlist]');
   if (box) box.onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; b.classList.toggle('on'); b.setAttribute('aria-pressed', String(b.classList.contains('on'))); };
-  api('/api/sound/status').then(st => {
+  if (state.isAdmin) api('/api/sound/status').then(st => {
     const h = d.querySelector('[data-sndhint]');
     if (h && st.loaded) h.textContent = 'None picked: any loud sound counts (and is named when it can be).';
   }).catch(() => {});
@@ -722,6 +752,8 @@ function readForm(d, c, isNew) {
     fps: num('fps', 10), scale: num('scale', 640),
     audio: v('audio') === '1', overlay: v('overlay') === '1', packages: v('packages') === '1' ? true : null,
     overlay_text: v('overlay_text') || null, overlay_pos: v('overlay_pos') || null,
+    copy_events_to: v('copy_events_to') || null, copy_events_keep_days: Math.min(3650, Math.max(0, Math.round(num('copy_events_keep_days', 0)) || 0)),
+    copy_events_only_confirmed: v('copy_events_only_confirmed') === '1',
   }, o.motion, o.recording, o.alerts, o.ai);
   const stg = readStrangers(d);
   if (stg !== undefined) body.strangers = stg;
@@ -864,6 +896,47 @@ function fieldErr(el, msg) {
   return x;
 }
 
+// ---------- event clips also saved to a folder ----------
+const agoText = (t) => { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? s + ' s ago' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' days ago'; };
+function copyStatus(c) {
+  const s = c.copy_events_status;
+  if (!c.copy_events_to || !s) return ['', ''];
+  const wait = s.waiting ? ' · ' + s.waiting + ' waiting' : '';
+  if (s.failing_since) return ['bad', 'Not saving since ' + agoText(s.failing_since) + ': ' + s.last_error + '.' + (s.hint ? ' ' + s.hint + '.' : '') + wait];
+  const skip = s.skipped ? ' · ' + s.skipped + ' skipped (' + s.last_skip + ')' : '';
+  if (s.last_ok) return ['ok', 'Last copy ' + agoText(s.last_ok) + ': ' + s.last_file + ' · ' + s.copied + ' since the server started' + wait + skip];
+  return ['', (s.waiting ? s.waiting + ' waiting for their event to end' : 'No copies yet since the server started') + skip + '.'];
+}
+function copyHtml(c, multi) {
+  const [cls, txt] = copyStatus(c);
+  return '<div class="cs-f"><span id="cs-cp-l">Also save event clips to</span><span class="cs-cprow">' +
+      text('copy_events_to', c.copy_events_to || '', 'aria-labelledby="cs-cp-l" spellcheck="false" autocomplete="off" maxlength="300" placeholder="Folder, e.g. a OneDrive or Google Drive folder"') +
+      (multi ? '' : '<button type="button" class="btn" data-cptest>Test</button>') + '</span></div>' +
+    '<div class="hint">Each event\'s clip is also saved here as an .mp4 a few seconds after it ends, in folders by camera and date. In a folder OneDrive, Google Drive or Dropbox syncs, events are off-site within minutes. Recording does not change. The full path of an existing folder; empty = off.</div>' +
+    (multi ? '' : '<div class="hint cs-cpst' + (cls ? ' ' + cls : '') + '" data-cpst aria-live="polite"' + (txt ? '' : ' hidden') + '>' + esc(txt) + '</div>') +
+    '<div data-cpopts' + (multi || c.copy_events_to ? '' : ' hidden') + '>' +
+      field('Keep copies (days)', text('copy_events_keep_days', c.copy_events_keep_days || 0, 'type="number" min="0" max="3650" step="1"'), '0 = keep them. Only the clips and pictures AmberSight saved there are deleted.') +
+      field('Only events AI confirmed', onoff('copy_events_only_confirmed', !!c.copy_events_only_confirmed), 'Only events with a person, vehicle or other object AI confirmed, a sound, or the camera\'s own detection (with AI off: every event). Notification settings never leave a copy out. Off: every event.') +
+    '</div>';
+}
+function wireCopy(d) {
+  const inp = d.querySelector('[data-k="copy_events_to"]'), opts = d.querySelector('[data-cpopts]'), st = d.querySelector('[data-cpst]'), btn = d.querySelector('[data-cptest]');
+  if (!inp || !opts || !st || !btn) return;
+  const show = (cls, msg) => { st.className = 'hint cs-cpst' + (cls ? ' ' + cls : ''); st.textContent = msg; st.hidden = !msg; };
+  inp.addEventListener('input', () => { opts.hidden = !inp.value.trim(); btn.disabled = !inp.value.trim(); });
+  btn.disabled = !inp.value.trim();
+  btn.onclick = async () => {
+    const path = inp.value.trim();
+    if (!path) return;
+    btn.disabled = true; show('', 'Testing...');
+    try {
+      const r = await api('/api/event-copy/test', { json: { path } });
+      show(r.ok ? 'ok' : 'bad', r.message);
+    } catch (e) { show('bad', errText(e)); }
+    btn.disabled = false;
+  };
+}
+
 // ---------- the sections ----------
 const SECTIONS = [['general', 'General'], ['stream', 'Stream'], ['network', 'Network'], ['recording', 'Recording'], ['motion', 'Motion'], ['alerts', 'Alerts'], ['ai', 'AI'], ['av', 'Audio & text'], ['tamper', 'Tamper'], ['unusual', 'Unusual activity'], ['watchdog', 'Watchdog']];
 const MORE_KEY = 'ambs.cs.more';
@@ -886,7 +959,8 @@ function sectionsOf(c, isNew, multi) {
     recording: [
       field('Record', onoff('record', c.record !== false)) +
       field('Record mode', sel('record_mode', [['0', 'continuous'], ['2', 'continuous: sub stream, main stream around events'], ['1', 'motion only']], c.record_motion_only ? '1' : (c.record_sub ? '2' : '0')),
-        'The middle choice keeps the full picture only around events and the sub stream the rest of the time, using far less space. It needs a sub stream URL; without one the camera records continuously.'),
+        'The middle choice keeps the full picture only around events and the sub stream the rest of the time, using far less space. It needs a sub stream URL; without one the camera records continuously.') +
+      copyHtml(c, multi),
       ovNum('pre_roll', 'Pre-roll (s)', c.pre_roll, m.pre_roll != null ? m.pre_roll + ' s' : '', 'type="number" min="0"', 'Video kept from before an event starts.') +
       ovNum('post_roll', 'Post-roll (s)', c.post_roll, m.post_roll != null ? m.post_roll + ' s' : '', 'type="number" min="0"', 'Video kept after it ends.') +
       field('Direct copy', onoff('direct', !!c.direct), 'Saves the camera\'s own video without re-encoding (lowest CPU).')],
@@ -906,9 +980,9 @@ function sectionsOf(c, isNew, multi) {
       ovNum('min_frames', 'Min frames', c.min_frames, m.min_frames, 'type="number" min="1"', 'Frames in a row with motion before an event starts.') +
       ovNum('break_time', 'Event break time (s)', c.break_time, m.break_time != null ? m.break_time + ' s' : '', 'type="number" min="0"', 'An event ends only after this long without motion.') +
       ovNum('sensitivity', 'Threshold (frame-diff only)', c.sensitivity, m.sensitivity, 'type="number" step="0.001"') +
-      field('Analysis FPS', text('fps', c.fps || 10, 'type="number" min="1" max="30"')) +
-      field('Analysis width (px)', text('scale', c.scale || 640, 'type="number" min="160" step="32"')) +
-      (isNew || multi ? '' : triggerHtml(c))],
+      (OP ? '' : field('Analysis FPS', text('fps', c.fps || 10, 'type="number" min="1" max="30"')) +
+      field('Analysis width (px)', text('scale', c.scale || 640, 'type="number" min="160" step="32"'))) +
+      (isNew || multi || OP ? '' : triggerHtml(c))],
     alerts: alertsHtml(c, multi),
     ai: [
       ovSel('ai', 'Object detection', [['1', 'on'], ['0', 'off']], c.ai == null ? null : c.ai ? '1' : '0', ai.enabled ? 'on' : 'off') +
@@ -917,15 +991,15 @@ function sectionsOf(c, isNew, multi) {
       // (Only "on" changes anything: there is no shared setting, and the default is off.)
       ovSel('ai_confirm_camera', 'Camera\'s own detection needs AI to agree', [['1', 'on']], c.ai_confirm_camera === true ? '1' : null, 'off',
         'When the camera itself reports a person, vehicle or animal, it alerts only if AI sees one too (AI keeps looking while the camera reports). Doorbell presses, sounds and packages always count. If AI cannot look, the camera\'s word counts. Off: the camera\'s own detection alerts on its own.') +
-      (isNew || multi || c.remote ? '' : spotsHtml()),
+      (isNew || multi || c.remote || OP ? '' : spotsHtml()),
       ovSel('ai_ignore_parked', 'Ignore objects that have not moved', [['1', 'yes'], ['0', 'no']], c.ai_ignore_parked == null ? null : c.ai_ignore_parked ? '1' : '0', ai.ignore_parked === false ? 'no' : 'yes',
         'A car parked in view (or someone sitting still) for a few minutes no longer confirms every motion event; one that arrives or leaves still does. AI also remembers spots where the same kind of thing is seen event after event (a bush or a bin it takes for a person, a parked car): they stop alerting until they move or go.') +
       ovSel('ai_strict', 'Stricter confirmation', [['1', 'on'], ['0', 'off']], c.ai_strict == null ? null : c.ai_strict ? '1' : '0', ai.strict ? 'on' : 'off',
         'Alert only when AI sees the object in 2 of 3 looks in a row and it moved between them. Fewer false alerts; someone passing very quickly may be missed.') +
       ovSel('ai_hide_unconfirmed', 'Show only events AI confirms', [['1', 'on'], ['0', 'off']], c.ai_hide_unconfirmed == null ? null : c.ai_hide_unconfirmed ? '1' : '0', ai.hide_unconfirmed ? 'on' : 'off',
         'Motion where AI found none of the objects that count (a flag or branches in the wind, or only an umbrella) stays out of Events and the timeline. Nothing is deleted and recording is unaffected; Events can still show them.') +
-      field('Package detection', onoff('packages', !!c.packages),
-        'For doorbells: after someone has been at the door, AmberSight compares the picture from before the visit with one a little after. Something new that looks like a box, parcel or mailer is a delivery ("Package at ..." alert, event and Home Assistant sensor); when it is gone after a later visit, "Package picked up". Uses the smart search picture model (downloaded the first time).')],
+      (OP ? '' : field('Package detection', onoff('packages', !!c.packages),
+        'For doorbells: after someone has been at the door, AmberSight compares the picture from before the visit with one a little after. Something new that looks like a box, parcel or mailer is a delivery ("Package at ..." alert, event and Home Assistant sensor); when it is gone after a later visit, "Package picked up". Uses the smart search picture model (downloaded the first time).'))],
     av: [
       field('Audio', onoff('audio', isNew ? true : !!c.audio), 'Sound in the live view and in recordings, when the camera sends it.') +
       field('Text on the picture', text('overlay_text', c.overlay_text || '', 'maxlength="120" placeholder="e.g. {short} · {site}   {date} {time}"'),
@@ -934,6 +1008,7 @@ function sectionsOf(c, isNew, multi) {
       field('Also burn it into recordings', onoff('overlay', !!c.overlay),
         'The text becomes part of the video files (without text set: name, date and time). This re-encodes the camera\'s video, which uses much more CPU and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Recordings are unaffected; leave it off unless they must carry the text.')],
   };
+  if (OP) return { motion: out.motion, alerts: out.alerts, ai: out.ai };
   if (!isNew && !multi && !c.remote) { out.tamper = tamperHtml(c); out.unusual = unusualHtml(c); }
   if (!isNew && !multi && !c.remote && isNetCam(c)) out.network = [netinfoHtml(), ''];
   if (!isNew && !multi && isNetCam(c)) out.watchdog = watchdogHtml(c);
@@ -976,12 +1051,12 @@ function updateSummaries(d, c, base) {
   let where = '';
   if (src === 'net') { try { where = new URL(v('url')).host; } catch (e) { where = v('url') ? 'custom URL' : 'no URL yet'; } }
   set('stream', ({ net: 'Network camera', device: 'Local device', screen: 'Screen', helper: 'Another computer', push: 'Pushed stream' }[src] || '') + (where ? ' · ' + where : '') + (src === 'net' && v('sub_url') ? ' · with sub stream' : ''));
-  set('recording', v('record') === '0' ? 'Recording: off' : 'Recording: ' + ({ 0: 'continuous', 1: 'motion only', 2: 'continuous sub stream, main around events' }[v('record_mode')] || 'continuous'));
+  set('recording', (v('record') === '0' ? 'Recording: off' : 'Recording: ' + ({ 0: 'continuous', 1: 'motion only', 2: 'continuous sub stream, main around events' }[v('record_mode')] || 'continuous')) + (v('copy_events_to') ? ' · event clips also saved to a folder' : ''));
   const zn = (c.zones || []).length + (c.zone_polys || []).length;
   set('motion', v('motion') === '0' ? 'Motion: off' : 'Motion: ' + (v('motion_algorithm') || m.algorithm || 'objects') + ' · ' + zn + ' zone' + (zn === 1 ? '' : 's') + ' · sensitivity ' + motionLevelText(d) + (v('schedule') ? ' · ' + v('schedule') : ''));
   const al = v('alerts');
   const chans = d.querySelector('[data-chall]');
-  set('alerts', 'Alerts: ' + (al === '' ? 'on (default)' : al === '1' ? 'on' : 'off') + ' · ' + (v('alert_schedule') || 'any time') + ' · ' + (v('nf') === 'some' && d.querySelector('[data-nflist] .chip.on') ? 'only ' + [...d.querySelectorAll('[data-nflist] .chip.on')].map(b => b.dataset.nl).join(', ') + ' · ' : '') + (!chans || chans.checked ? 'all services' : d.querySelectorAll('[data-ch]:checked').length + ' service(s)'));
+  set('alerts', 'Alerts: ' + (al === '' ? 'on (default)' : al === '1' ? 'on' : 'off') + ' · ' + (v('alert_schedule') || 'any time') + ' · ' + (v('nf') === 'some' && d.querySelector('[data-nflist] .chip.on') ? 'only ' + [...d.querySelectorAll('[data-nflist] .chip.on')].map(b => b.dataset.nl).join(', ') + ' · ' : '') + (OP ? '' : !chans || chans.checked ? 'all services' : d.querySelectorAll('[data-ch]:checked').length + ' service(s)'));
   const aiOn = v('ai') === '' ? !!ai.enabled : v('ai') === '1';
   set('ai', 'AI: ' + onOff(aiOn) + (aiOn ? ' · ' + (v('ai_labels') || (ai.labels || []).join(', ') || 'default objects') + ' · min ' + num('ai_min_score', ai.min_score != null ? ai.min_score : '?') : ''));
   set('av', 'Audio: ' + onOff(v('audio') === '1') + ' · text ' + (v('overlay_text') ? 'set' : 'none'));
@@ -1157,8 +1232,9 @@ function panelHtml(c, isNew) {
     '<button type="button" class="cs-x" data-x title="Close (Esc)" aria-label="Close"><svg class="ic"><use href="#i-x"/></svg></button></div>';
   const secs = sectionsOf(c, isNew);
   const idx = '<div class="cs-idx" role="navigation" aria-label="Sections">' + SECTIONS.filter(([k]) => secs[k]).map(([k, t]) => '<button type="button" data-jump="' + k + '">' + t + '</button>').join('') + '</div>';
-  const actions = isNew ? '' : '<div class="cs-acts"><button class="btn" data-copy title="Copy motion, recording, alert or AI settings to other cameras">Copy to...</button><span class="cs-sp"></span><button class="btn danger" data-remove>Remove camera</button></div>';
-  return head + idx + '<div class="cs-body" data-body>' + sectionsHtml(c, isNew) + actions + '</div>' +
+  const actions = isNew || OP ? '' : '<div class="cs-acts"><button class="btn" data-copy title="Copy motion, recording, alert or AI settings to other cameras">Copy to...</button><span class="cs-sp"></span><button class="btn danger" data-remove>Remove camera</button></div>';
+  const opNote = OP ? '<div class="hint cs-opnote">You can change when and where this camera detects and alerts. Its other settings are changed by an admin.</div>' : '';
+  return head + idx + '<div class="cs-body" data-body>' + opNote + sectionsHtml(c, isNew) + actions + '</div>' +
     '<div class="cs-foot"><div class="asys-err" data-err role="alert"></div><div class="cs-footrow"><button class="primary" data-save disabled>' + (isNew ? 'Add camera' : 'Save') + '</button><button class="btn" data-cancel>Close</button></div></div>';
 }
 
@@ -1186,15 +1262,15 @@ function render(id, c, isNew, keepScroll, savedNote) {
     const a = sec.getBoundingClientRect(), b = body.getBoundingClientRect();
     return a.bottom > b.top && a.top < b.bottom && !document.hidden;
   };
-  wireSource(d, c);
-  wireGroups(d);
+  if (!OP) { wireSource(d, c); wireGroups(d); }
   wireAlerts(d);
   wireTimeRanges(d);
+  wireCopy(d);
   wireArmStrip(d, c, cleanups);
   const stopSound = wireSound(d, c);
   if (stopSound) cleanups.push(stopSound);
-  if (!isNew) wireWatchdog(d, c);
-  if (!isNew) { const stopN = wireNetinfo(d, c); if (stopN) cleanups.push(stopN); }
+  if (!isNew && !OP) wireWatchdog(d, c);
+  if (!isNew && !OP) { const stopN = wireNetinfo(d, c); if (stopN) cleanups.push(stopN); }
   if (!isNew) cleanups.push(wirePreview(d, id));
   const zb = d.querySelector('[data-zedit]');
   if (zb) zb.onclick = () => openZoneEditor(id, {
@@ -1255,7 +1331,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
       paint();
     },
   };
-  if (!isNew) {
+  if (!isNew && !OP) {
     const stopT = wireTamper(d, c, ctx); if (stopT) cleanups.push(stopT);
     wireUnusual(d, c, ctx);
     wireSpots(d, c);
@@ -1294,7 +1370,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
     d.querySelectorAll('.cs-ferr').forEach(x => x.remove());
     d.querySelectorAll('.bad').forEach(x => x.classList.remove('bad'));
     if (!validate(d, isNew)) return false;
-    const rawBody = readForm(d, c, isNew);
+    const rawBody = OP ? operatorBody(d, c) : readForm(d, c, isNew);
     if (!isNew && !rawBody.password) delete rawBody.password;
     saveBtn.disabled = true; stEl.className = 'cs-state'; stEl.textContent = 'Saving...';
     try {
@@ -1305,7 +1381,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
       paint();
       return false;
     }
-    toast(isNew ? 'Camera added' : 'Saved ' + rawBody.name, { kind: 'ok' });
+    toast(isNew ? 'Camera added' : 'Saved ' + (rawBody.name || c.name), { kind: 'ok' });
     if (isNew) { cur = state; teardown(); await refreshCameras(); return true; }
     const scroll = body.scrollTop;
     await refreshCameras();
@@ -1343,9 +1419,9 @@ function validate(d, isNew) {
   let first = null;
   const bad = (k, msg) => { const el = d.querySelector('[data-k="' + k + '"]') || d.querySelector('[data-k="src"]'); const x = fieldErr(el, msg); if (!first) first = el; return x; };
   const v = (k) => { const el = d.querySelector('[data-k="' + k + '"]'); return el ? el.value.trim() : ''; };
-  if (!v('name')) bad('name', 'Give the camera a name.');
+  if (!OP && !v('name')) bad('name', 'Give the camera a name.');
   const src = v('src');
-  if (!sourceUrl(d) && src !== 'helper') {
+  if (!OP && !sourceUrl(d) && src !== 'helper') {
     if (src === 'device') bad('dev', 'Pick a capture device (or type its name).');
     else bad('url', 'A stream URL is needed.');
   } else if (src === 'helper' && !readHelper(d)) bad('src', 'Pick a computer and what to capture.');
@@ -1364,7 +1440,7 @@ function validate(d, isNew) {
 function showServerError(d, msg, errBox) {
   let text = msg;
   try { const j = JSON.parse(msg); if (j && j.error) text = j.error; } catch (e) { /* plain text */ }
-  const map = [[/alert window/i, 'alert_schedule'], [/no-motion watch/i, 'no_motion_schedule'], [/arm window|motion schedule/i, 'schedule'], [/^name\b|camera name|name is/i, 'name'], [/stream url|\burl\b/i, 'url']];
+  const map = [[/alert window/i, 'alert_schedule'], [/no-motion watch/i, 'no_motion_schedule'], [/arm window|motion schedule/i, 'schedule'], [/^name\b|camera name|name is/i, 'name'], [/stream url|\burl\b/i, 'url'], [/keep copies/i, 'copy_events_keep_days'], [/also save event clips|event copies/i, 'copy_events_to']];
   for (const [re, k] of map) {
     const el = d.querySelector('[data-k="' + k + '"]');
     if (re.test(text) && el) { fieldErr(el, text); el.scrollIntoView({ block: 'center' }); errBox.textContent = ''; return; }
@@ -1396,7 +1472,12 @@ function wirePreview(d, id) {
 
 // The settings panel for one camera (id), or for a new camera (id null).
 export async function openCameraDialog(id) {
-  if (!state.isAdmin) { msgDlg('View-only account: camera settings need an admin sign-in'); return; }
+  if (!state.isAdmin && !(id != null && can('camera_detection'))) {
+    msgDlg(state.role === 'operator' ? 'This account cannot change camera settings: an admin can allow it to change detection and alert settings' : 'View-only account: camera settings need an admin sign-in');
+    return;
+  }
+  const c0 = id == null ? null : camFromId(id);
+  if (!state.isAdmin && c0 && c0.remote) { msgDlg('Settings of a camera on another server are changed on that server'); return; }
   const isNew = id == null;
   const key = isNew ? 'new' : String(id);
   if (cur && cur.key === key) { ensureDrawer().focus({ preventScroll: true }); return; }
@@ -1404,8 +1485,11 @@ export async function openCameraDialog(id) {
   if (!c) { msgDlg('That camera no longer exists'); return; }
   const seq = ++openSeq;
   if (!(await leave())) return;
-  try { D = await api('/api/settings'); } catch (e) { D = null; }
+  // (Operators: the shared defaults are an admin's; fields show their own values.)
+  // (Operators get the shared defaults alone, to show what "Default" means.)
+  try { D = await api(state.isAdmin ? '/api/settings' : '/api/camera-defaults'); } catch (e) { D = null; }
   if (seq !== openSeq) return;
+  OP = !state.isAdmin;
   const keep = cur;
   const c2 = isNew ? c : (camFromId(id) || c);
   render(id, c2, isNew);
@@ -1424,6 +1508,8 @@ const BULK_BASE = (v, num) => ({
   on_demand: v('on_demand') === '1', idle_timeout: Math.min(604800, Math.max(30, num('idle_timeout', 300) || 300)), motion: v('motion') === '1',
   fps: num('fps', 10), scale: num('scale', 640), audio: v('audio') === '1', overlay: v('overlay') === '1', packages: v('packages') === '1' ? true : null,
   overlay_text: v('overlay_text') || null, overlay_pos: v('overlay_pos') || null,
+  copy_events_to: v('copy_events_to') || null, copy_events_keep_days: Math.min(3650, Math.max(0, Math.round(num('copy_events_keep_days', 0)) || 0)),
+  copy_events_only_confirmed: v('copy_events_only_confirmed') === '1',
 });
 // What each chosen camera's form would hold, per field.
 function fieldValues(c) {
@@ -1448,7 +1534,8 @@ function bulkBody(d, touched) {
 }
 
 export async function openCamerasBulk(ids) {
-  if (!state.isAdmin) { msgDlg('View-only account: camera settings need an admin sign-in'); return; }
+  if (!state.isAdmin) { msgDlg('Editing several cameras at once needs an admin sign-in'); return; }
+  OP = false;
   const cams = ids.map(camFromId).filter(Boolean);
   if (cams.length < 1) return;
   const seq = ++openSeq;
@@ -1637,7 +1724,8 @@ async function setPause(c, minutes) {
 export function resumeAlerts(c) { return setPause(c, 0); }
 export function pauseAlertsFor(c, minutes) { return setPause(c, minutes); }
 export function pauseAlertsDlg(c) {
-  const opts = [[30, '30 min'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours'], [null, 'Until I resume']];
+  // (Operators pause for a day at most.)
+  const opts = [[30, '30 min'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours'], state.isAdmin ? [null, 'Until I resume'] : [1440, '1 day']];
   const d = openDlg('Pause notifications', '<div class="hint"><b>' + esc(lbl(c)) + '</b>: no notifications for a while. ' +
     'It is still recording, detecting motion and listing events (and MQTT still reports them).</div>' +
     (c.alerts_paused ? '<div class="hint">Notifications paused ' + esc(pausedText(c)) + '.</div>' : '') +

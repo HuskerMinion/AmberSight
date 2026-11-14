@@ -1,7 +1,14 @@
 // ai_review.js - AI review: "why did (or didn't) this event alert?" in plain
 // words, the frames the AI looked at with what it saw drawn on them, and
 // one-click changes. Also the Settings > Smart features > AI review page (recent events by verdict).
-import { api, esc, toast, openDlg, fmtTime, state, ic, stillWaiting } from './core.js';
+import { api, esc, toast, openDlg, fmtTime, state, ic, stillWaiting, can } from './core.js';
+
+// One-click fixes change the camera's AI settings: admins, and operators who may change
+// detection settings of a camera they can see (not one of another server).
+const mayFix = (r) => {
+  const c = r.camera && r.camera.id != null ? state.cams.find(x => x.id === r.camera.id) : null;
+  return state.isAdmin || (can('camera_detection') && !!c && !c.remote);
+};
 import { registerAdminPage } from './admin.js';
 
 const pct = (s) => Math.round(s * 100) + '%';
@@ -218,7 +225,7 @@ export async function openAiReview(eventId) {
     const x = explain(r), v = r.review;
     let h = '<div class="air-head air-' + (r.summary ? r.summary.kind : 'none') + '">' + x.head + '</div>';
     if (x.lines.length) h += '<ul class="air-lines">' + x.lines.map(l => '<li>' + l + '</li>').join('') + '</ul>';
-    if (x.fixes.length && state.isAdmin) h += '<div class="air-fixes">' + x.fixes.map((f, i) => '<button class="btn" data-fix="' + i + '">' + f.label + '</button>').join('') + '</div>';
+    if (x.fixes.length && mayFix(r)) h += '<div class="air-fixes">' + x.fixes.map((f, i) => '<button class="btn" data-fix="' + i + '">' + f.label + '</button>').join('') + '</div>';
     if (v && (v.checks || []).length) {
       h += '<div class="air-legend"><span class="air-chip air-hit">counts</span><span class="air-chip air-low">wanted, not sure enough</span><span class="air-chip air-other">not on the alert list</span><span class="air-chip air-faint">faint guess</span></div>';
       h += '<div class="air-grid">' + v.checks.map(c => frameCard(r.event.id, c, v, again && again.find(a => a.n === c.n))).join('') + '</div>';
@@ -263,7 +270,8 @@ export async function markNotReal(eventId, label) {
 }
 
 // Compact verdict for the Events page player: headline, the first reason, one-click
-// fixes (admins), "Not a person" marks (admins) and a button for the full frame-by-frame
+// fixes (admins; operators allowed to change the camera), "Not a person" marks (those who may
+// mark events) and a button for the full frame-by-frame
 // dialog. `opts.onReview(review)` hears of a mark. Returns a promise.
 export async function renderVerdict(box, eventId, opts = {}) {
   box.innerHTML = '<span class="muted">AI review...</span>';
@@ -276,9 +284,9 @@ export async function renderVerdict(box, eventId, opts = {}) {
     let h = '<div class="evv-head air-' + kind + '">' + x.head + '</div>';
     if (x.lines.length) h += '<div class="evv-line">' + x.lines[0] + '</div>';
     h += '<div class="evv-btns">';
-    if (state.isAdmin) h += x.fixes.map((f, i) => '<button class="btn" data-fix="' + i + '">' + f.label + '</button>').join('');
+    if (mayFix(r)) h += x.fixes.map((f, i) => '<button class="btn" data-fix="' + i + '">' + f.label + '</button>').join('');
     // (Only what made it alert: a mark for each kind of object that counted.)
-    const kinds = r.review && state.isAdmin ? countedKinds(r.review) : [];
+    const kinds = r.review && can('events') ? countedKinds(r.review) : [];
     h += kinds.map(l => '<button class="btn" data-notreal="' + esc(l) + '" title="AI got this wrong: if it sat still, AI will not alert for this ' + esc(kindOf(l)) + ' in this spot again for 30 days, unless it moves">' + ic('x') + '<span>' + esc(notA(l)) + '</span></button>').join('');
     if (r.review && (r.review.checks || []).length) h += '<button class="btn" data-frames>Frames and details</button>';
     h += '</div>';

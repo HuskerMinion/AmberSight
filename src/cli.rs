@@ -1078,9 +1078,14 @@ pub async fn run() -> Result<()> {
                         Err(why) => println!("{why}"),
                         Ok(()) => {
                             println!("downloading the NVIDIA add-on into {}", crate::gpu_addon::folder(data_dir).display());
+                            let last = std::sync::atomic::AtomicU64::new(u64::MAX);
                             match crate::gpu_addon::download(data_dir, &cfg.update.repo, &|d, _| {
-                                print!("\r  {} MB", d >> 20);
-                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                                // Once per MB, not per chunk (a log or ssh session keeps every line).
+                                let mb = d >> 20;
+                                if mb != last.swap(mb, std::sync::atomic::Ordering::Relaxed) {
+                                    print!("\r  {mb} MB");
+                                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                                }
                             }) {
                                 Ok(_) => println!(),
                                 Err(e) => anyhow::bail!("the NVIDIA add-on could not be downloaded: {e:#}"),
@@ -1281,6 +1286,7 @@ pub async fn run_server_until(config: String, shutdown: impl std::future::Future
     let app = web::build_router(engine.clone());
     crate::rtmp::start(engine.clone());
     crate::restream::start(engine.clone());
+    crate::transcode::probe_in_background();
     crate::remote::start(engine.clone());
     let e = engine.clone();
     crate::update::spawn_checker(move || e.config.lock().unwrap().update.clone());

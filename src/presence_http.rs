@@ -249,7 +249,7 @@ mod tests {
     async fn an_account_not_listed_is_refused_and_nothing_is_stored() {
         let mut cfg: crate::config::Config = toml::from_str("").unwrap();
         for u in ["ann", "kiosk"] {
-            cfg.server.users.push(crate::config::UserConfig { disabled: false, username: u.into(), password: "x".into(), admin: false, cameras: Vec::new() });
+            cfg.server.users.push(crate::config::UserConfig { disabled: false, username: u.into(), password: "x".into(), admin: false, cameras: Vec::new(), ..Default::default() });
         }
         cfg.presence.accounts = vec!["ann".into()];
         let e = Engine::for_test(cfg);

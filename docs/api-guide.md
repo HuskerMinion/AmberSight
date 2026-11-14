@@ -7,8 +7,8 @@
 AmberSight is a self-hosted NVR. It serves a web app and a JSON/HTTP API from the same port.
 The web app uses only this API, so a phone app can do everything a viewer does in the browser:
 list cameras, watch live video (fragmented MP4 over WebSocket, or lighter JPEG streams), browse
-events with thumbnails, play event clips, scrub recordings, and (for admin accounts) control
-PTZ, arming, profiles and alert pauses. Sign-in uses a session cookie (password or one-time
+events with thumbnails, play event clips, scrub recordings, and (for admin and operator accounts)
+control PTZ, arming, profiles and alert pauses. Sign-in uses a session cookie (password or one-time
 pairing code). HTTP Basic auth also works. Android apps can get push notifications through
 UnifiedPush (end-to-end encrypted, see "Push notifications for apps"); MQTT and the server-side
 alert channels are there too.
@@ -29,7 +29,7 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/logout` | anyone | End the session |
 | GET | `/api/status` | viewer | Server name, version, armed state, active profile |
 | GET | `/api/cameras` | viewer | Camera list (includes cameras from linked servers) |
-| GET | `/api/live/:id/info` | viewer | Which live streams exist and their codecs |
+| GET | `/api/live/:id/info` | viewer | Which live streams exist and their codecs (with `caps`: what this player will get) |
 | GET (WS) | `/api/live/:id/ws?q=main\|sub` | viewer | Live fragmented MP4 over WebSocket |
 | GET | `/api/live/:id/stream?q=main\|sub` | viewer | Live fragmented MP4 over plain HTTP |
 | GET (WS) | `/api/live/:id/jpeg?fps=N` | viewer | Live JPEG frames over WebSocket (light) |
@@ -61,14 +61,14 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET, POST | `/api/ai/model` | viewer / **admin** | Built-in AI models (`tiny`, `s`, `l`), the one loaded, and download progress; POST `{"model": "l"}` downloads (checksum-checked), loads and switches to it. `l` (Large, about 217 MB) is the most accurate and about five times slower per check than `s`; `ai.p50_ms` in `/api/stats` shows the real time |
 | GET | `/api/stats` | viewer | Live machine, camera, storage, AI, network and GPU figures |
 | GET | `/api/cameras/:id/ptz/caps`, `/ptz/presets` | viewer | PTZ capabilities and presets |
-| POST | `/api/cameras/:id/ptz`, `/ptz/aim` | **admin** | Move / zoom / presets / tours |
-| POST | `/api/shield` | **admin** | Arm / disarm |
-| GET / POST | `/api/profiles` / `/api/profile` | viewer / **admin** | List / switch profiles |
+| POST | `/api/cameras/:id/ptz`, `/ptz/aim` | **admin**, operator (`ptz`) | Move / zoom / go to presets / tours (saving and deleting presets: admin) |
+| POST | `/api/shield` | **admin**, operator (`arm`) | Arm / disarm |
+| GET / POST | `/api/profiles` / `/api/profile` | viewer / **admin**, operator (`arm`) | List / switch profiles |
 | GET / POST | `/api/overlay` / `/api/overlay/:name` | viewer / **admin** | Named overlay variables shown in the camera text overlay as `{v:NAME}` (weather, a temperature, …). POST body is the plain value, or `{"value":"…","ttl":<seconds>}` to blank it after ttl; an empty body clears it. Also settable over MQTT (`<prefix>/overlay/<name>/set`), like the shield and profile. Live view only; not burned into recordings. Values live in memory: a restart clears them (a retained MQTT message sets them again) |
-| POST | `/api/cameras/:id/pause` | **admin** | Pause a camera's notifications |
+| POST | `/api/cameras/:id/pause` | **admin**, operator (`arm`) | Pause a camera's notifications |
 | GET | `/api/noisy` | **admin** | Cameras that sent too many notifications in 24 h, with suggestions |
 | POST | `/api/noisy/:id/dismiss` | **admin** | Hide that camera's suggestion for 7 days |
-| POST | `/api/clips/record` | **admin** | Record a manual clip |
+| POST | `/api/clips/record` | **admin**, operator (`talk_clip`) | Record a manual clip |
 | GET | `/api/cameras/:id/tamper` | **admin** | Tamper detection state, reference pictures, recent alerts |
 | POST | `/api/cameras/:id/tamper/reference` | **admin** | Take the camera's picture now as its reference |
 | GET | `/api/cameras/:id/tamper/ref/:light`, `/tamper/incidents/:n/:which` | viewer | Reference (`day`/`night`) and alert pictures (JPEG) |
@@ -76,7 +76,9 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET / POST | `/api/cameras/:id/spots`, `/spots/forget` | **admin** | How many fixed spots the camera's AI remembers; forget them |
 | GET / POST | `/api/digest/preview`, `/api/digest/send` | **admin** | Morning summary: build one now / build and send it now |
 | GET | `/api/digests`, `/api/digests/:id` | viewer | Summaries kept (`latest` for the newest), cut down to the cameras the account may see |
-| GET (WS) | `/api/cameras/:id/talk?rate=N` | **admin** | Two-way audio (PCM up to the camera) |
+| GET (WS) | `/api/cameras/:id/talk?rate=N` | **admin**, operator (`talk_clip`) | Two-way audio (PCM up to the camera) |
+| POST | `/api/events/:id/protect`, `/api/events/:id/review` | **admin**, operator (`events`) | Keep an event forever / mark it "not a real alert" or "looks fine" |
+| PUT | `/api/cameras/:id` | **admin**, operator (`camera_detection`: detection and alert fields only) | Change a camera's settings (see "Operators") |
 | GET / POST | `/api/links`, `/api/links/:id/open` | viewer | Linked servers / switch to one |
 | POST | `/api/presence` | viewer (counted accounts) | This phone is at home / away (geofencing) |
 | GET | `/api/presence` | viewer / **admin** | Own phones (and whether anyone is home, if the account counts) / every phone and the rule's state |
@@ -91,7 +93,8 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/system/restart` | **admin** | Restart AmberSight (only when it runs as a service) |
 
 "viewer" means any signed-in account (or anyone, when the server has no accounts). "admin" means
-an admin account.
+an admin account. "operator (`x`)" means an operator account whose right `x` is on (see "Roles and
+camera restrictions").
 
 The server also has many admin endpoints for configuration: cameras, users, settings, storage,
 offsite backup, capture helpers, discovery, faces, logs, health, and so on. They are not for
@@ -285,18 +288,24 @@ can do the same to notice that the server was updated, or ignore it.
 `GET /api/whoami` tells you which mode you are in:
 
 ```json
-{ "signed_in": true, "user": "viewer1", "admin": false, "auth_required": true, "session_cookie": true }
+{ "signed_in": true, "user": "viewer1", "admin": false, "role": "viewer",
+  "perms": { "ptz": false, "talk_clip": false, "arm": false, "events": false, "camera_detection": false },
+  "auth_required": true, "session_cookie": true }
 ```
 
 | Field | Meaning |
 |---|---|
 | `signed_in` | The request carried valid credentials, or the server has no accounts |
 | `user` | Account name (`""` in open mode or when not signed in) |
-| `admin` | Admin rights (always `true` in open mode) |
+| `admin` | Admin rights (always `true` in open mode). Operators are `false`: an app that reads only this flag shows them a viewer's buttons, and everything still works for them as for a viewer |
+| `role` | `"viewer"`, `"operator"` or `"admin"` (`"admin"` in open mode); `null` when not signed in. Older servers do not send it: take `admin` then |
+| `perms` | **What this session may do now**, beyond watching, each `true` or `false`: `ptz`, `talk_clip`, `arm` (arming, disarming, profiles), `pause` (pausing a camera's notifications), `events`, `camera_detection`. All `true` for an admin's session, all `false` for a viewer. They are the account's rights as they are now, less what this session cannot do: a camera-limited operator has `arm: false` (and `pause` as their right says); with a device token `talk_clip` and `camera_detection` are `false`, because talk never works with a token; `POST /api/clips/record` still works with a device token of the `"admin"` (control) scope when the account has the right, so do not hide a record-clip button on `talk_clip` alone for a token. Show a control only when its right is on; the server checks again either way. `null` when not signed in |
+| `limited` | The account sees only some cameras (never for an admin) |
 | `auth_required` | `true` when the server has accounts |
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -306,7 +315,8 @@ Request body (JSON, at most 64 KB):
 { "username": "viewer1", "password": "••••••" }
 ```
 
-Success: **200** with JSON `{"user": "viewer1", "admin": false}` and a cookie:
+Success: **200** with JSON `{"user": "viewer1", "admin": false, "role": "viewer", "perms": {...}, "limited": false}`
+(`role`, `perms` and `limited` as in `GET /api/whoami` for the new session) and a cookie:
 
 ```
 Set-Cookie: as_session=<64 hex chars>; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000; Secure
@@ -359,7 +369,7 @@ Content-Type: application/json
 { "code": "9f3c…e1" }
 ```
 
-The body is limited to 4 KB. The response matches `/api/login`: **200** `{"user", "admin"}` plus
+The body is limited to 4 KB. The response matches `/api/login`: **200** `{"user", "admin", "role", "perms", "limited"}` plus
 the `as_session` cookie. An expired or already-used code returns **401**
 `this sign-in code has expired or was already used; ask for a new one`. Lockout returns
 **429**. The code itself grants the account's role. The server never asks for the password.
@@ -385,7 +395,7 @@ POST /api/login/totp
 
 | Answer | Meaning |
 |---|---|
-| **200** `{"user", "admin"}` + `as_session` cookie | Signed in. With a recovery code also `"recovery_left": n`: tell the person how many are left. |
+| **200** `{"user", "admin", "role", "perms", "limited"}` + `as_session` cookie | Signed in. With a recovery code also `"recovery_left": n`: tell the person how many are left. |
 | **401** `that code is wrong` | Ask again. The ticket stays good. |
 | **401** `this sign-in has expired; enter your password again` | The ticket is used, older than 5 minutes, or not valid, the account changed, or the server restarted. Start over at `/api/login`. Treat a ticket as an opaque string: it can be a few hundred characters. A ticket that was never given out or was altered counts as a failed sign-in for your address; a late or used one counts against nobody. |
 | **409** `this code is still being checked` | The same ticket is being tried in another request (a form sent twice). Wait for that answer. |
@@ -441,7 +451,7 @@ gets **403** `sign in with a password for this`.
 | Scope | Allowed |
 |---|---|
 | `"viewer"` (default) | `GET`: `/api/cameras`, `/status`, `/live/:id` and `/live/:id/info`, `/stream`, `/ws`, `/jpeg`, `/snapshot/:id`, `/events`, `/events/:id/thumb`, `/timeline/events`, `/clips`, `/clips/:id`, `/recordings`, `/playback`, `/playback/picture`, `/seek`, `/still`, `/preview`, `/filmstrip`. `POST`: `/cameras/:id/wake`, `/signals`. Also RTSP. |
-| `"admin"` (only for an admin account; "day-to-day control") | All of the above except RTSP, plus `POST`: `/shield`, `/profile`, `/cameras/:id/ptz` (moves and go-to-preset; **403** for `set_preset`, `remove_preset` and `tour`), `/cameras/:id/ptz/aim`, `/cameras/:id/pause`, `/clips/record`, `/events/:id/review`, `/events/:id/protect`. `GET`: `/profiles`, `/cameras/:id/ptz/presets`, `/cameras/:id/ptz/caps`. A token holds a profile or a pause for 24 hours at most, whatever it asks. Admins get a system alert when a token disarms, pauses or sets a profile, and the audit log names the token. |
+| `"admin"` (only for an admin or operator account; "day-to-day control") | All of the above except RTSP, plus `POST`: `/shield`, `/profile`, `/cameras/:id/ptz` (moves and go-to-preset; **403** for `set_preset`, `remove_preset` and `tour`), `/cameras/:id/ptz/aim`, `/cameras/:id/pause`, `/clips/record`, `/events/:id/review`, `/events/:id/protect`. `GET`: `/profiles`, `/cameras/:id/ptz/presets`, `/cameras/:id/ptz/caps`. A token holds a profile or a pause for 24 hours at most, whatever it asks. Admins get a system alert when a token disarms, pauses or sets a profile, and the audit log names the token. An operator's token can do only what the operator's rights allow (**403** for the rest), on the operator's cameras. |
 
 `GET /api/whoami` also answers a token (`"by_token": true`).
 
@@ -464,7 +474,7 @@ account.
 |---|---|
 | Revoked | **401** from then on. Video the account has open ends within seconds (the account's other video is cut too: reconnect, a session or other token is not affected). If it cannot be removed from the database the revoke fails (**500**) and it stays listed. |
 | Password changed | **Keeps working**: that is what tokens are for. Revoke it to cut off a device. |
-| Account demoted from admin | Its `"admin"` tokens are deleted for good; being made an admin again does not bring them back. `"viewer"` tokens stay. |
+| Account demoted from admin, or from operator to viewer | Its `"admin"` tokens are deleted for good; being made an admin or operator again does not bring them back. `"viewer"` tokens stay. An operator whose rights are narrowed keeps its tokens, which then do less. |
 | Account disabled or deleted | All its tokens are deleted for good. Enabling again does not bring them back. |
 | Two-step turned on or off | Keeps working. |
 
@@ -504,9 +514,9 @@ on: they are checked like any other code, with the same limits and audit.
 
 | Request | When |
 |---|---|
-| `POST /api/users` | Creating an admin (`"admin": true`), promoting a viewer, enabling a disabled admin, or setting **another** account's `password`. |
+| `POST /api/users` | Creating an admin (`"admin": true`) or an operator, making a viewer an admin or operator or an operator an admin, turning on a right of an operator, enabling a disabled admin or operator, or setting **another** account's `password`. |
 | `POST /api/users/:name/two-step/off` | Always. |
-| `POST /api/users/:name/pair` | When `:name` is an admin account (also your own) or has two-step on. |
+| `POST /api/users/:name/pair` | When `:name` is an admin or operator account (also your own) or has two-step on. |
 | `POST /api/settings` | When it sets or changes `alerts.action_command` or `odt.command` (programs this server runs; not when left out, unchanged, masked or being cleared), or changes where or whether alerts arrive: any alert destination, changed or cleared (webhook, image post, Telegram and its API address, Home Assistant, ntfy, Pushover, MQTT, email); `alerts.link_url`, `alerts.system_alerts`, `alerts.system_alert_minutes`, `alerts.pushover_sound`; a server taken off `push.app_hosts` (adding one needs nothing); `digest.enabled` going off, `digest.channels`, `digest.cameras`; `watchdog.enabled` going on, or a higher `watchdog.minutes` or `watchdog.max_per_day` (the watchdog holds back the plain offline alert while it works on a camera). Masked and unchanged values and the defaults spelled out need nothing. The old destinations are told first. `alerts.link_url` must be `http://` or `https://` with no user name or password in it: otherwise `{"error": ...}`, before anything is asked. |
 | `POST /api/offsite/test` | When it tries a destination other than the saved one. |
 | `PUT /api/offsite` | When where backups go changes: kind, folder, S3 settings and keys, or passphrase. Not on/off or schedule. Fields go in the same object. |
@@ -576,14 +586,36 @@ with a valid session cookie is never blocked.
 | Role | Can do |
 |---|---|
 | **Admin** | Everything |
-| **Viewer** (non-admin) | All `GET` endpoints in this guide. The only writes allowed are waking a camera (`POST /api/cameras/:id/wake`), opening a linked server (`POST /api/links/:id/open`), reporting and removing their own phones' presence (`POST /api/presence`, `DELETE /api/presence/:device_id`), turning notifications on and off for their own devices and sending them a test (`POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `POST /api/push/test`), sending a signal (`POST /api/signals`), and a few personal-settings endpoints. Every other `POST`/`PUT`/`DELETE`, including PTZ moves, arm/disarm, profile switching, alert pause and manual record, returns **403** `admin access required for changes`. Admin-only reads (settings, logs, health, users, faces, ...) return **403** `admin access required`. Talk (two-way audio) is admin-only. |
+| **Operator** | What a viewer can, plus the day-to-day control their rights allow (below). Never settings, accounts, storage, automations or the rest of admin. |
+| **Viewer** (non-admin) | All `GET` endpoints in this guide. The only writes allowed are waking a camera (`POST /api/cameras/:id/wake`), opening a linked server (`POST /api/links/:id/open`), reporting and removing their own phones' presence (`POST /api/presence`, `DELETE /api/presence/:device_id`), turning notifications on and off for their own devices and sending them a test (`POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `POST /api/push/test`), sending a signal (`POST /api/signals`), and a few personal-settings endpoints. Every other `POST`/`PUT`/`DELETE`, including PTZ moves, arm/disarm, profile switching, alert pause and manual record, returns **403** `admin access required for changes`. Admin-only reads (settings, logs, health, users, faces, ...) return **403** `admin access required`. Talk (two-way audio) is for admins and operators. |
 
-An admin can limit a viewer account to some cameras. For such a **restricted viewer**:
+**Operators.** An operator account is a viewer with rights, each on unless an admin turns it off
+(`GET /api/whoami` `perms`):
+
+| Right | Allows |
+|---|---|
+| `ptz` | `POST /api/cameras/:id/ptz` (move, stop, go to a preset, tours; `set_preset` and `remove_preset` get **403** `only an admin can save or delete presets`) and `POST /api/cameras/:id/ptz/aim` |
+| `talk_clip` | Talk (`GET /api/cameras/:id/talk`, not with a device token) and `POST /api/clips/record` (also with an `"admin"`-scope device token, although `perms.talk_clip` is then `false`) |
+| `arm` | `POST /api/cameras/:id/pause` (for a day at most: a pause with no `minutes`, or more than 1440, lasts a day, as with a device token); and `POST /api/shield`, `POST /api/profile` unless the account is limited to some cameras (they change every camera: **403** `an account limited to some cameras cannot arm, disarm or switch profiles ...`) |
+| `events` | `POST /api/events/:id/protect` and `POST /api/events/:id/review` |
+| `camera_detection` | `PUT /api/cameras/:id` changing only these fields: `motion`, `sensitivity`, `min_object`, `max_object`, `contrast`, `min_travel`, `min_frames`, `break_time`, `motion_algorithm`, `schedule`, `zones`, `ignore_zones`, `zone_polys`, `ignore_polys`, `named_zones`, `alerts`, `alert_interval`, `alert_schedule`, `alert_labels`, `alert_ignore_polys`, `alert_priority`, `no_motion_minutes`, `no_motion_schedule`, `audio_trigger`, `audio_margin_db`, `audio_min_db`, `audio_sounds`, `ai`, `ai_labels`, `ai_min_score`, `ai_ignore_parked`, `ai_strict`, `ai_hide_unconfirmed`, `ai_confirm_camera`. Any other field sent with a different value than it has gets **403** `{"error": "only an admin can change these settings of a camera: url, ...", "fields": [...]}` and nothing is saved (the same value sent back is fine, but **send only the fields you change**: some values `GET /api/cameras` shows, such as `url` or the live `motion` flag, are not the stored ones). Also refused: turning `motion` off on a camera that records only on motion (**403**); a change that would restart the camera when operators' changes restarted it 3 times in the last 10 minutes (**429**, with `retry_after` in seconds; admins are told once); and **409** when the camera's settings changed while the request was checked (load and send again). A camera of a linked server: **403**. Every operator change is reported to admins (one message per camera every few minutes, naming the changed settings in plain words), as is marking an event "not a <object>"; the audit log names the fields. |
+
+A change a right does not cover gets **403** `this account may not do that: an admin can allow it in
+Settings, Users`; anything else an admin does gets **403** as for a viewer. Operators read what
+viewers read (the trimmed camera list, no settings). `GET /api/camera-defaults` (any signed-in account)
+gives the shared defaults a camera uses where it sets none of its own: `motion` (as in the
+settings), `ai` (`enabled`, `labels`, `min_score`, `strict`, `ignore_parked`, `hide_unconfirmed`)
+and `alerts` (`priority`, `min_interval`). An operator's actions are in the audit log like
+an admin's; talking is logged when it starts.
+
+An admin can limit a viewer or operator account to some cameras. For such a **restricted** account:
 
 - `/api/cameras` lists only the allowed cameras, and **no linked-server (remote) cameras**.
 - Any single-camera request for another camera (`/api/live/:id/...`, `/api/snapshot/:id`,
   `/api/cameras/:id/...`, `/api/events/:id/...`, `/api/clips/:id`, or a `camera=` query
-  parameter naming it) returns **404 `not found`**, as if the camera did not exist.
+  parameter naming it) returns **404 `not found`**, as if the camera did not exist. This covers an
+  operator's changes too (PTZ, talk, pause, keep, review, camera settings); `POST /api/clips/record`
+  for such a camera answers `{"error": "camera not found"}`.
 - Lists (`/api/events`, `/api/recordings`, `/api/timeline/events`, `/api/clips`) are filtered to
   the allowed cameras.
 - `/api/export` requires a `camera` the viewer may see (400 `choose a camera to export`
@@ -667,6 +699,7 @@ a viewer app can ignore. The fields useful to a viewer:
 | `overlay_text`, `overlay_pos` | string or null | Optional caption the web app draws over live video (placeholders `{name} {short} {site} {date} {time}`, and `{v:NAME}` for an overlay variable) and its corner |
 | `push_motion` | bool | A battery camera's motion push is in its window now (motion even before the picture arrives) |
 | `remote` | object | Present only on cameras from a linked server; see section 9 |
+| `copy_events_to`, `copy_events_keep_days`, `copy_events_only_confirmed`, `copy_events_status` | admin only | Event clips also saved to a folder; see "Event clips saved to a folder" under section 6. Left out for viewers. |
 
 Next to `cameras`, the reply has `overlay_vars`: the current overlay variables as `{"NAME": "value"}` (the same as `GET /api/overlay`).
 
@@ -807,6 +840,170 @@ The same bytes as the WebSocket, as one endless `Content-Type: video/mp4` body, 
 the stream restarts or the client lags. Failure statuses: 404 for an unknown camera, 503
 `no live stream (camera offline or on the ffmpeg pipeline)`.
 
+### Best quality on every device: `caps`
+
+A player can say what its decoders take. The server then sends the stream untouched when it
+fits, and otherwise transcodes it to the largest size that fits. Use it when a device cannot
+play a camera's main stream as it is (an Android TV whose hardware HEVC decoder stops at
+4096x2304 and a 4608x1728 camera, for example), instead of falling back to the sub stream.
+
+`caps` is taken by `GET /api/live/:id/stream`, `GET /api/live/:id/info`, `GET /api/playback`
+and `GET /api/clips/:id`. Without `caps` nothing changes (same bytes as before). Downloads
+(`download=1`), fast playback (`speed`) and `reverse=1` ignore it.
+
+**Format.** A comma list of `codec:WxH[@fps]`:
+
+```
+caps=h264:4096x2304@56,hevc:4096x2176@60,hevc10:4096x2176@60
+```
+
+- Codecs: `h264`, `hevc` (8-bit only), `hevc10` (10-bit HEVC; also takes 8-bit). Unknown
+  codecs (`av1`, ...) are skipped; a codec not listed means "can't decode it". At most 16
+  entries.
+- `WxH` is the largest frame that decoder takes, either way round: a landscape source must fit
+  `max(W,H)` x `min(W,H)`, a portrait one the same box turned. So send the decoder's landscape
+  limit (e.g. `4096x2304`); a portrait camera (`1728x4608`) is checked against `2304x4096`. If
+  your decoder is not symmetric, check rotated sizes yourself. 16–16384.
+- `@fps` (optional, 1–1000): the highest frame rate at that size.
+- A malformed entry, or no codec the server can send, is `400` with the reason as text.
+- Read the sizes from Android's `MediaCodecInfo.VideoCapabilities`
+  (`getSupportedWidths()`/`getSupportedHeightsFor()` and `getSupportedFrameRatesFor()`) of the
+  hardware decoders, or from the browser's `MediaCapabilities.decodingInfo()`.
+- Check `GET /api/whoami` `features` for `"caps"` first: an older server ignores `caps` and
+  sends the stream as it is.
+
+**The rule.** Each codec is checked with its own size and fps:
+
+1. The source codec (with its bit depth: 10-bit HEVC needs `hevc10`) is listed, the source size
+   fits that entry's `WxH`, and its frame rate is at most that entry's fps (+0.5): **sent
+   untouched**, exactly as without `caps`.
+2. Otherwise **transcoded**, with the listed codec that gives the largest picture: for each
+   entry, the largest size inside its `WxH` keeping the aspect (even sizes, never larger than
+   the source); the largest of those wins, and on a tie `h264`, then `hevc`, then `hevc10`
+   (always sent as 8-bit HEVC). Frame rate capped at that entry's fps (only once the source's
+   rate is known: live, after its first ten frames; a cap above the source's rate changes
+   nothing). Audio passed through unchanged. Bit rate: 0.08 bits per pixel per frame for H.264,
+   0.05 for HEVC, between 0.3 and 40 Mbit/s (4096x1536 at 20 fps: about 10 Mbit/s H.264, 6.3
+   Mbit/s HEVC). No B-frames; a keyframe every second live, every two seconds for recordings.
+3. A transcode smaller than 128 px on its short side is not made: the player gets the best
+   untouched stream instead (`transcoded: false`, `why` says why it did not fit).
+
+Example: the camera is 4608x1728 HEVC at 20 fps; with the caps above, HEVC's 4096x2176 is too
+small for it as it is. H.264 (4096x2304) and HEVC (4096x2176) both give 4096x1536, a tie, so it
+is transcoded to H.264 4096x1536 (`why: "too_big"`).
+
+**Encoders.** The server picks the best video encoder that worked in a short test encode at
+start: NVIDIA NVENC, Intel Quick Sync (`qsv`), VAAPI (Linux Intel/AMD), VideoToolbox (Mac), AMF
+(Windows AMD), decoding on the same graphics card where it can. Without one it encodes in
+software (x264/x265), at most `max_software` at a time (default 1). When the graphics card will
+not start one (consumer NVIDIA cards allow a limited number of encodes at a time, other
+programs' included), it is made in software if a software place is free. Requests in the first
+seconds after the server starts, before the test encode has finished, get `busy_fallback`.
+Settings in `config.toml`:
+
+```toml
+[transcode]
+encoder = "auto"      # or "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "software", "off"
+max_hardware = 6      # transcodes at a time on the graphics card (the whole server)
+max_software = 1      # transcodes at a time in software
+max_per_user = 4      # per account: transcoded streams watched, and live transcodes started
+```
+
+Limits per account (on a server without sign-in all players count as one account):
+
+- Each transcoded response (a live viewer, also one sharing a running transcode, or a
+  recording) counts against `max_per_user` while it runs.
+- A live transcode an account started also counts against its own `max_per_user` (separately)
+  until it stops.
+- An account starts at most 6 transcodes a minute.
+
+Over a limit, the player gets `busy_fallback`.
+
+**When it is not transcoded although it does not fit** (no place free, over a limit,
+`encoder = "off"`, no encoder works, or too small): the player gets the largest untouched
+stream that fits (live: the other stream, usually `sub`; recordings: the other stream's
+recording, sub or main, if it was recorded), and when **none** fits, the smallest stream there
+is (live) or the one asked for (recordings) as it is, which the player may not be able to
+decode. `why` is `busy_fallback` or `off` (or the reason it did not fit). Check
+`transcoded`/`why` (or the `X-AS-*` headers) and tell the user.
+
+**Answers.** `GET /api/live/:id/info?caps=...` (with the same `q` and `audio` you will use)
+adds these fields to its usual answer. It starts nothing; `encoder` is the one that would be
+used (or the one running):
+
+```json
+{
+  "main": {...}, "sub": {...}, "viewers": 0, "waking": false,
+  "codec": "h264", "width": 4096, "height": 1536, "fps": 20.0,
+  "transcoded": true, "bitrate_kbps": 10066,
+  "source": { "codec": "hevc", "width": 4608, "height": 1728, "fps": 20.0, "bit_depth": 8 },
+  "encoder": "nvenc",
+  "why": "too_big"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `codec`, `width`, `height`, `fps` | What you will receive (`fps` `null` when not known yet) |
+| `transcoded` | `true`: re-encoded by the server |
+| `bitrate_kbps` | Target bit rate when transcoded, else `null` |
+| `source` | The stream as the camera sends it (`codec` `h264`, `hevc` or `other`) |
+| `encoder` | `nvenc`, `qsv`, `vaapi`, `videotoolbox`, `amf`, `x264`, `x265`, or `null` (untouched) |
+| `why` | `null` (untouched, it fits), `too_big`, `codec`, `fps` (why transcoded), `busy_fallback`, `off` (why not transcoded although it does not fit) |
+
+The video responses carry `X-AS-Codec` (`h264`/`hevc`), `X-AS-Width`, `X-AS-Height`,
+`X-AS-Transcoded` (`1`/`0`), and when they apply `X-AS-Encoder` and `X-AS-Why`.
+
+**Live** (`/api/live/:id/stream?caps=...`): one transcode runs per camera stream and output
+(codec, size, fps cap, with or without audio) and is shared by everyone watching it; it stops
+about 5 s after the last viewer leaves (3 s after its first picture if nobody came), and ends
+(the response ends; reconnect) when the camera's stream restarts. A viewer that takes nothing
+for 10 s no longer keeps it running. The first picture takes about half a second longer than
+untouched; then about 50 ms more delay. If no picture comes within 7 s the viewer gets the
+untouched choice (`busy_fallback`) instead. Low-delay encoder settings, one fragment per frame.
+`X-Live-Mime` has the transcoded codecs. `HEAD` with `caps` answers the headers only and starts
+nothing. The response ends when the account is turned off. The WebSocket form (`/ws`) does not
+take `caps`; linked-server cameras ignore it.
+
+**Recordings and clips** with `caps`, when transcoded: a fragmented MP4 streamed as it is made
+(`Content-Type: video/mp4`, no `Content-Length`, no byte ranges). To seek, ask again with
+`start`:
+
+- `/api/playback?camera=&from=&to=&caps=...&start=<ms>`: `start` is a moment (epoch ms) within
+  `from..to`; a value no larger than the window's length (`to - from`) is taken as ms after
+  `from`; any other moment before `from` is `from`. A transcode begins **exactly** at `start`
+  (the frames before it in its group of pictures are decoded and dropped). Untouched answers
+  with `caps` begin at the keyframe at or before `start` (as if `from` were `start`).
+- `/api/clips/:id?caps=...&start=<ms>`: ms from the clip's start; a transcode begins exactly
+  there. Untouched clips ignore it (use ranges as before). A `start` at or past the clip's end
+  is `400 start is past the end of the clip`.
+- Headers on a transcoded answer: `x-clip-start-ms` (epoch ms of the video's time 0, which is
+  `start`), `x-clip-end-ms`, `x-clip-sub`, `x-clip-reverse` (`0`), `x-clip-frames` (`0`),
+  `X-AS-Duration-Ms` (the whole clip or window) and `X-AS-Media-Duration-Ms` (what is sent).
+  Untouched clips with `caps` also carry `x-clip-start-ms`, `x-clip-end-ms` and `x-clip-sub`.
+- **Reading the headers only:** `Range: bytes=0-0` (or `HEAD`) with `caps`, when it would be
+  transcoded, answers **200 with an empty body** (`Content-Length: 0`) and all the headers
+  above; no transcode starts. (Untouched answers are as before: 206 with one byte.)
+- A `Range` that does not start at byte 0 cannot be answered by a transcode: it gets the
+  untouched choice (as for `busy_fallback`), so a player that seeks by bytes in an untouched
+  answer keeps getting the same file.
+- `info=1` (with the same `caps`/`start`/`quality`; also without `caps`) answers JSON instead
+  of video: the live fields above plus
+
+  | Field | Meaning |
+  |---|---|
+  | `start_ms` | Epoch ms of the first frame of the whole clip or window (a saved clip file: the event's start minus pre-roll) |
+  | `duration_ms` | Length of the whole clip or window, ms |
+  | `media_start_ms` | Epoch ms of what the video's time 0 will show: `start` exactly when transcoded; the keyframe at or before it when untouched (a clip sent as it is: `start_ms`) |
+  | `media_duration_ms` | Length of what will be sent, ms |
+
+  Without `caps` it describes the recording as it is sent (`transcoded: false`).
+- Each transcoded request runs its own ffmpeg until the player disconnects (or takes nothing
+  for 45 s); it counts against the limits above.
+
+Admins see running transcodes (camera, size, encoder, viewers, CPU) in Settings > System status
+> Connections, from `GET /api/connections` `transcodes`.
+
 ### `GET /api/live/:id/jpeg?fps=N` (WebSocket)
 
 Binary messages, one complete JPEG each, sent only when a new frame exists, at most `fps` per
@@ -909,13 +1106,13 @@ and for linked-server cameras.
 - Grids of many cameras: use `/jpeg` or `q=sub` per tile, and `q=main` only for the enlarged
   view.
 
-### Two-way talk: `GET /api/cameras/:id/talk?rate=48000` (WebSocket, admin only)
+### Two-way talk: `GET /api/cameras/:id/talk?rate=48000` (WebSocket, admins and operators)
 
 The client sends **binary messages of raw PCM, 16-bit little-endian, mono**, at `rate` Hz
 (default 48000; 8000–96000 allowed, otherwise 400). The server resamples to 8 kHz G.711 and plays
 it through the camera's ONVIF RTSP audio backchannel. Only one talker per camera is allowed;
-others are closed with code **4409**. Camera errors close with **1011** and a reason. Non-admins
-get 403. Whether a camera supports a backchannel is only discovered when the session opens.
+others are closed with code **4409**. Camera errors close with **1011** and a reason. Viewers, and
+operators without the `talk_clip` right, get 403; device tokens too. Whether a camera supports a backchannel is only discovered when the session opens.
 
 ---
 
@@ -1003,13 +1200,13 @@ reported. A zone with `record: false` sends the notification but saves no event.
 not held back by the alert interval (they have their own cooldowns) and follow the arm state,
 profiles and the camera's alert settings like other alerts.
 
-### `POST /api/events/:id/review` (admin)
+### `POST /api/events/:id/review` (admin, operator with `events`)
 
 Body `{"verdict": "false_alarm"}`, `{"verdict": "ok"}`, or `{"verdict": null}` to clear it.
 Any other verdict is **400**. Success is **200** with
 `{"id", "review", "reviewed_at", "found": true, "marked"}`; an unknown event is **404** with
-`{"id", "found": false}`. Like other changes it needs an admin account (or a device token with
-the `"admin"` scope), and a camera restriction applies (the event id names its camera; a camera
+`{"id", "found": false}`. Like other changes it needs an admin account, an operator with the
+`events` right (or a device token with the `"admin"` scope of either), and a camera restriction applies (the event id names its camera; a camera
 the account may not see is 404). The verdict labels the event for filtering; it does not delete anything.
 
 `"false_alarm"` with a `"label"` ("not a person") also tells the AI it was wrong, e.g.
@@ -1040,6 +1237,8 @@ The event's video as `video/mp4`: from the event start minus pre-roll to the end
   clips over 8 MB failed with "Source error").
 - `quality=low` uses the sub stream where it was recorded (data saver).
 - `download=1` adds `Content-Disposition: attachment`.
+- `caps` (with `start`, `info=1`): transcoded when the clip does not fit the player; see
+  [Best quality on every device](#best-quality-on-every-device-caps).
 - Errors: 404 `clip not found`, 500 `clip failed (details are in the server log)`.
 
 `GET /api/clips` lists the latest 500 events that have video, as
@@ -1811,6 +2010,7 @@ the web app uses it directly as `<video src>`. Over HTTPS with the private CA, s
 | `frame_ms` | no | Fast playback: ms each picture shows, 100–1000 (default 100) |
 | `reverse` | no | `1`: the window played backwards. Capped at 10 s, scaled down to at most 960 px wide; `speed` is ignored. |
 | `download` | no | `1`: attachment, with the camera name and time burned in as captions (normal speed only) |
+| `caps`, `start`, `info` | no | What the player decodes: transcoded when the recording does not fit, from `start`; `info=1` answers JSON. See [Best quality on every device](#best-quality-on-every-device-caps). |
 | `quiet` | no | `1`: when nothing is recorded in the window, answer `204` with the header `x-none: 1` instead of `404` (the web app uses this so a browser's console stays free of errors; `/api/filmstrip` and `/api/playback/picture` take it too) |
 
 Response: `video/mp4`, with `Range`/206/416 and `HEAD` handled as for clips. Extra headers:
@@ -1903,6 +2103,49 @@ and device tokens); the POSTs follow the origin rule.
 
 Events whose video was all in the removed recordings keep their row and picture; their `clip`
 becomes `null` (shown as "No clip"). Protected events are not changed.
+
+### Event clips saved to a folder (admin)
+
+A camera can also save each event's clip as an .mp4 in a folder of the owner's choosing (for
+example one that OneDrive, Google Drive or Dropbox syncs), while it keeps recording as set. Camera
+settings (`PUT /api/cameras/:id`, `POST /api/cameras`, admin):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `copy_events_to` | string or null | The folder's full path; `null` or `""` = off. It must exist (it is never created). Refused (**400**, `error` starting "Also save event clips to:"): a relative path, `..`, `\\?\` or `\\.\` paths, a share on this computer (`\\localhost\...`), a whole system drive, system and program folders, temporary folders (`/tmp`, `/var/tmp`), a user's own top folder, AppData, and AmberSight's data folder, program folder or recording folders (inside them or holding them, also through links, on the same server and share for network paths); also two cameras whose names would give the same folder there. At each copy (and by the test below) a folder anyone on the computer may change (Unix) is refused. Checked on the disk only when it changes, at most 10 s. |
+| `copy_events_keep_days` | int | Delete copies older than this many days, 0 = keep them (at most 3650). Only files with AmberSight's own names in its own date folders are deleted. |
+| `copy_events_only_confirmed` | bool | Copy only the events that count by what was detected: an object AI confirmed, a sound, or the camera's own detection (with AI off: every event). Notification settings (alerts off, alert hours, pauses, limits, `alert_labels`, `alert_ignore_polys`) never leave a copy out. |
+
+Files: `<folder>/<Camera>/<YYYY-MM-DD>/<HH-MM-SS> <labels>.mp4` (the server's local time of the
+event's start; the camera name and labels with characters no file system allows replaced by `_`),
+plus the event's picture as `.jpg`; a different file of that name already there gets ` (2)` and so
+on. Each is written as `<name>.<8 hex>.part` and renamed when complete. A copy is made a few
+seconds after the event and its post-roll end (a battery camera's: once its card's first seconds
+are in, at most 10 minutes). While the folder is missing, cannot be written or its drive has less
+than 2 GB (or 5%) free (10 GB or 10% on the system drive or the data folder's drive), copies wait
+(and survive a restart) for up to 3 days, then are skipped; so are events whose recordings cannot be
+read after 3 tries. Loitering, line-crossing and package events are not copied separately. Docker:
+the local time is the container's (`TZ`).
+
+`GET /api/cameras` (admins) adds the three fields and `copy_events_status` (`null` when off):
+`{copied, last_ok, last_file, last_note, failing_since, failures, last_error, hint, skipped,
+last_skip, trimmed, busy_since, waiting}` (`last_note`: e.g. only part of it was recorded;
+`busy_since`: a copy running since then). `copied`, `skipped` and `trimmed` count since the server started; `last_ok` and
+`failing_since` are epoch seconds (`failing_since` `null` while copies work); `last_file` is relative
+to the folder; `last_error` and `hint` are plain words. While copies keep failing, `GET /api/health`
+has a problem with key `copy:<camera name>` after two failures in a row or a minute (a system
+alert after `[alerts] system_alert_minutes`), also when a copy has been running for 3 minutes (the
+folder is not responding); it clears when a copy works again.
+
+The folder is remembered by what it is (volume and file id), as of the last save that changed it or
+the last test. A different folder at that path later (deleted and made again, swapped for a link or
+another folder) gets `last_error` "the copy folder was replaced ..." and no copies until a test
+accepts it.
+
+`POST /api/event-copy/test {"path": "..."}` (admin): checks the folder the way saving does, then
+writes and removes a test file there (at most 15 s; one check of a folder at a time, a second one
+answers "still checking"), and accepts the folder now there as the copy folder. Answers `{ok, message}` (200 either way);
+`message` says what is wrong and what to do, or how little space is free.
 
 ---
 
@@ -2302,6 +2545,43 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.9.0**
+
+- `caps` (what the player can decode) on `GET /api/live/:id/stream`, `GET /api/live/:id/info`,
+  `GET /api/playback` and `GET /api/clips/:id`: untouched when the stream fits, else transcoded on
+  the server's video encoder (or in software, limited) to the largest size that fits. Info fields
+  `codec`, `width`, `height`, `fps`, `transcoded`, `bitrate_kbps`, `source`, `encoder`, `why`;
+  `start` and `info=1` on playback and clips (`start_ms`, `duration_ms`, `media_start_ms`,
+  `media_duration_ms`); `Range: bytes=0-0` and `HEAD` answer headers only (with `x-clip-*` when
+  transcoded) and never start a transcode; `X-AS-*` headers; `[transcode]` settings;
+  `GET /api/connections` `transcodes` (admin). See "Best quality on every device" in section 4.
+  `GET /api/whoami` `features` (e.g. `["caps", "operator", "event_copy"]`, also before sign-in).
+- Event clips saved to a folder: camera settings `copy_events_to`, `copy_events_keep_days`,
+  `copy_events_only_confirmed` (the old name `copy_events_only_alerts` is still read);
+  `copy_events_status` in `GET /api/cameras` (admins); new admin `POST /api/event-copy/test`; health
+  problem key `copy:<camera>`. See section 6.
+- Operator accounts: a third role between viewer and admin. `GET /api/whoami` adds `role` and `perms`
+  (`admin` stays `false` for operators); `GET /api/me/account` adds `role`. Operators may use PTZ,
+  talk and manual clips, arm and profiles, notification pauses, keep and review events, and a
+  camera's detection and alert fields in `PUT /api/cameras/:id`, as far as their rights go and only
+  on their cameras. See "Roles and camera restrictions".
+- `GET /api/users` adds `role` and `perms` per account; `POST /api/users` takes `"role": "viewer" |
+  "operator" | "admin"` (or the old `admin`) and `"perms": {...}` (a right left out is on; a name
+  that is not a right is **400**). Giving operator rights or more cameras takes the admin's own
+  password, like making an admin. An admin made `"admin": false` with no `role` becomes a viewer.
+- `GET /api/whoami` `perms` are what the session may do now (also `pause`), plus `limited`; the
+  sign-in answers (`POST /api/login`, `/api/login/totp`, `/api/pair`) carry `role`, `perms` and
+  `limited` too. Operators limited to some cameras cannot arm, disarm or switch profiles. New
+  `GET /api/camera-defaults`.
+- Camera settings have limits when saved (any account): at most 32 rectangles (inside the picture,
+  not empty) or 32 polygons of each kind, 3 to 64 corners inside the picture, 32 alert zones, 64 AI
+  objects, 20 sounds (each once); windows exactly `HH:MM-HH:MM`; `motion_algorithm` `objects` or
+  `frame-diff`; `alert_priority` `low`, `normal`, `high` or `urgent`. A camera saved before keeps
+  saving while those values stay unchanged.
+- `POST /api/events/:id/protect` answers **503** when too many kept clips are waiting to be saved
+  (nothing changes; try again later).
+- Device tokens with the `"admin"` scope can be made by operators; they do what the operator may.
 
 **New in 0.8.0**
 

@@ -715,6 +715,7 @@ async fn try_ticket(engine: Arc<Engine>, hold: crate::auth::TicketHold, body: Co
             crate::auth::record_success(ip);
             let _ = engine.db.insert_audit(&user, &ip.to_string(), if left.is_some() { "sign-in (recovery code)" } else { "sign-in (two-step code)" }, "", 200);
             let mut answer = serde_json::json!({ "user": user, "admin": admin });
+            crate::web::add_role(&engine, &mut answer, &user, admin);
             if let Some(n) = left {
                 answer["recovery_left"] = n.into();
             }
@@ -750,7 +751,7 @@ async fn try_ticket(engine: Arc<Engine>, hold: crate::auth::TicketHold, body: Co
 }
 
 /// `GET /api/me/account`: what "Your account" shows.
-pub async fn me_account(State(engine): State<Arc<Engine>>, Extension(caller): Extension<Caller>, Extension(admin): Extension<IsAdmin>, headers: HeaderMap) -> Response {
+pub async fn me_account(State(engine): State<Arc<Engine>>, Extension(caller): Extension<Caller>, Extension(admin): Extension<IsAdmin>, role: Option<Extension<crate::auth::Role>>, headers: HeaderMap) -> Response {
     if let Some(r) = signed_in_only(&caller.0) {
         return r;
     }
@@ -761,6 +762,7 @@ pub async fn me_account(State(engine): State<Arc<Engine>>, Extension(caller): Ex
     Json(serde_json::json!({
         "user": caller.0,
         "admin": admin.0,
+        "role": role.map(|r| r.0.name()),
         "two_step": {
             "on": on,
             "recovery_left": if on { engine.db.recovery_count(&caller.0).unwrap_or(0) } else { 0 },
@@ -1087,7 +1089,7 @@ pub struct TokenReq {
 
 /// `POST /api/me/tokens {"name", "scope"?, "password", "code"?}`: a new device
 /// token, answered once.
-pub async fn token_create(State(engine): State<Arc<Engine>>, Extension(caller): Extension<Caller>, Extension(admin): Extension<IsAdmin>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(req): Json<TokenReq>) -> Response {
+pub async fn token_create(State(engine): State<Arc<Engine>>, Extension(caller): Extension<Caller>, Extension(admin): Extension<IsAdmin>, role: Option<Extension<crate::auth::Role>>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(req): Json<TokenReq>) -> Response {
     if let Some(r) = signed_in_only(&caller.0) {
         return r;
     }
@@ -1103,9 +1105,14 @@ pub async fn token_create(State(engine): State<Arc<Engine>>, Extension(caller): 
     };
     // Before the code is used up: this caller's rights (a session from a linked
     // server may have fewer than its account) and the account's, as they are now.
-    let account_admin = crate::auth::accounts(&engine.config.lock().unwrap()).iter().any(|(u, _, a)| *u == user && *a);
-    if want_admin && !(account_admin && admin.0) {
-        return (StatusCode::FORBIDDEN, "only an admin can have a token with control rights").into_response();
+    let (account_admin, account_operator) = {
+        let cfg = engine.config.lock().unwrap();
+        (crate::auth::accounts(&cfg).iter().any(|(u, _, a)| *u == user && *a), crate::auth::is_operator(&cfg, &user))
+    };
+    // An operator's control token does what the operator may (see web.rs auth_mw).
+    let session_operator = role.is_some_and(|r| r.0.is_operator());
+    if want_admin && !((account_admin && admin.0) || (account_operator && session_operator)) {
+        return (StatusCode::FORBIDDEN, "only an admin or an operator can have a token with control rights").into_response();
     }
     // (From when the request was let in: anything changing the account since,
     // like a disable during the slow password check, stops this.)

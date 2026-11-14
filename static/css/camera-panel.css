@@ -38,6 +38,7 @@
 
 /* body */
 .cs-body { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 var(--s4) var(--s5); }
+.cs-opnote { margin: var(--s3) 0 0; }
 .cs-sec { padding: var(--s4) 0 var(--s3); border-bottom: 1px solid var(--line); }
 .cs-sec:last-of-type { border-bottom: 0; }
 .cs-sechd { display: flex; align-items: center; gap: var(--s2); }
@@ -300,3 +301,12 @@ html[data-touch="1"] .ni-copy, html[data-touch="1"] .ni-bar .btn { min-height: 4
 
 .cs-onvif .cs-onvif-st { margin: -2px 0 var(--s2); color: var(--muted); font-size: var(--fs); }
 .cs-onvif .cs-onvif-act { display: flex; flex-wrap: wrap; gap: var(--s2); margin-bottom: var(--s2); }
+
+/* event clips also saved to a folder */
+.cs-cprow { display: flex; gap: var(--s2); min-width: 0; align-items: center; }
+.cs-drawer .cs-pane .cs-cprow input { flex: 1; width: auto; }
+.cs-cprow .btn { flex: none; }
+.cs-drawer .cs-pane .cs-cpst { overflow-wrap: anywhere; }
+.cs-cpst.ok { color: var(--ok); }
+.cs-cpst.bad { color: var(--bad); }
+.cs-cpst[hidden], [data-cpopts][hidden] { display: none; }

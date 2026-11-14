@@ -458,11 +458,22 @@ pub fn fetch(data_dir: &Path, repo: &str, progress: &dyn Fn(u64, u64)) -> Result
 
     let tools = crate::ffmpeg_bin::tools_dir(data_dir);
     std::fs::create_dir_all(&tools).with_context(|| format!("could not make {}", tools.display()))?;
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(tools.join("cuda.lock")).context("could not open the add-on lock file")?;
-    // SAFETY: flock on a file this function keeps open; released when it is closed.
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(tools.join("cuda.lock")).context("could not open the add-on lock file")?;
+    // SAFETY: flock on a file this function keeps open.
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
         bail!("could not lock {}", tools.join("cuda.lock").display());
     }
+    // Unlocked explicitly when this function returns, not by closing the file: a child process
+    // another thread is just starting (forked, not yet running its program) holds a copy of
+    // the descriptor, and the lock would last until that copy is closed.
+    struct Unlock(std::fs::File);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            // SAFETY: the descriptor stays open for as long as self lives.
+            unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN) };
+        }
+    }
+    let lock = Unlock(file);
     let dest = folder(data_dir);
     // Another process may have put it in place while this one waited.
     if has_libs(&dest) && trusted(&dest, me).is_ok() {
