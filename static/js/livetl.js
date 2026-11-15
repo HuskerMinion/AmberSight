@@ -1318,13 +1318,20 @@ function ticksHtml(W) {
   let step = STEPS[STEPS.length - 1];
   for (const s of STEPS) if (s * ppm >= 74) { step = s; break; }
   const off = new Date(from).getTimezoneOffset() * 60000;
+  // Where the "Live" word is (beside the now line, to its left near the
+  // right end, as drawNow places it): a tick's time never runs into it.
+  const nowX = (Date.now() - from) * ppm;
+  const liveAt = nowX < 0 || nowX > W ? null : (nowX > W - 56 ? [nowX - 48, nowX + 2] : [nowX - 2, nowX + 48]);
   let html = '';
   for (let t = Math.ceil((from - off) / step) * step + off; t <= to; t += step) {
     const d = new Date(t);
     const mid = d.getHours() === 0 && d.getMinutes() === 0;
-    const lab = mid ? MONTHS[d.getMonth()] + ' ' + d.getDate()
+    const x = (t - from) * ppm;
+    let lab = mid ? MONTHS[d.getMonth()] + ' ' + d.getDate()
       : pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + (step < 60e3 ? ':' + pad2(d.getSeconds()) : '');
-    html += '<span class="tlt' + (mid ? ' day' : '') + '" style="left:' + ((t - from) * ppm).toFixed(1) + 'px">' + lab + '</span>';
+    // (The time starts 4 px right of its line; about 7 px a character.)
+    if (liveAt && x + 4 < liveAt[1] && x + 8 + lab.length * 7 > liveAt[0]) lab = '';
+    html += '<span class="tlt' + (mid ? ' day' : '') + '" style="left:' + x.toFixed(1) + 'px">' + lab + '</span>';
   }
   return html;
 }

@@ -13,8 +13,12 @@ export async function refreshStatus() {
   try {
     const s = await api('/api/status');
     if (s.name) state.serverName = s.name;
+    // Recordings: what the index holds in every folder (storage.bytes is the
+    // data folder only: event clips, the database and what is recorded there).
+    const st = s.storage || {};
+    const rec = typeof st.indexed_bytes === 'number' ? fmtSize(st.indexed_bytes) + ' of recordings' : fmtSize(st.bytes || 0) + ' in the data folder';
     const text = s.online + '/' + s.cameras + ' online · ' + s.events + ' events · ' +
-      fmtSize(s.storage.bytes) + ' (' + s.storage.clips + ' clips) · up ' + Math.floor(s.uptime_seconds / 60) + ' min';
+      rec + ' · ' + (st.clips || 0) + ' event clips · up ' + Math.floor(s.uptime_seconds / 60) + ' min';
     $('statusText').textContent = text;
     armingUntil = !s.armed && s.arming_until ? s.arming_until * 1000 : 0;
     armDelay = s.arm_delay || 0;

@@ -5,6 +5,11 @@
 # (PUID/PGID, default 1000), finds the groups of the video devices in
 # /dev/dri, and runs AmberSight as that user. PUID=0 runs it as root (for
 # rootless Docker or Podman, where root in the container is your own user).
+#
+# /recordings (and any folder listed in RECORDINGS_DIRS, separated by colons;
+# a symlink is left alone) is handed over only when it is new: empty (or holding only
+# lost+found) and owned by root, which is what Docker makes of a host folder
+# that did not exist. A share that already has recordings is never re-owned.
 set -eu
 CONFIG="${AMBERSIGHT_CONFIG:-/config/config.toml}"
 PUID="${PUID:-1000}"
@@ -23,6 +28,17 @@ if [ "$(id -u)" = 0 ] && [ "$PUID" != 0 ]; then
         if [ "$(stat -c %u:%g "$d")" != "$PUID:$PGID" ]; then
             chown -R "$PUID:$PGID" "$d" || echo "warning: could not give $d to $PUID:$PGID; AmberSight may not be able to write there" >&2
         fi
+    done
+    printf '%s\n' /recordings "$(printf '%s' "${RECORDINGS_DIRS:-}" | tr ':' '\n')" | while IFS= read -r d; do
+        # A trailing slash would hide a symlink from the -L test.
+        while [ "${d%/}" != "$d" ] && [ "$d" != / ]; do d="${d%/}"; done
+        case "$d" in /?*) ;; *) continue ;; esac
+        [ -d "$d" ] && [ ! -L "$d" ] || continue
+        [ "$(stat -c %u "$d")" = 0 ] || continue
+        if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 ! -name lost+found 2>/dev/null | head -n 1)" ]; then
+            continue
+        fi
+        chown "$PUID:$PGID" "$d" || echo "warning: could not give $d to $PUID:$PGID; AmberSight may not be able to record there" >&2
     done
     groups=""
     for dev in /dev/dri/renderD* /dev/dri/card*; do

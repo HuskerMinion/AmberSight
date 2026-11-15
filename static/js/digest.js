@@ -136,7 +136,10 @@ async function show() {
     if (!r || !Object.keys(r).length) throw Object.assign(new Error('gone'), { status: 404 });
     root.innerHTML = '<div class="ac dg-page"><h3>Morning summary</h3>' + digestHtml(r) + '</div>';
   } catch (e) {
-    root.innerHTML = '<div class="ac dg-page"><h3>Morning summary</h3><p class="hint">' + (e && e.status === 404 ? 'That summary is gone or does not exist.' : esc(errText(e))) + '</p></div>';
+    // "latest" with none at all: no summary has been made yet (a given id
+    // that is no longer there is gone).
+    const none = id === 'latest' ? 'No summary yet. The first one shows here once it has been made.' : 'That summary is gone or does not exist.';
+    root.innerHTML = '<div class="ac dg-page"><h3>Morning summary</h3><p class="hint">' + (e && e.status === 404 ? none : esc(errText(e))) + '</p></div>';
   }
 }
 registerTab({ id: 'digest', label: 'Summary', order: 66, noNav: true, init(e) { root = e; }, show });

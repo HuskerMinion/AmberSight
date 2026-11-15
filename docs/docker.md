@@ -61,6 +61,14 @@ another user. When `/config` or `/data` belongs to someone else (the first
 start, a changed `PUID`), the container gives that folder and everything in
 it to that user when it starts. Files copied in later as root, into a folder
 that already belongs to the user, are not changed: fix their owner by hand.
+`/recordings` is handed to that user only when it is new: owned by root (what
+Docker makes of a host folder that did not exist) and empty. Any other folder
+you record to, including an existing share full of recordings, is left as it
+is and must already be writable by `PUID:PGID`. Other new, empty mount points
+can be named in `RECORDINGS_DIRS` (separated by colons, for example
+`/cams1:/cams2`) to get the same treatment; a symlink is left alone. When
+AmberSight cannot write to a recording folder, the health page says so, and a
+camera recorded through ffmpeg shows it as its last error too.
 Use `PUID`/`PGID` rather than `--user`: with `--user` the folders and the
 video devices' groups are not set up. `PUID=0` runs AmberSight as root, for
 rootless Docker or Podman, where root in the container is your own user.

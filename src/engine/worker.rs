@@ -332,6 +332,15 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let child_box = Arc::new(Mutex::new(child));
         let mut children: Vec<Arc<Mutex<std::process::Child>>> = Vec::new();
         children.push(child_box.clone());
+        // Recorders (direct, sub stream) with their stderr, and whether their
+        // early exit has been looked at.
+        let mut rec_watch: Vec<RecWatch> = Vec::new();
+        let started = std::time::Instant::now();
+        let mut last_rec_check = std::time::Instant::now();
+        let mut motion_checked = false;
+        let motion_bad = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut motion_renew = std::time::Instant::now();
+        let mut motion_started = std::time::Instant::now();
 
         // Direct mode: a second ffmpeg stream-copies the source into segments
         // while the analysis process decodes its own substream.
@@ -366,8 +375,12 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                     None
                 }
             };
-            if rec_child.is_some() {
-                children.push(Arc::new(Mutex::new(rec_child.unwrap())))
+            if let Some(c) = rec_child {
+                let cb = Arc::new(Mutex::new(c));
+                children.push(cb.clone());
+                if let Some((_, t)) = extra_tails.last() {
+                    rec_watch.push(RecWatch::new(cb, t.clone()));
+                }
             }
         }
         // The sub stream, copied all along (named so it is indexed as the
@@ -389,7 +402,11 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                     if let Some(e) = c.stderr.take() {
                         extra_tails.push(("sub stream recorder", drain_stderr(e)));
                     }
-                    children.push(Arc::new(Mutex::new(c)));
+                    let cb = Arc::new(Mutex::new(c));
+                    children.push(cb.clone());
+                    if let Some((_, t)) = extra_tails.last() {
+                        rec_watch.push(RecWatch::new(cb, t.clone()));
+                    }
                 }
                 Err(err) => warn!("camera '{}': could not start the sub stream recorder: {}", cfg.name, err),
             }
@@ -414,6 +431,41 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // A recorder that stopped by itself while the stream goes
+                    // on (a folder that refuses writes) would otherwise go
+                    // unnoticed: the stream never ends.
+                    if cfg.record && last_rec_check.elapsed() >= std::time::Duration::from_secs(5) {
+                        last_rec_check = std::time::Instant::now();
+                        // (Whether the folder is there is asked on the probe's own
+                        // thread: a hung share must not stall frames.)
+                        for w in rec_watch.iter_mut() {
+                            if !w.done {
+                                if w.child.lock().unwrap().try_wait().ok().flatten().is_some() {
+                                    w.done = true;
+                                    let text = w.tail.lock().unwrap().clone();
+                                    if exit_needs_probe(&text, started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
+                                        spawn_folder_check(&folder_name, &folder_root, &seg_dir, 90, Some(w.bad.clone()));
+                                    }
+                                }
+                            } else if w.due_renewal() {
+                                // Dead from a folder problem and the stream
+                                // goes on: keep the finding alive (no restart
+                                // of a camera that is otherwise working).
+                                spawn_folder_check(&folder_name, &folder_root, &seg_dir, 330, Some(w.bad.clone()));
+                            }
+                        }
+                        if !motion_checked && recorder.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_some()) {
+                            motion_checked = true;
+                            motion_renew = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                            let text = extra_tails.iter().rev().find(|(n, _)| *n == "motion recorder").map(|(_, t)| t.lock().unwrap().clone()).unwrap_or_default();
+                            if exit_needs_probe(&text, motion_started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
+                                spawn_folder_check(&folder_name, &folder_root, &seg_dir, 90, Some(motion_bad.clone()));
+                            }
+                        } else if motion_checked && motion_bad.load(Ordering::Relaxed) && std::time::Instant::now() >= motion_renew {
+                            motion_renew = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                            spawn_folder_check(&folder_name, &folder_root, &seg_dir, 330, Some(motion_bad.clone()));
+                        }
+                    }
                     buf.extend_from_slice(&chunk[..n]);
                     loop {
                         if buf.len() >= 3 && !(buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF) {
@@ -473,7 +525,10 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                                     extra_tails.retain(|(n, _)| *n != "motion recorder");
                                                     extra_tails.push(("motion recorder", drain_stderr(e)));
                                                 }
-                                                recorder = Some(c)
+                                                recorder = Some(c);
+                                                motion_started = std::time::Instant::now();
+                                                motion_checked = false;
+                                                motion_bad.store(false, Ordering::Relaxed);
                                             }
                                             Err(err) => warn!("camera '{}': motion-only recorder failed: {}", cfg.name, err),
                                         }
@@ -522,7 +577,29 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let main_text = stderr_tail.map(|t| t.lock().unwrap().clone()).unwrap_or_default();
         if !local {
             let why = tail_summary(&main_text);
-            handle.state.write().unwrap().last_error = Some(ended_text(why.as_deref()));
+            let mut reason = ended_text(why.as_deref());
+            // A recording folder this account cannot write explains it best
+            // (only for cameras that record, and never for a folder that is
+            // missing: that has its own "cannot read" problem).
+            if cfg.record && folder_root.is_dir() {
+                let extra_texts: Vec<String> = extra_tails.iter().map(|(_, t)| t.lock().unwrap().clone()).collect();
+                let mut texts: Vec<&str> = vec![main_text.as_str()];
+                texts.extend(extra_texts.iter().map(|t| t.as_str()));
+                // The disk is awake now, so a real write is fair when any
+                // ffmpeg of this camera hints at it; or when nothing came
+                // through, but then at most every 10 minutes per folder.
+                let no_frames = handle.state.read().unwrap().frames <= frames_at_start;
+                let real = write_hint(&texts) || (no_frames && super::storage::real_probe_due(&folder_name, 600));
+                let keep = (backoff * 2).min(60) as i64 + 30;
+                if let Some(path) = super::storage::check_folder(&super::storage::SYSTEM_PROBES, &folder_name, &seg_dir, real, keep) {
+                    reason = super::storage::unwritable_text(&folder_name, &path, true);
+                    // Keep a different cause ffmpeg named (a refused sign-in).
+                    if let Some(c) = tail_cause(&main_text) {
+                        reason = format!("{reason} (ffmpeg: {c})");
+                    }
+                }
+            }
+            handle.state.write().unwrap().last_error = Some(reason);
             handle.state.write().unwrap().last_error_at = Some(Utc::now().timestamp());
             for (name, t) in &extra_tails {
                 let text = t.lock().unwrap().clone();
@@ -549,7 +626,8 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 backoff = 3;
             }
             let why = tail_summary(&main_text);
-            warn!("camera '{}': {}, retrying in {}s", cfg.name, ended_text(why.as_deref()), backoff);
+            let reason = handle.state.read().unwrap().last_error.clone().unwrap_or_else(|| ended_text(why.as_deref()));
+            warn!("camera '{}': {}, retrying in {}s", cfg.name, reason, backoff);
             let until = std::time::Instant::now() + std::time::Duration::from_secs(backoff);
             while std::time::Instant::now() < until && handle.active.load(Ordering::Relaxed) {
                 thread::sleep(std::time::Duration::from_millis(300));
@@ -1048,11 +1126,148 @@ pub(crate) fn redact_text(line: &str) -> String {
         .join(" ")
 }
 
-/// The last meaningful lines of ffmpeg's stderr (at most two), credentials
-/// removed. None when nothing useful was printed.
+/// Words that name what went wrong (the last such line is the cause).
+const CAUSES: [&str; 17] = [
+    "permission denied", "no such file or directory", "401", "403", "404", "unauthorized", "forbidden", "not found",
+    "connection refused", "connection timed out", "timeout", "timed out", "invalid data found", "no route to host",
+    "name or service not known", "could not resolve", "server returned",
+];
+/// Lines ffmpeg prints about the outcome, not the reason.
+const GENERIC: [&str; 8] = [
+    "nothing was written into output file", "error opening output file", "error opening input file", "conversion failed",
+    "exiting normally", "error while opening encoder", "error initializing output stream", "error muxing",
+];
+
+/// "[out#0/segment @ 0x55d] text" -> "text".
+fn strip_prefix_tag(l: &str) -> &str {
+    if l.starts_with('[') {
+        if let Some(end) = l.find("] ") {
+            if l[..end].contains(" @ 0x") {
+                return l[end + 2..].trim_start();
+            }
+        }
+    }
+    l
+}
+
+/// Cut `s` to at most `max` characters at a word boundary, with "…".
+fn cut_words(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    let next_is_space = s.chars().nth(max).is_some_and(|c| c.is_whitespace());
+    let cut = if next_is_space { head.as_str() } else { head.rsplit_once(char::is_whitespace).map(|(h, _)| h).filter(|h| !h.is_empty()).unwrap_or(head.as_str()) };
+    format!("{}…", cut.trim_end())
+}
+
+/// Why ffmpeg stopped, from its stderr, credentials removed: the last line
+/// that names a known cause, else the last meaningful lines (at most two).
+/// None when nothing useful was printed.
 pub(crate) fn tail_summary(text: &str) -> Option<String> {
+    tail_parts(text).map(|(t, _)| t)
+}
+
+/// Whether any of these stderr texts says the recording folder refused writes.
+pub(crate) fn write_hint(texts: &[&str]) -> bool {
+    texts.iter().any(|t| {
+        let l = t.to_ascii_lowercase();
+        l.contains("permission denied") || l.contains("read-only")
+    })
+}
+
+/// A recorder that exited by itself is worth a real write probe when its
+/// stderr hints at the folder, or it did not last long.
+/// `early_due` says whether an early exit without a hint may cost a probe
+/// (rate limit); it is only asked when needed.
+pub(crate) fn exit_needs_probe(tail: &str, ran_for: std::time::Duration, early_due: &mut dyn FnMut() -> bool) -> bool {
+    write_hint(&[tail]) || (ran_for < std::time::Duration::from_secs(30) && early_due())
+}
+
+/// A recorder (direct or sub stream) being watched while the stream goes on.
+struct RecWatch {
+    child: Arc<Mutex<std::process::Child>>,
+    tail: StderrTail,
+    done: bool,
+    /// Its folder refused writes the last time that was looked at.
+    bad: Arc<std::sync::atomic::AtomicBool>,
+    next_renewal: std::time::Instant,
+}
+
+impl RecWatch {
+    fn new(child: Arc<Mutex<std::process::Child>>, tail: StderrTail) -> Self {
+        RecWatch { child, tail, done: false, bad: Arc::new(std::sync::atomic::AtomicBool::new(false)), next_renewal: std::time::Instant::now() + std::time::Duration::from_secs(300) }
+    }
+    /// A recorder that died from a folder problem renews its finding every
+    /// 5 minutes while it stays that way.
+    fn due_renewal(&mut self) -> bool {
+        if self.bad.load(Ordering::Relaxed) && std::time::Instant::now() >= self.next_renewal {
+            self.next_renewal = std::time::Instant::now() + std::time::Duration::from_secs(300);
+            return true;
+        }
+        false
+    }
+}
+
+/// Folders with a probe outstanding: a second is not started meanwhile (a
+/// hung share would otherwise collect a thread every few seconds).
+static PROBING: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+
+/// Held while a folder's probe runs.
+struct ProbeSlot(String);
+
+impl ProbeSlot {
+    fn take(folder: &str) -> Option<ProbeSlot> {
+        PROBING.lock().unwrap().get_or_insert_with(Default::default).insert(folder.to_string()).then(|| ProbeSlot(folder.to_string()))
+    }
+}
+
+impl Drop for ProbeSlot {
+    fn drop(&mut self) {
+        if let Some(s) = PROBING.lock().unwrap().as_mut() {
+            s.remove(&self.0);
+        }
+    }
+}
+
+/// A real write probe of the folder, on a thread of its own (a slow disk or a
+/// hung share must not stall the frame loop; the folder's existence is asked
+/// there too). `bad` gets the answer. Skipped while one is already running.
+fn spawn_folder_check(folder: &str, folder_root: &std::path::Path, seg_dir: &std::path::Path, keep_secs: i64, bad: Option<Arc<std::sync::atomic::AtomicBool>>) {
+    let Some(slot) = ProbeSlot::take(folder) else { return };
+    let (folder, root, seg_dir) = (folder.to_string(), folder_root.to_path_buf(), seg_dir.to_path_buf());
+    thread::spawn(move || {
+        let _slot = slot;
+        if !root.is_dir() {
+            return;
+        }
+        let found = super::storage::check_folder(&super::storage::SYSTEM_PROBES, &folder, &seg_dir, true, keep_secs).is_some();
+        if let Some(b) = bad {
+            b.store(found, Ordering::Relaxed);
+        }
+    });
+}
+
+/// The last line naming a known cause that is not about the folder itself
+/// (permission denied, no such file), when there is one.
+pub(crate) fn tail_cause(text: &str) -> Option<String> {
+    clean_lines(text).iter().rev().find(|l| is_cause(l) && !is_folder_cause(l)).map(|l| cut_words(l, 240))
+}
+
+fn is_folder_cause(l: &str) -> bool {
+    let low = l.to_ascii_lowercase();
+    low.contains("permission denied") || low.contains("no such file or directory")
+}
+
+fn is_cause(l: &str) -> bool {
+    let low = l.to_ascii_lowercase();
+    CAUSES.iter().any(|c| if c.chars().all(|ch| ch.is_ascii_digit()) { low.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|w| w == *c) } else { low.contains(c) })
+}
+
+/// ffmpeg's stderr without banner lines and tags, credentials removed.
+fn clean_lines(text: &str) -> Vec<String> {
     const SKIP: [&str; 4] = ["ffmpeg version", "built with", "configuration:", "press [q]"];
-    let lines: Vec<String> = text
+    text
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
@@ -1062,17 +1277,32 @@ pub(crate) fn tail_summary(text: &str) -> Option<String> {
             let lib_banner = low.starts_with("lib") && low.contains(". ") && low.chars().any(|c| c.is_ascii_digit()) && low.split_whitespace().count() <= 4;
             !lib_banner && !SKIP.iter().any(|p| low.starts_with(p))
         })
-        .map(|l| redact_text(l))
-        .collect();
-    let keep = &lines[lines.len().saturating_sub(2)..];
+        .map(|l| redact_text(strip_prefix_tag(l)))
+        .collect()
+}
+
+fn tail_parts(text: &str) -> Option<(String, bool)> {
+    let lines = clean_lines(text);
+    let is_generic = |l: &str| {
+        let low = l.to_ascii_lowercase();
+        GENERIC.iter().any(|g| low.contains(g))
+    };
+    let mut found = false;
+    let keep: Vec<&str> = match lines.iter().rposition(|l| is_cause(l)) {
+        Some(i) => {
+            found = true;
+            vec![lines[i].as_str()]
+        }
+        None => {
+            let specific: Vec<&String> = lines.iter().filter(|l| !is_generic(l)).collect();
+            let pool: Vec<&str> = if specific.is_empty() { lines.iter().map(|l| l.as_str()).collect() } else { specific.into_iter().map(|l| l.as_str()).collect() };
+            pool[pool.len().saturating_sub(2)..].to_vec()
+        }
+    };
     if keep.is_empty() {
         return None;
     }
-    let mut out = keep.join("; ");
-    if out.chars().count() > 240 {
-        out = out.chars().take(240).collect::<String>() + "...";
-    }
-    Some(out)
+    Some((cut_words(&keep.join("; "), 240), found))
 }
 
 /// Text for the log and the camera's last_error when a network stream ends.
@@ -1108,11 +1338,82 @@ mod tail_tests {
     #[test]
     fn tail_picks_last_meaningful_lines() {
         let t = "ffmpeg version 6.1 Copyright\n  built with gcc\n  configuration: --x\n\nfirst problem\nsecond\n\nrtsp://u:pw@h/s: 401 Unauthorized\n\n";
-        assert_eq!(tail_summary(t).unwrap(), "second; rtsp://h/s: 401 Unauthorized");
+        assert_eq!(tail_summary(t).unwrap(), "rtsp://h/s: 401 Unauthorized");
+        assert_eq!(tail_summary("first problem\nsecond\n").unwrap(), "first problem; second");
         assert!(tail_summary("\n  \nffmpeg version 7\n").is_none());
         assert!(tail_summary("").is_none());
         let long = "x".repeat(1000);
         assert!(tail_summary(&long).unwrap().len() < 260);
+    }
+
+    #[test]
+    fn cause_beats_generic_tail_lines() {
+        let t = "[segment @ 0x55d1] Failed to open segment '/recordings/cameras/a/segments/a-seg000000.mp4'\n\
+                 [segment @ 0x55d1] Error opening '/recordings/cameras/a/segments/a-seg000000.mp4': Permission denied\n\
+                 [out#0/segment @ 0x55d2] Nothing was written into output file, because at least one of its streams received no packets.\n\
+                 [out#1/image2pipe @ 0x55d3] Nothing was written into output file, because at least one of its streams received no packets.\n";
+        let s = tail_summary(t).unwrap();
+        assert_eq!(s, "Error opening '/recordings/cameras/a/segments/a-seg000000.mp4': Permission denied");
+        let t = "[rtsp @ 0x1] method DESCRIBE failed: 401 Unauthorized\nError opening input file rtsp://u:pw@h/s.\nError opening input files: Server returned 401 Unauthorized (authorization failed)\n[out#0/segment @ 0x2] Nothing was written into output file, because at least one of its streams received no packets.\nConversion failed!\n";
+        let s = tail_summary(t).unwrap();
+        assert_eq!(s, "Error opening input files: Server returned 401 Unauthorized (authorization failed)");
+        // Only generic lines: they are still shown.
+        assert!(tail_summary("Conversion failed!\n").unwrap().contains("Conversion failed"));
+    }
+
+    #[test]
+    fn cause_only_when_one_is_named() {
+        assert_eq!(tail_cause("x\n[rtsp @ 0x1] 401 Unauthorized\nConversion failed!\n").unwrap(), "401 Unauthorized");
+        assert!(tail_cause("Nothing was written into output file\nsomething odd\n").is_none());
+    }
+
+    #[test]
+    fn cause_search_goes_backwards_past_folder_lines() {
+        let t = "[rtsp @ 0x1] 401 Unauthorized\nError opening 'x.mp4': Permission denied\n[out#0 @ 0x2] Nothing was written into output file\n";
+        assert_eq!(tail_cause(t).unwrap(), "401 Unauthorized");
+        assert!(tail_cause("Error opening 'x.mp4': Permission denied\n").is_none());
+    }
+
+    #[test]
+    fn the_folder_hint_reads_every_ffmpeg_of_the_camera() {
+        let main = "Conversion failed!";
+        let rec = "[segment @ 0x1] Error opening 'x.mp4': Permission denied";
+        assert!(!write_hint(&[main]));
+        assert!(write_hint(&[main, rec]));
+        assert!(write_hint(&["Read-only file system"]));
+    }
+
+    #[test]
+    fn only_one_probe_per_folder_runs_at_a_time() {
+        let a = ProbeSlot::take("slot-test").expect("free");
+        assert!(ProbeSlot::take("slot-test").is_none());
+        assert!(ProbeSlot::take("slot-other").is_some());
+        drop(a);
+        assert!(ProbeSlot::take("slot-test").is_some());
+    }
+
+    #[test]
+    fn an_early_or_telling_recorder_exit_is_probed() {
+        use std::time::Duration;
+        assert!(exit_needs_probe("anything", Duration::from_secs(3), &mut || true));
+        // An early exit without a hint is probed only when the rate limit allows.
+        assert!(!exit_needs_probe("anything", Duration::from_secs(3), &mut || false));
+        let mut asked = false;
+        assert!(exit_needs_probe("x: Permission denied", Duration::from_secs(900), &mut || { asked = true; false }));
+        assert!(!asked, "a hint needs no rate limit");
+        assert!(!exit_needs_probe("Connection reset", Duration::from_secs(900), &mut || true));
+    }
+
+    #[test]
+    fn prefixes_are_stripped_and_cuts_are_at_words() {
+        assert_eq!(tail_summary("[h264 @ 0x7f12ab] something odd happened\nthen [x @ 0x1] this").unwrap(), "something odd happened; then [x @ 0x1] this");
+        let words = "word ".repeat(100);
+        let s = tail_summary(&words).unwrap();
+        assert!(s.ends_with("word…"), "{s}");
+        assert!(s.chars().count() <= 241);
+        assert_eq!(cut_words("short", 10), "short");
+        assert_eq!(cut_words("alpha beta gamma", 8), "alpha…");
+        assert_eq!(cut_words("alpha beta gamma", 10), "alpha beta…");
     }
 
     #[test]

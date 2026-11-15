@@ -161,6 +161,13 @@ impl Engine {
                 "level": l.level, "label": l.label,
             }));
         }
+        // Folders AmberSight may not write to (recordings would fail).
+        for (name, path) in super::storage::unwritable_folders(&caps, now) {
+            let label = if name.is_empty() { "data".to_string() } else { name.clone() };
+            problem(format!("unwritable:{label}"), &super::storage::unwritable_text(&name, &path, false));
+            shorts.push(format!("{label} folder is not writable"));
+            warnings.push(super::storage::unwritable_text(&name, &path, true));
+        }
         // Devices the hourly check found that are not cameras here yet (not a problem).
         let (new_cameras, _) = super::newcams::current(self);
         serde_json::json!({ "ok": warnings.is_empty(), "warnings": warnings, "short": shorts, "fixes": fixes, "problems": problems, "cameras": cams, "disks": disks, "new_cameras": new_cameras })
@@ -185,7 +192,12 @@ fn ago(secs: i64) -> String {
 /// technical detail. Empty when there is nothing useful to say.
 pub fn plain_error(e: &str) -> String {
     let l = e.to_lowercase();
-    if l.contains("not reachable") || l.contains("timed out") || l.contains("timeout") || l.contains("no route") || l.contains("unreachable") {
+    // First: a folder named "Refused" must not read as a refused camera.
+    if l.contains("is on a read-only file system") {
+        "its recording folder is on a read-only file system".into()
+    } else if l.contains("is not writable by ambersight") {
+        "its recording folder is not writable".into()
+    } else if l.contains("not reachable") || l.contains("timed out") || l.contains("timeout") || l.contains("no route") || l.contains("unreachable") {
         "not reachable".into()
     } else if l.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "401") || l.contains("unauthorized") || l.contains("authentication") {
         "the camera refused the sign-in".into()
@@ -210,6 +222,9 @@ mod tests {
     #[test]
     fn errors_are_in_plain_words_without_addresses() {
         assert_eq!(plain_error("camera not reachable within 15 s (rtsp://192.0.2.10:554/stream1)"), "not reachable");
+        assert_eq!(plain_error("Folder Refused (/r/cameras/a) is not writable by AmberSight (user 99:100)"), "its recording folder is not writable");
+        assert_eq!(plain_error("Folder Timeout (/r) is not writable by AmberSight (user 1:1) (ffmpeg: 401 Unauthorized)"), "its recording folder is not writable");
+        assert_eq!(plain_error("Folder Timeout (/r) is on a read-only file system"), "its recording folder is on a read-only file system");
         assert_eq!(plain_error("RTSP 401 Unauthorized"), "the camera refused the sign-in");
         assert_eq!(plain_error("something odd at rtsp://192.0.2.10/x happened"), "something odd at happened");
         // 401 is a status, not part of a port or a number.

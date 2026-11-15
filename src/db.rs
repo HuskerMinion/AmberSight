@@ -2088,6 +2088,20 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Events of a camera that have a clip file (not a native event, whose clip
+/// is an /api/clips address) named in the index and start
+    /// in [lo, hi] (s) and end at or after `min_end`, the newest first or the oldest first: the few that
+    /// can hold a moment. The start bounds keep the lookup on the start
+    /// index; the camera name is compared without regard to case.
+    pub fn clip_events_starting(&self, camera: &str, lo: i64, hi: i64, min_end: i64, newest_first: bool, limit: usize) -> Result<Vec<Event>> {
+        let order = if newest_first { "DESC" } else { "ASC" };
+        let sql = format!("SELECT {EV_COLS} FROM events WHERE start >= ?1 AND start <= ?2 AND camera = ?3 COLLATE NOCASE AND end >= ?4 AND clip IS NOT NULL AND clip NOT LIKE '/api/%' ORDER BY start {order}, id {order} LIMIT ?5");
+        let conn = self.lock();
+        let mut st = conn.prepare(&sql)?;
+        let rows = st.query_map(params![lo, hi, camera, min_end, limit as i64], event_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // ---- interface state ----
 
     pub fn ui_get(&self, scope: &str, key: &str) -> Result<Option<String>> {

@@ -1739,7 +1739,7 @@ details.hsec[open] { padding-bottom: var(--s2); }
   body.pane #tabbar, body.popout #tabbar { display: none; }
   .helpsearch { top: 48px; }
 }
-body[data-tab="help"] #dock, body[data-tab="timelapse"] #dock { display: none; }
+body[data-tab="help"] #dock, body[data-tab="timelapse"] #dock, body[data-tab="digest"] #dock { display: none; }
 @media (max-width: 560px) { .hwgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .hwcard { padding: var(--s2) var(--s3); min-height: 64px; } .hwcard b { font-size: var(--fs); } }
 /* AI review table: one line a row; the label list is cut short (the full list is its tooltip). */
 .ar-tbl td { white-space: nowrap; }

@@ -130,6 +130,68 @@ pub fn sources_q(
         .collect())
 }
 
+/// The longest an event can run (s): bounds the lookup for the clip holding a moment.
+const EVENT_MAX_SECS: i64 = 2 * 3600;
+
+/// An event's saved clip file that holds part of a window playback could not
+/// assemble from recordings: the file and the stretch it shows (ms).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventClipAt {
+    pub path: PathBuf,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+/// The saved event clip that shows [from_ms, to_ms] (the one holding
+/// `from_ms`, else the first that starts inside the window), for a window
+/// with no recordings playback can read. A camera on the ffmpeg pipeline
+/// keeps its main-stream recordings in a form playback does not read
+/// ("legacy"): the timeline shows them, and each event's video is joined
+/// into a clip file, so that file is what there is to play. The clip starts
+/// where the first recording joined into it starts (as the index has it);
+/// with none left, at the event's pre-roll. The end is where the last of
+/// those recordings ends: it can overstate what the clip file really holds
+/// (the file is not opened to measure it). `pre`/`post`: the camera's
+/// pre- and post-roll (s). `file`: an event id's clip file.
+pub fn event_clip_at(db: &Db, camera: &str, from_ms: i64, to_ms: i64, pre: i64, post: i64, file: impl Fn(&str) -> PathBuf) -> anyhow::Result<Option<EventClipAt>> {
+    // The clip that holds `from_ms` is the latest event starting at or
+    // before it; the first one inside the window is the earliest starting
+    // after it. Two small lookups, bounded by the longest event.
+    let from_s = from_ms.div_euclid(1000);
+    let to_s = to_ms.div_euclid(1000);
+    let mut events = db.clip_events_starting(camera, from_s + pre - EVENT_MAX_SECS - 60, from_s + pre, from_s - post, true, 5)?;
+    events.extend(db.clip_events_starting(camera, from_s + pre + 1, to_s + pre + 60, 0, false, 5)?);
+    let cam = slug(camera);
+    let mut best: Option<EventClipAt> = None;
+    for ev in events {
+        let path = file(&ev.id);
+        if !path.is_file() {
+            continue;
+        }
+        let (a, b) = ((ev.start - pre) * 1000, (ev.end + post) * 1000);
+        // What build_clip joined: the main-stream recordings over the window.
+        let rows: Vec<SegmentRow> = db.segments_overlapping(&cam, a, b)?.into_iter().filter(|r| r.kind != "sub").collect();
+        let (start_ms, end_ms) = if rows.is_empty() {
+            (a, b)
+        } else {
+            (rows.iter().map(|r| r.start_ms).min().unwrap_or(a), rows.iter().map(|r| r.end_ms).max().unwrap_or(b))
+        };
+        if end_ms <= from_ms || start_ms >= to_ms {
+            continue;
+        }
+        let c = EventClipAt { path, start_ms, end_ms };
+        let holds = |x: &EventClipAt| x.start_ms <= from_ms;
+        best = match best {
+            None => Some(c),
+            // One holding `from_ms` wins (the latest such start); else the earliest.
+            Some(o) if holds(&c) && (!holds(&o) || c.start_ms > o.start_ms) => Some(c),
+            Some(o) if !holds(&c) && !holds(&o) && c.start_ms < o.start_ms => Some(c),
+            Some(o) => Some(o),
+        };
+    }
+    Ok(best)
+}
+
 /// Plan a clip over [from_ms, to_ms] from native-format recordings only.
 pub fn window_clip(
     db: &Db,
@@ -633,6 +695,16 @@ impl Engine {
         coverage(&self.db, camera, from_ms, to_ms)
     }
 
+    /// See [`event_clip_at`]: the camera's saved event clip for a window
+    /// playback could not assemble from recordings.
+    pub fn event_clip_at(&self, camera: &str, from_ms: i64, to_ms: i64) -> anyhow::Result<Option<EventClipAt>> {
+        let (pre, post) = {
+            let m = self.config.lock().unwrap().motion_for(camera);
+            (m.pre_roll as i64, m.post_roll as i64)
+        };
+        event_clip_at(&self.db, camera, from_ms, to_ms, pre, post, |id| self.clip_file_path(id))
+    }
+
     /// Names of all configured cameras.
     pub fn camera_names(&self) -> Vec<String> {
         self.config.lock().unwrap().cameras.iter().map(|c| c.name.clone()).collect()
@@ -921,6 +993,55 @@ mod tests {
         assert_eq!(names(sources_q(&db, "cam", 6_000, 9_000, false, resolve).unwrap()), vec![("m1.mp4".into(), false)]);
         // Full quality over 0-15 s: main preferred, sub fills 10-15 s.
         assert_eq!(names(sources_q(&db, "cam", 0, 15_000, false, resolve).unwrap()), vec![("m1.mp4".into(), false), ("s1.mp4".into(), true)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_with_only_an_event_clip_plays_that_clip() {
+        let dir = std::env::temp_dir().join(format!("amber-evclip-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("clips")).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let row = |path: &str, a: i64, b: i64, kind: &str| SegmentRow { path: path.into(), start_ms: a, end_ms: b, bytes: 1, video_frames: 1, kind: kind.into(), folder: String::new() };
+        let ev = |id: &str, start: i64, end: i64| Event { id: id.into(), camera_id: 0, camera: "Garage Temp".into(), start, end, score: 1.0, clip: Some(format!("/data/clips/{id}.mp4")), thumb: None, objects: vec![], protect: false };
+        // ffmpeg's motion-only recordings around two events (shown on the
+        // timeline, not read by playback), and a sub-stream file.
+        db.insert_segment("garage_temp", &row("a1.mp4", 995_000, 1_005_000, "legacy")).unwrap();
+        db.insert_segment("garage_temp", &row("a2.mp4", 1_005_000, 1_015_000, "legacy")).unwrap();
+        db.insert_segment("garage_temp", &row("b1.mp4", 2_000_000, 2_010_000, "legacy")).unwrap();
+        db.insert_segment("garage_temp", &row("s1.mp4", 900_000, 1_100_000, "sub")).unwrap();
+        db.insert_event(&ev("garage_temp-1000", 1000, 1008)).unwrap();
+        db.insert_event(&ev("garage_temp-2003", 2003, 2006)).unwrap();
+        db.insert_event(&ev("garage_temp-3000", 3000, 3005)).unwrap(); // its file is gone
+        std::fs::write(dir.join("clips/garage_temp-1000.mp4"), b"x").unwrap();
+        std::fs::write(dir.join("clips/garage_temp-2003.mp4"), b"x").unwrap();
+        let file = |id: &str| dir.join("clips").join(format!("{id}.mp4"));
+        let at = |a: i64, b: i64| event_clip_at(&db, "Garage Temp", a, b, 5, 5, file).unwrap();
+        // Playback finds nothing it can read there.
+        assert!(window_clip(&db, "Garage Temp", 1_000_000, 1_010_000, |r| dir.join(&r.path)).unwrap().is_none());
+        // The clip holding the moment, with the stretch of the recordings joined into it.
+        let c = at(1_001_000, 1_031_000).unwrap();
+        assert_eq!((c.path.clone(), c.start_ms, c.end_ms), (file("garage_temp-1000"), 995_000, 1_015_000));
+        // A window starting before a clip: the first clip inside it.
+        assert_eq!(at(1_990_000, 2_020_000).unwrap().start_ms, 2_000_000);
+        // Between clips, after the last one, or a clip whose file is gone: nothing.
+        assert!(at(1_500_000, 1_530_000).is_none());
+        assert!(at(2_990_000, 3_020_000).is_none());
+        assert!(event_clip_at(&db, "Other", 1_001_000, 1_031_000, 5, 5, file).unwrap().is_none());
+        // A long window: many later events (no files) cannot push out the clip holding the moment.
+        db.insert_event(&ev("garage_temp-5000", 5000, 5100)).unwrap();
+        std::fs::write(dir.join("clips/garage_temp-5000.mp4"), b"x").unwrap();
+        for i in 0..60 {
+            db.insert_event(&ev(&format!("garage_temp-{}", 5110 + i), 5110 + i, 5112 + i)).unwrap();
+        }
+        // Native events (an /api address, no file) cannot fill the few places looked at.
+        for i in 0..8 {
+            let mut e = ev(&format!("native-{i}"), 5040 + i, 5200);
+            e.clip = Some(format!("/api/clips/native-{i}"));
+            db.insert_event(&e).unwrap();
+        }
+        let c = at(5_050_000, 5_300_000).unwrap();
+        assert_eq!(c.path, file("garage_temp-5000"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

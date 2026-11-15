@@ -3740,6 +3740,10 @@ struct PlaybackQ {
     quality: String,
     #[serde(default)]
     download: String,
+    /// With download, "1": only say whether the download would work (204), or
+    /// why not; nothing is made.
+    #[serde(default)]
+    check: String,
     /// What the player decodes (see transcode/): transcoded when the
     /// recording does not fit. With download: a file made to fit. Not with
     /// speed or reverse.
@@ -3956,6 +3960,10 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
     let download = q.download == "1" || q.download == "true";
     let mut low = q.quality == "low";
     let mut caps_headers = Vec::new();
+    // Asking whether a download would work never starts one (no conversion).
+    if download && q.check == "1" {
+        return download_check(engine, camera, from, to, low).await;
+    }
     if download && trick.is_none() && !reverse {
         if let Some(caps) = q.caps.as_deref() {
             let caps = match crate::transcode::Caps::parse(caps) {
@@ -4013,6 +4021,7 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
     }
     let gone = Gone(Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let flag = gone.0.clone();
+    let engine2 = engine.clone();
     let built = tokio::task::spawn_blocking(move || match trick {
         _ if reverse => engine.reverse_clip(&cam, from, to, &|| flag.load(std::sync::atomic::Ordering::Relaxed)),
         Some(sp) => engine.trick_clip(&cam, from, to, sp, frame_ms, low, &|| flag.load(std::sync::atomic::Ordering::Relaxed)),
@@ -4055,11 +4064,102 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
             let name = format!("{}-{from}.mp4", crate::config::slug(&camera));
             serve_clip(clip, name, extra, download, req).await
         }
-        Ok(Ok(None)) => nothing_recorded(&q.quiet, "no recording covers that window"),
+        Ok(Ok(None)) => {
+            // Nothing playback can read: an event's saved clip may still
+            // show it (a camera on the ffmpeg pipeline), at normal speed.
+            if trick.is_none() && !reverse {
+                let (e, cam) = (engine2.clone(), camera.clone());
+                if let Ok(Ok(Some(c))) = tokio::task::spawn_blocking(move || e.event_clip_at(&cam, from, to)).await {
+                    // An export is exactly the range asked for: a clip that
+                    // shows much less of it is refused, saying why, rather
+                    // than handed over as if it were the range.
+                    if download {
+                        if let Some(why) = event_clip_export_problem(&c, from, to) {
+                            return (StatusCode::NOT_FOUND, why).into_response();
+                        }
+                    }
+                    let name = format!("{}-{}.mp4", crate::config::slug(&camera), c.start_ms);
+                    return event_clip_window(c, &name, download, req).await;
+                }
+            }
+            nothing_recorded(&q.quiet, "no recording covers that window")
+        }
         Ok(Err(e)) if e.to_string() == "busy" => (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "1")], "busy, try again").into_response(),
         Ok(Err(e)) => internal_error("playback", &e),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "playback error").into_response(),
     }
+}
+
+/// `download=1&check=1`: would this export work? 204, or 404 with the reason.
+/// The window is planned, nothing is made or converted.
+async fn download_check(engine: Arc<Engine>, camera: String, from: i64, to: i64, low: bool) -> Response {
+    let e = engine.clone();
+    let cam = camera.clone();
+    let planned = tokio::task::spawn_blocking(move || e.playback_clip(&cam, from, to, low).map(|c| c.is_some())).await;
+    let has = matches!(planned, Ok(Ok(true)));
+    let ev = if has {
+        None
+    } else {
+        tokio::task::spawn_blocking(move || engine.event_clip_at(&camera, from, to)).await.ok().and_then(|r| r.ok()).flatten()
+    };
+    match download_check_verdict(has, ev.as_ref(), from, to) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(why) => (StatusCode::NOT_FOUND, why).into_response(),
+    }
+}
+
+fn download_check_verdict(has_recording: bool, clip: Option<&crate::engine::playback::EventClipAt>, from: i64, to: i64) -> Result<(), String> {
+    if has_recording {
+        return Ok(());
+    }
+    match clip {
+        Some(c) => event_clip_export_problem(c, from, to).map_or(Ok(()), Err),
+        None => Err("no recording covers that window".into()),
+    }
+}
+
+/// Why an event clip is not an export of [from, to] (ms): it shows under
+/// half of the range. None when it is close enough.
+fn event_clip_export_problem(c: &crate::engine::playback::EventClipAt, from: i64, to: i64) -> Option<String> {
+    let shown = (c.end_ms.min(to) - c.start_ms.max(from)).max(0);
+    if shown * 2 >= to - from {
+        return None;
+    }
+    let clock = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default()
+    };
+    Some(format!(
+        "This camera's recordings can only be exported as saved event clips, and the one nearest that range shows only {} to {}. Pick a range inside an event, or save the event's clip from the Events page.",
+        clock(c.start_ms.max(from)),
+        clock(c.end_ms.min(to))
+    ))
+}
+
+/// A playback window answered from an event's saved clip file (see
+/// `Engine::event_clip_at`): the file as it is (byte ranges, HEAD), with the
+/// stretch it shows in the same headers a planned window has.
+async fn event_clip_window(c: crate::engine::playback::EventClipAt, name: &str, download: bool, req: Request) -> Response {
+    let mut r = match tower::ServiceExt::oneshot(ServeFile::new(&c.path), req).await {
+        Ok(r) => r.into_response(),
+        Err(_) => return (StatusCode::NOT_FOUND, "no recording covers that window").into_response(),
+    };
+    if !r.status().is_success() {
+        return r;
+    }
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    for (k, v) in [("x-clip-start-ms", c.start_ms.to_string()), ("x-clip-end-ms", c.end_ms.to_string()), ("x-clip-sub", "0".into()), ("x-clip-reverse", "0".into()), ("x-clip-frames", "0".into()), ("x-clip-event", "1".into())] {
+        if let Ok(v) = HeaderValue::from_str(&v) {
+            h.insert(header::HeaderName::from_static(k), v);
+        }
+    }
+    if download {
+        if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+            h.insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    r
 }
 
 #[derive(serde::Deserialize)]
@@ -5366,6 +5466,28 @@ async fn apply_settings(engine: Arc<Engine>, mut update: SettingsUpdate, caller:
 #[cfg(test)]
 mod proxy_tests {
     use super::*;
+
+    #[test]
+    fn a_check_says_yes_for_recordings_or_a_good_clip_and_why_not_otherwise() {
+        use crate::engine::playback::EventClipAt;
+        let c = EventClipAt { path: "x".into(), start_ms: 0, end_ms: 20_000 };
+        assert!(download_check_verdict(true, None, 0, 100_000).is_ok());
+        assert!(download_check_verdict(false, Some(&c), 0, 30_000).is_ok());
+        assert!(download_check_verdict(false, Some(&c), 0, 100_000).is_err());
+        assert_eq!(download_check_verdict(false, None, 0, 1000).unwrap_err(), "no recording covers that window");
+    }
+
+    #[test]
+    fn an_export_is_refused_when_the_event_clip_shows_under_half() {
+        use crate::engine::playback::EventClipAt;
+        let c = |a: i64, b: i64| EventClipAt { path: "x".into(), start_ms: a, end_ms: b };
+        // The clip covers 20 s of a 30 s window: fine. Of a 100 s window: refused.
+        assert!(event_clip_export_problem(&c(0, 20_000), 0, 30_000).is_none());
+        let why = event_clip_export_problem(&c(0, 20_000), 0, 100_000).unwrap();
+        assert!(why.contains("saved event clips"), "{why}");
+        // A clip outside the window shows nothing.
+        assert!(event_clip_export_problem(&c(0, 10_000), 50_000, 100_000).is_some());
+    }
 
     #[test]
     fn visitor_address_only_from_a_trusted_proxy() {

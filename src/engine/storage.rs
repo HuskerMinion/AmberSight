@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 impl Engine {
     /// Disk usage of the data folder. Walking it is slow (hundreds of
@@ -1374,5 +1376,513 @@ mod import_wait_tests {
         assert!(other.exists(), "a file the index does not know is left alone");
         assert!(e.db.oldest_segments(10).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ---------------------------------------------------------- writability
+
+/// What recorders found they cannot write, by (folder name, path): when, and
+/// how long it is reported whatever the cheap check says. So the health
+/// report names them even when the folder itself still looks writable.
+static UNWRITABLE: Mutex<Option<HashMap<(String, PathBuf), (i64, i64)>>> = Mutex::new(None);
+/// Real-write probes made for "no frames came" (folder name -> when).
+static LAST_REAL: Mutex<Option<HashMap<String, std::time::Instant>>> = Mutex::new(None);
+/// How long a recorder's finding counts without a new one.
+const UNWRITABLE_KEEP_SECS: i64 = 600;
+
+/// The account AmberSight runs as, for messages.
+fn run_as() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: plain getters with no arguments.
+        let (u, g) = unsafe { (libc::geteuid(), libc::getegid()) };
+        format!("user {u}:{g}")
+    }
+    #[cfg(not(unix))]
+    {
+        "this service account".to_string()
+    }
+}
+
+/// "Folder cams (/recordings) is not writable by AmberSight (user 99:100)", or
+/// "... is on a read-only file system" when that is the cause. `path` is the
+/// folder that refuses (a folder below the root, when only that one does).
+/// The form without a path is for alerts, which may leave the machine.
+pub(crate) fn unwritable_text(name: &str, path: &Path, with_path: bool) -> String {
+    // The read-only answer comes from the last probe: no statvfs here (this
+    // runs on the request path, where a hung share must not block).
+    let ro = PROBED.lock().unwrap().as_ref().and_then(|m| m.get(path)).is_some_and(|(_, _, ro)| *ro);
+    unwritable_text_with(name, path, with_path, ro)
+}
+
+pub(crate) fn unwritable_text_with(name: &str, path: &Path, with_path: bool, read_only: bool) -> String {
+    let name = if name.is_empty() { "data" } else { name };
+    match (with_path, read_only) {
+        (true, false) => format!("Folder {name} ({}) is not writable by AmberSight ({})", path.display(), run_as()),
+        (true, true) => format!("Folder {name} ({}) is on a read-only file system", path.display()),
+        (false, false) => format!("Folder {name} is not writable by AmberSight"),
+        (false, true) => format!("Folder {name} is on a read-only file system"),
+    }
+}
+
+/// Whether `dir` is on a file system mounted read-only.
+#[cfg(unix)]
+fn dir_read_only(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
+    // SAFETY: valid NUL-terminated path; `st` is read only after statvfs succeeds.
+    unsafe {
+        let mut st: libc::statvfs = std::mem::zeroed();
+        libc::statvfs(c.as_ptr(), &mut st) == 0 && (st.f_flag as u64 & libc::ST_RDONLY as u64) != 0
+    }
+}
+
+#[cfg(not(unix))]
+fn dir_read_only(_dir: &Path) -> bool {
+    false
+}
+
+/// Whether an error means "this account may not write here" (not a full
+/// disk or a missing folder, which have their own messages).
+pub(crate) fn is_write_denied(e: &std::io::Error) -> bool {
+    if matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        return e.raw_os_error() == Some(libc::EROFS);
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+/// The cheap question: may this account create files in `dir`? On unix it
+/// asks the system (faccessat with the effective uid, and statvfs) and writes
+/// nothing, so an idle disk stays asleep. It can be wrong where the file
+/// system does not enforce modes (some FUSE and network mounts), which is why
+/// [`write_denied`] exists. True only when the folder exists and refuses.
+#[cfg(unix)]
+pub(crate) fn dir_write_denied(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    if !dir.is_dir() {
+        return false;
+    }
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    const FLAGS: libc::c_int = libc::AT_EACCESS;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    const FLAGS: libc::c_int = 0;
+    // SAFETY: `c` is a valid NUL-terminated path; `st` is only read after statvfs succeeds.
+    unsafe {
+        if libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::W_OK | libc::X_OK, FLAGS) != 0 {
+            return is_write_denied(&std::io::Error::last_os_error());
+        }
+        let mut st: libc::statvfs = std::mem::zeroed();
+        libc::statvfs(c.as_ptr(), &mut st) == 0 && (st.f_flag as u64 & libc::ST_RDONLY as u64) != 0
+    }
+}
+
+/// Elsewhere there is no cheap question to ask: write a probe file. Callers
+/// cache the answer for minutes.
+#[cfg(not(unix))]
+pub(crate) fn dir_write_denied(dir: &Path) -> bool {
+    write_denied(dir)
+}
+
+/// The real question: create (and remove) a small file of our own in `dir`.
+/// Wakes the disk, so only for a folder that is being recorded to anyway or
+/// is asked about rarely. The name is unique, the create is exclusive and
+/// does not follow a link, and a name taken (or briefly pending delete) is
+/// retried under another, never read as "denied".
+pub(crate) fn write_denied(dir: &Path) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    if !dir.is_dir() {
+        return false;
+    }
+    for _ in 0..4 {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+        let probe = dir.join(format!(".ambersight-write-test-{}-{}-{nanos:x}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        match o.open(&probe) {
+            Ok(f) => {
+                drop(f);
+                let _ = std::fs::remove_file(&probe);
+                return false;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return is_write_denied(&e),
+        }
+    }
+    false
+}
+
+/// How long an answer about a folder is kept.
+#[cfg(unix)]
+const PROBE_KEEP: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(not(unix))]
+const PROBE_KEEP: std::time::Duration = std::time::Duration::from_secs(600);
+
+static PROBED: Mutex<Option<HashMap<PathBuf, (std::time::Instant, bool, bool)>>> = Mutex::new(None);
+/// (when asked, denied, on a read-only file system): the last answer for a folder.
+
+/// `dir_write_denied`, remembered for [`PROBE_KEEP`] (a recorder's finding
+/// replaces the entry at once). The lock is not held while asking, so a hung
+/// network mount cannot hold up every caller.
+fn denied_cached(dir: &Path) -> bool {
+    if let Some((t, d, _)) = PROBED.lock().unwrap().as_ref().and_then(|m| m.get(dir)) {
+        if t.elapsed() < PROBE_KEEP {
+            return *d;
+        }
+    }
+    let d = dir_write_denied(dir);
+    PROBED.lock().unwrap().get_or_insert_with(HashMap::new).insert(dir.to_path_buf(), (std::time::Instant::now(), d, d && dir_read_only(dir)));
+    d
+}
+
+/// The two questions, so tests can stand in for a file system that lies.
+pub(crate) struct Probes {
+    pub cheap: fn(&Path) -> bool,
+    pub real: fn(&Path) -> bool,
+}
+pub(crate) const SYSTEM_PROBES: Probes = Probes { cheap: dir_write_denied, real: write_denied };
+
+pub(crate) enum Verdict {
+    /// This path refuses writes.
+    Denied(PathBuf),
+    /// A real write there worked.
+    Writable(PathBuf),
+    /// Nothing was asked of the disk, or the folder is not there.
+    Unknown,
+}
+
+/// The deepest folder that exists on the way to `p` (itself, when it does).
+pub(crate) fn deepest_existing(p: &Path) -> Option<PathBuf> {
+    p.ancestors().find(|a| a.is_dir()).map(|a| a.to_path_buf())
+}
+
+/// Whether recordings can be written under `seg_dir`: the deepest existing
+/// folder on its way is asked cheaply, and (when `real`) by a real write.
+/// Folders above it are not asked: a root-owned share whose `cameras` folder
+/// belongs to AmberSight is fine.
+pub(crate) fn find_denied(pr: &Probes, seg_dir: &Path, real: bool) -> Verdict {
+    let Some(target) = deepest_existing(seg_dir) else { return Verdict::Unknown };
+    if (pr.cheap)(&target) {
+        return Verdict::Denied(target);
+    }
+    if real {
+        return if (pr.real)(&target) { Verdict::Denied(target) } else { Verdict::Writable(target) };
+    }
+    Verdict::Unknown
+}
+
+/// A recorder could not write into `dir` of the folder `name`. Reported for
+/// at least `keep_secs` (30 s or more; the recorder's retry interval plus 30 s
+/// stops a lying file system from making the warning flicker), until a real
+/// write into the same path works.
+pub(crate) fn note_unwritable(name: &str, dir: &Path, keep_secs: i64) {
+    UNWRITABLE.lock().unwrap().get_or_insert_with(HashMap::new).insert((name.to_string(), dir.to_path_buf()), (Utc::now().timestamp(), keep_secs.max(30)));
+    // What was asked of the system before is out of date.
+    PROBED.lock().unwrap().get_or_insert_with(HashMap::new).insert(dir.to_path_buf(), (std::time::Instant::now(), true, dir_read_only(dir)));
+}
+
+/// A real write into `dir` of folder `name` worked: drop that finding (and
+/// only that one: another camera's path is its own business).
+pub(crate) fn note_writable(name: &str, dir: &Path) {
+    if let Some(m) = UNWRITABLE.lock().unwrap().as_mut() {
+        m.remove(&(name.to_string(), dir.to_path_buf()));
+    }
+    if let Some(m) = PROBED.lock().unwrap().as_mut() {
+        m.remove(dir);
+    }
+}
+
+/// True at most once per `every_secs` for a folder: the "no frames came"
+/// reason to write a probe must not keep an idle disk awake through an outage.
+pub(crate) fn real_probe_due(name: &str, every_secs: u64) -> bool {
+    let mut g = LAST_REAL.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    if m.get(name).is_some_and(|t| t.elapsed().as_secs() < every_secs) {
+        return false;
+    }
+    m.insert(name.to_string(), std::time::Instant::now());
+    true
+}
+
+/// Ask about `seg_dir` (cheaply, and by a real write when `real`) and keep
+/// the books: a refusal is noted, a real write that worked drops the note.
+/// Returns the path that refuses.
+pub(crate) fn check_folder(pr: &Probes, name: &str, seg_dir: &Path, real: bool, keep_secs: i64) -> Option<PathBuf> {
+    match find_denied(pr, seg_dir, real) {
+        Verdict::Denied(p) => {
+            note_unwritable(name, &p, keep_secs);
+            Some(p)
+        }
+        Verdict::Writable(p) => {
+            note_writable(name, &p);
+            None
+        }
+        Verdict::Unknown => None,
+    }
+}
+
+/// At the end of a note's time: a real write (at most once a minute per path)
+/// that works clears it.
+fn recheck_clears(recheck: Option<fn(&Path) -> bool>, name: &str, p: &Path) -> bool {
+    let Some(real) = recheck else { return false };
+    if !real_probe_due(&format!("recheck:{}", p.display()), 60) {
+        return false;
+    }
+    if real(p) {
+        return false;
+    }
+    PROBED.lock().unwrap().get_or_insert_with(HashMap::new).insert(p.to_path_buf(), (std::time::Instant::now(), false, false));
+    let _ = name;
+    true
+}
+
+/// The folders that cannot be written right now, as (name, the path that
+/// refuses), one per folder. Asked cheaply about the deepest existing folder
+/// on the way to where recordings go (`<folder>/cameras`), and about what
+/// recorders reported: reported for the time they asked for, then while the
+/// cheap check agrees (up to 10 minutes). A missing or unreadable folder is
+/// not listed: it has its own "cannot read" problem.
+pub(crate) fn unwritable_folders(caps: &[FolderCap], now: i64) -> Vec<(String, PathBuf)> {
+    // Where the cheap check is itself a probe file kept for minutes, the end
+    // of a note's time is when a real write may clear it.
+    #[cfg(unix)]
+    let recheck: Option<fn(&Path) -> bool> = None;
+    #[cfg(not(unix))]
+    let recheck: Option<fn(&Path) -> bool> = Some(write_denied);
+    unwritable_folders_with(caps, now, recheck)
+}
+
+fn unwritable_folders_with(caps: &[FolderCap], now: i64, recheck: Option<fn(&Path) -> bool>) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    for c in caps {
+        if c.free.is_none() {
+            continue;
+        }
+        let mut notes: Vec<(PathBuf, i64, i64)> = UNWRITABLE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|m| m.iter().filter(|((n, _), _)| *n == c.name).map(|((_, p), (t, k))| (p.clone(), *t, *k)).collect())
+            .unwrap_or_default();
+        notes.sort();
+        let mut found: Option<PathBuf> = None;
+        for (p, t, keep) in notes {
+            let age = now - t;
+            let still = age < UNWRITABLE_KEEP_SECS && (age < keep || (denied_cached(&p) && !recheck_clears(recheck, &c.name, &p)));
+            if still {
+                found.get_or_insert(p);
+            } else if let Some(m) = UNWRITABLE.lock().unwrap().as_mut() {
+                // Only the note that was read: a newer one may have been
+                // written meanwhile.
+                let key = (c.name.clone(), p);
+                if m.get(&key).is_some_and(|(tt, _)| *tt == t) {
+                    m.remove(&key);
+                }
+            }
+        }
+        if found.is_none() {
+            if let Some(target) = deepest_existing(&c.path.join("cameras")) {
+                if denied_cached(&target) {
+                    found = Some(target);
+                }
+            }
+        }
+        if let Some(p) = found {
+            out.push((c.name.clone(), p));
+        }
+    }
+    out
+}
+
+#[cfg(all(test, unix))]
+mod writable_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("as-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn is_root() -> bool {
+        unsafe { libc::geteuid() == 0 }
+    }
+    fn caps(name: &str, d: &Path) -> [FolderCap; 1] {
+        [FolderCap { name: name.into(), path: d.to_path_buf(), free: Some(1), total: Some(2), ..Default::default() }]
+    }
+
+    #[test]
+    fn a_read_only_file_system_is_said_so() {
+        assert_eq!(unwritable_text_with("cams", Path::new("/r"), true, true), "Folder cams (/r) is on a read-only file system");
+        assert_eq!(unwritable_text_with("cams", Path::new("/r"), false, true), "Folder cams is on a read-only file system");
+        // A normal folder is not read-only.
+        assert!(!dir_read_only(&std::env::temp_dir()) || is_root());
+    }
+
+    #[test]
+    fn text_names_folder_path_and_user() {
+        let t = unwritable_text("Cams", Path::new("/recordings/cameras/a"), true);
+        assert!(t.starts_with("Folder Cams (/recordings/cameras/a) is not writable by AmberSight (user "), "{t}");
+        assert_eq!(unwritable_text("", Path::new("/d"), false), "Folder data is not writable by AmberSight");
+    }
+
+    #[test]
+    fn probe_sees_a_read_only_folder_and_the_cheap_one_writes_nothing() {
+        let d = tmp("wprobe");
+        assert!(!dir_write_denied(&d));
+        assert!(!dir_write_denied(&d.join("missing")));
+        assert!(!write_denied(&d));
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "probe files are removed");
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(dir_write_denied(&d), !is_root());
+        assert_eq!(write_denied(&d), !is_root());
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn read_only_errors_count_as_denied_and_others_do_not() {
+        assert!(is_write_denied(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        assert!(is_write_denied(&std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem)));
+        assert!(is_write_denied(&std::io::Error::from_raw_os_error(libc::EROFS)));
+        assert!(!is_write_denied(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+    }
+
+    #[test]
+    fn a_file_system_that_says_yes_and_refuses_is_caught_by_the_real_write() {
+        let d = tmp("wfuse");
+        let seg = d.join("cameras/a/segments");
+        let lying = Probes { cheap: |_| false, real: |_| true };
+        // Cheap only: believed (and nothing asked of the disk).
+        assert!(matches!(find_denied(&lying, &seg, false), Verdict::Unknown));
+        // With the real write: the refusal is found, naming the deepest existing folder.
+        assert!(matches!(find_denied(&lying, &seg, true), Verdict::Denied(p) if p == d));
+        let honest = Probes { cheap: |_| false, real: |_| false };
+        assert!(matches!(find_denied(&honest, &seg, true), Verdict::Writable(p) if p == d));
+        let refusing = Probes { cheap: |_| true, real: |_| false };
+        assert!(matches!(find_denied(&refusing, &seg, false), Verdict::Denied(_)));
+        assert!(matches!(find_denied(&lying, Path::new("/nonexistent-as-root/x"), true), Verdict::Denied(p) if p == Path::new("/")));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_note_beats_a_cached_writable_answer_and_clears_when_a_write_works() {
+        let d = tmp("wcache");
+        let cs = caps("wcache", &d);
+        let now = Utc::now().timestamp();
+        // Cached "writable" for the folder (nothing is denied).
+        assert!(unwritable_folders(&cs, now).is_empty());
+        note_unwritable("wcache", &d, 30);
+        assert_eq!(unwritable_folders(&cs, now), vec![("wcache".to_string(), d.clone())]);
+        // A real write that worked drops it at once.
+        note_writable("wcache", &d);
+        assert!(unwritable_folders(&cs, now).is_empty());
+        // Old notes are rechecked: the folder is writable, so it clears.
+        note_unwritable("wcache", &d, 30);
+        PROBED.lock().unwrap().as_mut().unwrap().remove(&d);
+        assert!(unwritable_folders(&cs, now + 40).is_empty());
+        // A longer keep time holds it past 30 s whatever the cheap check says.
+        note_unwritable("wcache", &d, 90);
+        PROBED.lock().unwrap().as_mut().unwrap().insert(d.clone(), (std::time::Instant::now(), false, false));
+        assert_eq!(unwritable_folders(&cs, now + 60).len(), 1);
+        assert!(unwritable_folders(&cs, now + 130).is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_root_owned_root_with_a_writable_cameras_folder_is_fine() {
+        if is_root() {
+            return;
+        }
+        let d = tmp("wcams");
+        std::fs::create_dir_all(d.join("cameras")).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let now = Utc::now().timestamp();
+        assert!(unwritable_folders(&caps("wcams", &d), now).is_empty());
+        assert!(matches!(find_denied(&SYSTEM_PROBES, &d.join("cameras/a/segments"), true), Verdict::Writable(p) if p == d.join("cameras")));
+        // With no cameras folder yet, the root itself is what matters.
+        let d2 = tmp("wcams2");
+        std::fs::set_permissions(&d2, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(unwritable_folders(&caps("wcams2", &d2), now), vec![("wcams2".to_string(), d2.clone())]);
+        for x in [&d, &d2] {
+            std::fs::set_permissions(x, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::remove_dir_all(x).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_missing_folder_is_not_reported() {
+        let d = tmp("wgone");
+        let gone = [FolderCap { name: "gone".into(), path: d.join("nope"), free: None, total: None, ..Default::default() }];
+        note_unwritable("gone", &d.join("nope"), 30);
+        assert!(unwritable_folders(&gone, Utc::now().timestamp()).is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn one_cameras_good_write_does_not_clear_anothers_finding() {
+        let d = tmp("wtwo");
+        let cs = caps("wtwo", &d);
+        let a = d.join("cameras/a");
+        let b = d.join("cameras/b");
+        let now = Utc::now().timestamp();
+        note_unwritable("wtwo", &a, 90);
+        note_unwritable("wtwo", &b, 90);
+        note_writable("wtwo", &b);
+        PROBED.lock().unwrap().as_mut().unwrap().insert(a.clone(), (std::time::Instant::now(), true, false));
+        assert_eq!(unwritable_folders(&cs, now), vec![("wtwo".to_string(), a.clone())]);
+        note_writable("wtwo", &a);
+        assert!(unwritable_folders(&cs, now).is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn check_folder_notes_refusals_and_real_probes_are_rate_limited() {
+        let d = tmp("wcheck");
+        let seg = d.join("cameras/a/segments");
+        let lying = Probes { cheap: |_| false, real: |_| true };
+        assert!(check_folder(&lying, "wcheck", &seg, false, 30).is_none());
+        assert_eq!(check_folder(&lying, "wcheck", &seg, true, 30), Some(d.clone()));
+        let honest = Probes { cheap: |_| false, real: |_| false };
+        assert!(check_folder(&honest, "wcheck", &seg, true, 30).is_none());
+        assert!(unwritable_folders(&caps("wcheck", &d), Utc::now().timestamp()).is_empty());
+        assert!(real_probe_due("wcheck-rate", 600));
+        assert!(!real_probe_due("wcheck-rate", 600));
+        assert!(real_probe_due("wcheck-rate2", 600));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_note_written_during_the_scan_is_not_removed_and_a_real_write_clears_at_the_end() {
+        let d = tmp("wrace");
+        let cs = caps("wrace", &d);
+        let now = Utc::now().timestamp();
+        // An expired note is removed only if it is still the one that was read.
+        note_unwritable("wrace", &d, 30);
+        UNWRITABLE.lock().unwrap().as_mut().unwrap().insert(("wrace".into(), d.clone()), (now - 100, 30));
+        PROBED.lock().unwrap().as_mut().unwrap().insert(d.clone(), (std::time::Instant::now(), false, false));
+        // (a fresh note replaces the old one before the scan acts on it)
+        note_unwritable("wrace", &d, 90);
+        assert_eq!(unwritable_folders(&cs, Utc::now().timestamp()).len(), 1);
+        // End of keep time with the cheap answer still "denied" (a cached
+        // probe on Windows): a real write that works clears the note.
+        let key = ("wrace".to_string(), d.clone());
+        UNWRITABLE.lock().unwrap().as_mut().unwrap().insert(key.clone(), (now - 100, 30));
+        PROBED.lock().unwrap().as_mut().unwrap().insert(d.clone(), (std::time::Instant::now(), true, false));
+        assert!(unwritable_folders_with(&cs, now, Some(|_| false)).is_empty());
+        assert!(UNWRITABLE.lock().unwrap().as_ref().unwrap().get(&key).is_none());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

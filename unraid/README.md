@@ -1,8 +1,9 @@
 # AmberSight on Unraid
 
 `ambersight.xml` is an Unraid container template for the prebuilt image
-`ghcr.io/huskerminion/ambersight:latest`. It is not in Community Apps yet;
-until it is, add it by hand. Unraid support is new and has not been tested on
+`ghcr.io/huskerminion/ambersight:latest`. The same template is kept for Community Apps
+in [HuskerMinion/unraid-templates](https://github.com/HuskerMinion/unraid-templates). It is
+not in Community Apps yet; until it is, add it by hand. Unraid support is new and has not been tested on
 Unraid yet: please report what works and what doesn't in
 [Discussions](https://github.com/HuskerMinion/AmberSight/discussions).
 
@@ -49,8 +50,12 @@ over the network share.
 
 **Ownership.** The container runs AmberSight as `PUID:PGID`. On the first
 start (or after changing them) it gives `/config` and `/data` and everything
-in them to that user. It does not change `/recordings`: Unraid shares already
-belong to `nobody:users` (99:100), so the defaults can write there.
+in them to that user. `/recordings` must be writable by `PUID:PGID` (99:100 by
+default). An existing share is fine: Unraid shares belong to `nobody:users`
+(99:100), so the defaults can write there, and the container never changes a
+share that has files in it. If the share's folder did not exist, Docker makes
+it owned by root; the container then gives it to `PUID:PGID` when it is empty.
+If AmberSight cannot write to a recording folder, the health page says so.
 
 **Time zone.** Unraid passes the server's time zone (`TZ`) to every container;
 schedules and quiet hours use it. To use another, add a variable `TZ`, for

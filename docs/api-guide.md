@@ -2274,6 +2274,15 @@ Map player time to wall-clock time as `x-clip-start-ms + position`. The web app 
 the next one before the current one ends. A clip may cover less than the requested window where
 the recording has breaks.
 
+**Cameras on the ffmpeg pipeline.** Where a window has no recording the server can read, but an
+event's saved clip shows it, `GET /api/playback` answers with that clip file at normal speed
+(`x-clip-event: 1`; `x-clip-end-ms` is where the recordings joined into the clip end, which can be
+a little later than what the file really holds). Trick play (`speed` of 2 or more) and `reverse=1`
+have no such fallback and answer `404` there, and `caps` and `info=1` do not see these windows
+either (`404`): for them, use `GET /api/clips/<event id>`, which takes `caps` and `info=1`. With
+`download=1` a range that the event clip shows less than half of is refused (`404`, with the
+reason as text); add `check=1` to ask first: `204` when the download would work, nothing is made.
+
 Errors:
 
 | Status | Body or header |
@@ -2827,6 +2836,21 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.10.2**
+
+- `GET /api/playback` falls back to an event's saved clip where only ffmpeg motion-only recordings exist (they are indexed but not played directly): the answer is the clip, with `x-clip-event: 1` and its own `x-clip-start-ms` / `x-clip-end-ms`. Fast playback, reverse, `caps` and `info=1` have no fallback there (404); apps use `/api/clips/<event id>` for those spans. See `GET /api/playback`.
+- `download=1` answered by an event clip that shows less than half of the range is refused (404 with the reason as text). Add `check=1` to ask first: `204` when the download would work; nothing is made or converted.
+- `GET /api/health`: a recording folder that can't be written is a problem `unwritable:<folder>` ("Folder X is not writable by AmberSight", or "… is on a read-only file system") with a warning that names the path and, where it applies, the user AmberSight runs as. ffmpeg-capture cameras also show it as their `last_error`.
+- `last_error` of network cameras on ffmpeg capture gives ffmpeg's cause line (for example `Permission denied`, `401 Unauthorized`) rather than its generic last line.
+- `GET /api/status` `storage.indexed_bytes`: the size of all indexed recordings.
+- `GET /api/digests/latest?quiet=1` answers `204` when no summary has been made yet.
+- Docker: an empty, root-owned `/recordings` (or folder in `RECORDINGS_DIRS`, colon separated) is handed to `PUID:PGID` on start; a folder with files is never re-owned.
+
+**New in 0.10.1**
+
+- Docker images are published per release: `ghcr.io/huskerminion/ambersight:<version>` and `:latest` (amd64, arm64), `:<version>-cuda` and `:cuda`.
+- Network cameras on ffmpeg capture log why the stream ended (`stream ended (ffmpeg: …)`), with credentials removed.
 
 **New in 0.10.0**
 
