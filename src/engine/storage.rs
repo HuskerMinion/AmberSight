@@ -498,6 +498,7 @@ fn remove_event_files(dir: &std::path::Path, id: &str) {
     // Converted answers kept from its clip go too.
     crate::transcode::cache::forget_event(id);
     let _ = std::fs::remove_file(dir.join("clips").join(format!("{id}.mp4")));
+    let _ = std::fs::remove_file(dir.join("clips").join(format!("{id}.start")));
     let _ = std::fs::remove_file(dir.join("thumbs").join(format!("{id}.jpg")));
     if !id.is_empty() && !id.contains(['/', '\\', '.']) {
         let _ = std::fs::remove_dir_all(dir.join("thumbs").join("ai").join(id));

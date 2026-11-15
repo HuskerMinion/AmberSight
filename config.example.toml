@@ -59,6 +59,8 @@ port = 8090
 # [transcode]
 # encoder = "auto"     # or "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "software", "off"
 # max_hardware = 6     # at a time on the graphics card
+# max_recording_hw = 4 # recordings re-encoded on the graphics card at a time (burned-in text or privacy
+#                      # masks), apart from max_hardware; past it they use the processor (libx264)
 # max_software = 1     # at a time in software (several CPU cores each)
 # max_per_user = 4     # per account: transcoded streams watched, and live transcodes started
 # cache_seconds = 600  # a converted clip or playback is kept on disk this long after its last use (players
@@ -270,8 +272,15 @@ post_roll = 10          # seconds of footage after the trigger
 # # HTTP-FLV http(s)://host/flv?... URLs; an RTSP camera that cannot be played
 # # that way switches to ffmpeg), "native", or "ffmpeg".
 # # ingest = "auto"
-# # Hardware decoding for motion detection, e.g. "vaapi", "vaapi:/dev/dri/renderD130", "qsv".
-# # hwaccel = "vaapi"
+# # How RTSP video travels: "auto" (TCP; a camera that answers "461 Unsupported
+# # Transport" is asked again over UDP, and UDP is kept for it), "tcp" or "udp".
+# # transport = "auto"
+# # Hardware decoding for motion detection. Unset = Auto: on Linux, VAAPI on the
+# # first graphics card (render node) that passed a test decode at start, else the
+# # processor; a card that fails later is replaced by the processor at once.
+# # Windows and macOS: Auto uses the processor. Or "off", "vaapi",
+# # "vaapi:/dev/dri/renderD130", "qsv", "qsv:/dev/dri/renderD128".
+# # hwaccel = "off"
 # # Record into a [[storage.folders]] entry instead of data_dir.
 # # folder = "main"
 # # Also save each event's clip as an .mp4 in this folder (it must exist), e.g.

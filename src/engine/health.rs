@@ -17,6 +17,10 @@ impl Engine {
         let mut problems: Vec<serde_json::Value> = Vec::new();
         let mut problem = |key: String, text: &str| problems.push(serde_json::json!({ "key": key, "text": text }));
         let mut cams = Vec::new();
+        // Notes about cameras (not problems), shown with the graphics card notes.
+        let mut hw_notes: Vec<String> = Vec::new();
+        // Camera notes with a button that opens the camera's settings: (text, camera id, fix kind).
+        let mut cam_notes: Vec<(String, usize, &'static str)> = Vec::new();
         let handles: Vec<Arc<CameraHandle>> = self.cameras.read().unwrap().iter().flatten().cloned().collect();
         for h in handles {
             let enabled = h.active.load(Ordering::Relaxed);
@@ -79,8 +83,60 @@ impl Engine {
                     ));
                 }
             }
+            // Motion decoding: on the graphics card or the processor, and the
+            // ffmpeg processes the camera runs now.
+            let dec = h.decode.lock().unwrap().clone();
+            let mut procs: Vec<String> = Vec::new();
+            if st.ingest == "native" {
+                if let Some(s) = dec.stream {
+                    procs.push(format!("motion decoder ({s} stream)"));
+                }
+            } else if dec.stream.is_some() {
+                procs.extend(dec.procs.iter().map(|p| p.to_string()));
+            }
+            procs.extend(crate::transcode::active_for(&run.name));
+            // No sub stream: motion decodes the full-size stream. Worth a note
+            // when it is large and on the processor (not a problem: some cameras
+            // have one stream, and the owner can say so with no_sub_ok).
+            if enabled && st.online && wants_sub_note(&run) {
+                if let Some((w, hh, codec)) = dec.heavy_main_on_cpu() {
+                    cam_notes.push((
+                        format!("{}: motion is decoding the full-size stream ({w}x{hh} {codec}) on the processor; adding the camera's sub stream cuts CPU use a lot", run.name),
+                        h.id,
+                        "substream",
+                    ));
+                }
+            }
+            // A sub stream address that cannot be opened: motion uses the main stream.
+            if let Some(why) = run.sub_url.as_deref().filter(|u| !u.trim().is_empty()).and_then(super::sub_url_problem) {
+                if enabled {
+                    hw_notes.push(format!("{}: {why}; motion uses the main stream. Fix it in the camera's Stream settings", run.name));
+                }
+            }
+            // The ffmpeg pipeline re-encodes the full-size recording. A note
+            // when it is the owner's choice (burn-in, masks, Direct copy off);
+            // a thing to check on the processor only when the camera fell back
+            // to ffmpeg by itself.
+            let on_ffmpeg = st.ingest.starts_with("ffmpeg");
+            if let (true, true, true, Some(text)) = (enabled, st.online, on_ffmpeg, dec.reencode.as_ref()) {
+                let full = match &dec.encoder_note {
+                    Some(n) if !dec.reencode_hw => format!("{text} (Not on the graphics card: {n}.)"),
+                    _ => text.clone(),
+                };
+                match reencode_kind(dec.reencode_hw, st.ingest) {
+                    Said::Note => hw_notes.push(text.clone()),
+                    Said::Warning => {
+                        shorts.push(format!("{} re-encodes its recordings", run.name));
+                        warnings.push(full);
+                    }
+                    Said::NoteWithFix => cam_notes.push((full, h.id, "settings")),
+                }
+            }
             cams.push(serde_json::json!({
                 "name": run.name,
+                "decode": dec.json(),
+                "ffmpeg_why": super::ffpath::why_ffmpeg_now(&run, st.ingest),
+                "ffmpeg": procs,
                 "clock_skew_s": st.clock_skew.map(|s| (s * 10.0).round() / 10.0),
                 "enabled": enabled,
                 "online": st.online,
@@ -170,8 +226,50 @@ impl Engine {
         }
         // Devices the hourly check found that are not cameras here yet (not a problem).
         let (new_cameras, _) = super::newcams::current(self);
-        serde_json::json!({ "ok": warnings.is_empty(), "warnings": warnings, "short": shorts, "fixes": fixes, "problems": problems, "cameras": cams, "disks": disks, "new_cameras": new_cameras })
+        // Notes (not problems): graphics cards that cannot decode, and
+        // decoders that left the card while running.
+        let mut notes = crate::hwdecode::notes();
+        notes.extend(hw_notes);
+        // Camera notes carry a button: note_fixes[] = {note (index into notes), camera, kind}.
+        let mut note_fixes: Vec<serde_json::Value> = Vec::new();
+        for (text, cam, kind) in cam_notes {
+            note_fixes.push(serde_json::json!({ "note": notes.len(), "camera": cam, "kind": kind }));
+            notes.push(text);
+        }
+        notes.extend(crate::ffmpeg_bin::old_note());
+        serde_json::json!({ "ok": warnings.is_empty(), "warnings": warnings, "short": shorts, "fixes": fixes, "problems": problems, "notes": notes, "note_fixes": note_fixes, "cameras": cams, "disks": disks, "new_cameras": new_cameras })
     }
+}
+
+/// How Status shows a thing about a camera.
+#[derive(Debug, PartialEq, Eq)]
+enum Said {
+    /// A note (health stays ok).
+    Note,
+    /// A note with a button that opens the camera's settings (health stays ok).
+    NoteWithFix,
+    /// A warning (health is not ok).
+    Warning,
+}
+
+/// The recording is re-encoded: on a hardware encoder, a note; on the
+/// processor because of the owner's own settings, a note with a button; on
+/// the processor after the camera fell back to ffmpeg by itself, a warning.
+fn reencode_kind(on_hw: bool, ingest: &str) -> Said {
+    if on_hw {
+        Said::Note
+    } else if ingest == "ffmpeg (fallback)" {
+        Said::Warning
+    } else {
+        Said::NoteWithFix
+    }
+}
+
+/// A network camera (not a battery one) with no sub stream whose owner did
+/// not say it has none: its large main stream decoded on the processor is noted.
+fn wants_sub_note(run: &CameraConfig) -> bool {
+    let netcam = ["rtsp://", "rtsps://", "http://", "https://"].iter().any(|s| run.url.starts_with(s));
+    netcam && !run.on_demand && !run.no_sub_ok && run.sub_url.as_deref().is_none_or(|u| u.trim().is_empty())
 }
 
 fn human_secs(s: f64) -> String {
@@ -193,31 +291,49 @@ fn ago(secs: i64) -> String {
 pub fn plain_error(e: &str) -> String {
     let l = e.to_lowercase();
     // First: a folder named "Refused" must not read as a refused camera.
-    if l.contains("is on a read-only file system") {
+    if e.starts_with(crate::macnet::BLOCKED_PREFIX) {
+        // Already in words, with what to do.
+        e.to_string()
+    } else if l.contains("is on a read-only file system") {
         "its recording folder is on a read-only file system".into()
     } else if l.contains("is not writable by ambersight") {
         "its recording folder is not writable".into()
     } else if l.contains("not reachable") || l.contains("timed out") || l.contains("timeout") || l.contains("no route") || l.contains("unreachable") {
         "not reachable".into()
-    } else if l.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "401") || l.contains("unauthorized") || l.contains("authentication") {
-        "the camera refused the sign-in".into()
-    } else if l.contains("refused") {
-        "the camera refused the connection".into()
     } else if l.contains("stream ended") {
         "the video stopped".into()
     } else {
-        // Anything else: the words, without addresses (also a bare
-        // user:password@host).
-        let kept: Vec<&str> = e.split_whitespace().filter(|w| !w.contains("://") && !w.contains('@')).collect();
-        let t = kept.join(" ");
-        let t = t.replace("()", "").replace("( )", "");
-        t.trim().trim_end_matches(':').trim().to_string()
+        // RTSP answers (404, 401, busy, refused) in words; anything else:
+        // its first line, without addresses (also a bare user:password@host).
+        super::native::readable_error(e)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::plain_error;
+    use super::{plain_error, reencode_kind, wants_sub_note, Said};
+
+    #[test]
+    fn owners_choices_are_notes_not_warnings() {
+        assert_eq!(reencode_kind(false, "ffmpeg"), Said::NoteWithFix);
+        assert_eq!(reencode_kind(true, "ffmpeg"), Said::Note);
+        assert_eq!(reencode_kind(true, "ffmpeg (fallback)"), Said::Note);
+        assert_eq!(reencode_kind(false, "ffmpeg (fallback)"), Said::Warning);
+        let cam = |url: &str, sub: Option<&str>, on_demand: bool, ok: bool| {
+            let mut c: crate::config::CameraConfig = serde_json::from_value(serde_json::json!({ "name": "c", "url": url })).unwrap();
+            c.sub_url = sub.map(String::from);
+            c.on_demand = on_demand;
+            c.no_sub_ok = ok;
+            c
+        };
+        assert!(wants_sub_note(&cam("rtsp://192.0.2.1/main", None, false, false)));
+        assert!(wants_sub_note(&cam("rtsp://192.0.2.1/main", Some(" "), false, false)));
+        assert!(!wants_sub_note(&cam("rtsp://192.0.2.1/main", Some("rtsp://192.0.2.1/sub"), false, false)));
+        assert!(!wants_sub_note(&cam("rtsp://192.0.2.1/main", None, true, false)), "battery camera");
+        assert!(!wants_sub_note(&cam("rtsp://192.0.2.1/main", None, false, true)), "owner said it has none");
+        assert!(!wants_sub_note(&cam("push://k", None, false, false)));
+        assert!(!wants_sub_note(&cam("baichuan://192.0.2.1", None, false, false)));
+    }
 
     #[test]
     fn errors_are_in_plain_words_without_addresses() {
@@ -225,11 +341,16 @@ mod tests {
         assert_eq!(plain_error("Folder Refused (/r/cameras/a) is not writable by AmberSight (user 99:100)"), "its recording folder is not writable");
         assert_eq!(plain_error("Folder Timeout (/r) is not writable by AmberSight (user 1:1) (ffmpeg: 401 Unauthorized)"), "its recording folder is not writable");
         assert_eq!(plain_error("Folder Timeout (/r) is on a read-only file system"), "its recording folder is on a read-only file system");
-        assert_eq!(plain_error("RTSP 401 Unauthorized"), "the camera refused the sign-in");
+        assert_eq!(plain_error("RTSP 401 Unauthorized"), "the camera refused the user name or password");
         assert_eq!(plain_error("something odd at rtsp://192.0.2.10/x happened"), "something odd at happened");
         // 401 is a status, not part of a port or a number.
         assert_eq!(plain_error("bad answer from 192.0.2.10:5401"), "bad answer from 192.0.2.10:5401");
-        assert_eq!(plain_error("server said 401"), "the camera refused the sign-in");
+        assert_eq!(plain_error("server said 401"), "the camera refused the user name or password");
+        assert_eq!(
+            plain_error("DESCRIBE failed: 404 response to DESCRIBE CSeq=3: Unexpected RTSP response status\n\nconn: 127.0.0.1:1(me)->127.0.0.1:2@x\nmsg: y"),
+            "the camera has no stream at that address (404); check the path"
+        );
+        assert_eq!(plain_error("the camera refused the user name or password (check them in the camera's settings)"), "the camera refused the user name or password");
         assert_eq!(plain_error("could not open admin:secret@192.0.2.10:554/live (odd)"), "could not open (odd)");
     }
 }

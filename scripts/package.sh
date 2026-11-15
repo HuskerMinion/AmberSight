@@ -32,6 +32,14 @@ name="ambersight-$version-$os-$arch"
 rm -rf "dist/$name"
 mkdir -p "dist/$name"
 cp "$bin" "dist/$name/"
+# macOS 15+ only asks for Local Network access (cameras) for a signed program
+# and blocks an unsigned one without asking. An ad-hoc signature is enough;
+# the fixed identifier keeps the owner's answer across updates (Apple's
+# linker signs Apple-silicon programs with a new identifier every build, and
+# Intel ones not at all). The same identifier as macnet::SIGNING_ID.
+if [ "$os" = darwin ]; then
+  codesign --force --sign - --identifier com.ambersight.ambersight "dist/$name/ambersight"
+fi
 # (The README without its pictures: those files are not in the package, and it links nowhere that needs an account.)
 cp config.example.toml "dist/$name/"
 sed -E '/^<p align="center">$/,/^<\/p>$/d; /^## Screenshots/,/^## Install/{/^## Install/!d;}; /docs\/images/d; /^More screenshots:/d; s,\[([^]]*)\]\(docs/[^)]*\),\1,g' README.md > "dist/$name/README.md"

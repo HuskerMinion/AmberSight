@@ -5,6 +5,7 @@
 
 pub mod aac;
 pub mod baichuan;
+pub mod clockjump;
 pub mod decode;
 pub mod dts;
 pub mod flv;
@@ -34,6 +35,129 @@ pub struct StreamSource {
     /// before the session's runtime ends, so cameras free the session at
     /// once instead of waiting for it to time out.
     pub group: Option<std::sync::Arc<retina::client::SessionGroup>>,
+    /// The camera's `transport` setting: "auto", "tcp" or "udp".
+    pub transport: String,
+}
+
+// ---------------------------------------------------------------------------
+// RTSP transport (TCP or UDP)
+// ---------------------------------------------------------------------------
+
+/// Servers (host:port) that refused TCP with "461 Unsupported Transport"
+/// under `transport = "auto"`: asked over UDP from then on (until restart).
+static UDP_ONLY: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// host:port of an RTSP address (the default port filled in), lowercase.
+fn server_key(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r)?;
+    let auth = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host = auth.rsplit_once('@').map(|(_, h)| h).unwrap_or(auth).to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let has_port = !host.ends_with(']') && host.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    Some(if has_port { host } else { format!("{host}:{}", if url.to_ascii_lowercase().starts_with("rtsps") { 322 } else { 554 }) })
+}
+
+/// Remember that this camera's server only takes UDP.
+pub fn remember_udp(url: &str) {
+    if let Some(k) = server_key(url) {
+        UDP_ONLY.lock().unwrap().get_or_insert_with(Default::default).insert(k);
+    }
+}
+
+/// Forget it again (a UDP session to it failed): TCP is asked first next time.
+pub fn forget_udp(url: &str) {
+    if let Some(k) = server_key(url) {
+        if let Some(s) = UDP_ONLY.lock().unwrap().as_mut() {
+            s.remove(&k);
+        }
+    }
+}
+
+fn udp_remembered(url: &str) -> bool {
+    server_key(url).is_some_and(|k| UDP_ONLY.lock().unwrap().as_ref().is_some_and(|s| s.contains(&k)))
+}
+
+/// Whether to ask for UDP now: "udp", or "auto" for a server that refused TCP before.
+pub fn wants_udp(setting: &str, url: &str) -> bool {
+    match transport_setting(setting) {
+        "udp" => true,
+        "tcp" => false,
+        _ => udp_remembered(url),
+    }
+}
+
+/// Whether a reader's error says the camera does not take this transport:
+/// the RTSP status 461 as retina ("461 response to SETUP") and ffmpeg
+/// ("method SETUP failed: 461 Unsupported Transport") word it. Only that
+/// status text counts, never a number that happens to hold 461.
+pub fn is_unsupported_transport(err: &str) -> bool {
+    const SAID: [&str; 3] = ["461 unsupported transport", "461 response to setup", "setup failed: 461"];
+    err.lines().any(|line| {
+        let l = line.to_ascii_lowercase();
+        SAID.iter().any(|p| {
+            l.match_indices(p).any(|(i, _)| {
+                // "461" stands as a word of its own.
+                let at = i + p.find("461").unwrap_or(0);
+                let before = l[..at].chars().next_back();
+                let after = l[at + 3..].chars().next();
+                !before.is_some_and(|c| c.is_ascii_alphanumeric()) && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+            })
+        })
+    })
+}
+
+/// The transport setting as used: anything unknown is "auto".
+pub fn transport_setting(s: &str) -> &'static str {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "tcp" => "tcp",
+        "udp" => "udp",
+        _ => "auto",
+    }
+}
+
+pub(crate) fn retina_transport(udp: bool) -> Transport {
+    if udp { Transport::Udp(Default::default()) } else { Transport::Tcp(Default::default()) }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn auto_switches_to_udp_only_after_a_461() {
+        let url = "rtsp://u:p@Cam-461.test/main";
+        assert!(!wants_udp("auto", url));
+        assert!(wants_udp("udp", url));
+        assert!(!wants_udp("tcp", url));
+        assert!(is_unsupported_transport("SETUP video failed: 461 response to SETUP CSeq=4: Unexpected RTSP response status\n\nconn: ..."));
+        assert!(is_unsupported_transport("[rtsp @ 0x5] method SETUP failed: 461 Unsupported Transport"));
+        assert!(is_unsupported_transport("461 Unsupported Transport"));
+        assert!(!is_unsupported_transport("401 Unauthorized"));
+        // Numbers that merely hold 461 are not the status.
+        for s in ["[h264 @ 0x1] cabac decode of qscale diff failed at 1461 > 1200", "frame=  461 fps= 10", "bitrate: 461 kb/s", "RTP: missed 461 packets", "x1461 unsupported transport", "setup failed: 4612"] {
+            assert!(!is_unsupported_transport(s), "{s}");
+        }
+        remember_udp(url);
+        // The same server (any path, any login, default port spelled out) is remembered.
+        assert!(wants_udp("auto", "rtsp://cam-461.test:554/sub"));
+        assert!(!wants_udp("tcp", url));
+        assert!(!wants_udp("auto", "rtsp://cam-461.test:8554/main"));
+        // A UDP session that failed: TCP first again.
+        forget_udp("rtsp://cam-461.test/main");
+        assert!(!wants_udp("auto", url));
+        assert!(wants_udp("udp", url));
+    }
+
+    #[test]
+    fn server_keys() {
+        assert_eq!(server_key("rtsp://a:b@H:8554/x?y").as_deref(), Some("h:8554"));
+        assert_eq!(server_key("rtsp://h/x").as_deref(), Some("h:554"));
+        assert_eq!(server_key("rtsps://h/x").as_deref(), Some("h:322"));
+        assert_eq!(transport_setting("UDP"), "udp");
+        assert_eq!(transport_setting("bogus"), "auto");
+    }
 }
 
 /// What we measured on one media stream during a probe.
@@ -159,7 +283,7 @@ pub async fn probe(src: &StreamSource, seconds: u64) -> Result<ProbeReport> {
             continue;
         }
         session
-            .setup(i, SetupOptions::default().transport(Transport::Tcp(Default::default())))
+            .setup(i, SetupOptions::default().transport(retina_transport(wants_udp(&src.transport, &src.url))))
             .await
             .map_err(|e| anyhow!("SETUP of {media} stream {i} failed: {e}"))?;
         map[i] = Some(report.streams.len());

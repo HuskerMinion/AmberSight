@@ -159,6 +159,48 @@ pub fn is_busy(e: &str) -> bool {
     ["500 response", "502 response", "503 response", "504 response", "service unavailable"].iter().any(|k| l.contains(k))
 }
 
+/// RTSP status codes in an error ("404 response to DESCRIBE", "RTSP 401
+/// Unauthorized"): three-digit words, so never a port ("192.0.2.10:554").
+fn rtsp_statuses(e: &str) -> Vec<u16> {
+    e.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|t| t.len() == 3)
+        .filter_map(|t| t.parse::<u16>().ok())
+        .filter(|n| (400..600).contains(n))
+        .collect()
+}
+
+/// A built-in reader error in words for the owner, for the camera's last
+/// error: what happened and what to check. retina's text holds the request
+/// number and debug lines (`conn:`, `msg:`); those, and addresses, go to the
+/// log only. Text that is already in words passes through unchanged.
+pub fn readable_error(e: &str) -> String {
+    let l = e.to_ascii_lowercase();
+    let status = rtsp_statuses(e);
+    let has = |n: u16| status.contains(&n);
+    if has(404) || l.contains("no stream at that address") {
+        "the camera has no stream at that address (404); check the path".into()
+    } else if has(401) || is_auth_error(e) || l.contains("user name or password") {
+        "the camera refused the user name or password".into()
+    } else if has(453) || has(503) || l.contains("service unavailable") || l.contains("not enough bandwidth") || l.contains("too many connections") {
+        "the camera is busy or has too many connections".into()
+    } else if l.contains("connection refused") || l.contains("refused the connection") {
+        "the camera refused the connection; check that it is on and that the port is right".into()
+    } else if is_unreachable(e) || (l.contains("unable to connect") && (l.contains("timed out") || l.contains("timeout"))) {
+        "the camera is not reachable; check that it is on and that its address is right".into()
+    } else if l.contains("connection reset") || l.contains("broken pipe") {
+        "the camera closed the connection".into()
+    } else if let Some(n) = status.first() {
+        format!("the camera turned the request down (RTSP {n})")
+    } else {
+        // Anything else: its first line, without addresses.
+        let first = e.lines().map(str::trim).find(|x| !x.is_empty()).unwrap_or("");
+        let kept: Vec<&str> = first.split_whitespace().filter(|w| !w.contains("://") && !w.contains('@')).collect();
+        let t = kept.join(" ").replace("()", "").replace("( )", "");
+        t.trim().trim_end_matches(':').trim().to_string()
+    }
+}
+
 /// Light check used only during a long wait between attempts: is the
 /// camera's stream port open again? A plain TCP connect, no RTSP request.
 /// The wait is cut short only the first time the port goes from closed (or
@@ -259,6 +301,9 @@ struct SessionPlan {
     on_demand: bool,
     /// Record the sub stream as well (continuous cameras, [storage] sub_copy).
     sub_copy: bool,
+    /// Why the sub stream is not used although it is set (shown with the
+    /// decoding note).
+    sub_note: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -274,7 +319,16 @@ struct SessionEnd {
     error: Option<String>,
     /// The stream broke on a damaged packet: reconnect at once, quietly.
     transient: bool,
+    /// The sub stream alone ended the session: it failed while the main
+    /// stream was playing, and the main stream was still fine a while later
+    /// (an outage takes both down, and that is not the sub stream's fault).
+    sub_only: bool,
 }
+
+/// After the sub stream fails, how long the main stream must go on for the
+/// failure to be the sub stream's alone (longer than the stall limit, so a
+/// main stream that is about to stall too is seen to).
+const SUB_GRACE: Duration = Duration::from_secs(12);
 
 /// A damaged packet ended the session (the RTSP library cannot continue a
 /// stream after one, so the session restarts immediately instead).
@@ -307,6 +361,8 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
     let mut ai_state = super::ai_check::AiState::default();
     ai_state.parked = super::ai_check::restore_parked(&engine, &cfg.name);
     let mut failures_before_play: u32 = 0;
+    // A sub stream that keeps ending the session: motion moves to the main stream.
+    let mut sub_watch = super::ffpath::SubWatch::default();
     // Once the built-in reader has played this camera (here or before a
     // restart, at the same address), a later failure is the camera or its
     // hub (a hub answering 503 for a while), not something ffmpeg would do
@@ -317,6 +373,8 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
     let mut failing_since: Option<std::time::Instant> = None;
     let mut backoff = Duration::from_secs(2);
     let mut port_watch = PortWatch::default();
+    // The macOS Local Network note was logged for this outage.
+    let mut said_blocked = false;
     let mut last_damaged_log: Option<std::time::Instant> = None;
     handle.state.write().unwrap().ingest = "native";
 
@@ -372,19 +430,25 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 }
                 _ => url.to_string(),
             };
-            StreamSource {
-                url,
-                username: cfg.username.clone(),
-                password: cfg.password.clone(),
-                group: Some(group.clone()),
-            }
+            // A sub stream keeps its own sign-in in its address (see
+            // normalize_creds); the reader takes it apart from the address.
+            let (url, own) = super::creds::split_login(&url);
+            let (username, password) = own.unwrap_or_else(|| (cfg.username.clone(), cfg.password.clone()));
+            StreamSource { url, username, password, group: Some(group.clone()), transport: cfg.transport.clone() }
         };
+        // A sub stream address that cannot be opened ("stream2" without
+        // rtsp://): motion uses the main stream, and the camera stays on
+        // the built-in reader.
+        let sub_url = if sub_watch.use_sub(std::time::Instant::now()) { super::usable_sub_url(&cfg) } else { None };
+        if let (None, Some(why)) = (&sub_url, cfg.sub_url.as_deref().filter(|u| !u.trim().is_empty()).and_then(super::sub_url_problem)) {
+            warn!("camera '{}': {why}; motion uses the main stream", cfg.name);
+        }
         let plan = SessionPlan {
             main: creds(&cfg.url),
-            sub: cfg.sub_url.as_deref().filter(|u| !u.is_empty()).map(creds),
+            sub: sub_url.as_deref().map(creds),
             record: match (cfg.record, cfg.record_motion_only) {
                 (false, _) => None,
-                (true, false) if cfg.record_sub && cfg.sub_url.as_deref().is_some_and(|u| !u.is_empty()) => {
+                (true, false) if cfg.record_sub && sub_url.is_some() => {
                     Some(RecordPlan::SubAndEvents { segment_seconds, pre_roll: motion_cfg.pre_roll, post_roll: motion_cfg.post_roll })
                 }
                 (true, false) => Some(RecordPlan::Continuous { segment_seconds }),
@@ -402,6 +466,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             slug: slug_name.clone(),
             on_demand: cfg.on_demand,
             sub_copy: storage.sub_copy,
+            sub_note: if sub_watch.trying() { Some("trying the sub stream again".into()) } else { sub_watch.off.clone() },
         };
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -420,7 +485,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
                 match rt {
                     Ok(rt) => rt.block_on(run_session(plan, handle, engine, stop, jpeg_tx, played)),
-                    Err(e) => SessionEnd { reached_play: false, error: Some(format!("runtime: {e}")), transient: false },
+                    Err(e) => SessionEnd { reached_play: false, error: Some(format!("runtime: {e}")), transient: false, sub_only: false },
                 }
             })
         };
@@ -429,7 +494,39 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let mut idle_stop = false;
         // Pictures arrived this session (the camera really sent video).
         let mut got_video = false;
+        // A given-up sub stream tried on the side while this session goes
+        // on; when it works the session starts over on it.
+        let mut probe: Option<mpsc::Receiver<Result<(), String>>> = None;
+        let mut back_to_sub = false;
         loop {
+            if probe.is_none() && !back_to_sub && sub_watch.probe_due(std::time::Instant::now()) {
+                if let Some(u) = super::usable_sub_url(&cfg) {
+                    let (tx, rx) = mpsc::channel();
+                    let c = cfg.clone();
+                    thread::spawn(move || {
+                        let _ = tx.send(super::ffpath::probe_sub(&c, &u));
+                    });
+                    probe = Some(rx);
+                }
+            }
+            if let Some(rx) = &probe {
+                match rx.try_recv() {
+                    Ok(outcome) => {
+                        let (back, line) = sub_watch.probe_done(std::time::Instant::now(), outcome);
+                        warn!("camera '{}': {line}", cfg.name);
+                        if back {
+                            back_to_sub = true;
+                            stop.store(true, Ordering::Relaxed);
+                        } else {
+                            let mut d = handle.decode.lock().unwrap();
+                            d.note = super::ffpath::replace_sub_note(d.note.take(), sub_watch.off.as_ref());
+                        }
+                        probe = None;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => probe = None,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
             // Disabled, removed or shutting down: stop the session now (not
             // only when frames pause, which a busy camera never does).
             if !handle.active.load(Ordering::Relaxed) {
@@ -471,8 +568,21 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             reached_play: played.load(Ordering::Relaxed),
             error: Some("session thread panicked".into()),
             transient: false,
+            sub_only: false,
         });
         engine.live_sessions.fetch_sub(1, Ordering::Relaxed);
+        handle.decode.lock().unwrap().stopped();
+        if back_to_sub && handle.active.load(Ordering::Relaxed) {
+            // Ended on purpose to move motion back to the sub stream.
+            let mut st = handle.state.write().unwrap();
+            st.online = false;
+            st.motion = false;
+            st.online_since = None;
+            st.offline_since.get_or_insert(Utc::now().timestamp());
+            drop(st);
+            backoff = Duration::from_secs(2);
+            continue;
+        }
         {
             let mut st = handle.state.write().unwrap();
             st.online = false;
@@ -482,7 +592,8 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             st.offline_since.get_or_insert(Utc::now().timestamp());
             if handle.active.load(Ordering::Relaxed) && !idle_stop {
                 st.reconnects += 1;
-                st.last_error = Some(end.error.clone().unwrap_or_else(|| "stream ended".into()));
+                let err = end.error.as_deref().unwrap_or("stream ended");
+                st.last_error = Some(crate::macnet::blocked(err, &cfg.url).unwrap_or_else(|| readable_error(err)));
                 st.last_error_at = Some(Utc::now().timestamp());
             }
             if idle_stop {
@@ -502,6 +613,23 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             backoff = Duration::from_secs(2);
             thread::sleep(Duration::from_millis(200));
             continue;
+        }
+        // The sub stream alone ended the session: after a refusal, or a few
+        // times in a row, motion moves to the main stream for a while (the
+        // camera stays on the built-in reader); a later try takes it back.
+        {
+            let err = end.error.clone().unwrap_or_default();
+            let why = readable_error(&err);
+            let sub_failed = end.sub_only.then_some((err.as_str(), why.as_str()));
+            if let Some(line) = sub_watch.ended(std::time::Instant::now(), session_began.elapsed(), sub_failed) {
+                warn!("camera '{}': {line}", cfg.name);
+                if end.sub_only {
+                    failures_before_play = 0;
+                    backoff = Duration::from_secs(2);
+                    thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+            }
         }
         if end.reached_play && cfg.on_demand && end.error.as_deref().is_some_and(|e| e.starts_with(NO_PICTURE_AFTER_WAKE)) {
             // Woke but stayed silent. A hub relaying a battery camera does
@@ -523,6 +651,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // sends nothing is not asked again every few seconds (that can wedge
         // it until it is power-cycled).
         let lasted = session_began.elapsed() >= Duration::from_secs(60);
+        crate::camreport::note_end(&cfg.name, &why, end.reached_play && (lasted || got_video));
         if end.reached_play && (lasted || got_video) {
             ever_played = true;
             failures_before_play = 0;
@@ -588,6 +717,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 "camera '{}': built-in RTSP reader could not play this camera ({why}); switching to ffmpeg ingest",
                 cfg.name
             );
+            crate::camreport::note_fallback(&cfg.name, &why);
             handle.state.write().unwrap().ingest = "ffmpeg (fallback)";
             camera_worker(handle, cfg, engine);
             return;
@@ -595,6 +725,15 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // (A long wait left from a refused sign-in does not apply here.)
         backoff = backoff.min(RETRY_MAX);
         warn!("camera '{}': {why}; reconnecting in {} s", cfg.name, backoff.as_secs());
+        // macOS's Local Network privacy: say what to do, once per outage.
+        if let Some(m) = crate::macnet::blocked(&why, &cfg.url) {
+            if !said_blocked {
+                warn!("camera '{}': {m}", cfg.name);
+                said_blocked = true;
+            }
+        } else {
+            said_blocked = false;
+        }
         if !end.reached_play && is_unreachable(&why) {
             port_watch.failed_unreachable();
         }
@@ -630,13 +769,16 @@ async fn run_session(
     // (A shared main stream needs its session even when nothing records it.)
     let main_needed = plan.record.is_some() || main_decodes || handle.restream_main.wanted();
 
+    // The main stream reached play this session (apart from the sub stream).
+    let main_played = AtomicBool::new(false);
     let main = async {
         if !main_needed {
             return std::future::pending::<anyhow::Result<()>>().await;
         }
         let tx = main_decodes.then(|| jpeg_tx.clone());
-        main_task(&plan, &handle, &engine, &stop, &reached_play, tx).await
+        main_task(&plan, &handle, &engine, &stop, &reached_play, &main_played, tx).await
     };
+    tokio::pin!(main);
     let sub = async {
         match &plan.sub {
             None => std::future::pending::<anyhow::Result<()>>().await,
@@ -644,16 +786,29 @@ async fn run_session(
         }
     };
     // Whichever side ends first ends the session; the worker reconnects both.
-    let result = tokio::select! {
-        r = main => r,
-        r = sub => r,
+    let (result, by_sub) = tokio::select! {
+        r = &mut main => (r, false),
+        r = sub => (r, true),
     };
+    // The sub stream failed: its fault alone only when the main stream plays
+    // (it may still be connecting when a sub stream is refused at once) and
+    // still does a while later (not when both go down at once).
+    let sub_only = by_sub
+        && result.is_err()
+        && main_needed
+        && tokio::time::timeout(SUB_GRACE, &mut main).await.is_err()
+        && main_played.load(Ordering::Relaxed);
+    // Nothing keeps the main stream open to compare with: a refusal of the
+    // sub stream (401/403/404) is its own fault. (If the main stream then
+    // fails too, the camera shows that, and the later try of the sub
+    // stream sorts it out.)
+    let sub_only = sub_only || (by_sub && !main_needed && result.as_ref().err().is_some_and(|e| super::ffpath::is_refusal(&format!("{e:#}"))));
     // Let the camera free the session now (TEARDOWN), not after a timeout.
     if let Some(g) = &plan.main.group {
         let _ = tokio::time::timeout(Duration::from_secs(3), g.await_teardown()).await;
     }
     let transient = result.as_ref().err().is_some_and(|e| e.downcast_ref::<DamagedPacket>().is_some());
-    SessionEnd { reached_play: reached_play.load(Ordering::Relaxed), error: result.err().map(|e| format!("{e:#}")), transient }
+    SessionEnd { reached_play: reached_play.load(Ordering::Relaxed), error: result.err().map(|e| format!("{e:#}")), transient, sub_only }
 }
 
 enum Sink {
@@ -690,6 +845,7 @@ async fn main_task(
     engine: &Arc<Engine>,
     stop: &AtomicBool,
     reached_play: &AtomicBool,
+    main_played: &AtomicBool,
     jpeg_tx: Option<mpsc::SyncSender<Vec<u8>>>,
 ) -> anyhow::Result<()> {
     // Set up every track (some hubs stream nothing otherwise); audio is
@@ -705,10 +861,14 @@ async fn main_task(
         s.stall_limit = WAKE_STALL;
     }
     reached_play.store(true, Ordering::Relaxed);
+    main_played.store(true, Ordering::Relaxed);
     info!("camera '{}': native stream playing ({})", handle.state.read().unwrap().name, redact_url(plan.main.url.clone()));
     let mut sink: Option<Sink> = None;
     let mut decoder: Option<FrameDecoder> = None;
     let mut seen_drops = 0u64;
+    // The decoder started before the graphics card test finished.
+    let mut dec_pending = false;
+    let mut main_noted = false;
     // Latest RTCP sender report per track (video, audio): (rtp ticks, NTP
     // epoch seconds). They align audio with video in the recordings; kept
     // here so a recorder created later starts aligned.
@@ -740,7 +900,16 @@ async fn main_task(
                     }
                     decoder = None;
                     live = None;
+                    main_noted = false;
                     shared.stop();
+                }
+                if key && !main_noted {
+                    // The main stream's size, for the warning about decoding
+                    // it for motion (no sub stream).
+                    if let Ok(Some(v)) = s.video_params() {
+                        handle.decode.lock().unwrap().main = Some((v.width, v.height, crate::hwdecode::codec_text(v.h265)));
+                        main_noted = true;
+                    }
                 }
                 if live.is_none() && key {
                     live = start_live(&s, &handle.live_main, &plan.slug)?;
@@ -750,13 +919,17 @@ async fn main_task(
                 }
                 share_video(&s, &shared, plan.with_audio, ticks + i64::from(cts), key, &data);
                 if let Some(tx) = &jpeg_tx {
+                    if key && dec_pending && crate::hwdecode::probe_done() {
+                        decoder = None;
+                    }
                     if decoder.is_none() && key {
-                        decoder = start_decoder(&s, plan)?;
+                        decoder = start_decoder(&s, plan, handle, "main", &mut dec_pending)?;
                         seen_drops = 0;
                     }
                     if let Some(d) = decoder.as_mut() {
                         let _ = d.push(&data, key);
                         note_drops(&handle, d, &mut seen_drops);
+                        note_decode(handle, d);
                         forward_jpegs(d, tx);
                     }
                 }
@@ -878,6 +1051,7 @@ async fn decode_only_task(
     };
     let mut decoder: Option<FrameDecoder> = None;
     let mut seen_drops = 0u64;
+    let mut dec_pending = false;
     let mut live: Option<LiveMuxer> = None;
     let mut sink: Option<Sink> = None;
     let shared = handle.restream_sub.clone();
@@ -924,13 +1098,17 @@ async fn decode_only_task(
                 l.push_video(ticks, cts, &data, key);
             }
             share_video(&s, &shared, plan.with_audio, ticks + i64::from(cts), key, &data);
+            if key && dec_pending && crate::hwdecode::probe_done() {
+                decoder = None;
+            }
             if decoder.is_none() && key {
-                decoder = start_decoder(&s, plan)?;
+                decoder = start_decoder(&s, plan, handle, "sub", &mut dec_pending)?;
                 seen_drops = 0;
             }
             if let Some(d) = decoder.as_mut() {
                 let _ = d.push(&data, key);
                 note_drops(&handle, d, &mut seen_drops);
+                note_decode(handle, d);
                 forward_jpegs(d, &jpeg_tx);
             }
             // The sub-stream recording is extra: if writing it fails, only it
@@ -1020,6 +1198,7 @@ async fn next_item(s: &mut OpenStream, stop: &AtomicBool) -> anyhow::Result<Opti
         // Only video frames prove the stream is alive (a stuck device may
         // keep sending RTCP reports, or audio, with no picture).
         if s.last_video.elapsed() >= s.stall_limit {
+            s.stalled();
             if s.stall_limit == WAKE_STALL {
                 return Err(anyhow::anyhow!("{NO_PICTURE_AFTER_WAKE} within {} s", WAKE_STALL.as_secs()));
             }
@@ -1028,6 +1207,7 @@ async fn next_item(s: &mut OpenStream, stop: &AtomicBool) -> anyhow::Result<Opti
         match tokio::time::timeout(Duration::from_millis(500), s.next()).await {
             Ok(Some(Ok(item))) => {
                 if matches!(&item, MediaItem::Video { .. }) {
+                    s.had_video = true;
                     // Awake and streaming: normal stall detection from now on.
                     s.stall_limit = STALL;
                     s.last_video = std::time::Instant::now();
@@ -1050,10 +1230,39 @@ async fn next_item(s: &mut OpenStream, stop: &AtomicBool) -> anyhow::Result<Opti
     }
 }
 
-fn start_decoder(s: &OpenStream, plan: &SessionPlan) -> anyhow::Result<Option<FrameDecoder>> {
+/// Start the motion decoder: on the graphics card when the camera's
+/// setting and the start-up test allow it (`pending`: the test had not
+/// finished; the caller starts again once it has).
+fn start_decoder(s: &OpenStream, plan: &SessionPlan, handle: &CameraHandle, stream: &'static str, pending: &mut bool) -> anyhow::Result<Option<FrameDecoder>> {
     let Some(v) = s.video_params()? else { return Ok(None) };
     let codec = if v.h265 { Codec::H265 } else { Codec::H264 };
-    Ok(Some(FrameDecoder::start(codec, &v.extra_data, plan.fps, plan.scale, plan.hwaccel.clone())?))
+    // (Never waits for the test: this runs on the camera's async task; a
+    // decoder started while it runs is started again once it is done.)
+    let r = crate::hwdecode::resolve(plan.hwaccel.as_deref(), Some(codec), Duration::ZERO);
+    *pending = r.pending;
+    let name = handle.state.read().unwrap().name.clone();
+    let d = FrameDecoder::start(codec, &v.extra_data, plan.fps, plan.scale, r.spec.clone())?.with_camera(&name);
+    let mut dec = handle.decode.lock().unwrap();
+    dec.stream = Some(stream);
+    dec.codec = Some(crate::hwdecode::codec_text(v.h265));
+    dec.width = v.width;
+    dec.height = v.height;
+    dec.gpu = r.spec.as_deref().map(crate::hwdecode::describe);
+    dec.note = super::ffpath::join_notes(r.why_not, plan.sub_note.as_ref());
+    if stream == "main" {
+        dec.main = Some((v.width, v.height, crate::hwdecode::codec_text(v.h265)));
+    }
+    Ok(Some(d))
+}
+
+/// A decoder that left the graphics card is shown as decoding on the processor.
+fn note_decode(handle: &CameraHandle, d: &FrameDecoder) {
+    if d.hw_fallback_used() {
+        let mut dec = handle.decode.lock().unwrap();
+        if let Some(was) = dec.gpu.take() {
+            dec.note = Some(format!("hardware decoding ({was}) stopped working ({}); using the processor", d.hw_reason().unwrap_or("failed")));
+        }
+    }
 }
 
 /// Add the decoder's new dropped frames to the camera's counter (status panel).
@@ -1325,6 +1534,42 @@ mod tests {
         assert_eq!(stream_addr("rtsp://u:p@192.0.2.10/stream").as_deref(), Some("192.0.2.10:554"));
         assert_eq!(stream_addr("rtsp://192.0.2.10:8554/a?b=c").as_deref(), Some("192.0.2.10:8554"));
         assert_eq!(stream_addr("https://cam.example/flv?x=1").as_deref(), Some("cam.example:443"));
+    }
+
+    #[test]
+    fn errors_read_as_plain_words() {
+        let not_found = "the camera has no stream at that address (404); check the path";
+        for e in [
+            "DESCRIBE failed: 404 response to DESCRIBE CSeq=3: Unexpected RTSP response status\n\nconn: 127.0.0.1:40000(me)->127.0.0.1:18554@2026-11-15T13:03:01Z\nmsg: RTSP/1.0 404 Not Found",
+            "DESCRIBE failed: 404 response to DESCRIBE CSeq=2: Unexpected RTSP response status",
+            not_found,
+        ] {
+            assert_eq!(readable_error(e), not_found, "{e}");
+        }
+        let auth = "the camera refused the user name or password";
+        assert_eq!(readable_error("DESCRIBE failed: 401 response to DESCRIBE CSeq=3: Received Unauthorized after trying digest auth\n\nconn: x\nmsg: y"), auth);
+        assert_eq!(readable_error("the camera refused the user name or password (check them in the camera's settings)"), auth);
+        let busy = "the camera is busy or has too many connections";
+        assert_eq!(readable_error("DESCRIBE failed: 503 response to DESCRIBE CSeq=3: Unexpected RTSP response status\n\nconn: x"), busy);
+        assert_eq!(readable_error("SETUP failed: 453 response to SETUP CSeq=4: Not Enough Bandwidth"), busy);
+        assert_eq!(readable_error(busy), busy);
+        let refused = readable_error("DESCRIBE failed: Unable to connect to RTSP server: Connection refused (os error 111)");
+        assert!(refused.starts_with("the camera refused the connection"), "{refused}");
+        assert_eq!(readable_error(&refused), refused);
+        let gone = readable_error("camera not reachable within 15 s (rtsp://192.0.2.10:554/stream)");
+        assert!(gone.starts_with("the camera is not reachable"), "{gone}");
+        assert_eq!(readable_error(&gone), gone);
+        assert_eq!(readable_error("DESCRIBE failed: Unable to connect to RTSP server: connection timed out (os error 110)"), gone);
+        assert_eq!(readable_error("RTSP framing error: Connection reset by peer (os error 104)\n\nconn: x"), "the camera closed the connection");
+        assert_eq!(readable_error("PLAY failed: 500 response to PLAY CSeq=5: Unexpected RTSP response status\n\nconn: x"), "the camera turned the request down (RTSP 500)");
+        // Already words: unchanged, and never with an address.
+        assert_eq!(readable_error("no video from camera for 10 s"), "no video from camera for 10 s");
+        assert_eq!(readable_error("camera closed the stream"), "camera closed the stream");
+        assert_eq!(readable_error("camera did not answer within 15 s (rtsp://192.0.2.10:554/x)"), "camera did not answer within 15 s");
+        // A port or address holding 404 is not a status.
+        assert_eq!(readable_error("bad answer from 192.0.2.10:5404"), "bad answer from 192.0.2.10:5404");
+        assert_eq!(readable_error("odd reply from rtsp://u:p@192.0.2.10:404/a"), "odd reply from");
+        assert_eq!(readable_error("lost 192.0.2.10:554 at once"), "lost 192.0.2.10:554 at once");
     }
 
     #[test]

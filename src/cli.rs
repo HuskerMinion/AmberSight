@@ -632,8 +632,9 @@ pub async fn run() -> Result<()> {
                 let mut best: Option<String> = None;
                 for cand in working.iter().take(3) {
                     let st = std::process::Command::new(crate::ffmpeg_bin::program())
-                        .args(["-hide_banner", "-loglevel", "error",
-                               "-timeout", "5", "-rtsp_transport", "tcp",
+                        .args(["-hide_banner", "-loglevel", "error"])
+                        .args(crate::ffmpeg_bin::rtsp_timeout_args(5_000_000))
+                        .args(["-rtsp_transport", "tcp",
                                "-i", &cand.clone(), "-frames:v", "1", "-f", "null", "-"])
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
@@ -913,6 +914,7 @@ pub async fn run() -> Result<()> {
                 url: url.unwrap_or(cam.url.clone()),
                 username: cam.username.clone(),
                 password: cam.password.clone(),
+                transport: cam.transport.clone(),
             };
             println!("recording {} for {} s into {}", engine::redact_url(src.url.clone()), seconds, out);
             let segs = crate::ingest::recorder::record_stream(
@@ -1178,6 +1180,7 @@ pub async fn run() -> Result<()> {
                     url: url.clone(),
                     username: cam.username.clone(),
                     password: cam.password.clone(),
+                    transport: cam.transport.clone(),
                 };
                 match crate::ingest::probe(&src, seconds).await {
                     Ok(r) => println!("{}", crate::ingest::format_report(
@@ -1202,6 +1205,7 @@ pub async fn run() -> Result<()> {
                 url,
                 username: cam.username.clone(),
                 password: cam.password.clone(),
+                transport: cam.transport.clone(),
             };
             decode_test(&src, seconds, hwaccel, fps, scale, every.max(1), &out).await
         }
@@ -1280,7 +1284,11 @@ pub async fn run_server_until(config: String, shutdown: impl std::future::Future
         tracing::warn!("{w}");
     }
     protect_folders(&cfg, &config);
+    crate::macnet::startup_note();
     crate::links::remember_name(&cfg);
+    // Test hardware decoding before the cameras start (they wait a few
+    // seconds for it at most).
+    crate::hwdecode::probe_in_background();
     let engine = Engine::start(cfg.clone(), config.clone())?;
     let bind = bind_addr(&cfg.server.bind, cfg.server.port);
     let app = web::build_router(engine.clone());
@@ -1363,7 +1371,7 @@ async fn decode_test(
 ) -> Result<()> {
     use crate::ingest::decode::{Codec, FrameDecoder};
     use futures::StreamExt;
-    use retina::client::{Credentials, PlayOptions, Session, SessionOptions, SetupOptions, Transport};
+    use retina::client::{Credentials, PlayOptions, Session, SessionOptions, SetupOptions};
     use retina::codec::{CodecItem, FrameFormat, ParametersRef};
     use std::time::{Duration, Instant};
 
@@ -1384,7 +1392,7 @@ async fn decode_test(
         .setup(
             idx,
             SetupOptions::default()
-                .transport(Transport::Tcp(Default::default()))
+                .transport(crate::ingest::retina_transport(crate::ingest::wants_udp(&src.transport, &src.url)))
                 .frame_format(FrameFormat::MP4),
         )
         .await

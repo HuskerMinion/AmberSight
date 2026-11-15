@@ -168,7 +168,7 @@ function statusPage(el) {
   function warningsHtml(h) {
     const ws = (h.warnings || []).slice();
     const cs = cardState();
-    const items = ws.map((w, i) => ({ text: w, fix: (h.fixes || []).find(x => x.warning === i), bad: true }));
+    const items = ws.map((w, i) => { const fix = (h.fixes || []).find(x => x.warning === i); return { text: w, fix, bad: !(fix && fix.kind === 'substream') }; });
     const covered = (re) => ws.some(w => re.test(w));
     // What the cards say that the health warnings do not already say.
     // (By the exact name: "Porch" is not covered by "Back Porch has been offline".)
@@ -189,9 +189,24 @@ function statusPage(el) {
       const x = it.fix, w = it.text;
       let btn = it.link ? link(it.link[0], it.link[1]) : '';
       if (x && x.kind === 'timesync') btn = '<button class="btn asys-fix" data-timesync="' + esc(String(x.camera)) + '"' + (fixing.has(x.camera) ? ' disabled' : '') + '>' + (fixing.has(x.camera) ? 'Turning on...' : 'Turn on time sync') + '</button>';
+      else if (x && x.kind === 'substream') btn = '<button class="btn asys-fix" data-opencam="' + esc(String(x.camera)) + '">Open camera settings</button>';
       else if (!btn && /disk|drive|storage|space|full|folder/i.test(w)) btn = link('#settings/recording/retention', 'Open Storage &amp; retention');
       else if (!btn && /offline|no video|not recording|no recordings/i.test(w)) btn = link('#settings/cameras/list', 'Open Cameras');
       return '<div class="st-prob"><span>' + esc(w.charAt(0).toUpperCase() + w.slice(1)) + '</span>' + btn + '</div>';
+    }).join('') + '</div>';
+  }
+
+  // Notes that are not problems (hardware decoding unavailable on a card, a camera that
+  // re-encodes by its own settings or has no sub stream, and the like). note_fixes adds a
+  // button that opens the camera's settings.
+  function notesHtml(h) {
+    const ns = (h.notes || []).map((n, i) => [n, i]).filter(([n]) => typeof n === 'string');
+    if (!ns.length) return '';
+    const fixOf = (i) => (h.note_fixes || []).find(x => x.note === i);
+    return '<div class="st-notes" role="status">' + ns.map(([n, i]) => {
+      const x = fixOf(i);
+      const btn = x && x.camera != null ? ' <button class="btn asys-fix" data-opencam="' + esc(String(x.camera)) + '">Open camera settings</button>' : '';
+      return '<p class="hint' + (btn ? ' st-note-fix' : '') + '">' + ic('help') + ' <span>' + esc(n) + '</span>' + btn + '</p>';
     }).join('') + '</div>';
   }
 
@@ -215,7 +230,7 @@ function statusPage(el) {
     const camLines = [cs.asleep.length ? (cs.asleep.length === 1 ? 'battery camera' : 'battery cameras') + ' asleep to save power' + fpsTxt : 'online' + fpsTxt];
     const camBig = cs.asleep.length ? cs.online + ' online, ' + cs.asleep.length + ' asleep' : cs.online + ' / ' + cs.en.length;
     if (cs.off.length) camLines.push('<b>' + cs.off.length + ' offline</b>');
-    let html = warningsHtml(h) + noisyHtml() + '<div class="st-cards">' +
+    let html = warningsHtml(h) + notesHtml(h) + noisyHtml() + '<div class="st-cards">' +
       card('Cameras', camBig, camLines, cs.cams, 'cameras') +
       (!d.plan ? card('Storage', 'Calculating...', ['Working out how long recordings are kept'], '', 'storage', null) :
       card('Storage', cs.kept != null ? esc(days(cs.kept)) : fmtSize(used), [
@@ -378,7 +393,7 @@ function statusPage(el) {
     const now = Date.now() / 1000;
     return '<div class="ac-row st-sync"><span class="hint">Camera clocks: the time each camera stamps on its picture. Sync turns on each camera\'s own time sync (NTP) and sets its clock to this computer\'s now.</span><span class="ac-sp"></span><button class="btn" data-syncall' + (syncing ? ' disabled' : '') + '>' + (syncing ? 'Syncing…' : 'Sync all camera clocks') + '</button></div>' +
       wrap('<table class="asys-tbl st-cams"><thead><tr><th>Camera</th><th>State</th><th class="num">Clock</th><th class="num">FPS</th><th class="num">Bitrate</th><th class="num">Per day</th><th class="num">Kept</th>' +
-      '<th>Up / down for</th><th class="num">Reconnects</th><th class="num">Viewers</th><th>Last recording</th><th>Last error</th></tr></thead><tbody>' +
+      '<th>Up / down for</th><th class="num">Reconnects</th><th class="num">Viewers</th><th>Decoding</th><th>ffmpeg</th><th>Last recording</th><th>Last error</th></tr></thead><tbody>' +
       cams.map(c => {
         let b;
         if (!c.enabled) b = '<span class="badge">Disabled</span>';
@@ -398,9 +413,20 @@ function statusPage(el) {
           '<td class="num" title="Oldest recording still kept">' + kept + '</td>' +
           '<td>' + (c.enabled && since ? dur(now - since) : '-') + '</td>' +
           '<td class="num">' + (c.reconnects != null ? c.reconnects : '-') + '</td><td class="num">' + (c.live_viewers != null ? c.live_viewers : '-') + '</td>' +
+          decodeCell(c) + '<td>' + ((c.ffmpeg || []).length ? esc(c.ffmpeg.join(' + ')) : '-') + (c.ffmpeg_why ? '<div class="muted">Why ffmpeg: ' + esc(c.ffmpeg_why) + '</div>' : '') + '</td>' +
           '<td>' + rec + '</td>' + lastErr(c) + '</tr>';
       }).join('') + '</tbody></table>') +
-      '<p class="hint">Bitrate is from the last hour of recordings; per day is measured over the last ' + ((p.window_days) || 7) + ' days (* = less than a day so far). Kept is the age of the oldest recording still stored.</p>';
+      '<p class="hint">Bitrate is from the last hour of recordings; per day is measured over the last ' + ((p.window_days) || 7) + ' days (* = less than a day so far). Kept is the age of the oldest recording still stored. Decoding: where motion detection decodes the picture (GPU: the graphics card; CPU: the processor), and which stream. ffmpeg: the ffmpeg processes the camera runs now.</p>' +
+      notesHtml(h);
+  }
+
+  // Where motion detection decodes: GPU or CPU, which stream and its size; why not the GPU on hover.
+  function decodeCell(c) {
+    const x = c.decode;
+    if (!x || !x.stream) return '<td>-</td>';
+    const size = x.width && x.height ? ' ' + x.width + 'x' + x.height : '';
+    const tip = (x.on === 'gpu' ? 'On the graphics card: ' + (x.gpu || '') : 'On the processor') + (x.note ? '. ' + x.note : '');
+    return '<td title="' + esc(tip) + '">' + (x.on === 'gpu' ? '<b>GPU</b>' : 'CPU') + ' <span class="muted">' + esc(x.stream + size + (x.codec ? ' ' + x.codec : '')) + '</span>' + (x.note && x.on !== 'gpu' ? ' ' + ic('help') : '') + '</td>';
   }
 
   // ------------------------------------------------------------ Performance
@@ -653,6 +679,8 @@ function statusPage(el) {
     if (nz) { noisyAct(nz.dataset.nz, nz.dataset.nzc); return; }
     const go = e.target.closest('[data-go]');
     if (go) { if (go.dataset.go === 'log') { openAdminPage('logs'); return; } tab = go.dataset.go; saveTab(tab); draw(); load(); return; }
+    const oc = e.target.closest('[data-opencam]');
+    if (oc) { const id = Number(oc.dataset.opencam); import('./cameras.js').then(m => m.openCameraDialog(id)); return; }
     const ga = e.target.closest('[data-goadmin]');
     if (ga) { e.preventDefault(); openAdminPage(ga.dataset.goadmin); return; }
     if (e.target.closest('[data-updinstall]')) { confirmUpdate(); return; }

@@ -108,9 +108,48 @@ struct State {
     chosen: Option<PathBuf>,
     /// Shown in the status page, e.g. "8.1.2 (downloaded by AmberSight)".
     note: Option<String>,
+    /// The version the chosen ffmpeg reports ("4.3.1", "n7.1", "N-1234-g...").
+    version: Option<String>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { tools: None, chosen: None, note: None });
+static STATE: Mutex<State> = Mutex::new(State { tools: None, chosen: None, note: None, version: None });
+
+/// The major version in an ffmpeg version string: "4.3.1" and "n4.4.2" give
+/// 4; git builds ("N-112345-g...", "git-2024-...") give None (new).
+pub fn major_of(v: &str) -> Option<u32> {
+    let v = v.strip_prefix('n').unwrap_or(v);
+    let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || !v[digits.len()..].starts_with('.') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The chosen ffmpeg's major version, when it is known.
+pub fn major() -> Option<u32> {
+    STATE.lock().unwrap().version.as_deref().and_then(major_of)
+}
+
+/// ffmpeg's RTSP socket timeout option for this major version: ffmpeg 5
+/// made it `-timeout`; before that `-timeout` meant "listen for an incoming
+/// connection" and the socket timeout was `-stimeout` (both microseconds).
+pub fn rtsp_timeout_flag(major: Option<u32>) -> &'static str {
+    match major {
+        Some(m) if m < 5 => "-stimeout",
+        _ => "-timeout",
+    }
+}
+
+/// The RTSP socket timeout arguments for the ffmpeg in use.
+pub fn rtsp_timeout_args(micros: u64) -> [String; 2] {
+    [rtsp_timeout_flag(major()).to_string(), micros.to_string()]
+}
+
+/// A Status note when the ffmpeg in use is older than 5.
+pub fn old_note() -> Option<String> {
+    let v = STATE.lock().unwrap().version.clone()?;
+    (major_of(&v)? < 5).then(|| format!("ffmpeg {v} is old; some cameras may not work. Install ffmpeg 5 or newer."))
+}
 
 fn exe_name() -> &'static str {
     if cfg!(windows) {
@@ -240,6 +279,10 @@ pub fn ensure(data_dir: &Path) -> Result<()> {
             Some(v) => {
                 let from = if p.starts_with(&tools) { "downloaded by AmberSight" } else { "installed" };
                 choose(p.clone(), format!("{v} ({from})"));
+                STATE.lock().unwrap().version = Some(v.clone());
+                if major_of(&v).is_some_and(|m| m < 5) {
+                    tracing::warn!("ffmpeg {v} is old; some cameras may not work. Install ffmpeg 5 or newer.");
+                }
                 tracing::info!("using ffmpeg {v}: {}", p.display());
                 return Ok(());
             }
@@ -267,6 +310,7 @@ pub fn ensure(data_dir: &Path) -> Result<()> {
             println!("ffmpeg {v} is ready ({})", p.display());
             tracing::info!("ffmpeg {v} downloaded and checked: {}", p.display());
             choose(p, format!("{v} (downloaded by AmberSight)"));
+            STATE.lock().unwrap().version = Some(v);
             Ok(())
         }
         Err(e) => bail!("{}", missing_help(Some(&format!("{e:#}")))),

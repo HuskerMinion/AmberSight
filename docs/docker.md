@@ -122,16 +122,24 @@ host networking that setting is the host's own.
 
 Pass `/dev/dri` through (`--device /dev/dri`) for Intel or AMD hardware
 decode (VAAPI); the container joins the groups that own those devices by
-itself. Then set it per camera in `config.toml`:
+itself. Motion detection then decodes on the graphics card by itself: at
+start AmberSight test-decodes a short H.264 and H.265 sample on each render
+node and uses the first that decodes it right (Status > Cameras shows GPU or
+CPU per camera; a card that fails is named in Status). Without `/dev/dri`
+everything decodes on the processor, as before.
+
+To choose per camera (camera settings > Stream > More settings > Hardware
+decoding, or in `config.toml`):
 
 ```toml
-hwaccel = "vaapi"                         # the first graphics device, /dev/dri/renderD128
+hwaccel = "off"                           # the processor
+hwaccel = "vaapi"                         # VAAPI on the first render node that passed the test
 hwaccel = "vaapi:/dev/dri/renderD129"     # a particular one, when there are several
+hwaccel = "qsv:/dev/dri/renderD128"       # Intel Quick Sync
 ```
 
 `ls -l /dev/dri/by-path` on the host shows which `renderD` belongs to which
-graphics card (an NVIDIA card's node does not do VAAPI). Without `hwaccel`,
-motion analysis decodes on the processor.
+graphics card (an NVIDIA card's node does not do VAAPI).
 
 ## AI on an NVIDIA card
 

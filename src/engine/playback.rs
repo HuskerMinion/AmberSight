@@ -171,11 +171,25 @@ pub fn event_clip_at(db: &Db, camera: &str, from_ms: i64, to_ms: i64, pre: i64, 
         let (a, b) = ((ev.start - pre) * 1000, (ev.end + post) * 1000);
         // What build_clip joined: the main-stream recordings over the window.
         let rows: Vec<SegmentRow> = db.segments_overlapping(&cam, a, b)?.into_iter().filter(|r| r.kind != "sub").collect();
-        let (start_ms, end_ms) = if rows.is_empty() {
+        let (mut start_ms, mut end_ms) = if rows.is_empty() {
             (a, b)
         } else {
             (rows.iter().map(|r| r.start_ms).min().unwrap_or(a), rows.iter().map(|r| r.end_ms).max().unwrap_or(b))
         };
+        // The rows overlapping the event are not always what was joined: the
+        // index lags when the clip is made, so it can hold a later subset.
+        // The file knows its own length; the start it was joined from is
+        // saved beside it (".start", written by build_clip).
+        let len = mp4_duration_ms(&path);
+        let saved = std::fs::read_to_string(path.with_extension("start")).ok().and_then(|t| t.trim().parse::<i64>().ok());
+        match (saved, len) {
+            (Some(s), Some(d)) => (start_ms, end_ms) = (s, s + d),
+            (Some(s), None) => start_ms = s,
+            // Older clips: no saved start. The joined recordings end where
+            // the rows end; the file's length places its start from there.
+            (None, Some(d)) if d < end_ms - start_ms => start_ms = end_ms - d,
+            _ => {}
+        }
         if end_ms <= from_ms || start_ms >= to_ms {
             continue;
         }
@@ -190,6 +204,67 @@ pub fn event_clip_at(db: &Db, camera: &str, from_ms: i64, to_ms: i64, pre: i64, 
         };
     }
     Ok(best)
+}
+
+/// The length (ms) an MP4 file says it has (its mvhd box, found by walking
+/// the top-level boxes; the moov box is often last). None when unreadable.
+pub fn mp4_duration_ms(path: &std::path::Path) -> Option<i64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut pos = 0u64;
+    while pos + 8 <= len {
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        let mut h = [0u8; 16];
+        let n = f.read(&mut h).ok()?;
+        if n < 8 {
+            return None;
+        }
+        let mut size = u32::from_be_bytes(h[0..4].try_into().ok()?) as u64;
+        let mut head = 8u64;
+        if size == 1 && n >= 16 {
+            size = u64::from_be_bytes(h[8..16].try_into().ok()?);
+            head = 16;
+        } else if size == 0 {
+            size = len - pos;
+        }
+        if size < head {
+            return None;
+        }
+        if &h[4..8] == b"moov" {
+            // Inside moov: boxes in a row until mvhd.
+            let end = (pos + size).min(len);
+            let mut q = pos + head;
+            while q + 8 <= end {
+                f.seek(SeekFrom::Start(q)).ok()?;
+                let mut b = [0u8; 8 + 32];
+                let got = f.read(&mut b).ok()?;
+                if got < 8 {
+                    return None;
+                }
+                let bs = u32::from_be_bytes(b[0..4].try_into().ok()?) as u64;
+                if &b[4..8] == b"mvhd" && got >= 8 + 24 {
+                    let v = b[8];
+                    let (scale, dur) = if v == 1 {
+                        if got < 8 + 32 {
+                            return None;
+                        }
+                        (u32::from_be_bytes(b[28..32].try_into().ok()?) as u64, u64::from_be_bytes(b[32..40].try_into().ok()?))
+                    } else {
+                        (u32::from_be_bytes(b[20..24].try_into().ok()?) as u64, u32::from_be_bytes(b[24..28].try_into().ok()?) as u64)
+                    };
+                    return (scale > 0).then(|| (dur.saturating_mul(1000) / scale) as i64);
+                }
+                if bs < 8 {
+                    return None;
+                }
+                q += bs;
+            }
+            return None;
+        }
+        pos += size;
+    }
+    None
 }
 
 /// Plan a clip over [from_ms, to_ms] from native-format recordings only.
@@ -996,6 +1071,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ftyp, mdat, then moov/mvhd saying `ms` (timescale 1000): where ffmpeg puts them.
+    fn mp4_with_duration(ms: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend([0, 0, 0, 16]);
+        v.extend(*b"ftypisom");
+        v.extend([0; 4]);
+        v.extend([0, 0, 0, 12]);
+        v.extend(*b"mdat");
+        v.extend([1, 2, 3, 4]);
+        let mut mvhd = vec![0u8; 100];
+        mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+        mvhd[16..20].copy_from_slice(&ms.to_be_bytes());
+        let mvhd_len = 8 + mvhd.len() as u32;
+        v.extend((8 + mvhd_len).to_be_bytes());
+        v.extend(*b"moov");
+        v.extend(mvhd_len.to_be_bytes());
+        v.extend(*b"mvhd");
+        v.extend(mvhd);
+        v
+    }
+
     #[test]
     fn a_window_with_only_an_event_clip_plays_that_clip() {
         let dir = std::env::temp_dir().join(format!("amber-evclip-test-{}", std::process::id()));
@@ -1028,6 +1124,21 @@ mod tests {
         assert!(at(1_500_000, 1_530_000).is_none());
         assert!(at(2_990_000, 3_020_000).is_none());
         assert!(event_clip_at(&db, "Other", 1_001_000, 1_031_000, 5, 5, file).unwrap().is_none());
+        // A clip that joined a later subset than the rows overlapping its event
+        // (the index lagged): its saved start and its own length decide.
+        db.insert_event(&ev("garage_temp-7000", 7000, 7010)).unwrap();
+        db.insert_segment("garage_temp", &row("c1.mp4", 6_995_000, 7_005_000, "legacy")).unwrap();
+        db.insert_segment("garage_temp", &row("c2.mp4", 7_005_000, 7_015_000, "legacy")).unwrap();
+        std::fs::write(dir.join("clips/garage_temp-7000.mp4"), mp4_with_duration(10_000)).unwrap();
+        std::fs::write(dir.join("clips/garage_temp-7000.start"), "7005000").unwrap();
+        let c = at(7_006_000, 7_036_000).unwrap();
+        assert_eq!((c.start_ms, c.end_ms), (7_005_000, 7_015_000));
+        // Without a saved start (older clips): from the end of the rows, by its length.
+        std::fs::remove_file(dir.join("clips/garage_temp-7000.start")).unwrap();
+        let c = at(7_006_000, 7_036_000).unwrap();
+        assert_eq!((c.start_ms, c.end_ms), (7_005_000, 7_015_000));
+        assert_eq!(mp4_duration_ms(&dir.join("clips/garage_temp-7000.mp4")), Some(10_000));
+        assert_eq!(mp4_duration_ms(&dir.join("clips/garage_temp-1000.mp4")), None);
         // A long window: many later events (no files) cannot push out the clip holding the moment.
         db.insert_event(&ev("garage_temp-5000", 5000, 5100)).unwrap();
         std::fs::write(dir.join("clips/garage_temp-5000.mp4"), b"x").unwrap();

@@ -619,6 +619,21 @@ mod sys {
                 spec.config.display()
             );
         }
+        // macOS 15+ blocks an unsigned program from cameras on the local
+        // network without asking (and never lists it in Privacy & Security >
+        // Local Network); an ad-hoc signature makes it ask once.
+        match crate::macnet::sign_if_unsigned(&spec.exe) {
+            Ok(true) => println!(
+                "signed {} (ad hoc) so macOS can ask for Local Network access: click Allow when it asks",
+                spec.exe.display()
+            ),
+            Ok(false) => {}
+            Err(e) => println!(
+                "note: could not sign {} ({e:#}). macOS 15 and later will block it from cameras on the local network without asking. Sign it by hand, then restart the service:\n  {}",
+                spec.exe.display(),
+                crate::macnet::sign_command(&spec.exe)
+            ),
+        }
         let path = plist_path(&label, spec.system)?;
         let user = if spec.system { login_user() } else { None };
         std::fs::create_dir_all(path.parent().expect("plist path has a parent"))?;

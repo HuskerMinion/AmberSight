@@ -790,6 +790,11 @@ a viewer app can ignore. The fields useful to a viewer:
 | `push_motion` | bool | A battery camera's motion push is in its window now (motion even before the picture arrives) |
 | `remote` | object | Present only on cameras from a linked server; see section 9 |
 | `copy_events_to`, `copy_events_keep_days`, `copy_events_only_confirmed`, `copy_events_status` | admin only | Event clips also saved to a folder; see "Event clips saved to a folder" under section 6. Left out for viewers. |
+| `no_sub_ok` | admin only; bool | `true`: this camera has no sub stream to add, so `GET /api/health` does not note that motion decodes its full-size stream. Set it with `PUT /api/cameras/:id`. |
+| `hwaccel` | admin only; string or null | How motion detection decodes: `null` (Auto), `"off"`, `"vaapi"`, `"vaapi:/dev/dri/renderD129"`, `"qsv"`, `"qsv:/dev/dri/renderD128"` (older pass-through names such as `"d3d11va"` are kept). Set it with `PUT /api/cameras/:id`; other values get 400. |
+| `decode` | admin only; object | How motion decoding runs now: `{"stream": "main" or "sub" or null (not running), "on": "gpu" or "cpu", "gpu": "VAAPI on /dev/dri/renderD129" or null, "codec", "width", "height", "note" (why not on the card, or null), "main": {"width", "height", "codec"} or null, "heavy_main": bool, "reencode", "reencode_hw", "encoder", "encoder_note"}`. `heavy_main`: there is no sub stream and motion decodes a main stream larger than about 1080p on the processor. `reencode`: on the ffmpeg pipeline, a text saying the full-size recording is re-encoded and why (burned-in text, privacy masks, Direct copy off), or null; `reencode_hw`: a hardware encoder does it; `encoder`: `"NVENC"`, `"VAAPI on /dev/dri/renderD129"`, `"libx264"` ...; `encoder_note`: why it is not on the graphics card, or null. |
+| `transport` | admin only; string | How RTSP video travels: `"auto"` (default: TCP; a camera that answers 461 Unsupported Transport is asked again over UDP, and UDP is kept for it until the server restarts), `"tcp"` or `"udp"`. Used by the built-in reader and ffmpeg. Set it with `PUT /api/cameras/:id`; other values get 400. |
+| `ffmpeg_why` | admin only; string or null | Why the camera is read by ffmpeg rather than the built-in reader, naming the setting to change where there is one (burned-in text, privacy masks, `ingest = "ffmpeg"`, a local device, or the built-in reader's automatic switch with its reason). `null` on the built-in reader. |
 
 Next to `cameras`, the reply has `overlay_vars`: the current overlay variables as `{"NAME": "value"}` (the same as `GET /api/overlay`).
 
@@ -812,6 +817,49 @@ when the camera does not answer.
 same network as the server. `maker`, `model`, `firmware` and `serial` are `null` unless
 `onvif_port` is set and the camera answers. A camera that is not on the network (for example a
 computer's camera) returns `host: null` and a `note`.
+
+### `GET /api/cameras/:id/report` (admin)
+
+The camera report: one text file (`text/plain; charset=utf-8`, `Content-Disposition: attachment`,
+named `ambersight-camera-report-<camera>-<date>-<time>.txt`) to attach to a bug report about a
+camera. Viewers, operators and device tokens get **403**; an unknown camera is **404**; while a
+report for the same camera is being made, **429**. It takes up to about 20 seconds.
+
+The file starts with a readable summary, followed by a line `=== JSON (the same, for tools) ===`
+and the same facts as one JSON object:
+
+| Key | What |
+|---|---|
+| `system` | `version`, `os`, `arch`, `install` (container, package or program files, and whether it runs as a service), `ffmpeg` |
+| `camera` | its settings: `url` and `sub_url` without sign-in or secret query values, `username` and `password` as `"set"` / `"not set"`, `onvif_host`, `onvif_port`, recording and decoding settings |
+| `state` | `ingest` (`native`, `ffmpeg`, `ffmpeg (fallback)`), `fallback_reason`, `online`, `last_error`, `reconnects` and their times |
+| `stream_ends` | the last 10 reasons the stream ended, since the server started |
+| `describe.main`, `describe.sub` | an RTSP DESCRIBE: the camera's `server`, its streams and the raw `sdp` |
+| `probe.main`, `probe.sub` | `ffmpeg -i` on the stream: each stream's codec, size, fps, audio rate and channels, and ffmpeg's last lines |
+| `onvif` | maker, model and firmware, and the ONVIF profiles (name, size, codec, stream address), when the camera has an ONVIF port |
+| `log` | the last 50 log lines naming the camera |
+
+Each of `describe`, `probe` and `onvif` is `{ "status": "ok" | "failed" | "timed out" | "skipped",
+"ms", "note", "data" }`. Battery cameras that are asleep are not asked (that would wake them).
+Cameras behind a hub or NVR (a Reolink channel, or another camera at the same address) get no
+extra DESCRIBE or ffmpeg probe: `describe` shows the SDP of the session running now, or
+`"skipped"` with "skipped for hub cameras".
+
+User names, passwords, stream keys, UIDs and the values of `password`, `pwd`, `passwd`, `pass`,
+`user`, `username`, `usr`, `token`, `key`, `apikey`, `api_key`, `auth`, `loginuse`, `loginpas`, `pw`,
+`psw`, `pswd`, `access_token`, `secret`, `session`, `sid`, `sig`, `signature`, `loginpass`, `adminpass`,
+`userpass`, `passkey` (also as the last part after `_` or `-`), and names ending in the word `pass`,
+`pwd`, `token`, `key` or `secret` after `_`, `-` or a change of case (`x_pass`, `camToken`; not
+`monkey` or `bypass`), in addresses and in `name=value` text, are removed from every part. A
+password typed raw with a `/` in it (`rtsp://u:pa/ss@host/x`) counts as a password, unless the
+address already starts with a host[:port] (`rtsp://camhost:554/live@2` keeps its `@` in the path). SDP `a=control`, `u=` and `o=` lines that hold an `@` are left out. The whole
+file is checked for the camera's own sign-in (as typed, percent-encoded, with only spaces encoded,
+JSON- and XML-escaped, base64, and base64 of `user:password`) before it is sent. At most two
+reports are made at once (an ONVIF lookup that outlives its report counts), else **429**. A password or user name shorter than 6
+characters is removed only inside addresses and key=value pairs (elsewhere "1234" is just a
+number, and replacing it would also break the JSON); the summary then starts with a `WARNING:` line
+and the JSON has `scrub_note`: review such a report before sharing it. It does contain the
+camera's network address.
 
 ### `GET /api/status`
 
@@ -840,13 +888,34 @@ or storage folder paths. The exact shapes of `storage`, `profile` and `ffmpeg` a
 not described here.
 
 `GET /api/health` (cameras, disks, warnings) is **admin-only**. It returns
-`{"ok", "warnings", "short", "fixes", "problems", "cameras", "disks", "new_cameras"}`; `short` has a few words for each entry of `warnings` (same order, for a small badge); `warnings` are in plain words with no stream address, and each `cameras[]` entry has `last_error_plain` (the camera's last error in words, no address) beside the raw `last_error`; each `problems` entry is
+`{"ok", "warnings", "short", "fixes", "problems", "notes", "note_fixes", "cameras", "disks", "new_cameras"}`; `short` has a few words for each entry of `warnings` (same order, for a small badge); `warnings` are in plain words with no stream address, and each `cameras[]` entry has `last_error_plain` (the camera's last error in words, no address) beside the raw `last_error`; each `problems` entry is
 `{"key", "text"}`. `new_cameras` lists what the hourly new-camera check (`[discovery] watch`)
 found that is not a camera on this server yet and was not ignored: `{"ip", "kind"` (`onvif` or
 `rtsp`)`, "name", "first_seen"}` (Unix seconds). It is information, not a problem. A folder that is full while the oldest recordings make room is not a
 warning; disk warnings come when free space is below what the drive should keep (a problem
 only when it cannot be freed, or under 2% free). Besides camera and disk problems, `warnings` may contain `AI object detection
-is stalled: no check has worked for the last two minutes` (problem key `ai`).
+is stalled: no check has worked for the last two minutes` (problem key `ai`), and a camera whose
+recording is re-encoded on the processor after it fell back to ffmpeg by itself. `notes` are
+information, not problems (`ok` stays true): graphics cards that cannot decode (`Hardware
+decoding unavailable on /dev/dri/renderD128 (…); /dev/dri/renderD129 is used instead`), hardware
+decoders that failed while running, `<camera>: motion is decoding the full-size stream (3840x2160
+H.265) on the processor; …` for a network camera (not a battery one) with no sub stream unless the
+camera has `no_sub_ok`, and a recording re-encoded on the processor because of the camera's own
+settings (burned-in text, privacy masks, Direct copy off). `note_fixes` gives a button for some
+notes: `{"note": index into notes, "camera": id, "kind": "substream" or "settings"}`; both open
+the camera's settings. Each `cameras[]` entry has `decode` (as in
+`GET /api/cameras`) and `ffmpeg`: the ffmpeg processes the camera runs now, in words (for
+example `["motion decoder (sub stream)", "live conversion"]`).
+
+`GET /api/hwdecode` (**admin**): the render nodes and what the start-up test of hardware decoding
+found: `{"auto_supported": bool (Linux), "tested": bool, "nodes": [{"path", "driver", "tests":
+[{"kind": "vaapi" or "qsv", "device", "codec": "h264" or "hevc", "ok", "reason", "ms"}]}], "auto":
+{"h264", "hevc"} (what Auto uses, e.g. "VAAPI on /dev/dri/renderD129", or null), "notes": […]}`.
+
+`POST /api/cameras/:id/sub-suggest` (**admin**, no body): sub-stream addresses for a camera that
+has none, from its ONVIF profiles and from the usual addresses of common cameras (Reolink,
+Dahua / Amcrest, Hikvision). Each is tried: `{"suggestions": [{"url", "from": "onvif" or
+"pattern", "works": bool}]}`. Nothing is saved; set `sub_url` with `PUT /api/cameras/:id`.
 
 ### `GET /api/stats`
 
@@ -858,7 +927,7 @@ number on. Main keys:
 | Key | Contents |
 |---|---|
 | `cpu`, `mem`, `fps`, `uptime_s` | Machine and program load, frames per second, uptime |
-| `cameras[]` | Per camera: `id`, `name`, `enabled`, `online`, `sleeping`, `fps_in` (frames per second arriving), `cfg_fps` (frames per second it is set to), `kbps` (measured video bit rate, 0 when offline), `dropped_1m` (frames the decoder dropped in the last minute), `reconnects` (stream drops since start) |
+| `cameras[]` | Per camera: `id`, `name`, `enabled`, `online`, `sleeping`, `fps_in` (frames per second arriving), `cfg_fps` (frames per second it is set to), `kbps` (measured video bit rate, 0 when offline; `null` when it is not measured: a camera on the ffmpeg pipeline that does not record all along. On the ffmpeg pipeline it is the bit rate of the continuous recording), `dropped_1m` (frames the decoder dropped in the last minute), `reconnects` (stream drops since start) |
 | `storage[]` | Per recording folder: `name`, `used`, `cap`, `free`, `total` (bytes, for the drive), `tier` (`new` = where recordings land, `stored` = the archive), `write_bps` (bytes per second written), plus `pct`, `rolls`, `auto` (the cap is automatic: what the drive can spare while keeping `target_free` bytes free), `target_free`, and `level` (`""`, `info` = full and pruning keeps up, `warn`, `crit`) with its short `label` (e.g. `Full · keeping 9 days`) |
 | `ai` | `state` (`off`, `idle`, `ok` or `stalled`), `device`, `checks_1m`, `errors_1m`, `p50_ms`, `p95_ms`, `last_ok_s` (seconds since the last good check; may be null) |
 | `net` | `{"rx_bps", "tx_bps"}` bytes per second, or `null` where the machine cannot report it |
@@ -2836,6 +2905,29 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.10.3**
+
+- `GET /api/health`: a missing sub stream and a recording re-encoded on the processor by the
+  camera's own settings are `notes` now, not `warnings`, so `ok` stays true; new `note_fixes`
+  (`{"note", "camera", "kind"}`). New camera setting `no_sub_ok`.
+- The web app's camera form now enters a network camera's address in parts (address, port,
+  protocol, user, password, main and sub stream paths). The API is unchanged: `url` and `sub_url`
+  are still full addresses, and `username` / `password` stay separate fields.
+- New `GET /api/cameras/:id/report` (admin, not for device tokens): the camera report, a text file
+  with a JSON section for bug reports. See [the camera report](#get-apicamerasidreport-admin).
+- Log lines and error texts now also hide `user=`, `username=` and `usr=` values in addresses (they
+  read `user=***`).
+- Hardware decoding for motion detection: camera setting `hwaccel` (Auto by default: VAAPI on a graphics card that passed a test decode at start, Linux only; `"off"`; `"vaapi[:device]"`; `"qsv[:device]"`). `GET /api/cameras` (admin) has `decode`; `GET /api/health` has `notes`, `cameras[].decode` and `cameras[].ffmpeg`, and notes a large main stream decoded on the processor for want of a sub stream (`note_fixes` kind `substream`; camera setting `no_sub_ok: true` turns the note off for a camera that has one stream). New admin `GET /api/hwdecode` and `POST /api/cameras/:id/sub-suggest`.
+
+- Camera setting `transport` (`"auto"`, `"tcp"`, `"udp"`; `GET`/`PUT /api/cameras`, admin): RTSP over TCP or UDP. Auto uses TCP and asks a camera that answers 461 Unsupported Transport again over UDP (both the built-in reader and ffmpeg), so UDP-only cameras work.
+- `GET /api/cameras` (admin) `ffmpeg_why` and `GET /api/health` `cameras[].ffmpeg_why`: why a camera is read by ffmpeg, with the setting to change.
+- The ffmpeg pipeline re-encodes the full-size recording on a hardware encoder (NVENC, Quick Sync, VAAPI, ... that passed the start-up test encode, within `[transcode] max_hardware`) with decoding on the same card, and falls back to libx264. `decode.reencode`, `reencode_hw`, `encoder`, `encoder_note`. `GET /api/health`: a `notes` line per camera re-encoded on the processor by its own settings ("recordings are re-encoded to burn in the text ...", `note_fixes` kind `settings`) or on a hardware encoder; a warning only when a camera that fell back to ffmpeg by itself re-encodes on the processor.
+- The ffmpeg pipeline decodes a camera's sub stream for motion when it has one (`decode.stream` = `"sub"`; ffmpeg processes `motion decoder (sub stream)` and `recorder (main stream)`), using the camera's `hwaccel`.
+- `GET /api/stats` `cameras[].kbps`: measured from the continuous recording on the ffmpeg pipeline, and `null` (not 0) when it cannot be measured.
+- `POST /api/cameras` and `PUT /api/cameras/:id` check the addresses: `url` needs a scheme (`rtsp://`, `http://`, ... or a local device), and `sub_url` must start with `rtsp://`, `rtsps://`, `http://`, `https://` or `rtmp://` and name a host (400 "Sub stream URL must start with rtsp:// ..."). A sub stream address already saved that cannot be opened is left out at run time: motion uses the main stream, the camera stays on the built-in reader, and `GET /api/health` `notes` says so.
+- ffmpeg older than 5 (where `-timeout` on RTSP means "listen"): AmberSight uses `-stimeout` for it, and `GET /api/health` `notes` has "ffmpeg 4.x is old; some cameras may not work. Install ffmpeg 5 or newer."
+- Camera report: a password or user name shorter than 6 characters is removed from addresses and key=value pairs only, and the report's header says so (JSON `scrub_note`); review such a report before sharing it. Cameras behind a hub or NVR get no extra DESCRIBE or ffmpeg probe: the running session's SDP is shown, or the parts say "skipped for hub cameras".
 
 **New in 0.10.2**
 

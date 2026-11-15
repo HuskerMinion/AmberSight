@@ -34,6 +34,7 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/cameras/:id/powercycle", post(camera_powercycle))
         .route("/cameras/:id/watchdog", get(camera_watchdog))
         .route("/cameras/:id/netinfo", get(camera_netinfo))
+        .route("/cameras/:id/report", get(camera_report))
         .route("/cameras/:id/tamper", get(tamper_status))
         .route("/cameras/:id/tamper/reference", post(tamper_set_reference))
         .route("/cameras/:id/tamper/ref/:light", get(tamper_ref_picture))
@@ -46,6 +47,8 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/cameras/:id/ptz/caps", get(ptz_caps))
         .route("/cameras/:id/onvif", get(onvif_get))
         .route("/cameras/:id/onvif/find", post(onvif_find))
+        .route("/cameras/:id/sub-suggest", post(sub_suggest))
+        .route("/hwdecode", get(hwdecode_status))
         .route("/cameras/:id/ptz/aim", post(ptz_aim))
         .route("/ui/prefs", get(crate::ui_http::get_prefs).put(crate::ui_http::put_prefs).patch(crate::ui_http::patch_prefs))
         .route("/ui/orders", get(crate::ui_http::get_orders))
@@ -985,7 +988,7 @@ fn gate(path: &str, method: &axum::http::Method, role: &Role, limited: bool) -> 
 /// API paths only admins may read too (settings, logs, health, accounts,
 /// network scans, restarting the server ...).
 fn admin_only_path(path: &str) -> bool {
-    matches!(path, "/settings" | "/logs" | "/health" | "/users" | "/addresses" | "/discover" | "/devices" | "/discover/logins" | "/discover/watch" | "/discover/ignore" | "/helpers" | "/connections" | "/storage/plan" | "/storage/privacy" | "/drives" | "/ai/reviews" | "/sound/status" | "/restream" | "/plates/status" | "/plates/known")
+    matches!(path, "/settings" | "/logs" | "/health" | "/hwdecode" | "/users" | "/addresses" | "/discover" | "/devices" | "/discover/logins" | "/discover/watch" | "/discover/ignore" | "/helpers" | "/connections" | "/storage/plan" | "/storage/privacy" | "/drives" | "/ai/reviews" | "/sound/status" | "/restream" | "/plates/status" | "/plates/known")
         || path.starts_with("/users/")
         || path.starts_with("/storage/missing")
         || path.starts_with("/alert-rules")
@@ -999,7 +1002,7 @@ fn admin_only_path(path: &str) -> bool {
         || path.starts_with("/system")
         // A camera's tamper, unusual-activity and ONVIF settings windows (the
         // pictures are open to anyone who may see the camera).
-        || matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(), ["cameras", _, "tamper" | "unusual" | "onvif" | "spots"])
+        || matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(), ["cameras", _, "tamper" | "unusual" | "onvif" | "spots" | "report"])
 }
 
 /// The answer to a password (or code, or token) for the demo account.
@@ -1687,6 +1690,68 @@ async fn onvif_get(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>)
     }
 }
 
+/// `GET /api/hwdecode`: the graphics cards' render nodes, what the start-up
+/// test of hardware decoding found on each, and what Auto uses.
+async fn hwdecode_status() -> Json<serde_json::Value> {
+    Json(tokio::task::spawn_blocking(crate::hwdecode::status_json).await.unwrap_or_default())
+}
+
+/// `POST /api/cameras/:id/sub-suggest`: a sub stream for a camera that has
+/// none: from its ONVIF profiles when it has ONVIF, else from the address
+/// patterns of common cameras. Each one is tried (a picture must come);
+/// nothing is saved (the page asks the admin first).
+async fn sub_suggest(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>) -> Response {
+    let cfg = match onvif_cfg(&engine, id) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    if crate::local_source::is_local(&cfg.url) || !(cfg.url.starts_with("rtsp://") || cfg.url.starts_with("rtsps://")) {
+        return Json(serde_json::json!({ "suggestions": [], "why": "only network (RTSP) cameras have a sub stream" })).into_response();
+    }
+    let ecfg = crate::onvif_ptz::effective_cfg(id, &cfg);
+    let r = tokio::task::spawn_blocking(move || {
+        let mut cands: Vec<(String, &'static str)> = Vec::new();
+        // ONVIF: the camera says which of its streams is the smaller one.
+        if let Some(port) = ecfg.onvif_port {
+            if let Some(host) = crate::onvif::host_from_rtsp_url(&ecfg.url) {
+                let xaddr = format!("http://{host}:{port}/onvif/device_service");
+                match crate::onvif_ptz::inspect(&xaddr, &ecfg.username, &ecfg.password) {
+                    Ok(ins) => {
+                        // This camera's channel (a hub or recorder has several):
+                        // the one whose main stream is ours, or the only one.
+                        let path = |u: &str| url::Url::parse(u).ok().map(|x| format!("{}?{}", x.path(), x.query().unwrap_or("")));
+                        let mine = ins
+                            .cameras
+                            .iter()
+                            .find(|c| c["url"].as_str().and_then(path).is_some_and(|p| Some(p) == path(&ecfg.url)))
+                            .or_else(|| (ins.cameras.len() <= 1).then_some(&ins.suggested));
+                        if let Some(u) = mine.and_then(|c| c["sub_url"].as_str()).filter(|u| !u.is_empty() && *u != ecfg.url) {
+                            cands.push((u.to_string(), "onvif"));
+                        }
+                    }
+                    Err(e) => tracing::debug!("camera '{}': ONVIF for a sub stream: {e:#}", ecfg.name),
+                }
+            }
+        }
+        if let Some(u) = crate::hwdecode::sub_from_pattern(&ecfg.url) {
+            if !cands.iter().any(|(c, _)| *c == u) {
+                cands.push((u, "pattern"));
+            }
+        }
+        let mut out = Vec::new();
+        for (u, from) in cands.into_iter().take(3) {
+            let mut probe = ecfg.clone();
+            probe.url = u.clone();
+            let ok = grab_preview(&crate::engine::camera_url(&probe)).is_some();
+            out.push(serde_json::json!({ "url": u, "from": from, "works": ok }));
+        }
+        out
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({ "suggestions": r })).into_response()
+}
+
 /// `POST /api/cameras/:id/onvif/find`: search the common ONVIF ports now
 /// (waits for the answer) and return the same as the GET.
 async fn onvif_find(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>) -> Response {
@@ -1752,7 +1817,7 @@ async fn set_overlay_var_http(
 /// What GET /api/cameras leaves out for anyone not an admin (viewers and
 /// operators alike): logins, folders, event copies, capture helpers, pushed
 /// senders, hardware and the watchdog.
-const HIDDEN_FROM_NON_ADMINS: [&str; 12] = ["username", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "has_password", "watchdog"];
+const HIDDEN_FROM_NON_ADMINS: [&str; 15] = ["username", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
 
 /// `GET /api/camera-defaults`: the shared detection and alert settings a
 /// camera uses where it sets none of its own (motion, AI, alert priority and
@@ -1840,6 +1905,7 @@ async fn list_cameras(
             // even while the camera has no picture yet.
             v["push_motion"] = st.camera_detections.pulse_active().into();
             v["onvif_port"] = cfg.onvif_port.into();
+            v["no_sub_ok"] = cfg.no_sub_ok.into();
             // Polygon zones and privacy masks (rectangles above are the simple kind).
             v["zone_polys"] = serde_json::json!(cfg.zone_polys);
             v["ignore_polys"] = serde_json::json!(cfg.ignore_polys);
@@ -1903,6 +1969,11 @@ async fn list_cameras(
             v["copy_events_keep_days"] = cfg.copy_events_keep_days.into();
             v["copy_events_only_confirmed"] = cfg.copy_events_only_confirmed.into();
             v["copy_events_status"] = cfg.copy_folder().map(|_| crate::engine::event_copy::status_json(&cfg.name)).into();
+            // How motion decoding runs: on the graphics card or the processor (admins only).
+            v["decode"] = h.decode.lock().unwrap().json();
+            // Why the camera is read by ffmpeg, and the setting that changes it (admins only).
+            v["ffmpeg_why"] = crate::engine::ffpath::why_ffmpeg_now(&h.running.read().unwrap(), st.ingest).into();
+            v["transport"] = crate::ingest::transport_setting(&cfg.transport).into();
             // Viewers see what a camera is, not how to reach or impersonate it
             // (a push key is the only secret guarding its stream input).
             if !admin.0 {
@@ -2059,6 +2130,13 @@ fn check_camera_sizes(cam: &CameraConfig, old: Option<&CameraConfig>) -> Result<
 
 /// Checks of a camera's settings shared by adding and changing one.
 fn check_camera_fields(cam: &crate::config::CameraConfig) -> Result<(), String> {
+    if let Some(e) = crate::hwdecode::check(cam.hwaccel.as_deref()) {
+        return Err(e);
+    }
+    if !matches!(cam.transport.as_str(), "auto" | "tcp" | "udp") {
+        return Err("Transport: auto, tcp or udp".into());
+    }
+    crate::engine::check_camera_urls(cam)?;
     for (what, w) in [("Alert window", &cam.alert_schedule), ("No-motion watch window", &cam.no_motion_schedule)] {
         if w.as_deref().is_some_and(|t| !t.trim().is_empty() && crate::config::parse_schedule(t).is_none()) {
             return Err(format!("{what}: write it like 07:00-21:00"));
@@ -6764,6 +6842,49 @@ async fn camera_netinfo(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<us
     }
 }
 
+/// `GET /api/cameras/:id/report` (admin): the camera report, a text file to
+/// attach to a bug report (see camreport.rs). Never holds a user name or
+/// password. About 20 s at most; one per camera and two in all at a time (429).
+async fn camera_report(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>, axum::Extension(admin): axum::Extension<IsAdmin>) -> Response {
+    if !admin.0 {
+        return api_error(StatusCode::FORBIDDEN, "admin access required");
+    }
+    let Some(h) = engine.camera(id) else { return api_error(StatusCode::NOT_FOUND, "no such camera") };
+    let Some(_busy) = crate::camreport::begin(id) else {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "a camera report is being made already (one per camera, two at a time); wait for it");
+    };
+    let mut cfg = h.cfg.read().unwrap().clone();
+    crate::engine::normalize_creds(&mut cfg);
+    let cfg = crate::onvif_ptz::effective_cfg(id, &cfg);
+    let hub = {
+        let all = engine.config.lock().unwrap().cameras.clone();
+        crate::camreport::behind_hub(&cfg, &all)
+    };
+    let live = {
+        let st = h.state.read().unwrap();
+        crate::camreport::Live {
+            hub,
+            ingest: st.ingest.to_string(),
+            online: st.online,
+            sleeping: st.sleeping,
+            last_error: st.last_error.clone(),
+            last_error_at: st.last_error_at,
+            reconnects: st.reconnects,
+            online_since: st.online_since,
+            offline_since: st.offline_since,
+            frames: st.frames,
+            clock_skew: st.clock_skew,
+        }
+    };
+    let (file, text) = crate::camreport::make(cfg, live).await;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{file}\""))
+        .body(Body::from(text))
+        .unwrap()
+}
+
 /// `GET /api/cameras/:id/watchdog` (admin): what the watchdog is doing for
 /// this camera, and its recent restarts and power cycles.
 async fn camera_watchdog(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>, axum::Extension(admin): axum::Extension<IsAdmin>) -> Response {
@@ -7224,6 +7345,7 @@ mod viewer_write_tests {
         "/cameras/:id/powercycle",
         "/cameras/:id/watchdog",
         "/cameras/:id/netinfo",
+        "/cameras/:id/report",
         "/cameras/:id/tamper",
         "/cameras/:id/tamper/reference",
         "/cameras/:id/tamper/ref/:light",
@@ -7234,6 +7356,8 @@ mod viewer_write_tests {
         "/cameras/:id/spots/forget",
         "/cameras/:id/onvif",
         "/cameras/:id/onvif/find",
+        "/cameras/:id/sub-suggest",
+        "/hwdecode",
         "/ui/prefs",
         "/ui/orders",
         "/ui/diag",
@@ -7431,6 +7555,7 @@ mod viewer_write_tests {
         ("/cameras/:id/powercycle", "POST", "admin"),
         ("/cameras/:id/watchdog", "GET", "viewer"),
         ("/cameras/:id/netinfo", "GET", "viewer"),
+        ("/cameras/:id/report", "GET", "admin"),
         ("/cameras/:id/tamper", "GET", "admin"),
         ("/cameras/:id/tamper/reference", "POST", "admin"),
         ("/cameras/:id/tamper/ref/:light", "GET", "viewer"),
@@ -7443,6 +7568,8 @@ mod viewer_write_tests {
         ("/cameras/:id/ptz/caps", "GET", "viewer"),
         ("/cameras/:id/onvif", "GET", "admin"),
         ("/cameras/:id/onvif/find", "POST", "admin"),
+        ("/cameras/:id/sub-suggest", "POST", "admin"),
+        ("/hwdecode", "GET", "admin"),
         ("/cameras/:id/ptz/aim", "POST", "operator:ptz"),
         ("/ui/prefs", "GET", "viewer"),
         ("/ui/prefs", "PUT", "viewer"),
@@ -7728,7 +7855,7 @@ mod viewer_write_tests {
             assert!(gate(p, &m, &op, false).is_err(), "{p} {m}");
         }
         // Reads an operator has a viewer's answer for: still admin only.
-        for p in ["/settings", "/users", "/logs", "/health", "/cameras/1/tamper", "/cameras/1/onvif", "/cameras/1/spots", "/storage/plan", "/offsite", "/update", "/alert-rules"] {
+        for p in ["/settings", "/users", "/logs", "/health", "/cameras/1/tamper", "/cameras/1/onvif", "/cameras/1/report", "/cameras/1/spots", "/storage/plan", "/offsite", "/update", "/alert-rules"] {
             assert!(gate(p, &Method::GET, &op, false).is_err(), "{p}");
         }
         // Limited to some cameras: no arming or profiles (every camera), the rest as before.

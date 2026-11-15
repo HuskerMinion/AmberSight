@@ -241,7 +241,8 @@ It first prints what it will do and where everything goes, then:
 2. creates the settings file from the starter settings (an existing one is never overwritten),
 3. installs and starts the background service,
 4. opens the firewall port (Windows; on Linux it prints the command if ufw or firewalld is on;
-   on macOS, choose **Allow** when asked),
+   on macOS, choose **Allow** when asked; macOS 15 and later also ask whether AmberSight may
+   find devices on local networks: choose **Allow** there too, or cameras cannot connect),
 5. adds an **AmberSight** shortcut with the AmberSight icon,
 6. opens AmberSight in the browser.
 
@@ -385,6 +386,38 @@ sudo ./ambersight service install --system --config ~/AmberSight/config.toml
 Keep the Mac from sleeping (System Settings > Energy, or Battery > Options on a laptop):
 recording stops while it sleeps.
 
+### 4. Allow access to the local network (macOS 15 and later)
+
+macOS 15 (Sequoia) and later ask before a program connects to devices on your local network,
+which includes your cameras. The first time AmberSight connects to a camera, macOS asks:
+**Allow "ambersight" to find devices on local networks?** Choose **Allow**. Cameras then connect
+within a few seconds; nothing needs a restart. You can change the answer later in **System
+Settings > Privacy & Security > Local Network** (the entry is called `ambersight`).
+
+- If you never saw the question, or chose **Don't Allow**, every camera fails with
+  "No route to host" and the camera shows "macOS blocked AmberSight from the local network".
+  Turn `ambersight` on in **Privacy & Security > Local Network**.
+- macOS only asks for a code-signed program. The release packages are signed (ad hoc; that
+  needs no Apple account), and `ambersight setup` and `ambersight service install` sign the
+  program if it is not, for example one you built yourself on an Intel Mac. If `ambersight` is
+  missing from the Local Network list, run `ambersight setup` (or `ambersight service install`)
+  again, or sign it by hand and restart the service:
+
+  ```
+  codesign --force --sign - --identifier com.ambersight.ambersight ~/AmberSight/ambersight
+  ./ambersight service stop
+  ./ambersight service start
+  ```
+
+- A program you build from source on an Apple-silicon Mac is already signed by the linker, but
+  with an identifier that changes with every build, so macOS asks again after each one. Build
+  with `scripts/package.sh` (it signs with the fixed identifier), or sign it by hand as above.
+
+- The `--system` LaunchDaemon does not get around this: it runs as your user, and macOS asks
+  the same way. Commands run from Terminal or over ssh are allowed, so a camera that works with
+  `./ambersight run` but not as a service points to this setting.
+- The answer is kept across updates.
+
 ### Day-to-day on macOS
 
 | Task | How (Terminal in `~/AmberSight`) |
@@ -392,6 +425,7 @@ recording stops while it sleeps.
 | Stop / start | `./ambersight service stop` / `./ambersight service start` |
 | Status | `./ambersight service status` |
 | Logs | `ambersight.out.log`, `ambersight.err.log` in the folder (also Settings > System > Logs) |
+| Cameras fail with "No route to host" | Allow `ambersight` in System Settings > Privacy & Security > Local Network (see step 4) |
 | Remove the service | `./ambersight service uninstall` |
 
 ---
@@ -542,7 +576,7 @@ way is the package: `sudo apt install ./ambersight_<version>_arm64.deb` (see
   quickly. Mount the drive (for example at `/mnt/recordings`), then choose it in
   **Settings > Recording > Drives & folders**.
 - **Number of cameras:** the Pi decodes video on its processor. Give each camera its
-  lower-resolution **sub stream** (camera settings > Stream > Sub stream URL), so motion detection
+  lower-resolution **sub stream** (camera settings > Stream > Sub stream), so motion detection
   uses that instead of the full picture. A Pi 4 or 5 then handles a handful of cameras.
 - **AI** runs on the Pi's processor. Choose the **Tiny** model in Settings > Detection & alerts > Objects (AI); do not choose **Large**, which is far too slow on a Pi. It is slower than
   on a PC but fine for checking motion events.
@@ -559,9 +593,13 @@ ticks itself off when it is done; the checklist is also under Help.
 1. **Add your cameras.** On a new install the Live page shows **Add your first camera**. Choose
    **Find cameras** (also **Settings > Cameras > Find cameras**), enter the user name and password
    you set in the camera's own app, and press **Scan for cameras**. AmberSight finds ONVIF cameras
-   on your network; press **Add** on each one. For other cameras, use **Add by address** with the
-   camera's stream address (for example `rtsp://192.168.1.50:554/stream1`; the camera's manual
-   lists it).
+   on your network; press **Add** on each one. For other cameras, use **Add by address**: enter the
+   camera's address (for example `192.168.1.50`), port and protocol, its user name and password,
+   and the main and sub stream paths (for example `/stream1` and `/stream2`). **Brand** fills both
+   paths for common makes, and **Find via ONVIF** asks the camera for them. You can also paste a
+   whole stream address such as `rtsp://192.168.1.50:554/stream1` into the address field and it is
+   split for you. The camera's manual lists its paths, and the [camera guide](cameras.md) has the
+   usual ones by brand.
 2. **Get alerts on your phone.** Open AmberSight on the phone (see **Phones** below), then in the
    Getting started list choose **Turn on notifications on this device** and **Send a test**. Other
    ways (Telegram, email, ntfy, Pushover, Home Assistant) are in **Settings > Detection & alerts >

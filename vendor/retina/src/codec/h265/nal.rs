@@ -122,12 +122,6 @@ impl UnitType {
             | UnitType::RsvVclR13
             | UnitType::RsvVclN14
             | UnitType::RsvVclR15
-            | UnitType::BlaWLp
-            | UnitType::BlaWRadl
-            | UnitType::BlaNLp
-            | UnitType::CraNut
-            | UnitType::RsvIrapVcl22
-            | UnitType::RsvIrapVcl23
             | UnitType::RsvVcl24
             | UnitType::RsvVcl25
             | UnitType::RsvVcl26
@@ -136,7 +130,18 @@ impl UnitType {
             | UnitType::RsvVcl29
             | UnitType::RsvVcl30
             | UnitType::RsvVcl31 => UnitTypeClass::Vcl { intra_coded: false },
-            UnitType::IdrWRadl | UnitType::IdrNLp => UnitTypeClass::Vcl { intra_coded: true },
+            // IRAP pictures (H.265 section 3.73): BLA, IDR, CRA and the reserved
+            // IRAP types. Each is intra coded and a decoder can start there.
+            // Leading RASL pictures after a CRA or BLA may refer to pictures
+            // before it; a decoder starting at the IRAP skips them.
+            UnitType::BlaWLp
+            | UnitType::BlaWRadl
+            | UnitType::BlaNLp
+            | UnitType::IdrWRadl
+            | UnitType::IdrNLp
+            | UnitType::CraNut
+            | UnitType::RsvIrapVcl22
+            | UnitType::RsvIrapVcl23 => UnitTypeClass::Vcl { intra_coded: true },
             _ => UnitTypeClass::NonVcl,
         }
     }
@@ -1392,6 +1397,20 @@ mod tests {
     use crate::testutil::init_logging;
 
     use super::*;
+
+    #[test]
+    fn irap_pictures_are_random_access_points() {
+        // BLA_W_LP (16) through RSV_IRAP_VCL23 (23) are IRAP pictures.
+        for t in 0u8..=40 {
+            let u = UnitType::try_from(t).unwrap();
+            let want = match t {
+                16..=23 => UnitTypeClass::Vcl { intra_coded: true },
+                0..=31 => UnitTypeClass::Vcl { intra_coded: false },
+                _ => UnitTypeClass::NonVcl,
+            };
+            assert_eq!(u.unit_type_class(), want, "nal_unit_type {t}");
+        }
+    }
 
     struct LoggingBitReader<R>(R);
 

@@ -21,7 +21,8 @@ pre/post roll, and serves a web dashboard plus a JSON API.
 
 Step-by-step installation for Windows, macOS and Linux is in the
 [install guide](docs/install.md). The API for app developers is in the
-[API guide](docs/api-guide.md).
+[API guide](docs/api-guide.md). Stream addresses and known problems by camera brand are in the
+[camera guide](docs/cameras.md).
 
 <p align="center"><img src="docs/images/screenshots/1-live.jpg" alt="AmberSight live view: eight cameras with AI detections" width="900"></p>
 

@@ -1895,7 +1895,10 @@ mod tests {
             for t in &f.trafs {
                 if t.track_id == 2 {
                     if let Some(nx) = next {
-                        assert_eq!(t.tfdt, nx, "audio decode times follow on");
+                        // They follow on; where a file ends, the next one is
+                        // placed by its own time, which these camera steps
+                        // can leave less than a packet apart.
+                        assert!(t.tfdt >= nx && t.tfdt - nx < 320, "audio decode times follow on: {} after {nx}", t.tfdt);
                     }
                     assert_eq!(t.duration % 320, 0);
                     next = Some(t.tfdt + t.duration);

@@ -139,10 +139,11 @@ pub struct CamStat {
     pub sleeping: bool,
     pub enabled: bool,
     pub fps: f64,
-    /// Fps the camera is set to, measured video kbit/s, frames dropped in the
-    /// last minute, and stream drops since start.
+    /// Fps the camera is set to, measured video kbit/s (None: not measured,
+    /// e.g. an ffmpeg camera that does not record all along), frames dropped
+    /// in the last minute, and stream drops since start.
     pub cfg_fps: u32,
-    pub kbps: f64,
+    pub kbps: Option<f64>,
     pub dropped_1m: u64,
     pub reconnects: u32,
 }
@@ -307,7 +308,7 @@ impl Stats {
             "cameras": cams.iter().map(|c| serde_json::json!({
                 "id": c.id, "name": c.name, "enabled": c.enabled, "online": c.online,
                 "sleeping": c.sleeping, "fps": r1(c.fps),
-                "fps_in": r1(c.fps), "cfg_fps": c.cfg_fps, "kbps": c.kbps.round(),
+                "fps_in": r1(c.fps), "cfg_fps": c.cfg_fps, "kbps": c.kbps.map(f64::round),
                 "dropped_1m": c.dropped_1m, "reconnects": c.reconnects,
             })).collect::<Vec<_>>(),
             "ai": {
@@ -415,13 +416,14 @@ fn sampler(engine: Arc<Engine>) {
                 };
                 let fps = trackers.entry(h.id).or_default().update(now, h.rx_frames.load(Ordering::Relaxed));
                 let online_now = online && !sleeping;
-                let kbps = kb_trackers.entry(h.id).or_default().update(now, h.rx_bytes.load(Ordering::Relaxed)) * 8.0 / 1000.0;
+                let rx_bytes = h.rx_bytes.load(Ordering::Relaxed);
+                let kbps = kb_trackers.entry(h.id).or_default().update(now, rx_bytes) * 8.0 / 1000.0;
                 let dropped_1m = drop_trackers.entry(h.id).or_default().update(now, h.dropped.load(Ordering::Relaxed), DROP_WINDOW_S);
                 let cfg_fps = h.running.read().unwrap().fps;
                 let reconnects = h.state.read().unwrap().reconnects;
                 cams.push(CamStat {
                     cfg_fps,
-                    kbps: if online_now { kbps } else { 0.0 },
+                    kbps: shown_kbps(online_now, rx_bytes, kbps),
                     dropped_1m,
                     reconnects,
                     id: h.id,
@@ -515,9 +517,27 @@ fn sampler(engine: Arc<Engine>) {
     }
 }
 
+/// The bitrate shown for a camera: 0 while it is offline; not known (None,
+/// shown as "-") while it is online but nothing counts its bytes (the
+/// ffmpeg pipeline without a continuous recording to measure).
+fn shown_kbps(online: bool, rx_bytes: u64, kbps: f64) -> Option<f64> {
+    match (online, rx_bytes) {
+        (false, _) => Some(0.0),
+        (true, 0) => None,
+        (true, _) => Some(kbps),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmeasured_bitrate_is_not_zero() {
+        assert_eq!(shown_kbps(true, 0, 0.0), None);
+        assert_eq!(shown_kbps(true, 5000, 1234.0), Some(1234.0));
+        assert_eq!(shown_kbps(false, 5000, 1234.0), Some(0.0));
+    }
 
     #[test]
     fn fps_from_counter_deltas() {

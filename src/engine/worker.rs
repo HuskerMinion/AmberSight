@@ -167,18 +167,33 @@ pub fn video_filter(cfg: &CameraConfig) -> String {
 /// reader writes.
 const FRAGMENTED: [&str; 2] = ["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"];
 
-fn reencode_args(segment_seconds: u64) -> Vec<String> {
-    [
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-        "-force_key_frames",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .chain(std::iter::once(format!("expr:gte(t,n_forced*{})", segment_seconds.max(1))))
-    .collect()
+pub fn ffmpeg_input_args(url: &str) -> Vec<String> {
+    ffmpeg_input_args_over(url, false)
 }
 
-pub fn ffmpeg_input_args(url: &str) -> Vec<String> {
+/// ffmpeg's input arguments for one of this camera's streams, over UDP
+/// when its `transport` setting (or a server remembered as UDP-only) says
+/// so, or (`try_udp`) when this camera's last try over TCP got a 461.
+fn input_args(cfg: &CameraConfig, try_udp: bool, url: &str) -> Vec<String> {
+    let udp = crate::ingest::wants_udp(&cfg.transport, url) || (try_udp && crate::ingest::transport_setting(&cfg.transport) == "auto");
+    ffmpeg_input_args_over(url, udp)
+}
+
+/// An RTSP input for ffmpeg of this major version (the socket timeout's
+/// name changed in ffmpeg 5).
+fn rtsp_input_args(url: &str, udp: bool, major: Option<u32>) -> Vec<String> {
+    vec![
+        "-rtsp_transport".into(),
+        if udp { "udp" } else { "tcp" }.into(),
+        crate::ffmpeg_bin::rtsp_timeout_flag(major).into(),
+        "10000000".into(),
+        "-i".into(),
+        url.into(),
+    ]
+}
+
+/// `udp`: RTSP over UDP instead of TCP.
+pub fn ffmpeg_input_args_over(url: &str, udp: bool) -> Vec<String> {
     if crate::local_source::is_local(url) {
         // Invalid local URLs are caught before spawning (camera_worker);
         // otherwise fall through so ffmpeg reports the problem.
@@ -192,7 +207,7 @@ pub fn ffmpeg_input_args(url: &str) -> Vec<String> {
     } else if url.starts_with("rtsp://") {
         // -timeout (microseconds): without it ffmpeg waits forever on a
         // stream path the camera does not answer.
-        vec!["-rtsp_transport".into(), "tcp".into(), "-timeout".into(), "10000000".into(), "-i".into(), url.into()]
+        rtsp_input_args(url, udp, crate::ffmpeg_bin::major())
     } else {
         vec!["-i".into(), url.into()]
     }
@@ -224,6 +239,22 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
     }
     // Retry delay for local sources that fail; grows while nothing works.
     let mut backoff: u64 = 3;
+    // Hardware decoding failed for this camera: the processor from now on
+    // (until its settings change or the server restarts).
+    let mut hw_off = false;
+    // The same for the hardware encoder of a re-encoded recording (why it is
+    // off), and for decoding on that card.
+    let mut enc_off: Option<String> = None;
+    let mut rec_dec_off = false;
+    // Why hardware decoding was turned off (kept for the note).
+    let mut hw_off_note: Option<String> = None;
+    // The camera answered 461 over TCP: UDP next. Kept for the server
+    // (other cameras, the built-in reader) only once UDP brought pictures.
+    let mut try_udp = false;
+    // A UDP try that brought nothing: a later 461 waits as usual.
+    let mut udp_failed = false;
+    // A sub stream that keeps failing: motion moves to the main stream.
+    let mut sub_watch = super::ffpath::SubWatch::default();
 
     // The worker lives for the lifetime of the camera slot: while the camera
     // is disabled it parks; when re-enabled it restarts ffmpeg.
@@ -255,7 +286,8 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // "Sub stream all the time, main around events": the sub stream is
         // copied into its own segments all along, and the main stream is
         // recorded as for motion-only.
-        let sub_url = cfg.sub_url.clone().filter(|u| !u.is_empty());
+        // (An address that cannot be opened is left out: see `sub_url_problem`.)
+        let sub_url = if sub_watch.use_sub(std::time::Instant::now()) { super::usable_sub_url(&cfg) } else { None };
         let sub_mode = cfg.record && !cfg.record_motion_only && cfg.record_sub && sub_url.is_some() && !local;
         // Motion-only recording: segments are written by a recorder process
         // that lives only while the camera currently reports motion.
@@ -268,23 +300,70 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 continue;
             }
         }
-        let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
-        args.extend(ffmpeg_input_args(&camera_url(&cfg)));
+        // Hardware decoding: network cameras only (nothing to decode in a
+        // synthetic source; capture devices give raw pictures).
+        let netcam = !local && !cfg.url.starts_with("lavfi://");
+        // Motion analysis decodes the sub stream when the camera has one (as
+        // the built-in reader does): the large main stream is then only
+        // recorded, by its own ffmpeg.
+        let ana_sub = netcam && sub_url.is_some();
+        let ana_cfg = match (&sub_url, ana_sub) {
+            (Some(u), true) => CameraConfig { url: u.clone(), ..cfg.clone() },
+            _ => cfg.clone(),
+        };
+        let hw = if netcam && !hw_off { crate::hwdecode::resolve(cfg.hwaccel.as_deref(), None, std::time::Duration::from_secs(5)) } else { Default::default() };
+        let hw_args = hw.spec.as_deref().and_then(|s| crate::ingest::decode::hw_input_args(s, None).ok());
+        let download = if hw_args.is_some() { format!("{},", crate::ingest::decode::HW_DOWNLOAD) } else { String::new() };
         let segment_seconds = engine.config.lock().unwrap().storage.segment_seconds;
-        if cfg.record && !direct && !motion_only {
+        // The full-size recording is re-encoded all along (masks/overlay
+        // burned in, or Direct copy off): on a hardware encoder when one
+        // passed the test and has a free place, else libx264.
+        let reencode_main = cfg.record && !direct && !motion_only;
+        // One ffmpeg decodes the main stream for both the recording and motion.
+        let single = reencode_main && !ana_sub;
+        let mut rec_enc: Option<crate::transcode::Encoder> = None;
+        let mut rec_slot: Option<crate::transcode::RecordingSlot> = None;
+        let mut enc_note: Option<String> = None;
+        if reencode_main && netcam {
+            match &enc_off {
+                Some(why) => enc_note = Some(why.clone()),
+                None => match super::ffpath::pick_hw_encoder(std::time::Duration::from_secs(20)) {
+                    Ok((e, s)) => {
+                        rec_enc = Some(e);
+                        rec_slot = Some(s);
+                    }
+                    Err(why) => enc_note = Some(why),
+                },
+            }
+        }
+        let rec_hw_decode = rec_enc.is_some() && !rec_dec_off && cfg.hwaccel.as_deref() != Some("off");
+        // Whether the camera's hardware decoding (hwaccel) is used: by the
+        // analysis ffmpeg, and by a separate main-stream recorder on libx264.
+        let ana_hw = hw_args.is_some() && !(single && rec_enc.is_some());
+        let rec_label = rec_enc.as_ref().map(super::ffpath::encoder_label);
+        let up = super::ffpath::rec_upload(rec_enc.as_ref()).map(|u| format!(",{u}")).unwrap_or_default();
+        let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+        if single && rec_enc.is_some() {
+            args.extend(super::ffpath::rec_input_args(rec_enc.as_ref(), rec_hw_decode));
+        } else if let (true, Some(h)) = (ana_hw, &hw_args) {
+            args.extend(h.iter().cloned());
+        }
+        args.extend(input_args(&cfg, try_udp, &camera_url(&ana_cfg)));
+        if single {
             // One decode, two outputs: the full-resolution recording (with
             // masks/overlay burned in) and the small analysis stream.
             let pre = if picture.is_empty() { "null".to_string() } else { picture.clone() };
+            let dl = if ana_hw { download.as_str() } else { "" };
             args.extend([
                 "-filter_complex".to_string(),
-                format!("[0:v]{pre},split=2[rec][a0];[a0]{}[ana]", analysis_filter(&cfg)),
+                format!("[0:v]{dl}{pre},split=2[r0][a0];[r0]null{up}[rec];[a0]{}[ana]", analysis_filter(&cfg)),
                 "-map".into(),
                 "[rec]".into(),
             ]);
             if cfg.audio {
                 args.extend(["-map", "0:a?", "-c:a", "aac"].map(String::from));
             }
-            args.extend(reencode_args(segment_seconds));
+            args.extend(super::ffpath::rec_encode_args(rec_enc.as_ref(), segment_seconds));
             args.extend(["-f", "segment", "-segment_time"].map(String::from));
             args.push(segment_seconds.to_string());
             args.extend(["-reset_timestamps", "1"].map(String::from));
@@ -293,7 +372,9 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             args.extend(["-map", "[ana]"].map(String::from));
         } else {
             args.push("-vf".into());
-            args.push(video_filter(&cfg));
+            // (On the card, frames are dropped there first, so only the
+            // analysed ones are copied back.)
+            args.push(if ana_hw { format!("fps={},{download}{}", cfg.fps.max(1), video_filter(&cfg)) } else { video_filter(&cfg) });
         }
         args.extend(["-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "8", "-"].map(String::from));
 
@@ -327,6 +408,17 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let stderr_tail = child.stderr.take().map(drain_stderr);
         let mut extra_tails: Vec<(&'static str, StderrTail)> = Vec::new();
         let frames_at_start = handle.state.read().unwrap().frames;
+        // Over UDP this session because of an earlier 461 (or a server remembered so).
+        let auto_transport = crate::ingest::transport_setting(&cfg.transport) == "auto";
+        let udp_session = auto_transport && netcam && (try_udp || crate::ingest::wants_udp(&cfg.transport, &cfg.url));
+        // Started while the graphics card test ran: once it is done, start
+        // over (once) so the card can be used.
+        let mut hw_restart = false;
+        // A side try of a given-up sub stream, and whether it worked.
+        let mut probe: Option<std::sync::mpsc::Receiver<Result<(), String>>> = None;
+        let mut back_to_sub = false;
+        let mut motion_meter = super::ffpath::SegMeter::default();
+        let mut motion_prefix: Option<String> = None;
         // Share processes with a watchdog so disabling the camera unblocks
         // the read loop immediately (kill ffmpeg -> EOF -> park).
         let child_box = Arc::new(Mutex::new(child));
@@ -341,12 +433,67 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let motion_bad = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut motion_renew = std::time::Instant::now();
         let mut motion_started = std::time::Instant::now();
+        // The main-stream recorder (analysis on the sub stream) stopped by
+        // itself: its last words, and the session restarts.
+        let mut rec_died: Option<String> = None;
+        let mut meter = super::ffpath::SegMeter::default();
+
+        // The main stream recorded by its own ffmpeg while motion decodes
+        // the sub stream: re-encoded (masks/overlay burned in), on the
+        // hardware encoder when there is one.
+        if reencode_main && ana_sub {
+            let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+            let mut chain: Vec<String> = Vec::new();
+            if rec_enc.is_some() {
+                rargs.extend(super::ffpath::rec_input_args(rec_enc.as_ref(), rec_hw_decode));
+            } else if let Some(h) = &hw_args {
+                rargs.extend(h.iter().cloned());
+                chain.push(crate::ingest::decode::HW_DOWNLOAD.to_string());
+            }
+            rargs.extend(input_args(&cfg, try_udp, &camera_url(&cfg)));
+            rargs.extend(["-map", "0:v"].map(String::from));
+            if cfg.audio {
+                rargs.extend(["-map", "0:a?", "-c:a", "aac"].map(String::from));
+            }
+            if !picture.is_empty() {
+                chain.push(picture.clone());
+            }
+            if let Some(u) = super::ffpath::rec_upload(rec_enc.as_ref()) {
+                chain.push(u.to_string());
+            }
+            if !chain.is_empty() {
+                rargs.push("-vf".into());
+                rargs.push(chain.join(","));
+            }
+            rargs.extend(super::ffpath::rec_encode_args(rec_enc.as_ref(), segment_seconds));
+            rargs.extend(["-f", "segment", "-segment_time"].map(String::from));
+            rargs.push(segment_seconds.to_string());
+            rargs.extend(["-reset_timestamps", "1"].map(String::from));
+            rargs.extend(FRAGMENTED.map(String::from));
+            rargs.push(seg_dir.join(format!("{seg_prefix}%06d.mp4")).to_string_lossy().into_owned());
+            match crate::child::ffmpeg().args(&rargs).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn() {
+                Ok(mut c) => {
+                    crate::child::adopt(&c);
+                    if let Some(e) = c.stderr.take() {
+                        extra_tails.push(("recorder (main stream)", drain_stderr(e)));
+                    }
+                    let cb = Arc::new(Mutex::new(c));
+                    children.push(cb.clone());
+                    if let Some((_, t)) = extra_tails.last() {
+                        let mut w = RecWatch::new(cb, t.clone());
+                        w.main = true;
+                        rec_watch.push(w);
+                    }
+                }
+                Err(err) => warn!("camera '{}': could not start the main stream recorder: {}", cfg.name, err),
+            }
+        }
 
         // Direct mode: a second ffmpeg stream-copies the source into segments
-        // while the analysis process decodes its own substream.
+        // while the analysis process decodes its own stream.
         if direct && !motion_only {
             let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
-            rargs.extend(ffmpeg_input_args(&camera_url(&cfg)));
+            rargs.extend(input_args(&cfg, try_udp, &camera_url(&cfg)));
             rargs.push("-f".into());
             rargs.push("segment".into());
             rargs.push("-segment_time".into());
@@ -379,7 +526,10 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 let cb = Arc::new(Mutex::new(c));
                 children.push(cb.clone());
                 if let Some((_, t)) = extra_tails.last() {
-                    rec_watch.push(RecWatch::new(cb, t.clone()));
+                    let mut w = RecWatch::new(cb, t.clone());
+                    // With motion on the sub stream nothing else would notice it stop.
+                    w.main = ana_sub;
+                    rec_watch.push(w);
                 }
             }
         }
@@ -389,7 +539,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             let mut sc = cfg.clone();
             sc.url = u.clone();
             let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
-            rargs.extend(ffmpeg_input_args(&camera_url(&sc)));
+            rargs.extend(input_args(&cfg, try_udp, &camera_url(&sc)));
             rargs.extend(["-map", "0:v"].map(String::from));
             rargs.extend(["-f", "segment", "-segment_time"].map(String::from));
             rargs.push(segment_seconds.to_string());
@@ -412,8 +562,47 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
         }
         start_watchdog(children.clone(), handle.clone());
+        // Events of a motion-only camera are re-encoded too when the
+        // picture changes or Direct copy is off.
+        let motion_reencode = motion_only && netcam && !(cfg.direct && picture.is_empty());
+        {
+            // What runs for this camera (Status): the capture, and the recorders.
+            let mut dec = handle.decode.lock().unwrap();
+            dec.stream = Some(if ana_sub { "sub" } else { "main" });
+            dec.codec = None;
+            dec.gpu = if ana_hw {
+                hw.spec.as_deref().map(crate::hwdecode::describe)
+            } else if single && rec_hw_decode {
+                rec_label.clone()
+            } else {
+                None
+            };
+            let sub_note = if sub_watch.trying() { Some("trying the sub stream again".to_string()) } else { sub_watch.off.clone() };
+            dec.note = super::ffpath::join_notes(if hw_off { hw_off_note.clone() } else { hw.why_not.clone() }, sub_note.as_ref());
+            let mut procs = vec![if ana_sub { "motion decoder (sub stream)" } else { "capture" }];
+            procs.extend(extra_tails.iter().map(|(n, _)| *n));
+            if motion_only {
+                procs.push("motion recorder (while there is motion)");
+            }
+            dec.procs = procs;
+            let cause = if reencode_main || motion_reencode { super::ffpath::reencode_cause(&cfg) } else { None };
+            let hw_for_events = if motion_reencode && enc_off.is_none() { super::ffpath::hw_encoder_available().map(|e| super::ffpath::encoder_label(&e)) } else { None };
+            let label = rec_label.clone().or(hw_for_events);
+            dec.reencode = cause.map(|c| super::ffpath::reencode_text(&cfg.name, c, label.as_deref()));
+            dec.reencode_hw = cause.is_some() && label.is_some();
+            dec.encoder = cause.map(|_| label.clone().unwrap_or_else(|| "libx264".into()));
+            dec.encoder_note = if cause.is_some() && label.is_none() { enc_note.clone().or_else(|| enc_off.clone()) } else { None };
+        }
+        // (Held while the recording runs: freed when this session ends.)
+        let _rec_slot = rec_slot;
+        // The bitrate shown for the camera: how fast its continuous
+        // recording grows (ffmpeg does not say what it receives).
+        let meter_on = cfg.record && !motion_only;
 
         let mut recorder: Option<std::process::Child> = None;
+        // The motion recorder's hardware encoder place, and whether it uses one.
+        let mut recorder_slot: Option<crate::transcode::RecordingSlot> = None;
+        let mut motion_hw: Option<String> = None;
         let mut frames_over: u32 = 0;
         let mut event_start: Option<i64> = None;
         let mut event_score: f64 = 0.0;
@@ -431,11 +620,53 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if hw.pending && last_rec_check.elapsed() >= std::time::Duration::from_secs(5) && crate::hwdecode::probe_done() {
+                        hw_restart = true;
+                        break;
+                    }
+                    // A given-up sub stream is tried on the side when due; when
+                    // it works the session starts over on it.
+                    if probe.is_none() && sub_watch.probe_due(std::time::Instant::now()) {
+                        if let Some(u) = super::usable_sub_url(&cfg) {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let c = cfg.clone();
+                            thread::spawn(move || {
+                                let _ = tx.send(super::ffpath::probe_sub(&c, &u));
+                            });
+                            probe = Some(rx);
+                        }
+                    }
+                    if let Some(rx) = &probe {
+                        match rx.try_recv() {
+                            Ok(outcome) => {
+                                probe = None;
+                                let (back, line) = sub_watch.probe_done(std::time::Instant::now(), outcome);
+                                warn!("camera '{}': {line}", cfg.name);
+                                if back {
+                                    back_to_sub = true;
+                                    break;
+                                }
+                                let mut d = handle.decode.lock().unwrap();
+                                d.note = super::ffpath::replace_sub_note(d.note.take(), sub_watch.off.as_ref());
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => probe = None,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        }
+                    }
                     // A recorder that stopped by itself while the stream goes
                     // on (a folder that refuses writes) would otherwise go
                     // unnoticed: the stream never ends.
                     if cfg.record && last_rec_check.elapsed() >= std::time::Duration::from_secs(5) {
                         last_rec_check = std::time::Instant::now();
+                        if meter_on {
+                            handle.rx_bytes.fetch_add(meter.poll(&seg_dir, &seg_prefix), Ordering::Relaxed);
+                        }
+                        // A camera that records its main stream around events
+                        // only (motion-only, sub stream all along): the
+                        // bitrate of that main recording while it runs.
+                        if let Some(p) = &motion_prefix {
+                            handle.rx_bytes.fetch_add(motion_meter.poll(&seg_dir, p), Ordering::Relaxed);
+                        }
                         // (Whether the folder is there is asked on the probe's own
                         // thread: a hung share must not stall frames.)
                         for w in rec_watch.iter_mut() {
@@ -443,7 +674,11 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                 if w.child.lock().unwrap().try_wait().ok().flatten().is_some() {
                                     w.done = true;
                                     let text = w.tail.lock().unwrap().clone();
-                                    if exit_needs_probe(&text, started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
+                                    if w.main && !write_hint(&[text.as_str()]) {
+                                        // Motion goes on from the sub stream:
+                                        // start over so recording resumes.
+                                        rec_died = Some(text);
+                                    } else if exit_needs_probe(&text, started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
                                         spawn_folder_check(&folder_name, &folder_root, &seg_dir, 90, Some(w.bad.clone()));
                                     }
                                 }
@@ -454,10 +689,21 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                 spawn_folder_check(&folder_name, &folder_root, &seg_dir, 330, Some(w.bad.clone()));
                             }
                         }
+                        if rec_died.is_some() {
+                            break;
+                        }
                         if !motion_checked && recorder.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_some()) {
                             motion_checked = true;
                             motion_renew = std::time::Instant::now() + std::time::Duration::from_secs(300);
                             let text = extra_tails.iter().rev().find(|(n, _)| *n == "motion recorder").map(|(_, t)| t.lock().unwrap().clone()).unwrap_or_default();
+                            // The graphics card would not encode it: the
+                            // processor for the next events.
+                            if let (Some(label), true) = (&motion_hw, super::ffpath::hw_encode_blamed(&text)) {
+                                let why = hw_line(&text).unwrap_or_else(|| "it failed".into());
+                                warn!("camera '{}': recording an event on {label} did not work ({why}); using the processor (libx264)", cfg.name);
+                                enc_off = Some(format!("{label} did not work ({why}); using the processor"));
+                                recorder_slot = None;
+                            }
                             if exit_needs_probe(&text, motion_started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
                                 spawn_folder_check(&folder_name, &folder_root, &seg_dir, 90, Some(motion_bad.clone()));
                             }
@@ -489,8 +735,23 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                 if motion_only {
                                     let m = handle.state.read().unwrap().motion;
                                     if m && recorder.is_none() {
+                                        // Re-encoded (masks/overlay, or Direct copy off): on
+                                        // a hardware encoder with a free place, when one
+                                        // passed the test (never waiting for it here).
+                                        let copy = cfg.direct && picture.is_empty();
+                                        let (enc, slot) = match (motion_reencode, &enc_off) {
+                                            (true, None) => match super::ffpath::pick_hw_encoder(std::time::Duration::ZERO) {
+                                                Ok((e, s)) => (Some(e), Some(s)),
+                                                Err(_) => (None, None),
+                                            },
+                                            _ => (None, None),
+                                        };
+                                        let enc_hw_decode = enc.is_some() && cfg.hwaccel.as_deref() != Some("off") && !rec_dec_off;
                                         let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
-                                        rargs.extend(ffmpeg_input_args(&camera_url(&cfg)));
+                                        if !copy {
+                                            rargs.extend(super::ffpath::rec_input_args(enc.as_ref(), enc_hw_decode));
+                                        }
+                                        rargs.extend(input_args(&cfg, try_udp, &camera_url(&cfg)));
                                         rargs.push("-f".into());
                                         rargs.push("segment".into());
                                         rargs.push("-segment_time".into());
@@ -498,15 +759,22 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                         rargs.push("-reset_timestamps".into());
                                         rargs.push("1".into());
                                         rargs.extend(FRAGMENTED.map(String::from));
-                                        if cfg.direct && picture.is_empty() {
+                                        if copy {
                                             rargs.push("-c".into());
                                             rargs.push("copy".into());
                                         } else {
+                                            let mut chain: Vec<&str> = Vec::new();
                                             if !picture.is_empty() {
-                                                rargs.push("-vf".into());
-                                                rargs.push(picture.clone());
+                                                chain.push(&picture);
                                             }
-                                            rargs.extend(reencode_args(segment_seconds));
+                                            if let Some(u) = super::ffpath::rec_upload(enc.as_ref()) {
+                                                chain.push(u);
+                                            }
+                                            if !chain.is_empty() {
+                                                rargs.push("-vf".into());
+                                                rargs.push(chain.join(","));
+                                            }
+                                            rargs.extend(super::ffpath::rec_encode_args(enc.as_ref(), segment_seconds));
                                         }
                                         // Unique prefix per launch so restarts never overwrite earlier files.
                                         let rec_prefix = format!("{slug_name}-{}-rec-seg", Utc::now().timestamp_millis());
@@ -526,6 +794,10 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                                     extra_tails.push(("motion recorder", drain_stderr(e)));
                                                 }
                                                 recorder = Some(c);
+                                                motion_prefix = Some(rec_prefix.clone());
+                                                motion_meter = super::ffpath::SegMeter::default();
+                                                motion_hw = enc.as_ref().map(super::ffpath::encoder_label);
+                                                recorder_slot = slot;
                                                 motion_started = std::time::Instant::now();
                                                 motion_checked = false;
                                                 motion_bad.store(false, Ordering::Relaxed);
@@ -535,7 +807,11 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                     } else if !m {
                                         if let Some(c) = recorder.take() {
                                             // Don't stall the frame loop while ffmpeg finalizes the MP4.
-                                            thread::spawn(move || stop_recorder(c));
+                                            let slot = recorder_slot.take();
+                                            thread::spawn(move || {
+                                                stop_recorder(c);
+                                                drop(slot);
+                                            });
                                         }
                                     }
                                 }
@@ -551,6 +827,26 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
         }
 
+        // The main-stream recorder was still going when motion stopped (so
+        // the sub stream, not the camera, ended the session).
+        // Motion (the sub stream) stopped by itself: the sub stream's fault
+        // alone only when the main-stream recorder wrote segments this
+        // session and is still going a while later (an outage takes both down).
+        let sub_alone = ana_sub
+            && !hw_restart
+            && !back_to_sub
+            && rec_died.is_none()
+            && handle.active.load(Ordering::Relaxed)
+            && rec_watch.iter().find(|w| w.main).is_some_and(|w| {
+                let alive = || w.child.lock().unwrap().try_wait().ok().flatten().is_none();
+                let until = std::time::Instant::now() + SUB_GRACE;
+                while alive() && std::time::Instant::now() < until && handle.active.load(Ordering::Relaxed) {
+                    thread::sleep(std::time::Duration::from_millis(250));
+                }
+                // (A sub stream refused at once: the recorder has had the
+                // grace time to write its first segment.)
+                alive() && handle.active.load(Ordering::Relaxed) && seg_dir.join(format!("{seg_prefix}000000.mp4")).exists()
+            });
         for cb in children.iter() {
             let mut c = cb.lock().unwrap();
             let _ = c.kill();
@@ -559,6 +855,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         if let Some(c) = recorder.take() {
             stop_recorder(c);
         }
+        drop(recorder_slot.take());
         {
             let mut st = handle.state.write().unwrap();
             st.online = false;
@@ -575,9 +872,104 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // the pipes close at once).
         thread::sleep(std::time::Duration::from_millis(if local { 200 } else { 100 }));
         let main_text = stderr_tail.map(|t| t.lock().unwrap().clone()).unwrap_or_default();
+        {
+            let mut dec = handle.decode.lock().unwrap();
+            let note = dec.note.take();
+            dec.stopped();
+            dec.note = note;
+        }
+        let active = handle.active.load(Ordering::Relaxed);
+        let got_frames = handle.state.read().unwrap().frames > frames_at_start;
+        if hw_restart && active {
+            info!("camera '{}': the graphics card test has finished; starting again to use it", cfg.name);
+            continue;
+        }
+        if back_to_sub && active {
+            continue;
+        }
+        // Nothing records the main stream all along to compare with: a
+        // refusal of the sub stream (401/403/404) is its own fault (if the
+        // main stream fails too, the camera says so, and the later try of
+        // the sub stream sorts it out).
+        let sub_alone = sub_alone || (ana_sub && !rec_watch.iter().any(|w| w.main) && super::ffpath::is_refusal(&main_text));
+        // The sub stream (motion) stopped while the main stream recorded on:
+        // after a refusal or a few sessions, motion moves to the main stream
+        // for a while; a later try takes it back.
+        if active {
+            let why = tail_summary(&main_text).unwrap_or_else(|| "no pictures came".into());
+            let failed = sub_alone.then_some((main_text.as_str(), why.as_str()));
+            if let Some(line) = sub_watch.ended(std::time::Instant::now(), started.elapsed(), failed) {
+                warn!("camera '{}': {line}", cfg.name);
+                if sub_alone {
+                    continue;
+                }
+            }
+        }
+        // The graphics card would not decode or encode the re-encoded
+        // recording: at once again, first without its decoding, then on
+        // the processor (libx264).
+        let rec_text = if single { Some(main_text.clone()) } else { rec_died.clone() };
+        if let (Some(label), Some(text), true) = (&rec_label, &rec_text, active) {
+            if super::ffpath::hw_encode_blamed(text) {
+                let why = hw_line(text).unwrap_or_else(|| "it failed".into());
+                if rec_hw_decode {
+                    rec_dec_off = true;
+                    warn!("camera '{}': decoding for the recording on {label} did not work ({why}); decoding on the processor, encoding on {label}", cfg.name);
+                } else {
+                    warn!("camera '{}': recording on {label} did not work ({why}); using the processor (libx264)", cfg.name);
+                    enc_off = Some(format!("{label} did not work ({why}); using the processor"));
+                }
+                continue;
+            }
+        }
+        // A camera that refuses TCP (461 Unsupported Transport) under
+        // transport = "auto": again over UDP. The server is remembered as
+        // UDP-only only once UDP brought pictures, and forgotten when UDP
+        // brought nothing.
+        if auto_transport && netcam && active {
+            let urls: Vec<&String> = std::iter::once(&cfg.url).chain(sub_url.as_ref()).collect();
+            match udp_transport_step(udp_session, got_frames, || {
+                std::iter::once(main_text.clone()).chain(extra_tails.iter().map(|(_, t)| t.lock().unwrap().clone())).any(|t| crate::ingest::is_unsupported_transport(&t))
+            }) {
+                UdpStep::Keep => urls.iter().for_each(|u| crate::ingest::remember_udp(u)),
+                UdpStep::Drop => {
+                    urls.iter().for_each(|u| crate::ingest::forget_udp(u));
+                    try_udp = false;
+                    udp_failed = true;
+                }
+                UdpStep::Try => {
+                    try_udp = true;
+                    info!("camera '{}': the camera refused RTSP over TCP; asking over UDP", cfg.name);
+                    if !udp_failed {
+                        continue;
+                    }
+                }
+                UdpStep::Nothing => {}
+            }
+        }
+        // The card would not decode this camera: at once again, on the processor.
+        let hw_text = match (&rec_died, single) {
+            // (A separate main-stream recorder on libx264 decodes with hwaccel too.)
+            (Some(t), false) if rec_enc.is_none() && hw_args.is_some() => format!("{main_text}\n{t}"),
+            _ => main_text.clone(),
+        };
+        if (ana_hw || (hw_args.is_some() && rec_died.is_some() && rec_enc.is_none())) && hw_blamed(&hw_text) && active {
+            let main_text = hw_text;
+            hw_off = true;
+            let why = hw_line(&main_text).unwrap_or_else(|| "it failed".into());
+            let what = hw.spec.as_deref().map(crate::hwdecode::describe).unwrap_or_default();
+            warn!("camera '{}': hardware decoding ({what}) did not work ({why}); decoding on the processor", cfg.name);
+            hw_off_note = Some(format!("hardware decoding ({what}) did not work ({why}); using the processor"));
+            handle.decode.lock().unwrap().note = hw_off_note.clone();
+            continue;
+        }
         if !local {
-            let why = tail_summary(&main_text);
+            let why = tail_summary(rec_died.as_deref().unwrap_or(&main_text));
             let mut reason = ended_text(why.as_deref());
+            // macOS's Local Network privacy (ffmpeg: "No route to host").
+            if let Some(m) = crate::macnet::blocked(&main_text, &cfg.url) {
+                reason = m;
+            }
             // A recording folder this account cannot write explains it best
             // (only for cameras that record, and never for a folder that is
             // missing: that has its own "cannot read" problem).
@@ -622,21 +1014,66 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         if handle.active.load(Ordering::Relaxed) {
             // Nothing came through: wait longer each time (up to a minute),
             // so a camera refusing the sign-in is not asked every few seconds.
-            if handle.state.read().unwrap().frames > frames_at_start {
+            // (A recorder that stopped by itself after running a good while
+            // starts the waits over too; one that keeps stopping at once does not.)
+            let ran_long = started.elapsed() >= std::time::Duration::from_secs(60);
+            if got_frames && (rec_died.is_none() || ran_long) {
                 backoff = 3;
             }
             let why = tail_summary(&main_text);
             let reason = handle.state.read().unwrap().last_error.clone().unwrap_or_else(|| ended_text(why.as_deref()));
+            crate::camreport::note_end(&cfg.name, &reason, handle.state.read().unwrap().frames > frames_at_start);
             warn!("camera '{}': {}, retrying in {}s", cfg.name, reason, backoff);
             let until = std::time::Instant::now() + std::time::Duration::from_secs(backoff);
             while std::time::Instant::now() < until && handle.active.load(Ordering::Relaxed) {
                 thread::sleep(std::time::Duration::from_millis(300));
             }
-            if handle.state.read().unwrap().frames <= frames_at_start {
+            if !got_frames || (rec_died.is_some() && !ran_long) {
                 backoff = (backoff * 2).min(60);
             }
         }
     }
+}
+
+/// After motion (the sub stream) stops, how long the main-stream recorder
+/// must go on for it to be the sub stream's failure alone.
+const SUB_GRACE: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// What a session's end means for RTSP over UDP under `transport = "auto"`.
+#[derive(Debug, PartialEq, Eq)]
+enum UdpStep {
+    /// UDP brought pictures: remember the server as UDP-only.
+    Keep,
+    /// UDP brought nothing: forget it, TCP first next time.
+    Drop,
+    /// TCP got a 461: try UDP.
+    Try,
+    Nothing,
+}
+
+/// `udp`: the session was over UDP; `refused_tcp`: whether a 461 is in
+/// ffmpeg's words (asked only for a TCP session).
+fn udp_transport_step(udp: bool, got_frames: bool, refused_tcp: impl FnOnce() -> bool) -> UdpStep {
+    match (udp, got_frames) {
+        (true, true) => UdpStep::Keep,
+        (true, false) => UdpStep::Drop,
+        (false, _) if refused_tcp() => UdpStep::Try,
+        _ => UdpStep::Nothing,
+    }
+}
+
+/// Whether ffmpeg's stderr says the hardware decoder (not the camera) failed.
+fn hw_blamed(text: &str) -> bool {
+    hw_line(text).is_some()
+}
+
+/// The first line of ffmpeg's stderr about the hardware decoder.
+fn hw_line(text: &str) -> Option<String> {
+    const WORDS: [&str; 13] = ["vaapi", "qsv", "hwaccel", "hwdownload", "hardware", "device creation", "hw_frames", "hwframe", "d3d11", "dxva", "videotoolbox", "cuda", "impossible to convert"];
+    text.lines().find(|l| {
+        let low = l.to_ascii_lowercase();
+        WORDS.iter().any(|w| low.contains(w))
+    }).and_then(crate::hwdecode::reason_from_stderr)
 }
 
 /// Record why a local source is not running and wait before retrying; the
@@ -997,6 +1434,54 @@ pub(super) fn process_frame(
 }
 
 #[cfg(test)]
+mod transport_arg_tests {
+    use super::*;
+
+    #[test]
+    fn rtsp_transport_follows_the_setting() {
+        let a = ffmpeg_input_args_over("rtsp://h/x", true);
+        assert_eq!(a[..2], ["-rtsp_transport", "udp"]);
+        assert_eq!(ffmpeg_input_args("rtsp://h/x")[..2], ["-rtsp_transport", "tcp"]);
+        let mut c: CameraConfig = toml::from_str("name = \"a\"\nurl = \"rtsp://transport-test.invalid/x\"\ntransport = \"udp\"").unwrap();
+        assert_eq!(input_args(&c, false, &c.url)[1], "udp");
+        c.transport = "tcp".into();
+        assert_eq!(input_args(&c, false, &c.url)[1], "tcp");
+        c.transport = "auto".into();
+        assert_eq!(input_args(&c, false, &c.url)[1], "tcp");
+    }
+
+    #[test]
+    fn udp_is_kept_only_after_it_brought_pictures() {
+        assert_eq!(udp_transport_step(false, false, || true), UdpStep::Try);
+        assert_eq!(udp_transport_step(false, true, || false), UdpStep::Nothing);
+        assert_eq!(udp_transport_step(true, true, || unreachable!()), UdpStep::Keep);
+        assert_eq!(udp_transport_step(true, false, || unreachable!()), UdpStep::Drop);
+        // A 461-looking number in ffmpeg's output is not a refusal.
+        let said = "[h264 @ 0x1] cabac decode of qscale diff failed at 1461 > 1200";
+        assert_eq!(udp_transport_step(false, true, || crate::ingest::is_unsupported_transport(said)), UdpStep::Nothing);
+        let c: CameraConfig = toml::from_str("name = \"a\"\nurl = \"rtsp://try-udp.invalid/x\"").unwrap();
+        assert_eq!(input_args(&c, true, &c.url)[1], "udp");
+        let mut t = c.clone();
+        t.transport = "tcp".into();
+        assert_eq!(input_args(&t, true, &t.url)[1], "tcp", "tcp is tcp");
+    }
+
+    /// ffmpeg 4's `-timeout` on RTSP means "listen"; its socket timeout is `-stimeout`.
+    #[test]
+    fn rtsp_timeout_follows_the_ffmpeg_version() {
+        assert_eq!(rtsp_input_args("rtsp://h/x", false, Some(4))[2..4], ["-stimeout", "10000000"]);
+        assert_eq!(rtsp_input_args("rtsp://h/x", false, Some(5))[2..4], ["-timeout", "10000000"]);
+        assert_eq!(rtsp_input_args("rtsp://h/x", true, None)[2], "-timeout");
+        assert_eq!(crate::ffmpeg_bin::major_of("4.3.1"), Some(4));
+        assert_eq!(crate::ffmpeg_bin::major_of("n4.4.2"), Some(4));
+        assert_eq!(crate::ffmpeg_bin::major_of("8.0.1-3ubuntu2"), Some(8));
+        assert_eq!(crate::ffmpeg_bin::major_of("N-112345-gabc"), None);
+        assert_eq!(crate::ffmpeg_bin::rtsp_timeout_flag(Some(4)), "-stimeout");
+        assert_eq!(crate::ffmpeg_bin::rtsp_timeout_flag(Some(7)), "-timeout");
+    }
+}
+
+#[cfg(test)]
 mod overlay_tests {
     use super::*;
 
@@ -1084,7 +1569,7 @@ type StderrTail = Arc<Mutex<String>>;
 
 /// Read a child's stderr on its own thread so a full pipe never blocks ffmpeg;
 /// only the last few KB are kept.
-fn drain_stderr(e: std::process::ChildStderr) -> StderrTail {
+pub(super) fn drain_stderr(e: std::process::ChildStderr) -> StderrTail {
     let tail: StderrTail = Arc::new(Mutex::new(String::new()));
     let t = tail.clone();
     thread::spawn(move || {
@@ -1105,22 +1590,29 @@ fn drain_stderr(e: std::process::ChildStderr) -> StderrTail {
 }
 
 /// Remove sign-in details from free text: any `scheme://user:pw@host` token
-/// loses its userinfo (looked for only in the authority, up to the first '/',
-/// '?' or '#', and up to its last '@'), and secret query values are hidden.
+/// loses its userinfo (found as in the settings, `creds::userinfo_at`: also
+/// a password typed raw with a '/' in it), and secret query values are hidden.
 /// Punctuation after the URL (as in "...: 401") is kept.
 pub(crate) fn redact_text(line: &str) -> String {
+    redact_text_with(line, false)
+}
+
+/// [`redact_text`]; `strict` for the camera report (see
+/// `creds::shown_userinfo_at`: an '@' path after a plain host is masked too).
+pub(crate) fn redact_text_with(line: &str, strict: bool) -> String {
     line.split(' ')
         .map(|tok| {
             let Some(i) = tok.find("://") else { return tok.to_string() };
             let body_end = tok.trim_end_matches(|c: char| matches!(c, ':' | ',' | ';' | ')' | ']' | '"' | '\'' | '.')).len();
             let (body, tail) = tok.split_at(body_end.max(i + 3));
             let (head, rest) = body.split_at(i + 3);
-            let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-            let rest = match rest[..auth_end].rfind('@') {
+            // (Wider than the connection rule: sign-ins it leaves in place
+            // on purpose are hidden too.)
+            let rest = match super::creds::shown_userinfo_at(rest, strict) {
                 Some(at) => &rest[at + 1..],
                 None => rest,
             };
-            format!("{}{}", super::creds::redact_url(format!("{head}{rest}")), tail)
+            format!("{}{}", super::creds::redact_url_with(format!("{head}{rest}"), strict), tail)
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -1192,11 +1684,14 @@ struct RecWatch {
     /// Its folder refused writes the last time that was looked at.
     bad: Arc<std::sync::atomic::AtomicBool>,
     next_renewal: std::time::Instant,
+    /// The camera's continuous main-stream recording while motion decodes
+    /// the sub stream: when it stops (not from its folder) the camera starts over.
+    main: bool,
 }
 
 impl RecWatch {
     fn new(child: Arc<Mutex<std::process::Child>>, tail: StderrTail) -> Self {
-        RecWatch { child, tail, done: false, bad: Arc::new(std::sync::atomic::AtomicBool::new(false)), next_renewal: std::time::Instant::now() + std::time::Duration::from_secs(300) }
+        RecWatch { child, tail, done: false, bad: Arc::new(std::sync::atomic::AtomicBool::new(false)), next_renewal: std::time::Instant::now() + std::time::Duration::from_secs(300), main: false }
     }
     /// A recorder that died from a folder problem renews its finding every
     /// 5 minutes while it stays that way.
@@ -1318,6 +1813,14 @@ mod tail_tests {
     use super::*;
 
     #[test]
+    fn hardware_decoder_failures_are_told_from_camera_failures() {
+        assert!(hw_blamed("[AVHWDeviceContext @ 0x1] Failed to initialise VAAPI connection: -1\nDevice creation failed: -5."));
+        assert_eq!(hw_line("rtsp://x: Connection refused\n[h264 @ 0x2] Impossible to convert between the formats").as_deref(), Some("Impossible to convert between the formats"));
+        assert!(!hw_blamed("rtsp://h/s: 401 Unauthorized\nError opening input"));
+        assert!(!hw_blamed(""));
+    }
+
+    #[test]
     fn redacts_special_password() {
         let l = "[rtsp @ 0x1] rtsp://admin:p%40ss%2Fw%3Ard%3F%23x@192.168.1.5:554/stream1: 401 Unauthorized";
         let r = redact_text(l);
@@ -1326,7 +1829,7 @@ mod tail_tests {
         assert!(r.ends_with("401 Unauthorized"), "{r}");
         assert_eq!(redact_text("no url here"), "no url here");
         // '@' outside the authority is not userinfo.
-        assert_eq!(redact_text("http://h/api?cmd=Snap&user=admin&password=ab@cd: 401"), "http://h/api?cmd=Snap&user=admin&password=***: 401");
+        assert_eq!(redact_text("http://h/api?cmd=Snap&user=admin&password=ab@cd: 401"), "http://h/api?cmd=Snap&user=***&password=***: 401");
         assert_eq!(redact_text("rtsp://h/stream@1: 404"), "rtsp://h/stream@1: 404");
         assert_eq!(redact_text("http://h/x?token=abc 404"), "http://h/x?token=*** 404");
         assert_eq!(redact_text("http://h/x?token=abc: 404"), "http://h/x?token=***: 404");

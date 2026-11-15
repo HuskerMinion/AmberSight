@@ -41,9 +41,12 @@ pub mod spots;
 mod spots_replay;
 pub use plan::list_drives;
 mod worker;
+pub mod ffpath;
 mod zone_watch;
 
-pub use creds::{camera_url, normalize_creds, redact_url};
+pub use creds::{camera_url, check_urls as check_camera_urls, normalize_creds, redact_url, sub_url_problem, usable_sub_url};
+pub(crate) use worker::{redact_text, redact_text_with};
+pub(crate) use creds::{is_secret_key, shown_login};
 pub use worker::{caption_drawtext, ffmpeg_input_args, video_filter};
 
 use clip::*;
@@ -189,6 +192,8 @@ pub struct CameraHandle {
     /// Video bytes received, and frames the decoder had to drop (status panel).
     pub rx_bytes: std::sync::atomic::AtomicU64,
     pub dropped: std::sync::atomic::AtomicU64,
+    /// How motion decoding runs (GPU or CPU, which stream), for Status.
+    pub decode: Mutex<crate::hwdecode::CamDecode>,
 }
 
 /// What became of a battery camera's motion push.
@@ -1275,6 +1280,8 @@ fn copy_light_fields(to: &mut CameraConfig, from: &CameraConfig) {
     to.copy_events_to = from.copy_events_to.clone();
     to.copy_events_keep_days = from.copy_events_keep_days;
     to.copy_events_only_confirmed = from.copy_events_only_confirmed;
+    // Only Status reads it.
+    to.no_sub_ok = from.no_sub_ok;
 }
 
 /// True when `new` differs from `old` in anything but the light fields.
@@ -1311,6 +1318,7 @@ fn make_handle(id: usize, cfg: CameraConfig) -> Arc<CameraHandle> {
         rx_frames: std::sync::atomic::AtomicU64::new(0),
         rx_bytes: std::sync::atomic::AtomicU64::new(0),
         dropped: std::sync::atomic::AtomicU64::new(0),
+        decode: Mutex::new(Default::default()),
         state: RwLock::new(CameraState {
             name: cfg.name.clone(),
             url: cfg.url.clone(),

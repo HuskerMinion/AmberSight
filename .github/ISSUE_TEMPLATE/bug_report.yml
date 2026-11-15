@@ -13,7 +13,7 @@ body:
     attributes:
       label: AmberSight version
       description: Settings > System > Status & updates, or `ambersight --version`
-      placeholder: "0.7.1"
+      placeholder: "0.10.3"
     validations:
       required: true
   - type: dropdown
@@ -38,7 +38,15 @@ body:
     id: cameras
     attributes:
       label: Camera make and model (if a camera is involved)
-      placeholder: "e.g. Reolink RLC-810A, Amcrest IP8M-2496"
+      placeholder: "e.g. the camera's brand and model"
+  - type: textarea
+    id: camera_report
+    attributes:
+      label: Camera report (for camera problems)
+      description: >-
+        Settings > Cameras > (the camera) > Network > Camera report saves a text file with what AmberSight
+        sees from the camera, without user names or passwords. Drag the file here. It does contain the
+        camera's network address.
   - type: textarea
     id: what
     attributes:

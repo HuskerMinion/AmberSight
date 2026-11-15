@@ -36,6 +36,7 @@ function operatorBody(d, c) {
 import { helperHtml, wireHelper, readHelper, pairDialog, helpersListHtml } from './helperpick.js';
 import { helpButton } from './help.js';
 import { netinfoHtml, wireNetinfo } from './netinfo.js';
+import { addrHtml, wireAddr, addrValidate, addrErrKey, addrSetSub, addrChanged, addrRebaseSub } from './camaddr_form.js';
 import { openZoneEditor, zonesSummary } from './zones.js';
 import { MOTION_PRESETS } from './sp_kit.js';
 import { armStrip, loadArmData } from './armstrip.js';
@@ -115,7 +116,7 @@ function wireOnvif(d, c, ctx) {
     try {
       await api('/api/cameras/' + c.id, { method: 'PUT', json: { onvif_port: found } });
       inp.value = found;
-      ctx.rebase(box.closest('.cs-sec'));
+      ctx.rebaseEls([inp]);
       toast('Saved', { kind: 'ok' });
       refreshCameras();
       load();
@@ -126,6 +127,136 @@ function wireOnvif(d, c, ctx) {
   return () => { gone = true; clearTimeout(timer); };
 }
 
+// ---------- hardware decoding and the sub stream ----------
+// hwaccel: null / "auto", "off", "vaapi[:/dev/dri/renderD129]", "qsv[:...]"; anything
+// else written by hand is kept and shown as it is.
+function hwParse(v) {
+  const s = String(v == null ? '' : v).trim();
+  const low = s.toLowerCase();
+  if (!s || low === 'auto') return { kind: 'auto', node: '' };
+  if (['off', 'none', 'software', 'cpu'].includes(low)) return { kind: 'off', node: '' };
+  const m = /^(vaapi|qsv)(?::(.*))?$/i.exec(s);
+  if (m) return { kind: m[1].toLowerCase(), node: (m[2] || '').trim() };
+  return { kind: s, node: '', other: true };
+}
+// What the form says, as the setting (null = Auto). A field that is not there keeps what is set.
+function hwValue(d, c) {
+  const k = d.querySelector('[data-k="hw_kind"]');
+  if (!k) return c ? c.hwaccel : undefined;
+  if (k.value === MIXED) return undefined;
+  // The card list shows only once /api/hwdecode answered with more than one card; until then
+  // (or when it failed, or there is one card) the saved card is kept.
+  const nodeEl = d.querySelector('[data-k="hw_node"]');
+  const shown = nodeEl && !nodeEl.closest('[hidden]') && nodeEl.dataset.loaded === '1' && nodeEl.value !== MIXED;
+  const node = shown ? nodeEl.value : (c ? hwParse(c.hwaccel).node : '');
+  if (k.value === 'auto') return null;
+  if (k.value === 'vaapi' || k.value === 'qsv') return node ? k.value + ':' + node : k.value;
+  return k.value;
+}
+// "Decoding now: on the graphics card (VAAPI on /dev/dri/renderD129), sub stream 640x360 H.264".
+function decodeNow(c) {
+  const x = c.decode;
+  if (!x || !x.stream) return '';
+  const size = x.width && x.height ? ' ' + x.width + 'x' + x.height : '';
+  return 'Decoding now: ' + (x.on === 'gpu' ? 'on the graphics card (' + esc(x.gpu || '') + ')' : 'on the processor') + ', ' + esc(x.stream) + ' stream' + esc(size) + (x.codec ? ' ' + esc(x.codec) : '') + '.' +
+    (x.note ? ' ' + esc(x.note.charAt(0).toUpperCase() + x.note.slice(1)) + '.' : '');
+}
+function hwHtml(c, multi) {
+  const h = hwParse(c.hwaccel);
+  const opts = [['auto', 'Auto (graphics card when it works)'], ['off', 'Off (processor)'], ['vaapi', 'VAAPI'], ['qsv', 'Quick Sync (QSV)']];
+  if (h.other) opts.push([h.kind, h.kind]);
+  const nodeOpts = '<option value="">first one that works</option>' + (h.node ? '<option value="' + esc(h.node) + '" selected>' + esc(h.node) + '</option>' : '');
+  return '<div data-hwbox>' + field('Hardware decoding', sel('hw_kind', opts, h.kind),
+    'How motion detection decodes the picture. Auto uses the graphics card (VAAPI) when it passed a test decode at start, and the processor otherwise; a card that fails later is replaced by the processor at once. Linux only for now: on Windows and macOS, Auto uses the processor.') +
+    '<div data-hwnode hidden>' + field('Graphics card', '<select data-k="hw_node">' + nodeOpts + '</select>') + '</div>' +
+    (multi ? '' : '<div class="hint" data-hwnow>' + decodeNow(c) + '</div>') + '</div>';
+}
+function wireHw(d, c) {
+  const box = d.querySelector('[data-hwbox]');
+  if (!box) return;
+  const kind = box.querySelector('[data-k="hw_kind"]'), wrapN = box.querySelector('[data-hwnode]'), nodeSel = box.querySelector('[data-k="hw_node"]');
+  let nodes = [];
+  const show = () => { wrapN.hidden = !(nodes.length > 1 && (kind.value === 'vaapi' || kind.value === 'qsv')); };
+  kind.addEventListener('change', () => { fillNodes(); show(); });
+  const fillNodes = () => {
+    if (!nodes.length) return;
+    nodeSel.dataset.loaded = '1';
+    const keep = nodeSel.value;
+    const k = kind.value === 'qsv' ? 'qsv' : 'vaapi';
+    nodeSel.innerHTML = '<option value="">first one that works</option>' + nodes.map(n => {
+      const ts = (n.tests || []).filter(t => t.kind === k);
+      const ok = ts.filter(t => t.ok).map(t => t.codec === 'hevc' ? 'H.265' : 'H.264');
+      const how = !n.tests ? '' : !ts.length ? ' (not tested)' : ok.length ? ' (decodes ' + ok.join(' and ') + ')' : ' (failed the test)';
+      return '<option value="' + esc(n.path) + '"' + (n.path === keep ? ' selected' : '') + '>' + esc(n.path + (n.driver ? ' ' + n.driver : '') + how) + '</option>';
+    }).join('');
+    if (keep && !nodes.some(n => n.path === keep)) nodeSel.insertAdjacentHTML('beforeend', '<option value="' + esc(keep) + '" selected>' + esc(keep) + '</option>');
+  };
+  api('/api/hwdecode').then(r => { nodes = r.nodes || []; fillNodes(); show(); }).catch(() => {});
+  show();
+}
+// No sub stream, and motion decodes a large main stream on the processor.
+// (The same test as the Status note: a network camera, not a battery one, with no sub stream.)
+const NET_RE = /^(rtsps?|https?):\/\//i;
+function subWarnHtml(c) {
+  const x = c.decode;
+  if (c.sub_url || !x || !x.heavy_main || !NET_RE.test(c.url || '') || c.on_demand) return '';
+  if (c.no_sub_ok) return '<div class="hint" data-subok>Not noting the missing sub stream for this camera. <button type="button" class="btn link" data-subnote="1">Note it again</button></div>';
+  const m = x.main || x;
+  return '<div class="cs-subwarn" data-subwarn role="status"><p>' + ic('alert') + ' Motion is decoding the full-size stream (' + esc(m.width + 'x' + m.height + ' ' + (m.codec || '')) + ') on the processor. Adding the camera\'s sub stream cuts CPU use a lot.</p>' +
+    '<div class="cs-subwarn-act"><button type="button" class="btn" data-subfind>Find the sub stream</button><button type="button" class="btn" data-subnote="0" title="For a camera that has only one stream">Don\'t warn about this camera</button></div><div data-subres></div></div>';
+}
+// "Don't warn about this camera" / "Note it again": saved at once (no_sub_ok), nothing else.
+function wireSubNote(d, c) {
+  d.querySelectorAll('[data-subnote]').forEach(b => {
+    b.onclick = async () => {
+      const ok = b.dataset.subnote === '0';
+      b.disabled = true;
+      try { await api('/api/cameras/' + c.id, { method: 'PUT', json: { no_sub_ok: ok } }); }
+      catch (e) { b.disabled = false; toast('Could not save: ' + (e.message || e)); return; }
+      const box = b.closest('[data-subwarn], [data-subok]');
+      if (box) box.outerHTML = '<div class="hint">' + (ok ? 'Status no longer notes the missing sub stream for this camera.' : 'Status notes the missing sub stream again.') + '</div>';
+      toast('Saved', { kind: 'ok' });
+      refreshCameras();
+    };
+  });
+}
+function wireSubFind(d, c, ctx) {
+  const box = d.querySelector('[data-subwarn]');
+  if (!box) return;
+  const btn = box.querySelector('[data-subfind]'), res = box.querySelector('[data-subres]');
+  btn.onclick = async () => {
+    btn.disabled = true; res.textContent = 'Looking for the sub stream (this can take a few seconds)...';
+    let r;
+    try { r = await api('/api/cameras/' + c.id + '/sub-suggest', { json: {} }); } catch (e) { res.textContent = 'Could not look just now: ' + (e.message || e); btn.disabled = false; return; }
+    btn.disabled = false;
+    const list = r.suggestions || [];
+    if (!list.length) { res.textContent = 'No sub stream found. Look for "sub stream" or "substream" in the camera\'s manual, and enter its address above.'; return; }
+    res.innerHTML = list.map((x, i) => '<div class="cs-subcand"><code>' + esc(x.url) + '</code> <span class="muted">' + (x.from === 'onvif' ? 'from the camera (ONVIF)' : 'the usual address for this kind of camera') + (x.works ? '' : '; it did not play just now') + '</span>' +
+      (x.works ? ' <button type="button" class="btn" data-subuse="' + i + '">Use this sub stream</button>' : '') + '</div>').join('');
+    res.querySelectorAll('[data-subuse]').forEach(b => {
+      b.onclick = () => {
+        const u = list[Number(b.dataset.subuse)].url;
+        const dlg = openDlg('Use this sub stream?', '<p>Save <code>' + esc(u) + '</code> as the sub stream of ' + esc(c.name) + '? Motion detection and the Live grid then use it; recording keeps the main stream. The camera reconnects.</p>' +
+          '<div class="row"><button type="button" class="btn" data-no>Cancel</button><button type="button" class="primary" data-yes>Save</button></div>', true);
+        dlg.querySelector('[data-no]').onclick = () => dlg.__close();
+        dlg.querySelector('[data-yes]').onclick = async (ev) => {
+          ev.target.disabled = true;
+          try { await api('/api/cameras/' + c.id, { method: 'PUT', json: { sub_url: u } }); }
+          catch (e) { ev.target.disabled = false; toast('Could not save the sub stream: ' + (e.message || e)); return; }
+          dlg.__close();
+          addrSetSub(d, u);
+          box.hidden = true;
+          // Only what the PUT wrote is saved now; other edits in the section stay unsaved.
+          addrRebaseSub(d);
+          ctx.rebaseEls([d.querySelector('[data-k="sub_url"]')]);
+          toast('Saved. ' + c.name + ' now uses its sub stream for motion.', { kind: 'ok' });
+          refreshCameras();
+        };
+      };
+    });
+  };
+}
+
 function streamHtml(c, isNew) {
   const s = parseSource(c.url);
   if (c.capture) s.kind = 'helper';
@@ -134,10 +265,8 @@ function streamHtml(c, isNew) {
   return field('Source', sel('src', [['net', 'Network camera (RTSP / HTTP)'], ['device', 'Local device (webcam or capture card)'], ['screen', 'Screen'], ['helper', 'Another computer (screen capture)'], ['push', 'Pushed stream (OBS, ffmpeg...)']], s.kind)) +
     helperHtml(c) +
     '<div data-src="net"' + (net ? '' : ' hidden') + '>' +
-      field('Stream URL', text('url', net ? c.url : '', 'placeholder="rtsp://host:554/stream" spellcheck="false"')) +
-      field('Sub stream URL (optional)', text('sub_url', c.sub_url, 'placeholder="lower resolution, for the grid and motion" spellcheck="false"')) +
-      field('Stream user', text('username', c.username, 'autocomplete="off"')) +
-      field('Stream password', '<input data-k="password" type="password" autocomplete="new-password" placeholder="' + (isNew ? 'device password' : 'blank keeps the stored password') + '">') +
+      addrHtml(c, isNew, net) +
+      (isNew ? '' : subWarnHtml(c)) +
       (isNew || c.id == null ? '' : onvifHtml(c)) +
     '</div>' +
     '<div data-src="device"' + (s.kind === 'device' ? '' : ' hidden') + '>' +
@@ -160,7 +289,13 @@ function streamHtml(c, isNew) {
     '</div>' +
     '<div class="hint" data-localhint' + (s.kind === 'device' || s.kind === 'screen' ? '' : ' hidden') + '>' + LOCAL_HINT + '</div>' +
     '<div class="hint" data-devnote hidden></div>' +
-    (isNew ? '' : '<div class="hint">Receiving: ' + esc(c.ingest || 'unknown') + '</div>');
+    (isNew ? '' : '<div class="hint">Receiving: ' + esc(c.ingest || 'unknown') + (c.ffmpeg_why ? '. Why: ' + esc(c.ffmpeg_why) + '.' : '') + '</div>' + reencodeHtml(c));
+}
+// The ffmpeg pipeline re-encodes the full-size recording (burned-in text, masks, Direct copy off).
+function reencodeHtml(c) {
+  const x = c.decode;
+  if (!x || !x.reencode || !(c.ingest || '').startsWith('ffmpeg')) return '';
+  return '<div class="hint' + (x.reencode_hw ? '' : ' warn') + '" role="status">' + esc(x.reencode) + (x.encoder_note ? ' Not on the graphics card: ' + esc(x.encoder_note) + '.' : '') + '</div>';
 }
 
 // A random stream key for a pushed camera (letters and digits only, URL-safe).
@@ -749,12 +884,13 @@ function readForm(d, c, isNew) {
     url: v('url'), sub_url: v('sub_url') || null, username: v('username'), password: d.querySelector('[data-k="password"]').value,
     record: v('record') === '1', record_motion_only: v('record_mode') === '1', record_sub: v('record_mode') === '2', direct: v('direct') === '1',
     on_demand: v('on_demand') === '1', idle_timeout: Math.min(604800, Math.max(30, num('idle_timeout', 300) || 300)),
-    fps: num('fps', 10), scale: num('scale', 640),
+    fps: num('fps', 10), scale: num('scale', 640), hwaccel: hwValue(d, c),
     audio: v('audio') === '1', overlay: v('overlay') === '1', packages: v('packages') === '1' ? true : null,
     overlay_text: v('overlay_text') || null, overlay_pos: v('overlay_pos') || null,
     copy_events_to: v('copy_events_to') || null, copy_events_keep_days: Math.min(3650, Math.max(0, Math.round(num('copy_events_keep_days', 0)) || 0)),
     copy_events_only_confirmed: v('copy_events_only_confirmed') === '1',
   }, o.motion, o.recording, o.alerts, o.ai);
+  if (v('transport')) body.transport = v('transport');
   const stg = readStrangers(d);
   if (stg !== undefined) body.strangers = stg;
   if (isNew) { body.enabled = true; } else {
@@ -954,6 +1090,9 @@ function sectionsOf(c, isNew, multi) {
       groupsHtml(c),
       field('Short name', text('short_name', c.short_name, 'placeholder="Door"'), 'Shown where space is tight.')],
     stream: [streamHtml(c, isNew),
+      (OP ? '' : hwHtml(c, multi)) +
+      (OP ? '' : field('RTSP transport', sel('transport', [['auto', 'Auto (TCP; UDP when the camera refuses TCP)'], ['tcp', 'TCP'], ['udp', 'UDP']], c.transport || 'auto'),
+        'How the video travels from the camera. Auto uses TCP, the most reliable; a camera that answers "461 Unsupported Transport" (it offers only UDP) is asked again over UDP, and UDP is kept for it. Pick UDP only for such a camera: UDP loses pictures on a busy or Wi-Fi network.')) +
       field('Battery camera (connect only when needed)', onoff('on_demand', !!c.on_demand)) +
       field('Disconnect after idle (s)', text('idle_timeout', c.idle_timeout || 300, 'type="number" min="30" max="604800" step="10"'))],
     recording: [
@@ -1006,7 +1145,8 @@ function sectionsOf(c, isNew, multi) {
         'Shown on this camera in Live and full size. Fill-ins: {name}, {short} (short name), {site} (this server), {date}, {time}, and {v:NAME} for a value an automation sends in (weather or a temperature from Home Assistant, for example) over MQTT (<code>&lt;prefix&gt;/overlay/NAME/set</code>) or <code>POST /api/overlay/NAME</code>. Empty = no text. {v:NAME} shows in live view, not in burned-in recordings.'),
       field('Corner', sel('overlay_pos', [['bottom-left', 'bottom left'], ['bottom-right', 'bottom right'], ['top-left', 'top left'], ['top-right', 'top right']], c.overlay_pos || 'bottom-left')) +
       field('Also burn it into recordings', onoff('overlay', !!c.overlay),
-        'The text becomes part of the video files (without text set: name, date and time). This re-encodes the camera\'s video, which uses much more CPU and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Recordings are unaffected; leave it off unless they must carry the text.')],
+        'The text becomes part of the video files (without text set: name, date and time). This re-encodes the camera\'s video (on the graphics card when it has a video encoder that passed the test at start, else on the processor: about one core per 4K camera) and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Recordings are unaffected; leave it off unless they must carry the text.') +
+      (isNew || multi ? '' : reencodeHtml(c))],
   };
   if (OP) return { motion: out.motion, alerts: out.alerts, ai: out.ai };
   if (!isNew && !multi && !c.remote) { out.tamper = tamperHtml(c); out.unusual = unusualHtml(c); }
@@ -1067,12 +1207,13 @@ function updateSummaries(d, c, base) {
   if (wdEl) set('watchdog', 'Watchdog: ' + onOff(wdEl.checked) + ' · restart via ' + (v('wd_reboot') || 'auto') + (v('wd_kind') ? ' · power switch' : ''));
   // "N changed": how many fields of the section differ from the saved values (formSig's order).
   const parts = base ? base.split('\u0001') : null;
-  const els = parts ? [...d.querySelectorAll('.cs-body input, .cs-body select, .cs-body textarea')] : [];
+  const els = parts ? [...d.querySelectorAll(SIG_SEL)] : [];
   const chips = parts ? [...d.querySelectorAll('.cs-body .chip')] : [];
   d.querySelectorAll('.cs-sec').forEach(sec => {
     let n = 0;
     if (parts && parts.length === els.length + chips.length * 2) {
-      els.forEach((el, i) => { if (sec.contains(el) && String(el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value) !== parts[i]) n++; });
+      els.forEach((el, i) => { if (sec.contains(el) && !(el.closest('[data-addr]') && (el.dataset.k === 'url' || el.dataset.k === 'sub_url')) && String(el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value) !== parts[i]) n++; });
+      if (sec.querySelector('[data-addr]')) n += addrChanged(d);
       chips.forEach((b, i) => { if (sec.contains(b) && String(b.classList.contains('on') ? 1 : 0) !== parts[els.length + i * 2 + 1]) n++; });
     }
     const b = sec.querySelector('[data-chg]');
@@ -1162,12 +1303,26 @@ bus.on('cameras', () => {
   const dot = cur.root.querySelector('[data-dot]');
   if (c && dot) dot.className = 'cs-dot ' + dotClass(c);
 });
+// Phones: the section index scrolls sideways; faded edges show there is more that way.
+function idxFade(root) {
+  const x = root.querySelector('.cs-idx');
+  if (!x) return;
+  const upd = () => {
+    x.classList.toggle('fade-l', x.scrollLeft > 2);
+    x.classList.toggle('fade-r', x.scrollLeft + x.clientWidth < x.scrollWidth - 2);
+  };
+  x.addEventListener('scroll', upd, { passive: true });
+  if (window.ResizeObserver) new ResizeObserver(upd).observe(x);
+  upd();
+}
 const dotClass = (c) => (c.enabled === false ? 'off' : c.online ? 'ok' : 'bad');
 const dotTitle = (c) => (c.enabled === false ? 'Disabled' : c.online ? 'Online' : 'Offline');
 
 // Everything the user can change, as one string: dirty = it differs from the opening state.
+// (data-nosig: fields that only feed another field, such as the address parts of the stream URL.)
+const SIG_SEL = '.cs-body input:not([data-nosig]), .cs-body select:not([data-nosig]), .cs-body textarea:not([data-nosig])';
 function formSig(root) {
-  const parts = [...root.querySelectorAll('.cs-body input, .cs-body select, .cs-body textarea')].map(el => (el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value));
+  const parts = [...root.querySelectorAll(SIG_SEL)].map(el => (el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value));
   root.querySelectorAll('.cs-body .chip').forEach(b => parts.push(b.dataset.g || b.dataset.sn || b.dataset.nl || '', b.classList.contains('on') ? 1 : 0));
   return parts.join('\u0001');
 }
@@ -1247,6 +1402,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
   root.className = 'cs-root';
   root.innerHTML = panelHtml(c, isNew);
   dr.replaceChildren(root);
+  idxFade(root);
   const d = root;
   const body = d.querySelector('[data-body]');
   const err = d.querySelector('[data-err]');
@@ -1262,7 +1418,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
     const a = sec.getBoundingClientRect(), b = body.getBoundingClientRect();
     return a.bottom > b.top && a.top < b.bottom && !document.hidden;
   };
-  if (!OP) { wireSource(d, c); wireGroups(d); }
+  if (!OP) { wireSource(d, c); wireAddr(d, c, isNew); wireGroups(d); }
   wireAlerts(d);
   wireTimeRanges(d);
   wireCopy(d);
@@ -1317,16 +1473,23 @@ function render(id, c, isNew, keepScroll, savedNote) {
   const touch = (e) => { if (e.isTrusted) { state.touched = true; saved = false; } paint(); };
   d.addEventListener('input', touch);
   d.addEventListener('change', touch);
-  d.addEventListener('click', (e) => { if (e.isTrusted && e.target.closest('.chip, [data-reset], .cs-reset, [data-newkey]')) { state.touched = true; saved = false; } setTimeout(paint, 0); });
+  d.addEventListener('click', (e) => { if (e.isTrusted && e.target.closest('.chip, [data-reset], .cs-reset, [data-newkey], [data-touch]')) { state.touched = true; saved = false; } setTimeout(paint, 0); });
   paint();
   // A switch in the Tamper or Unusual section saves by itself; the form then counts that section as saved.
   const ctx = {
     rebase: (sec) => {
-      const els = [...d.querySelectorAll('.cs-body input, .cs-body select, .cs-body textarea')];
+      const els = [...d.querySelectorAll(SIG_SEL)];
       const chips = [...d.querySelectorAll('.cs-body .chip')];
       const parts = state.base.split('\u0001');
       els.forEach((el, i) => { if (sec.contains(el)) parts[i] = el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value; });
       chips.forEach((b, i) => { if (sec.contains(b)) parts[els.length + i * 2 + 1] = b.classList.contains('on') ? 1 : 0; });
+      state.base = parts.join('\u0001');
+      paint();
+    },
+    rebaseEls: (list) => {
+      const els = [...d.querySelectorAll(SIG_SEL)];
+      const parts = state.base.split('\u0001');
+      els.forEach((el, i) => { if (list.includes(el)) parts[i] = el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value; });
       state.base = parts.join('\u0001');
       paint();
     },
@@ -1336,7 +1499,10 @@ function render(id, c, isNew, keepScroll, savedNote) {
     wireUnusual(d, c, ctx);
     wireSpots(d, c);
     cleanups.push(wireOnvif(d, c, ctx));
+    wireSubFind(d, c, ctx);
+    wireSubNote(d, c);
   }
+  if (!OP) wireHw(d, c);
 
   // section index
   const idxBtns = [...d.querySelectorAll('[data-jump]')];
@@ -1421,10 +1587,16 @@ function validate(d, isNew) {
   const v = (k) => { const el = d.querySelector('[data-k="' + k + '"]'); return el ? el.value.trim() : ''; };
   if (!OP && !v('name')) bad('name', 'Give the camera a name.');
   const src = v('src');
-  if (!OP && !sourceUrl(d) && src !== 'helper') {
+  if (!OP && src === 'net') addrValidate(d).forEach(([k, msg]) => bad(k, msg));
+  else if (!OP && !sourceUrl(d) && src !== 'helper') {
     if (src === 'device') bad('dev', 'Pick a capture device (or type its name).');
     else bad('url', 'A stream URL is needed.');
   } else if (src === 'helper' && !readHelper(d)) bad('src', 'Pick a computer and what to capture.');
+  if (!OP && src === 'net') {
+    const u = v('url'), su = v('sub_url');
+    if (u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) bad('url', 'Stream URL must start with rtsp:// (or another stream address such as http://).');
+    if (su && !/^(rtsps?|https?|rtmp):\/\/[^/?#\s]+/i.test(su)) bad('sub_url', 'Sub stream URL must start with rtsp:// (or rtsps://, http://, https://), e.g. rtsp://192.168.1.50/sub.');
+  }
   d.querySelectorAll('[data-trf]').forEach(box => {
     const raw = box.querySelector('[data-trraw] input');
     if (raw.value.trim() && !trParse(raw.value)) bad(raw.dataset.k, 'Write it like 07:00-21:00 (hours 00-23).');
@@ -1440,8 +1612,9 @@ function validate(d, isNew) {
 function showServerError(d, msg, errBox) {
   let text = msg;
   try { const j = JSON.parse(msg); if (j && j.error) text = j.error; } catch (e) { /* plain text */ }
-  const map = [[/alert window/i, 'alert_schedule'], [/no-motion watch/i, 'no_motion_schedule'], [/arm window|motion schedule/i, 'schedule'], [/^name\b|camera name|name is/i, 'name'], [/stream url|\burl\b/i, 'url'], [/keep copies/i, 'copy_events_keep_days'], [/also save event clips|event copies/i, 'copy_events_to']];
-  for (const [re, k] of map) {
+  const map = [[/alert window/i, 'alert_schedule'], [/no-motion watch/i, 'no_motion_schedule'], [/arm window|motion schedule/i, 'schedule'], [/^name\b|camera name|name is/i, 'name'], [/sub stream url/i, 'sub_url'], [/stream url|\burl\b/i, 'url'], [/keep copies/i, 'copy_events_keep_days'], [/also save event clips|event copies/i, 'copy_events_to']];
+  for (const [re, k0] of map) {
+    const k = k0 === 'url' || k0 === 'sub_url' ? addrErrKey(d, k0) : k0;
     const el = d.querySelector('[data-k="' + k + '"]');
     if (re.test(text) && el) { fieldErr(el, text); el.scrollIntoView({ block: 'center' }); errBox.textContent = ''; return; }
   }
@@ -1502,14 +1675,14 @@ export async function openCameraDialog(id) {
 // sent, one PUT per camera with just those keys.
 const MIXED = '\u0001mixed';
 // data-k of a field -> the config keys it writes (default: the same name).
-const BULK_KEYS = { record_mode: ['record_motion_only', 'record_sub'] };
+const BULK_KEYS = { record_mode: ['record_motion_only', 'record_sub'], hw_kind: ['hwaccel'], hw_node: ['hwaccel'] };
 const BULK_BASE = (v, num) => ({
   record: v('record') === '1', record_motion_only: v('record_mode') === '1', record_sub: v('record_mode') === '2', direct: v('direct') === '1',
   on_demand: v('on_demand') === '1', idle_timeout: Math.min(604800, Math.max(30, num('idle_timeout', 300) || 300)), motion: v('motion') === '1',
   fps: num('fps', 10), scale: num('scale', 640), audio: v('audio') === '1', overlay: v('overlay') === '1', packages: v('packages') === '1' ? true : null,
   overlay_text: v('overlay_text') || null, overlay_pos: v('overlay_pos') || null,
   copy_events_to: v('copy_events_to') || null, copy_events_keep_days: Math.min(3650, Math.max(0, Math.round(num('copy_events_keep_days', 0)) || 0)),
-  copy_events_only_confirmed: v('copy_events_only_confirmed') === '1',
+  copy_events_only_confirmed: v('copy_events_only_confirmed') === '1', transport: v('transport') || 'auto',
 });
 // What each chosen camera's form would hold, per field.
 function fieldValues(c) {
@@ -1524,6 +1697,8 @@ function bulkBody(d, touched) {
   const num = (k, dflt) => { const x = v(k); return x === '' ? dflt : Number(x); };
   const o = readOverrides(d);
   const all = Object.assign(BULK_BASE(v, num), o.motion, o.recording, o.alerts, o.ai);
+  const hw = hwValue(d, null);
+  if (hw !== undefined) all.hwaccel = hw;
   const body = {};
   for (const k of touched) {
     const el = d.querySelector('[data-k="' + k + '"]');
@@ -1561,6 +1736,7 @@ function renderMulti(cams) {
     sectionsHtml(cams[0], false, true) + '<div class="cs-bulkres" data-res hidden></div></div>' +
     '<div class="cs-foot"><div class="asys-err" data-err role="alert"></div><div class="cs-footrow"><button class="primary" data-save disabled>Save to ' + n + ' camera' + (n === 1 ? '' : 's') + '</button><button class="btn" data-cancel>Close</button></div></div>';
   dr.replaceChildren(root);
+  idxFade(root);
   const d = root, body = d.querySelector('[data-body]');
   const st = { key: 'multi', id: null, isNew: false, multi: true, root, c: { name: n + ' cameras' }, opener, touched: false, base: '' };
   const cleanups = [];
@@ -1655,7 +1831,10 @@ function renderMulti(cams) {
     let done = 0;
     for (const c of cams) {
       stEl.className = 'cs-state'; stEl.textContent = 'Saving ' + (done + 1) + ' of ' + n + '...';
-      try { await api('/api/cameras/' + c.id, { method: 'PUT', json: patch }); }
+      // A card chosen for this camera stays when the way (VAAPI, QSV) is set for all of them.
+      const own = hwParse(c.hwaccel).node;
+      const body = own && /^(vaapi|qsv)$/.test(patch.hwaccel || '') ? Object.assign({}, patch, { hwaccel: patch.hwaccel + ':' + own }) : patch;
+      try { await api('/api/cameras/' + c.id, { method: 'PUT', json: body }); }
       catch (e) { fails.push([c.name, errText(e)]); }
       done++;
     }

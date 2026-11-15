@@ -733,7 +733,7 @@ pub fn begin_check(folder: &str) -> Option<CheckGuard> {
     let key = folder_key(folder);
     // (The lock is let go here, not at the end of the caller's statement.)
     let fresh = CHECKING.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone());
-    fresh.then_some(CheckGuard(key))
+    fresh.then(|| CheckGuard(key))
 }
 
 /// Bytes the copy folder's drive must keep free: 2 GB or 5%, and 10 GB or
@@ -1450,6 +1450,10 @@ mod tests {
             assert!(open_root(&f, &gd, Open::Accept).err().unwrap().to_string().contains("data folder"));
         }
         assert!(begin_check(&f).is_some_and(|g1| begin_check(&f).is_none() && { drop(g1); begin_check(&f).is_some() }));
+        // A refused second check must not let a third start while the first runs.
+        let g = begin_check(&f).unwrap();
+        assert!(begin_check(&f).is_none() && begin_check(&f).is_none(), "the first check still runs");
+        drop(g);
     }
 
     #[test]

@@ -211,6 +211,11 @@ body[data-tab="settings"] #dock { display: none; }
 /* System > Status: the banner and the word on each card */
 .st-banner { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; padding: var(--s3) var(--s4); margin: 0 0 var(--s3); border: 1px solid var(--line2); border-left-width: 4px; border-radius: var(--r2); background: var(--surface); font-size: var(--fs-l); }
 .st-banner.ok { border-color: var(--ok); }
+.st-notes { margin: 0 0 var(--s3); }
+.st-notes p { margin: 2px 0; overflow-wrap: anywhere; }
+.st-notes .ic { vertical-align: -2px; }
+.st-notes p.st-note-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--s2); }
+.st-notes p.st-note-fix > span { flex: 1 1 16rem; min-width: 0; }
 .st-banner.ok .ic { color: var(--ok); }
 .st-banner.bad { border-color: var(--fault); flex-direction: column; align-items: stretch; gap: var(--s2); }
 .st-banner-h { display: flex; align-items: center; gap: var(--s2); }

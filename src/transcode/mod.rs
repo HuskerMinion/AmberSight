@@ -36,6 +36,12 @@ pub struct TranscodeConfig {
     /// Transcodes at a time on the video encoder (the whole server).
     #[serde(default = "default_max_hardware")]
     pub max_hardware: usize,
+    /// Recordings re-encoded on the video encoder at a time (cameras with
+    /// burned-in text or privacy masks on the ffmpeg pipeline), counted apart
+    /// from `max_hardware` so they never take the places of live views and
+    /// downloads. Past it, such a recording uses the processor (libx264).
+    #[serde(default = "default_max_recording_hw")]
+    pub max_recording_hw: usize,
     /// Transcodes at a time in software (they take several CPU cores each).
     #[serde(default = "default_max_software")]
     pub max_software: usize,
@@ -74,6 +80,9 @@ fn default_encoder() -> String {
 fn default_max_hardware() -> usize {
     6
 }
+fn default_max_recording_hw() -> usize {
+    4
+}
 fn default_max_software() -> usize {
     1
 }
@@ -83,7 +92,7 @@ fn default_max_per_user() -> usize {
 
 impl Default for TranscodeConfig {
     fn default() -> Self {
-        TranscodeConfig { encoder: default_encoder(), max_hardware: default_max_hardware(), max_software: default_max_software(), max_per_user: default_max_per_user(), cache_entry_mb: default_cache_entry_mb(), cache_total_mb: default_cache_total_mb(), cache_seconds: default_cache_seconds() }
+        TranscodeConfig { encoder: default_encoder(), max_hardware: default_max_hardware(), max_recording_hw: default_max_recording_hw(), max_software: default_max_software(), max_per_user: default_max_per_user(), cache_entry_mb: default_cache_entry_mb(), cache_total_mb: default_cache_total_mb(), cache_seconds: default_cache_seconds() }
     }
 }
 
@@ -101,7 +110,7 @@ impl TranscodeConfig {
             warn.push(format!("[transcode] encoder must be auto, nvenc, qsv, vaapi, videotoolbox, amf, software or off (not \"{}\"); \"auto\" is used", c.encoder));
             c.encoder = default_encoder();
         }
-        for (name, v) in [("max_hardware", &mut c.max_hardware), ("max_software", &mut c.max_software), ("max_per_user", &mut c.max_per_user)] {
+        for (name, v) in [("max_hardware", &mut c.max_hardware), ("max_recording_hw", &mut c.max_recording_hw), ("max_software", &mut c.max_software), ("max_per_user", &mut c.max_per_user)] {
             if *v > MAX_LIMIT {
                 warn.push(format!("[transcode] {name} must be {MAX_LIMIT} or less (not {v}); {MAX_LIMIT} is used"));
                 *v = MAX_LIMIT;
@@ -400,7 +409,7 @@ impl Encoder {
         }
     }
 
-    fn ffmpeg_name(&self, codec: OutCodec) -> &'static str {
+    pub fn ffmpeg_name(&self, codec: OutCodec) -> &'static str {
         match (self.hw, codec) {
             (Some(Hw::Nvenc), OutCodec::H264) => "h264_nvenc",
             (Some(Hw::Nvenc), OutCodec::Hevc) => "hevc_nvenc",
@@ -542,6 +551,11 @@ fn start_probe() {
             let _ = PROBED.set(run_probe());
         });
     }
+}
+
+/// Whether the test encodes have finished.
+pub fn probed() -> bool {
+    PROBED.get().is_some()
 }
 
 /// Start the test encodes in the background (at start), so the first
@@ -884,10 +898,32 @@ pub fn reserve(encoders: &[Encoder]) -> Option<(Vec<Encoder>, Slot)> {
     None
 }
 
+static REC_HW_RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// A re-encoded recording's place on the video encoder (`max_recording_hw`);
+/// freed when dropped.
+pub struct RecordingSlot(&'static AtomicUsize);
+
+impl Drop for RecordingSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A place for one re-encoded recording on the video encoder. None: all
+/// `max_recording_hw` are in use (or it is 0).
+pub fn reserve_recording() -> Option<RecordingSlot> {
+    reserve_recording_in(&REC_HW_RUNNING, config().max_recording_hw)
+}
+
+fn reserve_recording_in(counter: &'static AtomicUsize, max: usize) -> Option<RecordingSlot> {
+    take(counter, max).then(|| RecordingSlot(counter))
+}
+
 /// A software place, for a transcode whose graphics card would not start
 /// (a card's own limit on encodes at a time, say).
 pub fn reserve_software() -> Option<Slot> {
-    take(&SW_RUNNING, config().max_software).then_some(Slot { hardware: false })
+    take(&SW_RUNNING, config().max_software).then(|| Slot { hardware: false })
 }
 
 /// Downloads fitted to a device converted at a time (the whole server): each
@@ -907,7 +943,7 @@ impl Drop for DownloadSlot {
 
 /// A place for one fitted download. None: `MAX_FIT_DOWNLOADS` are running.
 pub fn reserve_download() -> Option<DownloadSlot> {
-    take(&DOWNLOADS, MAX_FIT_DOWNLOADS).then_some(DownloadSlot(()))
+    take(&DOWNLOADS, MAX_FIT_DOWNLOADS).then(|| DownloadSlot(()))
 }
 
 /// Whether a place is free now (for `info`, which starts nothing).
@@ -1067,6 +1103,25 @@ pub fn list_active(what: &str, camera: &str, target: Target, viewers: Box<dyn Fn
     Listed(a)
 }
 
+/// What runs for this camera now (each an ffmpeg), e.g. "live view".
+pub fn active_for(camera: &str) -> Vec<String> {
+    let sub = format!("{camera} (sub)");
+    ACTIVE
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|a| {
+            if a.camera == camera {
+                Some(format!("{} conversion", a.what))
+            } else if a.camera == sub {
+                Some(format!("{} conversion (sub stream)", a.what))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// CPU time of a process, seconds (Linux), for a rough CPU share.
 fn cpu_seconds(pid: u32) -> Option<f64> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -1106,6 +1161,7 @@ pub fn status() -> serde_json::Value {
         "setting": cfg.encoder,
         "encoders": PROBED.get(),
         "hardware": { "running": HW_RUNNING.load(Ordering::SeqCst), "max": cfg.max_hardware },
+        "recording_hardware": { "running": REC_HW_RUNNING.load(Ordering::SeqCst), "max": cfg.max_recording_hw },
         "software": { "running": SW_RUNNING.load(Ordering::SeqCst), "max": cfg.max_software },
         "active": list,
     })
@@ -1201,6 +1257,20 @@ impl Plan {
 
 #[cfg(test)]
 mod tests {
+    /// Recordings have their own places on the card: they never use up
+    /// `max_hardware` (live views and downloads).
+    #[test]
+    fn recordings_have_their_own_hardware_places() {
+        assert_eq!(super::TranscodeConfig::default().max_recording_hw, 4);
+        static C: super::AtomicUsize = super::AtomicUsize::new(0);
+        let held: Vec<_> = (0..4).map(|_| super::reserve_recording_in(&C, 4).expect("a place")).collect();
+        assert!(super::reserve_recording_in(&C, 4).is_none(), "past max_recording_hw");
+        drop(held);
+        assert!(super::reserve_recording_in(&C, 4).is_some(), "freed when dropped");
+        // (Its own counter: the live-view and download places are not used.)
+        assert!(!std::ptr::eq(&C, &super::HW_RUNNING) && !std::ptr::eq(&super::REC_HW_RUNNING, &super::HW_RUNNING));
+    }
+
     #[test]
     fn the_card_is_blamed_only_when_software_decoding_then_works() {
         use std::time::Instant;

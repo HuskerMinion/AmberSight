@@ -14,4 +14,6 @@ for f in static/js/*.js static/sw.js; do
   fi
 done
 [ $bad = 0 ] && echo "all scripts parse"
+# Unit tests of the pure modules.
+node scripts/test-camaddr.mjs || bad=1
 exit $bad

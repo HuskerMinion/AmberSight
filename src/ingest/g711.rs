@@ -155,6 +155,35 @@ pub fn flac_block_size(f: &[u8]) -> Option<u32> {
     Some(u32::from(u16::from_be_bytes([*f.get(i)?, *f.get(i + 1)?])) + 1)
 }
 
+/// The first sample number of a frame made by `flac_frame`.
+fn flac_first_sample(f: &[u8]) -> Option<u64> {
+    let b0 = *f.get(4)?;
+    let lead = b0.leading_ones();
+    if lead == 0 {
+        return Some(u64::from(b0));
+    }
+    if lead == 1 || lead > 7 {
+        return None;
+    }
+    let mut n = u64::from(b0 & (0x7f >> lead));
+    for i in 1..lead as usize {
+        n = (n << 6) | u64::from(*f.get(4 + i)? & 0x3f);
+    }
+    Some(n)
+}
+
+/// Split a frame made by `flac_frame` after `at` samples into two frames
+/// (the second numbered on from the first). None when it is not such a
+/// frame or `at` does not fall inside it.
+pub fn flac_split(f: &[u8], at: usize, rate: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    let samples = flac_frame_samples(f)?;
+    if at == 0 || at >= samples.len() {
+        return None;
+    }
+    let first = flac_first_sample(f)?;
+    Some((flac_frame(&samples[..at], first, rate), flac_frame(&samples[at..], first + at as u64, rate)))
+}
+
 fn mp4_box(out: &mut Vec<u8>, kind: &[u8; 4], body: impl FnOnce(&mut Vec<u8>)) {
     let start = out.len();
     out.extend_from_slice(&[0, 0, 0, 0]);
@@ -728,6 +757,24 @@ mod tests {
         feed(&mut c, 0, 320, &[600, 1_000_000_000, 600, 600], 2000);
         let _ = c.timeline_of(i64::MAX);
         let _ = c.timeline_of(i64::MIN);
+    }
+
+    #[test]
+    fn frames_split_in_two() {
+        let samples: Vec<i16> = (0..1024).map(|i| (i * 7 - 3000) as i16).collect();
+        for first in [0u64, 100, 5000, 1 << 20, 1 << 33] {
+            let f = flac_frame(&samples, first, 8000);
+            assert_eq!(flac_first_sample(&f), Some(first));
+            let (a, b) = flac_split(&f, 900, 8000).unwrap();
+            assert_eq!(flac_frame_samples(&a).unwrap(), &samples[..900]);
+            assert_eq!(flac_frame_samples(&b).unwrap(), &samples[900..]);
+            assert_eq!((flac_first_sample(&a), flac_first_sample(&b)), (Some(first), Some(first + 900)));
+            assert_eq!(a, flac_frame(&samples[..900], first, 8000), "a frame as flac_frame makes it");
+        }
+        let f = flac_frame(&samples, 0, 8000);
+        assert!(flac_split(&f, 0, 8000).is_none());
+        assert!(flac_split(&f, 1024, 8000).is_none());
+        assert!(flac_split(b"not flac at all", 3, 8000).is_none());
     }
 
     #[test]

@@ -1,12 +1,36 @@
 // A camera's "Network" section in its settings panel: address, MAC, ports, stream,
-// maker/model, with Copy, an "Open camera's web page" link and Refresh.
+// maker/model, with Copy, an "Open camera's web page" link, Refresh and Camera report
+// (a text file for a bug report: GET /api/cameras/:id/report).
 // Admin only (the server answers 403 to viewers). Loaded when a camera's panel opens.
-import { api, esc, toast } from './core.js';
+import { api, esc, toast, downloadUrl } from './core.js';
 
 export function netinfoHtml() {
   return '<div class="ni" data-netinfo><div class="ni-rows" aria-live="polite"><p class="muted ni-wait">Looking up the camera...</p></div>' +
     '<div class="ni-bar"><a class="btn" data-ni-open target="_blank" rel="noopener noreferrer" hidden>Open camera\'s web page</a>' +
-    '<button type="button" class="btn" data-ni-refresh>Refresh</button></div></div>';
+    '<button type="button" class="btn" data-ni-refresh>Refresh</button>' +
+    '<button type="button" class="btn" data-ni-report title="Download a text file for a bug report about this camera">Camera report</button></div>' +
+    '<p class="hint">Camera report: a text file to attach to a bug report about this camera (its streams, ONVIF profiles and recent log lines, without user names or passwords). Takes up to 20 seconds.</p></div>';
+}
+
+// Download the camera report (the server names the file).
+async function saveReport(c, b) {
+  b.disabled = true; b.textContent = 'Collecting...';
+  try {
+    const r = await fetch('/api/cameras/' + c.id + '/report', { credentials: 'same-origin' });
+    if (!r.ok) {
+      let why = '';
+      try { why = (await r.text()).trim(); } catch (e) { /* no body */ }
+      throw new Error(r.status === 429 ? 'one is being made already' : (why || 'error ' + r.status));
+    }
+    const name = (/filename="([^"]+)"/.exec(r.headers.get('content-disposition') || '') || [])[1] || 'ambersight-camera-report.txt';
+    const u = URL.createObjectURL(await r.blob());
+    downloadUrl(u, name);
+    setTimeout(() => URL.revokeObjectURL(u), 5000);
+    toast('Camera report saved: attach it to your GitHub issue', { kind: 'ok' });
+  } catch (e) {
+    toast('Could not make the camera report: ' + (e.message || e));
+  }
+  b.disabled = false; b.textContent = 'Camera report';
 }
 
 async function copyText(text, b) {
@@ -72,6 +96,8 @@ export function wireNetinfo(d, c) {
     if (!gone && box.isConnected) { btn.disabled = false; btn.textContent = 'Refresh'; }
   };
   btn.onclick = () => load(true);
+  const rep = box.querySelector('[data-ni-report]');
+  rep.onclick = () => saveReport(c, rep);
   box.addEventListener('click', (e) => {
     const b = e.target.closest('[data-copy]');
     if (b) copyText(b.dataset.copy, b);

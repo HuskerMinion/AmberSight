@@ -1,0 +1,474 @@
+# Camera rig: what the simulated cameras send, and what AmberSight should do
+# with each. Read by rig.py.
+#
+# [[profile]]: a stream fed by ffmpeg (test pattern + tone) into MediaMTX at
+#   <name>/main and <name>/sub. Each profile also becomes one camera on the
+#   Basic-auth MediaMTX, with the login in the camera's fields.
+#     codec      h264 | h265            sub_codec (default h264)
+#     size       WxH of the main stream sub = WxH of the sub stream, or "" for none
+#     fps, gop   frames per second, frames between keyframes
+#     bframes    B-frames (H.264 only; default 0, as most cameras)
+#     open_gop   H.265 only: keyframes are CRA pictures, not IDR (x265's own default;
+#                seen on some cameras). Default false: IDR, as most cameras send
+#     audio      none | aac | pcmu | pcma; audio_rate (Hz)
+#
+# [[case]]: one more camera, pointed at any server in the rig.
+#     server     mtx-basic | mtx-digest | mtx-udp | gst-basic | gst-digest | stub
+#     path       stream path, with any query string; sub = sub stream path
+#                (sub_raw: a sub stream address written as it is, e.g. a bad one)
+#     creds      fields | url | none (login in AmberSight's fields, in the URL, or none)
+#     login      a [logins] entry
+#     ingest     AmberSight's ingest setting (default auto)
+#     overlay    burn the name and time into recordings (needs the ffmpeg pipeline)
+#     expect     play | fail
+#     expect_ingest  what GET /api/cameras must say (default native)
+#     expect_error   for fail cases: a regex the camera's last error must match
+#     audio      the recordings must have audio
+#     check      extra checks: drop, tsjump, authcount, onvif-ptz, onvif-events
+
+[logins]
+viewer  = { user = "viewer", password = "simple1" }
+special = { user = "admin",  password = "p@ss#w:rd/ x1" }      # GStreamer only
+special_mtx = { user = "admin", password = "p@ss#w&rd$1" }    # MediaMTX refuses ':', '/' and spaces in logins
+wrong   = { user = "viewer", password = "not-the-password" }
+stub    = { user = "admin",  password = "right-pass" }
+stubbad = { user = "admin",  password = "wrong-pass" }
+
+# ---------------------------------------------------------------- profiles
+
+[[profile]]
+name = "h264-720-aac"
+codec = "h264"
+size = "1280x720"
+sub = "640x360"
+fps = 15
+gop = 30
+audio = "aac"
+audio_rate = 16000
+
+[[profile]]
+name = "h265-1080"
+codec = "h265"
+size = "1920x1080"
+sub = "640x360"
+fps = 15
+gop = 30
+audio = "none"
+
+[[profile]]
+name = "h264-1080-pcmu"
+codec = "h264"
+size = "1920x1080"
+sub = "640x360"
+fps = 10
+gop = 20
+audio = "pcmu"
+audio_rate = 8000
+
+[[profile]]
+name = "h264-720-pcma"
+codec = "h264"
+size = "1280x720"
+sub = "640x360"
+fps = 10
+gop = 20
+audio = "pcma"
+audio_rate = 8000
+
+[[profile]]
+name = "h264-720-pcmu16k"
+codec = "h264"
+size = "1280x720"
+sub = ""
+fps = 10
+gop = 20
+audio = "pcmu"
+audio_rate = 16000
+
+[[profile]]
+name = "h264-4k-aac"
+codec = "h264"
+size = "3840x2160"
+sub = "640x360"
+fps = 10
+gop = 20
+audio = "aac"
+audio_rate = 16000
+
+[[profile]]
+name = "h265-1440-aac48"
+codec = "h265"
+size = "2560x1440"
+sub = "640x360"
+sub_codec = "h265"
+fps = 10
+gop = 20
+audio = "aac"
+audio_rate = 48000
+
+[[profile]]
+name = "h264-720-longgop"
+codec = "h264"
+size = "1280x720"
+sub = "640x360"
+fps = 10
+gop = 100
+audio = "aac"
+audio_rate = 16000
+
+[[profile]]
+name = "h264-720-bframes"
+codec = "h264"
+size = "1280x720"
+sub = "640x360"
+fps = 15
+gop = 30
+bframes = 2
+audio = "aac"
+audio_rate = 16000
+
+[[profile]]
+name = "h264-720-nosub"
+codec = "h264"
+size = "1280x720"
+sub = ""
+fps = 10
+gop = 20
+audio = "none"
+
+[[profile]]
+name = "h265-1080-cra"
+codec = "h265"
+size = "1920x1080"
+sub = "640x360"
+fps = 15
+gop = 30
+open_gop = true
+audio = "none"
+
+[[profile]]
+name = "h264-1080-25fps"
+codec = "h264"
+size = "1920x1080"
+sub = "640x360"
+fps = 25
+gop = 50
+audio = "aac"
+audio_rate = 16000
+
+# ---------------------------------------------------------------- auth and transport
+
+[[case]]
+name = "basic-login-in-url"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+sub = "h264-720-aac/sub"
+creds = "url"
+login = "viewer"
+audio = true
+
+[[case]]
+name = "basic-special-fields"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+creds = "fields"
+login = "special_mtx"
+audio = true
+
+[[case]]
+name = "basic-special-url"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+creds = "url"
+login = "special_mtx"
+audio = true
+
+[[case]]
+name = "digest-fields"
+server = "mtx-digest"
+path = "h264-720-aac/main"
+sub = "h264-720-aac/sub"
+creds = "fields"
+login = "viewer"
+audio = true
+
+[[case]]
+name = "digest-special-fields"
+server = "mtx-digest"
+path = "h265-1080/main"
+creds = "fields"
+login = "special_mtx"
+
+[[case]]
+name = "digest-special-url"
+server = "mtx-digest"
+path = "h265-1080/main"
+creds = "url"
+login = "special_mtx"
+
+[[case]]
+name = "udp-only-server"
+server = "mtx-udp"
+path = "h264-720-pcma/main"
+creds = "fields"
+login = "viewer"
+# transport = "auto": TCP is refused (461), so the built-in reader asks over UDP.
+
+[[case]]
+name = "dahua-query-mtx"
+server = "mtx-basic"
+path = "cam/realmonitor?channel=1&subtype=0"
+sub = "cam/realmonitor?channel=1&subtype=1"
+creds = "fields"
+login = "viewer"
+audio = true
+
+[[case]]
+name = "query-login-mtx"
+server = "mtx-basic"
+path = "stream0?username=admin&password=q1w2e3"
+creds = "none"
+
+[[case]]
+name = "ffmpeg-ingest-control"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+sub = "h264-720-aac/sub"
+creds = "fields"
+login = "viewer"
+ingest = "ffmpeg"
+expect_ingest = "ffmpeg"
+audio = true
+
+[[case]]
+# A sub stream address without rtsp:// (as typed by hand): motion uses the
+# main stream and the camera stays on the built-in reader.
+name = "bad-sub-url"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+sub_raw = "stream2"
+creds = "fields"
+login = "viewer"
+
+[[case]]
+# A sub stream the camera does not have (404): motion moves to the main
+# stream and the camera keeps playing (built-in reader, then ffmpeg).
+name = "missing-sub-native"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+sub_raw = "rtsp://viewer:simple1@127.0.0.1:18554/no-such-path/sub"
+creds = "fields"
+login = "viewer"
+
+[[case]]
+name = "missing-sub-ffmpeg"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+sub_raw = "rtsp://viewer:simple1@127.0.0.1:18554/no-such-path/sub"
+creds = "fields"
+login = "viewer"
+ingest = "ffmpeg"
+expect_ingest = "ffmpeg"
+
+[[case]]
+# Burned-in text: the ffmpeg pipeline re-encodes the 4K main stream (on a
+# hardware encoder when there is one) and decodes the sub stream for motion.
+name = "overlay-sub-ffmpeg"
+server = "mtx-basic"
+path = "h264-4k-aac/main"
+sub = "h264-4k-aac/sub"
+creds = "fields"
+login = "viewer"
+overlay = true
+expect_ingest = "ffmpeg"
+audio = true
+
+# ---------------------------------------------------------------- second RTSP implementation (GStreamer)
+
+[[case]]
+name = "gst-h264-aac"
+server = "gst-basic"
+path = "h264aac"
+sub = "sub"
+creds = "fields"
+login = "viewer"
+audio = true
+
+[[case]]
+name = "gst-h265-digest"
+server = "gst-digest"
+path = "h265"
+sub = "sub"
+creds = "fields"
+login = "viewer"
+
+[[case]]
+name = "gst-h264-pcmu"
+server = "gst-basic"
+path = "h264pcmu"
+creds = "url"
+login = "viewer"
+audio = true
+
+[[case]]
+name = "gst-special-basic-fields"
+server = "gst-basic"
+path = "sub"
+creds = "fields"
+login = "special"
+
+[[case]]
+name = "gst-special-basic-url"
+server = "gst-basic"
+path = "sub"
+creds = "url"
+login = "special"
+
+[[case]]
+name = "gst-special-digest-fields"
+server = "gst-digest"
+path = "sub"
+creds = "fields"
+login = "special"
+
+[[case]]
+name = "gst-special-digest-url"
+server = "gst-digest"
+path = "sub"
+creds = "url"
+login = "special"
+
+# ---------------------------------------------------------------- quirks (the rig's RTSP stub)
+
+[[case]]
+name = "stub-dahua-query"
+server = "stub"
+path = "cam/realmonitor?channel=1&subtype=0"
+sub = "cam/realmonitor?channel=1&subtype=1"
+creds = "none"
+
+[[case]]
+name = "stub-query-login"
+server = "stub"
+path = "stream0?username=admin&password=q1w2e3"
+creds = "none"
+
+[[case]]
+name = "stub-g711-odd-clock"
+server = "stub"
+path = "oddclock"
+creds = "none"
+audio = true
+
+[[case]]
+name = "stub-aac-adts"
+server = "stub"
+path = "adts"
+creds = "none"
+audio = true
+
+[[case]]
+name = "stub-timestamp-jump-fwd"
+server = "stub"
+path = "tsjump"
+creds = "none"
+check = ["tsjump"]
+
+[[case]]
+name = "stub-timestamp-jump-back"
+server = "stub"
+path = "tsback"
+creds = "none"
+check = ["tsjump"]
+
+# ---------------------------------------------------------------- faults
+
+[[case]]
+name = "fault-drop-after-20s"
+server = "stub"
+path = "drop"
+creds = "none"
+check = ["drop"]
+
+[[case]]
+name = "fault-describe-no-packets"
+server = "stub"
+path = "silent"
+creds = "none"
+expect = "fail"
+expect_error = "(?i)no (video|picture|frames|data)|stall|silent|nothing|timed? ?out"
+
+[[case]]
+name = "fault-404-mtx"
+server = "mtx-basic"
+path = "no-such-camera/main"
+creds = "fields"
+login = "viewer"
+expect = "fail"
+expect_error = "(?i)not found|404|no stream|wrong path|address"
+
+[[case]]
+name = "fault-404-stub"
+server = "stub"
+path = "nothing-here"
+creds = "none"
+expect = "fail"
+expect_error = "(?i)not found|404|no stream|wrong path|address"
+
+[[case]]
+name = "fault-wrong-password-mtx"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+creds = "fields"
+login = "wrong"
+expect = "fail"
+expect_error = "(?i)user name or password|password|login|unauthori[sz]ed"
+
+[[case]]
+name = "fault-camera-off-login-in-url"
+server = "off"
+path = "h264Preview_01_main"
+creds = "url"
+login = "viewer"
+expect = "fail"
+expect_error = "(?i)refused|not reachable|unable to connect|off"
+
+[[case]]
+name = "fault-camera-off-login-in-fields"
+server = "off"
+path = "h264Preview_01_main"
+creds = "fields"
+login = "viewer"
+expect = "fail"
+expect_error = "(?i)refused|not reachable|unable to connect|off"
+
+[[case]]
+name = "fault-wrong-password-then-fixed"
+server = "stub"
+path = "authcount"
+creds = "fields"
+login = "stubbad"
+check = ["authcount"]
+
+# ---------------------------------------------------------------- ONVIF
+
+[[case]]
+name = "onvif-rigcam-ptz-events"
+server = "mtx-basic"
+path = "h264-720-aac/main"
+sub = "h264-720-aac/sub"
+creds = "fields"
+login = "viewer"
+onvif_port = 18001
+trigger = "camera"
+audio = true
+check = ["onvif-ptz", "onvif-events"]
+
+[[case]]
+name = "onvif-go-ptz"
+server = "mtx-basic"
+path = "h264-720-nosub/main"
+creds = "fields"
+login = "viewer"
+onvif_port = 18010
+check = ["onvif-ptz"]

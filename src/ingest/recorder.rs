@@ -21,6 +21,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_FRAGMENT_SECS: f64 = 2.0;
 
+/// At a file's end, how long (of video after the cut) the file stays open
+/// for the audio up to the cut to arrive. Audio comes in packets that are
+/// sent once full: a G.711 camera's 128 ms packet covering the cut arrives
+/// after the keyframe that starts the next file.
+const AUDIO_WAIT_SECS: f64 = 0.5;
+
 /// How long the first fragment of a file may be held back waiting for
 /// sender reports (cameras send the first one a few seconds after PLAY).
 const SR_WAIT_SECS: f64 = 5.0;
@@ -107,11 +113,62 @@ struct Track {
     /// Next decode time in the current file, in ticks.
     next_decode: Option<u64>,
     last_duration: u32,
+    /// FLAC (G.711): the newest frame starts exactly where the one before
+    /// it ended, so the track's ticks are its samples and a frame can be
+    /// split by them (recordings made before G.711 was timed by its
+    /// samples were not).
+    sample_timed: bool,
+    /// The newest audio frame's (ticks, samples), for `sample_timed`.
+    newest: Option<(i64, u32)>,
 }
 
 impl Track {
     fn secs(&self, ticks: i64) -> f64 {
         ticks as f64 / self.info.timescale as f64 + self.offset.unwrap_or(0.0)
+    }
+
+    /// The samples in a FLAC frame (G.711 audio); None for other codecs.
+    fn flac_len(&self, data: &[u8]) -> Option<u32> {
+        let flac = self.info.sample_entry.get(4..8) == Some(b"fLaC".as_slice());
+        flac.then(|| super::g711::flac_block_size(data)).flatten()
+    }
+
+    /// A file ends at `cut` and the newest audio frame (the last pending,
+    /// with no successor yet) starts before it: let the file's audio reach
+    /// the cut, so audio and video end together. G.711 cameras send long
+    /// frames (128 ms is common), and leaving the frame for the next file
+    /// would end this file's audio that much early. A FLAC frame (G.711) is
+    /// split at the cut, the rest staying pending for the next file; any
+    /// other frame goes in whole when more than half of it is before the
+    /// cut. Returns how many more frames the file takes (0 or 1).
+    fn audio_to_cut(&mut self, cut: f64) -> usize {
+        let rate = f64::from(self.info.timescale.max(1));
+        let Some(p) = self.pending.last() else { return 0 };
+        let start = self.secs(p.ticks);
+        if start >= cut {
+            return 0;
+        }
+        if let Some(n) = self.flac_len(&p.data) {
+            let at = ((cut - start) * rate).round() as usize;
+            if at == 0 {
+                return 0;
+            }
+            if at >= n as usize {
+                return 1;
+            }
+            if !self.sample_timed {
+                return usize::from(at * 2 > n as usize);
+            }
+            if let Some((a, b)) = super::g711::flac_split(&p.data, at, self.info.timescale) {
+                let ticks = p.ticks + at as i64;
+                let last = self.pending.len() - 1;
+                self.pending[last].data = a;
+                self.pending.push(Pending { ticks, cts: 0, data: b, is_sync: true });
+                return 1;
+            }
+        }
+        let dur = f64::from(self.last_duration) / rate;
+        usize::from(dur > 0.0 && start + dur / 2.0 < cut)
     }
 }
 
@@ -153,6 +210,9 @@ pub struct SegmentWriter {
     /// Writing footage recorded earlier (see `new_recorded_at`): times come
     /// from the frames alone, not from when they are written.
     recorded: bool,
+    /// The current file ends at this video keyframe (ticks, shared-time-base
+    /// seconds) and waits for its audio up to there (AUDIO_WAIT_SECS).
+    closing: Option<(i64, f64)>,
 }
 
 impl SegmentWriter {
@@ -181,7 +241,7 @@ impl SegmentWriter {
             segment_seconds: segment_seconds.max(1) as f64,
             tracks: tracks
                 .into_iter()
-                .map(|info| Track { info, offset: None, arrival_offset: None, sr: None, pending: Vec::new(), next_decode: None, last_duration: 0 })
+                .map(|info| Track { info, offset: None, arrival_offset: None, sr: None, pending: Vec::new(), next_decode: None, last_duration: 0, sample_timed: false, newest: None })
                 .collect(),
             video,
             anchor_epoch: now,
@@ -196,6 +256,7 @@ impl SegmentWriter {
             drift_logged: 0.0,
             written: crate::telemetry::write_counter(dir),
             recorded: false,
+            closing: None,
         })
     }
 
@@ -377,18 +438,26 @@ impl SegmentWriter {
             self.seen_keyframe = true;
         }
         let t = self.tracks[v].secs(ticks);
+        if self.closing.is_some_and(|(_, c)| is_key || t - c >= AUDIO_WAIT_SECS) {
+            self.end_closing()?;
+        }
         let buffered_from = self.tracks[v].pending.first().map(|p| self.tracks[v].secs(p.ticks));
         let long_gop = buffered_from.is_some_and(|s| t - s >= MAX_FRAGMENT_SECS);
-        if is_key || long_gop {
-            self.flush_fragment(ticks, false)?;
-        }
-        if is_key {
-            let rotate = match &self.file {
+        let rotate = is_key
+            && match &self.file {
                 None => true,
                 // 1 ms tolerance: a keyframe exactly on the boundary must cut.
                 Some(f) => t - f.start >= self.segment_seconds - 0.001,
             };
-            if rotate {
+        if is_key || long_gop {
+            self.flush_fragment(ticks, false, false)?;
+        }
+        if rotate {
+            if self.file.is_some() && self.tracks.iter().any(|t| t.info.kind == TrackKind::Audio) {
+                // This file's audio up to the cut may still be on its way.
+                self.closing = Some((ticks, t));
+                self.end_closing_if_audio_arrived()?;
+            } else {
                 self.close_file(t)?;
                 self.adopt_sr_alignment();
                 self.open_file(t)?;
@@ -411,7 +480,43 @@ impl SegmentWriter {
         if !self.seen_keyframe {
             return;
         }
-        self.tracks[a].pending.push(Pending { ticks, cts: 0, data, is_sync: true });
+        let t = &mut self.tracks[a];
+        if let Some(n) = t.flac_len(&data) {
+            t.sample_timed = t.newest.is_some_and(|(pt, pn)| pt + i64::from(pn) == ticks);
+            t.newest = Some((ticks, n));
+        }
+        t.pending.push(Pending { ticks, cts: 0, data, is_sync: true });
+        // A write error here shows at the next video frame (the file is gone).
+        let _ = self.end_closing_if_audio_arrived();
+    }
+
+    /// While a file waits for its audio (`closing`): close it once the
+    /// newest audio frame reaches the cut.
+    fn end_closing_if_audio_arrived(&mut self) -> std::io::Result<()> {
+        let Some((_, cut)) = self.closing else { return Ok(()) };
+        let Some(t) = self.tracks.iter().find(|t| t.info.kind == TrackKind::Audio) else { return Ok(()) };
+        let Some(p) = t.pending.last() else { return Ok(()) };
+        let rate = f64::from(t.info.timescale.max(1));
+        let len = t.flac_len(&p.data).unwrap_or(t.last_duration);
+        if t.secs(p.ticks) + f64::from(len) / rate >= cut - 0.0005 {
+            self.end_closing()?;
+        }
+        Ok(())
+    }
+
+    /// Write the waiting file's audio up to the cut, close it and open the
+    /// next file at the cut. The video since the cut stays pending for the
+    /// next file.
+    fn end_closing(&mut self) -> std::io::Result<()> {
+        let Some((cut_ticks, cut)) = self.closing.take() else { return Ok(()) };
+        let v = self.video;
+        let video = std::mem::take(&mut self.tracks[v].pending);
+        let r = self.flush_fragment(cut_ticks, true, true);
+        self.tracks[v].pending = video;
+        r?;
+        self.close_file(cut)?;
+        self.adopt_sr_alignment();
+        self.open_file(cut)
     }
 
     /// Write buffered samples as one fragment. `video_end_ticks` is the
@@ -423,7 +528,10 @@ impl SegmentWriter {
     /// align audio are still missing, since audio placement is fixed once its
     /// first fragment is written. Nothing is lost: the held frames go out in
     /// the next fragment.
-    fn flush_fragment(&mut self, video_end_ticks: i64, force: bool) -> std::io::Result<()> {
+    ///
+    /// `closing`: the file ends at the cut, so its audio should reach it
+    /// (see `audio_to_cut`).
+    fn flush_fragment(&mut self, video_end_ticks: i64, force: bool, closing: bool) -> std::io::Result<()> {
         let Some((file_start, fragments)) = self.file.as_ref().map(|f| (f.start, f.fragments)) else {
             for t in &mut self.tracks {
                 t.pending.clear();
@@ -452,6 +560,9 @@ impl SegmentWriter {
                 while n + 1 < track.pending.len() && track.secs(track.pending[n].ticks) < cut {
                     n += 1;
                 }
+                if closing && n + 1 == track.pending.len() {
+                    n += track.audio_to_cut(cut);
+                }
                 n
             };
             if take == 0 {
@@ -466,7 +577,7 @@ impl SegmentWriter {
                 let following = batch.get(k + 1).map(|q| q.ticks).or(next_ticks);
                 let d = match following {
                     Some(n) if n > p.ticks => (n - p.ticks).min(u32::MAX as i64) as u32,
-                    _ => track.last_duration.max(1),
+                    _ => track.flac_len(&p.data).unwrap_or(track.last_duration).max(1),
                 };
                 track.last_duration = d;
                 samples.push(Sample { duration: d, data: Vec::new(), is_sync: p.is_sync, composition_offset: p.cts });
@@ -551,6 +662,7 @@ impl SegmentWriter {
     /// Flush what is buffered and close the current file (stream ended or
     /// the camera is being stopped).
     pub fn finish(&mut self) -> std::io::Result<()> {
+        self.end_closing()?;
         let v = self.video;
         let end_ticks = match self.tracks[v].pending.last() {
             Some(p) => p.ticks + self.tracks[v].last_duration.max(1) as i64,
@@ -559,7 +671,7 @@ impl SegmentWriter {
                 return self.close_file(end);
             }
         };
-        self.flush_fragment(end_ticks, true)?;
+        self.flush_fragment(end_ticks, true, true)?;
         let end = self.tracks[v].secs(end_ticks);
         self.close_file(end)
     }
@@ -637,6 +749,25 @@ pub struct OpenStream {
     video_dts: super::dts::DtsFromPts,
     /// `video_dts` has been told what the codec configuration allows.
     video_dts_checked: bool,
+    /// RTSP: jumps of the camera's RTP clock are taken out (video, audio),
+    /// timed against arrival on this clock.
+    jumps: [super::clockjump::ClockJump; 2],
+    opened_at: std::time::Instant,
+    /// Opened over UDP under `transport = "auto"` (the address): a session
+    /// that then brings no picture forgets the server's UDP-only mark.
+    udp_auto: Option<String>,
+    /// A video frame came.
+    pub had_video: bool,
+}
+
+impl OpenStream {
+    /// No picture came for the stall limit. An UDP session opened under
+    /// "auto" that never brought one: TCP first next time.
+    pub fn stalled(&self) {
+        if let (false, Some(u)) = (self.had_video, &self.udp_auto) {
+            super::forget_udp(u);
+        }
+    }
 }
 
 /// The parts of the video parameters that matter for decoding and for the
@@ -726,7 +857,8 @@ impl OpenStream {
                                 self.video_dts_checked = true;
                             }
                             // RTP timestamps are presentation times.
-                            let (ticks, cts) = self.video_dts.push(f.timestamp().elapsed(), f.is_random_access_point());
+                            let pts = unjump(&mut self.jumps[0], self.opened_at, "video", f.timestamp());
+                            let (ticks, cts) = self.video_dts.push(pts, f.is_random_access_point());
                             let item = MediaItem::Video {
                                 ticks,
                                 cts,
@@ -737,7 +869,7 @@ impl OpenStream {
                             return Some(Ok(self.settle_params(item)));
                         }
                         CodecItem::AudioFrame(f) if (self.use_audio || self.tap_audio) && Some(f.stream_id()) == *audio_i => {
-                            let mut ticks = f.timestamp().elapsed();
+                            let mut ticks = unjump(&mut self.jumps[1], self.opened_at, "audio", f.timestamp());
                             let data = match g711.as_mut() {
                                 Some(c) => {
                                     let (t, frame) = c.convert_timed(ticks, f.data());
@@ -774,7 +906,7 @@ impl OpenStream {
                             };
                             let Some(ts) = r.rtp_timestamp() else { continue };
                             let Some(Ok(Some(sr))) = r.pkts().next().map(|p| p.as_sender_report()) else { continue };
-                            let mut ticks = ts.elapsed();
+                            let mut ticks = self.jumps[track].apply(ts.elapsed());
                             if track == 1 {
                                 // G.711 audio is timed by its samples, not the RTP clock the
                                 // report uses: placed on that timeline (or left out when it
@@ -946,14 +1078,22 @@ impl OpenStream {
     }
 }
 
+/// A frame's RTP time with any jump of the camera's clock taken out (see
+/// clockjump.rs).
+fn unjump(c: &mut super::clockjump::ClockJump, opened_at: std::time::Instant, what: &str, ts: retina::Timestamp) -> i64 {
+    let (ticks, jumped) = c.map(ts.elapsed(), ts.clock_rate().get(), opened_at.elapsed().as_secs_f64());
+    if let Some(secs) = jumped {
+        tracing::warn!("camera {what} clock jumped {secs:+.1} s; recordings keep this computer's time");
+    }
+    ticks
+}
+
 /// Open a camera stream: HTTP-FLV for `http(s)://host/flv?...` URLs,
-/// otherwise RTSP (DESCRIBE/SETUP/PLAY over TCP with MP4 frame format:
-/// length-prefixed NALs, raw AAC, which both the recorder and the decoder
-/// consume).
+/// otherwise RTSP (DESCRIBE/SETUP/PLAY over TCP or UDP, see `transport`,
+/// with MP4 frame format: length-prefixed NALs, raw AAC, which both the
+/// recorder and the decoder consume).
 pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow::Result<OpenStream> {
-    use anyhow::{anyhow, Context};
-    use retina::client::{PlayOptions, Session, SetupOptions, Transport};
-    use retina::codec::FrameFormat;
+    use anyhow::anyhow;
 
     let opened = |reader| OpenStream {
         reader,
@@ -964,6 +1104,10 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
         video_key: None,
         video_dts: super::dts::DtsFromPts::new(90_000),
         video_dts_checked: false,
+        jumps: Default::default(),
+        opened_at: std::time::Instant::now(),
+        udp_auto: None,
+        had_video: false,
     };
     if super::baichuan::is_baichuan_url(&src.url) {
         // The persistent session is created and kept connected by the event
@@ -992,10 +1136,53 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
         return Ok(opened(Reader::Flv(Box::new(f))));
     }
 
+    // TCP first (unless the setting or an earlier 461 says UDP); under
+    // "auto" a camera that refuses TCP is asked once more over UDP.
+    let udp = super::wants_udp(&src.transport, &src.url);
+    match open_rtsp(src, with_audio, udp).await {
+        Err(e) if !udp && super::transport_setting(&src.transport) == "auto" && super::is_unsupported_transport(&format!("{e:#}")) => {
+            let first = e.to_string().lines().next().unwrap_or_default().to_string();
+            tracing::info!("{}: the camera refused RTSP over TCP ({first}); asking over UDP", crate::engine::redact_url(src.url.clone()));
+            let r = open_rtsp(src, with_audio, true).await?;
+            super::remember_udp(&src.url);
+            Ok(OpenStream { udp_auto: Some(src.url.clone()), ..opened(r) })
+        }
+        Err(e) if udp && super::transport_setting(&src.transport) == "auto" => {
+            // Remembered as UDP-only, and UDP does not work now: TCP first next time.
+            super::forget_udp(&src.url);
+            Err(e)
+        }
+        Ok(r) if udp && super::transport_setting(&src.transport) == "auto" => Ok(OpenStream { udp_auto: Some(src.url.clone()), ..opened(r) }),
+        r => r.map(opened),
+    }
+}
+
+/// The running sessions' SDP by address (no sign-in in it), for the camera
+/// report of a camera that must not be asked again (behind a hub).
+static SDPS: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> = std::sync::Mutex::new(None);
+
+/// The SDP of the last session opened to this address (sign-in left out).
+pub fn last_sdp(url: &str) -> Option<String> {
+    SDPS.lock().unwrap().as_ref().and_then(|m| m.get(&crate::engine::redact_url(url.to_string())).cloned())
+}
+
+async fn open_rtsp(src: &super::StreamSource, with_audio: bool, udp: bool) -> anyhow::Result<Reader> {
+    use anyhow::{anyhow, Context};
+    use retina::client::{PlayOptions, Session, SetupOptions};
+    use retina::codec::FrameFormat;
     let url = url::Url::parse(&src.url).context("invalid stream URL")?;
     let mut session = Session::describe(url, super::session_options(src))
         .await
         .map_err(|e| anyhow!("DESCRIBE failed: {e}"))?;
+    {
+        let mut m = SDPS.lock().unwrap();
+        let m = m.get_or_insert_with(Default::default);
+        if m.len() > 256 {
+            m.clear();
+        }
+        m.insert(crate::engine::redact_url(src.url.clone()), String::from_utf8_lossy(session.sdp()).replace("\r\n", "\n"));
+    }
+    let transport = || super::retina_transport(udp);
     let video_i = session
         .streams()
         .iter()
@@ -1023,11 +1210,7 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
     } else {
         (None, None)
     };
-    let setup = || {
-        SetupOptions::default()
-            .transport(Transport::Tcp(Default::default()))
-            .frame_format(FrameFormat::MP4)
-    };
+    let setup = || SetupOptions::default().transport(transport()).frame_format(FrameFormat::MP4);
     session.setup(video_i, setup()).await.map_err(|e| anyhow!("SETUP video failed: {e}"))?;
     if let Some(a) = audio_i {
         session.setup(a, setup()).await.map_err(|e| anyhow!("SETUP audio failed: {e}"))?;
@@ -1040,7 +1223,7 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
             .filter(|&i| i != video_i && Some(i) != audio_i && session.streams()[i].media() == "audio")
             .collect();
         for i in extra {
-            let _ = session.setup(i, SetupOptions::default().transport(Transport::Tcp(Default::default()))).await;
+            let _ = session.setup(i, SetupOptions::default().transport(transport())).await;
         }
     }
     let demuxed = session
@@ -1049,7 +1232,7 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
         .map_err(|e| anyhow!("PLAY failed: {e}"))?
         .demuxed()
         .map_err(|e| anyhow!("demux setup failed: {e}"))?;
-    Ok(opened(Reader::Rtsp { demuxed, video_i, audio_i, g711, aac_next: None }))
+    Ok(Reader::Rtsp { demuxed, video_i, audio_i, g711, aac_next: None })
 }
 
 /// Track descriptions for the MP4 writer, once codec parameters are known.
@@ -1488,7 +1671,9 @@ mod tests {
         // even though the report came after it opened.
         let (_, sr) = run("sr-c", Some(25), 2, 50);
         assert!(sr[0] < 100, "{}", sr[0]);
-        assert!(sr[1].abs_diff(320) < 100, "{}", sr[1]);
+        // The frame before the cut went in the first file (as it was placed
+        // there); the next one starts at the cut, 120 ms later by the report.
+        assert!(sr[1].abs_diff(1920) < 100, "{}", sr[1]);
         // Reports at 0.3 s with 10 s segments: held until the report, so
         // the first file is aligned although it opened before.
         let (_, sr) = run("sr-d", Some(3), 10, 60);
@@ -1501,14 +1686,66 @@ mod tests {
         let (segs, sr) = run("sr-b", Some(65), 10, 130);
         // First file was already written with arrival alignment.
         assert!(sr[0].abs_diff(plain[0]) < 100, "{} vs {}", sr[0], plain[0]);
-        // The next file uses the report: its first audio frame started 100 ms
-        // (1600 ticks) before the cut, so the 120 ms lag leaves it 320 ticks
-        // into the file, where arrival anchoring clamps it to 0.
+        // The next file uses the report. The frame that started 100 ms before
+        // the cut is in the first file (the file waits for audio up to its
+        // end), so the next one, at the cut, is 120 ms (1920 ticks) into the
+        // file by the report, and at its start by arrival anchoring.
         assert!(plain[1] < 100, "{}", plain[1]);
-        assert!(sr[1].abs_diff(320) < 100, "{}", sr[1]);
+        assert!(sr[1].abs_diff(1920) < 100, "{}", sr[1]);
         assert_ne!(segs[0].start_ms, (NTP0 * 1000.0) as i64);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[1].end_ms - segs[0].start_ms, 13000);
+    }
+
+    /// Where a track ends in a file, in seconds from the file's start: the
+    /// base decode time of its last fragment plus that run's durations.
+    fn track_end(bytes: &[u8], track_id: u32, timescale: u32) -> f64 {
+        let mut end = 0;
+        for i in 4..bytes.len().saturating_sub(24) {
+            if &bytes[i..i + 4] == b"tfhd" && u32::from_be_bytes(bytes[i + 8..i + 12].try_into().unwrap()) == track_id {
+                let at = i + bytes[i..].windows(4).position(|w| w == b"tfdt").unwrap();
+                let base = u64::from_be_bytes(bytes[at + 8..at + 16].try_into().unwrap());
+                let (_, _, samples) = crate::ingest::fmp4::tests::parse_trun(&bytes[i - 4..]);
+                end = base + samples.iter().map(|s| u64::from(s.0)).sum::<u64>();
+            }
+        }
+        end as f64 / f64::from(timescale)
+    }
+
+    #[test]
+    fn g711_audio_ends_with_the_video_in_every_file() {
+        let dir = std::env::temp_dir().join(format!("amber-rec-g711-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let audio = TrackInfo { kind: TrackKind::Audio, timescale: 8000, sample_entry: crate::ingest::g711::flac_sample_entry(8000), width: 0, height: 0 };
+        let mut w = SegmentWriter::new(&dir, "cam-g711", vec![video_track(), audio], 2).unwrap();
+        // 10 fps video with a 1 s GOP; G.711 at 8 kHz in 1024-sample (128 ms)
+        // packets, each arriving once its last sample was taken.
+        let (mut v, mut a) = (0i64, 0i64);
+        let mut samples_written = 0u64;
+        while v < 75 {
+            if (a + 1) * 128 <= v * 100 {
+                let pcm: Vec<i16> = (0..1024).map(|k| (a * 1024 + k) as i16).collect();
+                w.push_audio(a * 1024, crate::ingest::g711::flac_frame(&pcm, (a * 1024) as u64, 8000));
+                a += 1;
+            } else {
+                w.push_video(v * 9000, vec![1; 100], v % 10 == 0).unwrap();
+                v += 1;
+            }
+        }
+        w.finish().unwrap();
+        let segs = w.take_closed();
+        assert_eq!(segs.len(), 4);
+        for s in &segs[..3] {
+            let bytes = std::fs::read(&s.path).unwrap();
+            let (ve, ae) = (track_end(&bytes, 1, 90000), track_end(&bytes, 2, 8000));
+            assert!((ve - 2.0).abs() < 1e-6, "video ends at {ve}");
+            assert!((ae - ve).abs() <= 0.05, "{}: audio ends at {ae:.3} s, video at {ve:.3} s", s.path.display());
+            samples_written += (ae * 8000.0).round() as u64;
+        }
+        // No sound is lost or doubled at the cuts: the files hold the samples
+        // in order, each file's first audio where the previous one stopped.
+        assert_eq!(samples_written, 6 * 8000);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

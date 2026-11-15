@@ -302,6 +302,14 @@ html[data-touch="1"] .ni-copy, html[data-touch="1"] .ni-bar .btn { min-height: 4
 .cs-onvif .cs-onvif-st { margin: -2px 0 var(--s2); color: var(--muted); font-size: var(--fs); }
 .cs-onvif .cs-onvif-act { display: flex; flex-wrap: wrap; gap: var(--s2); margin-bottom: var(--s2); }
 
+/* no sub stream: motion decodes the large main stream */
+.cs-subwarn { margin: 0 0 var(--s2); padding: var(--s2) var(--s3); border: 1px solid color-mix(in srgb, var(--warn) 60%, var(--line)); border-radius: 8px; font-size: var(--fs); }
+.cs-subwarn p { margin: 0 0 var(--s2); }
+.cs-subwarn p svg { color: var(--warn); vertical-align: -2px; }
+.cs-subwarn-act { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.cs-subcand { margin-top: var(--s2); overflow-wrap: anywhere; }
+.cs-subcand .btn { margin-top: 4px; }
+
 /* event clips also saved to a folder */
 .cs-cprow { display: flex; gap: var(--s2); min-width: 0; align-items: center; }
 .cs-drawer .cs-pane .cs-cprow input { flex: 1; width: auto; }
@@ -310,3 +318,41 @@ html[data-touch="1"] .ni-copy, html[data-touch="1"] .ni-bar .btn { min-height: 4
 .cs-cpst.ok { color: var(--ok); }
 .cs-cpst.bad { color: var(--bad); }
 .cs-cpst[hidden], [data-cpopts][hidden] { display: none; }
+
+/* Phones: faded edges on the sideways-scrolling section index (cameras.js idxFade). */
+.cs-idx.fade-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
+.cs-idx.fade-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); }
+.cs-idx.fade-l.fade-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); }
+
+/* Stream address: protocol, address and port, sign-in, then the two paths (camaddr_form.js) */
+.ca { margin: 0 0 var(--s2); min-width: 0; }
+.ca [hidden] { display: none !important; }
+.ca-r1, .ca-r2, .ca-full, .ca-paths, .ca-tools { display: grid; gap: var(--s2); margin-bottom: var(--s2); min-width: 0; }
+.ca-r1 { grid-template-columns: minmax(0, 1fr) 5.5rem 6.5rem; }
+.ca-r2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.ca-cell { min-width: 0; }
+.cs-drawer .cs-pane .ca .cs-f { display: flex; flex-direction: column; align-items: stretch; gap: 4px; margin: 0; min-width: 0; }
+.cs-drawer .cs-pane .ca .cs-f > span:first-child { font-size: var(--fs-s); }
+.ca .cs-f em { font-style: normal; color: var(--muted); margin-left: 4px; }
+.ca .cs-f em::before { content: "\00b7"; margin-right: 4px; }
+.cs-drawer .ca .cs-f + .cs-ferr { padding-left: 0; margin: 4px 0 0; }
+/* What gets saved: each address on its own line, wrapping anywhere. */
+.ca-prev { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-s); color: var(--muted); min-width: 0; }
+.ca-prev:empty { display: none; }
+.ca-prev .ca-u { overflow-wrap: anywhere; word-break: break-all; }
+.ca-brandnote { font-size: var(--fs-s); color: var(--muted); margin-top: -2px; }
+.ca-brandnote a { margin-left: 4px; }
+.ca-acts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); font-size: var(--fs-s); margin-bottom: var(--s2); }
+.ca-acts .btn { font-size: var(--fs-s); }
+.ca-fullchk { margin-left: auto; white-space: nowrap; }
+.ca-msg { font-size: var(--fs-s); color: var(--muted); margin-top: var(--s1); overflow-wrap: anywhere; }
+.ca-msg:empty { display: none; }
+.ca-cand { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2); margin-top: var(--s2); overflow-wrap: anywhere; font-size: var(--fs-s); }
+.ca-cand code { word-break: break-all; }
+@media (max-width: 600px) {
+  .ca-r1 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .ca-r1 .ca-host { grid-column: 1 / -1; }
+  .ca-r2 { grid-template-columns: minmax(0, 1fr); }
+  .ca-fullchk { margin-left: 0; }
+}
+@media (pointer: coarse) { .ca-acts .btn, .ca-cand .btn { min-height: 44px; } }

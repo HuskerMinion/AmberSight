@@ -508,6 +508,9 @@ pub(super) fn build_clip(
         }
     }
     chosen.sort_by_key(|(t, _)| *t);
+    // Where the first joined recording starts: saved beside the clip so
+    // playback can say what time the file begins at.
+    let first_ms = chosen.first().map(|(t, _)| *t);
     // ffmpeg's concat demuxer resolves paths relative to the list file,
     // so store absolute paths.
     let files: Vec<std::path::PathBuf> = chosen
@@ -536,7 +539,12 @@ pub(super) fn build_clip(
         .status();
     let _ = std::fs::remove_file(&list);
     match status {
-        Ok(s) if s.success() => Some(out.to_string_lossy().into_owned()),
+        Ok(s) if s.success() => {
+            if let Some(t) = first_ms {
+                let _ = std::fs::write(out.with_extension("start"), t.to_string());
+            }
+            Some(out.to_string_lossy().into_owned())
+        }
         _ => None,
     }
 }

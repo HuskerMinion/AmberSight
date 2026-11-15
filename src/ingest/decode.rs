@@ -24,6 +24,35 @@ const OUTPUT_QUEUE: usize = 32;
 const HW_FALLBACK_WINDOW: Duration = Duration::from_secs(1);
 /// Input chunks kept for replay into the software fallback decoder.
 const REPLAY_LIMIT: usize = 64;
+/// A hardware decoder that sends no picture for this long while frames go
+/// in is taken for stuck.
+const HW_STALL: Duration = Duration::from_secs(10);
+/// Frames that must have gone in without a picture coming out before a
+/// hardware decoder counts as stuck.
+const HW_STALL_FRAMES: u64 = 40;
+/// This many error lines within a minute from a hardware decoder: it is
+/// replaced by software decoding.
+const HW_ERROR_BURST: u32 = 30;
+
+/// What went wrong with a hardware decoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Trouble {
+    /// It exited.
+    Stopped,
+    /// Many error lines: more often this camera's stream than the card.
+    ErrorBurst,
+    /// Frames went in, no pictures came out.
+    Stalled,
+}
+
+impl Trouble {
+    /// Whether the card may be blamed (and skipped for every camera with
+    /// that codec for an hour) once software decoding then works. An error
+    /// burst only moves this camera to the processor.
+    fn blames_card(self) -> bool {
+        !matches!(self, Trouble::ErrorBurst)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
@@ -32,12 +61,30 @@ pub enum Codec {
 }
 
 impl Codec {
-    fn ffmpeg_format(self) -> &'static str {
+    pub fn ffmpeg_format(self) -> &'static str {
         match self {
             Codec::H264 => "h264",
             Codec::H265 => "hevc",
         }
     }
+}
+
+/// An H.265 access unit (4-byte length-prefixed NAL units) whose first
+/// picture slice is a RASL picture (types 8 and 9): a leading picture of a
+/// CRA or BLA that may refer to pictures before it, so it cannot be decoded
+/// when decoding starts at that CRA or BLA.
+pub fn is_rasl(data: &[u8]) -> bool {
+    let mut pos = 0;
+    while let Some(hdr) = data.get(pos..pos + 4) {
+        let len = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
+        let Some(&b) = data.get(pos + 4) else { return false };
+        let t = (b >> 1) & 0x3f;
+        if t < 32 {
+            return matches!(t, 8 | 9);
+        }
+        pos = pos + 4 + len;
+    }
+    false
 }
 
 /// Convert one access unit of 4-byte length-prefixed NAL units into Annex B,
@@ -163,6 +210,14 @@ pub struct DecoderStats {
     pub jpegs_dropped: u64,
 }
 
+/// What a hardware decoder printed: the first error line, and whether
+/// errors came in a burst.
+#[derive(Default)]
+struct ErrWatch {
+    first: std::sync::Mutex<Option<String>>,
+    burst: std::sync::atomic::AtomicBool,
+}
+
 /// One running ffmpeg process plus its two I/O threads.
 struct Pipeline {
     child: Child,
@@ -172,7 +227,9 @@ struct Pipeline {
     started: Instant,
     /// Milliseconds after `started` at which stdout closed; `u64::MAX` while alive.
     exited_ms: Arc<AtomicU64>,
-    hw: bool,
+    /// The hardware decoder it runs with (None: software).
+    hw: Option<String>,
+    errs: Arc<ErrWatch>,
 }
 
 pub struct FrameDecoder {
@@ -187,34 +244,65 @@ pub struct FrameDecoder {
     seen_key: bool,
     /// Input was lost after a gap and is skipped until the next keyframe.
     gap: bool,
+    /// H.265: decoding (re)started at a keyframe, so RASL pictures right
+    /// after it are skipped (they refer to pictures before a CRA).
+    skip_rasl: bool,
     /// Chunks sent while a hardware decoder is still unproven.
     replay: Vec<Vec<u8>>,
     hw_failed: bool,
+    /// Why the hardware decoder was replaced.
+    hw_reason: Option<String>,
+    /// The hardware decoder that was replaced, to blame once software
+    /// decoding of the same stream works: (spec, why, pictures out then).
+    blame: Option<(String, String, u64)>,
+    /// Pictures out at the last look, when that number last changed, and
+    /// frames in since (stuck-decoder check).
+    seen_out: u64,
+    seen_out_at: Instant,
+    in_since_out: u64,
+    /// The camera, for the log and Status.
+    camera: String,
 }
 
-/// Split `hwaccel` ("vaapi", "vaapi:/dev/dri/renderD129", "qsv") into ffmpeg input args.
-fn hwaccel_args(spec: &str) -> Result<Vec<String>> {
+/// The filter that brings decoded pictures from the graphics card into
+/// memory (8-bit or 10-bit), for the CPU filters after it.
+pub const HW_DOWNLOAD: &str = "hwdownload,format=nv12|p010le";
+
+/// ffmpeg input arguments for a hardware decoder `spec` ("vaapi:/dev/dri/renderD129",
+/// "qsv:/dev/dri/renderD128", "d3d11va", ...). The pictures stay on the card
+/// (`-hwaccel_output_format`), so a decoder that cannot start fails instead of
+/// quietly decoding on the processor; `HW_DOWNLOAD` brings them back. Quick
+/// Sync needs its decoder named, so the codec when it is known.
+pub fn hw_input_args(spec: &str, codec: Option<Codec>) -> Result<Vec<String>> {
     let (kind, device) = match spec.split_once(':') {
-        Some((k, d)) => (k, Some(d.to_string())),
+        Some((k, d)) if !d.is_empty() => (k, Some(d.to_string())),
+        Some((k, _)) => (k, None),
         None => (spec, None),
     };
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
     match kind {
-        "vaapi" => Ok(vec![
-            "-hwaccel".into(),
-            "vaapi".into(),
-            "-hwaccel_device".into(),
-            device.unwrap_or_else(|| "/dev/dri/renderD128".into()),
-        ]),
+        "vaapi" => {
+            let d = device.unwrap_or_else(|| "/dev/dri/renderD128".into());
+            Ok(s(&["-hwaccel", "vaapi", "-hwaccel_device", &d, "-hwaccel_output_format", "vaapi"]))
+        }
         "qsv" => {
-            let mut v = vec!["-hwaccel".to_string(), "qsv".into()];
+            let mut v = Vec::new();
             if let Some(d) = device {
-                v.extend(["-hwaccel_device".to_string(), d]);
+                v.extend(["-qsv_device".to_string(), d]);
+            }
+            v.extend(s(&["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]));
+            match codec {
+                Some(Codec::H264) => v.extend(s(&["-c:v", "h264_qsv"])),
+                Some(Codec::H265) => v.extend(s(&["-c:v", "hevc_qsv"])),
+                None => {}
             }
             Ok(v)
         }
-        "cuda" | "vulkan" | "videotoolbox" | "d3d11va" | "dxva2" => {
-            Ok(vec!["-hwaccel".into(), kind.into()])
-        }
+        "cuda" => Ok(s(&["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])),
+        "vulkan" => Ok(s(&["-hwaccel", "vulkan", "-hwaccel_output_format", "vulkan"])),
+        "videotoolbox" => Ok(s(&["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"])),
+        "d3d11va" => Ok(s(&["-hwaccel", "d3d11va", "-hwaccel_output_format", "d3d11"])),
+        "dxva2" => Ok(s(&["-hwaccel", "dxva2", "-hwaccel_output_format", "dxva2_vld"])),
         other => bail!("unsupported hwaccel '{other}'"),
     }
 }
@@ -222,7 +310,7 @@ fn hwaccel_args(spec: &str) -> Result<Vec<String>> {
 fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>) -> Result<Vec<String>> {
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error"].map(String::from).into();
     if let Some(spec) = hw {
-        a.extend(hwaccel_args(spec)?);
+        a.extend(hw_input_args(spec, Some(codec))?);
     }
     // Raw elementary streams carry no timing; stamp with arrival time so the
     // fps filter sees real time regardless of the camera frame rate.
@@ -243,7 +331,13 @@ fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>) -> Result<V
         ]
         .map(String::from),
     );
+    // On the card: drop frames there first, so only the analysed ones are
+    // copied back.
     let mut vf = format!("fps={}", fps.max(1));
+    if hw.is_some() {
+        vf.push(',');
+        vf.push_str(HW_DOWNLOAD);
+    }
     if scale > 0 {
         vf.push_str(&format!(",scale={scale}:-2"));
     }
@@ -322,7 +416,7 @@ impl Pipeline {
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(if hw.is_some() { Stdio::piped() } else { Stdio::null() })
             .spawn()
             .context("failed to start ffmpeg")?;
         crate::child::adopt(&child);
@@ -330,6 +424,37 @@ impl Pipeline {
         let mut stdout = child.stdout.take().context("ffmpeg stdout unavailable")?;
         let started = Instant::now();
         let exited_ms = Arc::new(AtomicU64::new(u64::MAX));
+        let errs = Arc::new(ErrWatch::default());
+        // A hardware decoder's complaints: the first says why it failed; many
+        // in a short time mean it decodes badly.
+        if let Some(e) = child.stderr.take() {
+            let w = errs.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                let mut window = Instant::now();
+                let mut n = 0u32;
+                for line in std::io::BufReader::new(e).lines() {
+                    let Ok(line) = line else { break };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    {
+                        let mut f = w.first.lock().unwrap();
+                        if f.is_none() {
+                            *f = crate::hwdecode::reason_from_stderr(&line);
+                        }
+                    }
+                    if window.elapsed() > Duration::from_secs(60) {
+                        window = Instant::now();
+                        n = 0;
+                    }
+                    n += 1;
+                    if n >= HW_ERROR_BURST {
+                        w.burst.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
+        }
 
         let (in_tx, in_rx) = mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE);
         let writer = std::thread::spawn(move || {
@@ -383,7 +508,8 @@ impl Pipeline {
             reader: Some(reader),
             started,
             exited_ms,
-            hw: hw.is_some(),
+            hw: hw.map(String::from),
+            errs,
         })
     }
 
@@ -438,9 +564,27 @@ impl FrameDecoder {
             counters,
             seen_key: false,
             gap: false,
+            skip_rasl: false,
             replay: Vec::new(),
             hw_failed: false,
+            hw_reason: None,
+            blame: None,
+            seen_out: 0,
+            seen_out_at: Instant::now(),
+            in_since_out: 0,
+            camera: String::new(),
         })
+    }
+
+    /// Name the camera (the log, and what a failing card is blamed for).
+    pub fn with_camera(mut self, name: &str) -> Self {
+        self.camera = name.to_string();
+        self
+    }
+
+    /// Why the hardware decoder was replaced by software decoding.
+    pub fn hw_reason(&self) -> Option<&str> {
+        self.hw_reason.as_deref()
     }
 
     /// Decoded JPEG frames (SOI..next SOI), at most `fps` per second.
@@ -448,14 +592,14 @@ impl FrameDecoder {
         &self.frames
     }
 
-    /// True if hardware decoding was requested but ffmpeg rejected it.
+    /// True if hardware decoding was requested but did not work.
     pub fn hw_fallback_used(&self) -> bool {
         self.hw_failed
     }
 
     /// True while the current ffmpeg process is running with hardware decode.
     pub fn using_hwaccel(&self) -> bool {
-        self.pipe.as_ref().is_some_and(|p| p.hw && p.alive())
+        self.pipe.as_ref().is_some_and(|p| p.hw.is_some() && p.alive())
     }
 
     pub fn stats(&self) -> DecoderStats {
@@ -490,6 +634,14 @@ impl FrameDecoder {
             }
             self.seen_key = true;
             self.gap = false;
+            self.skip_rasl = self.codec == Codec::H265;
+        } else if self.skip_rasl && !is_keyframe {
+            if is_rasl(data) {
+                // Refers to pictures before the keyframe this decode started at.
+                self.counters.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            self.skip_rasl = false;
         }
         let mut chunk = Vec::with_capacity(data.len() + self.param_sets.len() + 16);
         if is_keyframe {
@@ -501,9 +653,22 @@ impl FrameDecoder {
         }
         self.counters.frames_in.fetch_add(1, Ordering::Relaxed);
 
-        self.maybe_fall_back()?;
+        self.in_since_out += 1;
+        let fell_back = self.maybe_fall_back()?;
+        if fell_back == Some(false) && !is_keyframe {
+            // A software decoder started mid-stream: from the next keyframe.
+            self.seen_key = false;
+            self.counters.frames_dropped.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        if fell_back == Some(false) {
+            // It starts at this keyframe: H.265 RASL pictures after it refer
+            // to pictures it never had.
+            self.skip_rasl = self.codec == Codec::H265;
+        }
+        self.settle_blame();
         let pipe = self.pipe.as_mut().context("decoder stopped")?;
-        if pipe.hw && pipe.started.elapsed() < HW_FALLBACK_WINDOW {
+        if pipe.hw.is_some() && pipe.started.elapsed() < HW_FALLBACK_WINDOW {
             if self.replay.len() < REPLAY_LIMIT {
                 self.replay.push(chunk.clone());
             }
@@ -520,7 +685,7 @@ impl FrameDecoder {
             }
             Err(TrySendError::Disconnected(_)) => {
                 self.drop_until_keyframe();
-                if self.maybe_fall_back()? {
+                if self.maybe_fall_back()?.is_some() {
                     return Ok(());
                 }
                 bail!("ffmpeg exited")
@@ -538,33 +703,78 @@ impl FrameDecoder {
         self.gap = true;
     }
 
-    /// If a hardware-decode ffmpeg died within the grace window, restart in
-    /// software and replay what it was sent. Returns whether it switched.
-    fn maybe_fall_back(&mut self) -> Result<bool> {
-        let Some(pipe) = self.pipe.as_ref() else { return Ok(false) };
-        if !pipe.hw {
-            return Ok(false);
+    /// What is wrong with the hardware decoder, if anything: it stopped, it
+    /// reported a burst of errors, or no picture came out for a while as
+    /// frames went in. The flag: whether the card may be blamed for it (an
+    /// exit or a stall; a burst of errors is more likely this camera's stream).
+    fn hw_trouble(&mut self) -> Option<(String, bool)> {
+        let out = self.counters.jpegs_out.load(Ordering::Relaxed);
+        if out != self.seen_out {
+            self.seen_out = out;
+            self.seen_out_at = Instant::now();
+            self.in_since_out = 0;
         }
-        let died_ms = pipe.exited_ms.load(Ordering::SeqCst);
-        let early_exit = died_ms != u64::MAX && Duration::from_millis(died_ms) < HW_FALLBACK_WINDOW;
-        let writer_dead = pipe.writer.as_ref().is_some_and(|w| w.is_finished())
-            && pipe.started.elapsed() < HW_FALLBACK_WINDOW;
-        if !(early_exit || writer_dead) {
-            return Ok(false);
+        let pipe = self.pipe.as_ref()?;
+        pipe.hw.as_ref()?;
+        let first = || pipe.errs.first.lock().unwrap().clone();
+        let writer_dead = pipe.writer.as_ref().is_some_and(|w| w.is_finished());
+        if !pipe.alive() || writer_dead {
+            // (Give the stderr reader a moment to catch the reason.)
+            std::thread::sleep(Duration::from_millis(30));
+            return Some((first().unwrap_or_else(|| "the decoder stopped".into()), Trouble::Stopped.blames_card()));
         }
-        if let Some(old) = self.pipe.take() {
-            old.shutdown();
+        if pipe.errs.burst.load(Ordering::SeqCst) {
+            return Some((format!("many decoding errors: {}", first().unwrap_or_default()), Trouble::ErrorBurst.blames_card()));
         }
+        if self.in_since_out >= HW_STALL_FRAMES && self.seen_out_at.elapsed() >= HW_STALL && pipe.started.elapsed() >= HW_STALL {
+            return Some(("no pictures came out".into(), Trouble::Stalled.blames_card()));
+        }
+        None
+    }
+
+    /// If the hardware decoder is in trouble, restart in software (replaying
+    /// what it was sent when it failed at once). Returns whether it switched
+    /// at once (`Some(true)`: the input was replayed) or mid-stream.
+    fn maybe_fall_back(&mut self) -> Result<Option<bool>> {
+        let Some((why, blamable)) = self.hw_trouble() else { return Ok(None) };
+        let Some(old) = self.pipe.take() else { return Ok(None) };
+        let early = old.started.elapsed() < HW_FALLBACK_WINDOW;
+        let spec = old.hw.clone().unwrap_or_default();
+        old.shutdown();
         self.hw_failed = true;
+        tracing::info!(
+            "camera '{}': hardware decoding ({}) stopped working ({why}); decoding on the processor",
+            self.camera,
+            crate::hwdecode::describe(&spec)
+        );
+        self.hw_reason = Some(why.clone());
         let out_tx = self.out_tx.clone().context("decoder stopped")?;
         let new = Pipeline::spawn(self.codec, self.fps, self.scale, None, out_tx, self.counters.clone())?;
-        if let Some(tx) = new.input.as_ref() {
-            for c in self.replay.drain(..) {
-                let _ = tx.try_send(c);
+        if early {
+            if let Some(tx) = new.input.as_ref() {
+                for c in self.replay.drain(..) {
+                    let _ = tx.try_send(c);
+                }
             }
+        } else {
+            self.replay.clear();
         }
+        // (A burst of errors moves only this camera to the processor; the
+        // card stays in use for the others.)
+        self.blame = blamable.then(|| (spec, why, self.counters.jpegs_out.load(Ordering::Relaxed)));
         self.pipe = Some(new);
-        Ok(true)
+        Ok(Some(early))
+    }
+
+    /// Software decoding of the same stream works where the card failed:
+    /// the card is to blame (other cameras skip it for that codec a while).
+    /// When software fails too, the stream was at fault, not the card.
+    fn settle_blame(&mut self) {
+        let Some((spec, why, base)) = &self.blame else { return };
+        if self.counters.jpegs_out.load(Ordering::Relaxed) >= base + 2 {
+            crate::hwdecode::note_failure(spec, Some(self.codec), &self.camera, why);
+            self.blame = None;
+        }
     }
 
     /// Close ffmpeg's input, wait briefly for it to flush, then kill it.
@@ -733,12 +943,123 @@ mod tests {
     #[test]
     fn hwaccel_flags() {
         assert_eq!(
-            hwaccel_args("vaapi").unwrap(),
-            ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"]
+            hw_input_args("vaapi", None).unwrap(),
+            ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi"]
         );
-        assert_eq!(hwaccel_args("vaapi:/dev/dri/renderD129").unwrap()[3], "/dev/dri/renderD129");
-        assert_eq!(hwaccel_args("qsv").unwrap(), ["-hwaccel", "qsv"]);
-        assert!(hwaccel_args("bogus").is_err());
+        assert_eq!(hw_input_args("vaapi:/dev/dri/renderD129", None).unwrap()[3], "/dev/dri/renderD129");
+        assert_eq!(hw_input_args("qsv", None).unwrap(), ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]);
+        assert_eq!(
+            hw_input_args("qsv:/dev/dri/renderD128", Some(Codec::H265)).unwrap(),
+            ["-qsv_device", "/dev/dri/renderD128", "-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", "hevc_qsv"]
+        );
+        assert!(hw_input_args("bogus", None).is_err());
+        // Pictures are copied back after the frame-rate filter.
+        let a = ffmpeg_args(Codec::H264, 5, 640, Some("vaapi:/dev/dri/renderD129")).unwrap();
+        let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
+        assert_eq!(vf, "fps=5,hwdownload,format=nv12|p010le,scale=640:-2");
+        let a = ffmpeg_args(Codec::H264, 5, 640, None).unwrap();
+        assert!(!a.iter().any(|x| x.contains("hw")), "{a:?}");
+    }
+
+    /// The test sample's access units (length-prefixed) and its avcC record.
+    fn sample_h264() -> (Vec<u8>, Vec<(Vec<u8>, bool)>) {
+        let data = include_bytes!("../hwdecode/sample.h264");
+        let mut starts = Vec::new();
+        let mut i = 0;
+        while i + 3 <= data.len() {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                starts.push(i + 3);
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        let mut nals: Vec<&[u8]> = Vec::new();
+        for (n, &st) in starts.iter().enumerate() {
+            let mut end = starts.get(n + 1).map(|&e| e - 3).unwrap_or(data.len());
+            while end > st && data[end - 1] == 0 {
+                end -= 1;
+            }
+            nals.push(&data[st..end]);
+        }
+        let sps: Vec<&[u8]> = nals.iter().copied().filter(|n| n[0] & 0x1f == 7).collect();
+        let pps: Vec<&[u8]> = nals.iter().copied().filter(|n| n[0] & 0x1f == 8).collect();
+        let frames = nals.iter().filter(|n| matches!(n[0] & 0x1f, 1 | 5)).map(|n| (lp(&[n]), n[0] & 0x1f == 5)).collect();
+        (avcc(&sps, &pps), frames)
+    }
+
+    #[test]
+    fn a_hardware_decoder_that_cannot_start_is_replaced_by_software() {
+        if std::process::Command::new(crate::ffmpeg_bin::program()).arg("-version").output().is_err() {
+            return;
+        }
+        let (rec, frames) = sample_h264();
+        assert!(frames.len() >= 8 && frames[0].1, "{}", frames.len());
+        let mut d = FrameDecoder::start(Codec::H264, &rec, 10, 160, Some("vaapi:/dev/dri/renderD999".into())).unwrap().with_camera("Test");
+        let mut got = 0;
+        for round in 0..6 {
+            for (f, key) in &frames {
+                d.push(f, *key).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                while d.frames().try_recv().is_ok() {
+                    got += 1;
+                }
+            }
+            if got > 2 && round > 1 {
+                break;
+            }
+        }
+        assert!(d.hw_fallback_used(), "fell back");
+        assert!(!d.using_hwaccel());
+        assert!(d.hw_reason().is_some());
+        assert!(got > 0, "software decoding made pictures");
+        d.stop();
+    }
+
+    #[test]
+    fn only_exits_and_stalls_blame_the_card() {
+        assert!(Trouble::Stopped.blames_card());
+        assert!(Trouble::Stalled.blames_card());
+        assert!(!Trouble::ErrorBurst.blames_card());
+    }
+
+    #[test]
+    fn rasl_pictures_are_recognized() {
+        let nal = |t: u8| vec![t << 1, 1, 0xaa];
+        assert!(is_rasl(&lp(&[&nal(8)])));
+        assert!(is_rasl(&lp(&[&nal(9)])));
+        // Prefix SEI and AUD before the slice are passed over.
+        assert!(is_rasl(&lp(&[&nal(35), &nal(39), &nal(8)])));
+        for t in [0, 1, 6, 7, 19, 21] {
+            assert!(!is_rasl(&lp(&[&nal(t)])), "type {t}");
+        }
+        assert!(!is_rasl(&[]));
+        assert!(!is_rasl(&[0, 0, 0, 9]), "truncated");
+    }
+
+    #[test]
+    fn h265_decoding_skips_rasl_pictures_after_its_first_keyframe() {
+        if std::process::Command::new(crate::ffmpeg_bin::program()).arg("-version").output().is_err() {
+            return;
+        }
+        // A minimal hvcC: 22 header bytes, then one VPS/SPS/PPS array each.
+        let mut rec = vec![1u8];
+        rec.extend_from_slice(&[0; 21]);
+        rec.push(3);
+        for t in [32u8, 33, 34] {
+            rec.extend_from_slice(&[t, 0, 1, 0, 2, t << 1, 1]);
+        }
+        let nal = |t: u8| lp(&[&[t << 1, 1, 0xaa]]);
+        let mut d = FrameDecoder::start(Codec::H265, &rec, 2, 320, None).unwrap();
+        d.push(&nal(21), true).unwrap(); // CRA
+        d.push(&nal(9), false).unwrap(); // RASL_R: skipped
+        d.push(&nal(8), false).unwrap(); // RASL_N: skipped
+        assert_eq!((d.stats().frames_in, d.stats().frames_dropped, d.stats().real_dropped), (1, 2, 0));
+        d.push(&nal(1), false).unwrap(); // TRAIL_R: decoded
+        d.push(&nal(21), true).unwrap(); // the next CRA, mid-decode
+        d.push(&nal(8), false).unwrap(); // its RASL can be decoded now
+        assert_eq!((d.stats().frames_in, d.stats().frames_dropped), (4, 2));
+        d.stop();
     }
 
     #[test]

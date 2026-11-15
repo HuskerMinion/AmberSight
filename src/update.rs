@@ -271,7 +271,7 @@ const CONTAINER: &str = "AmberSight is running in a container: update by pulling
 
 /// Docker and Podman mark their containers with these files. An update
 /// installed inside one would be lost when the container is recreated.
-fn in_container() -> bool {
+pub(crate) fn in_container() -> bool {
     Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
 }
 

@@ -32,6 +32,8 @@ pub fn idle_secs(idle_timeout: u64) -> i64 { idle_timeout.clamp(30, 7 * 86400) a
 fn is_default_idle(v: &u64) -> bool { *v == 300 }
 fn is_default_trigger(s: &String) -> bool { s == "video" }
 fn is_default_ingest(s: &String) -> bool { s == "auto" }
+fn default_transport() -> String { "auto".into() }
+fn is_default_transport(s: &String) -> bool { s == "auto" }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -494,8 +496,17 @@ pub struct CameraConfig {
     /// "native", or "ffmpeg" (the older ffmpeg-process pipeline).
     #[serde(default = "default_ingest", skip_serializing_if = "is_default_ingest")]
     pub ingest: String,
-    /// Hardware video decode for motion analysis, e.g. "vaapi",
-    /// "vaapi:/dev/dri/renderD130" or "qsv". Unset = software.
+    /// How RTSP video travels: "auto" (TCP; a camera that refuses TCP with
+    /// "461 Unsupported Transport" is asked again over UDP, and UDP is kept
+    /// for it until the server restarts), "tcp" or "udp". Both the built-in
+    /// reader and ffmpeg use it.
+    #[serde(default = "default_transport", skip_serializing_if = "is_default_transport")]
+    pub transport: String,
+    /// Hardware video decode for motion analysis: unset or "auto" (Linux:
+    /// VAAPI on a render node that passed the start-up test, else the
+    /// processor; Windows and macOS: the processor), "off", "vaapi",
+    /// "vaapi:/dev/dri/renderD130", "qsv" or "qsv:/dev/dri/renderD128"
+    /// (see hwdecode/).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hwaccel: Option<String>,
     /// Recording folder name from [[storage.folders]]; unset = data_dir.
@@ -555,6 +566,10 @@ pub struct CameraConfig {
     /// Built-in RTSP reader only; ignored without `sub_url`.
     #[serde(default)]
     pub record_sub: bool,
+    /// The owner said this camera has no sub stream to add: Status does not
+    /// note that motion decodes its full-size stream.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_sub_ok: bool,
     #[serde(default)]
     pub username: String,
     #[serde(default)]
@@ -2432,6 +2447,10 @@ impl Config {
         }
         for c in cfg.cameras.iter_mut() {
             c.normalize_groups();
+            // Not understood: used as Auto, kept as written.
+            if let (_, Some(w)) = crate::hwdecode::sanitized(c.hwaccel.as_deref()) {
+                tracing::warn!("{path}: camera '{}': {w}; Auto is used", c.name);
+            }
         }
         // A name listed twice by hand becomes one account: the one that could sign
         // in. Nothing can then bring the other back, with whatever rights it has.
