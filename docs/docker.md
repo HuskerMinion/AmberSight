@@ -1,18 +1,30 @@
 # Running AmberSight in Docker
 
-The image is built from this repository. It holds the AmberSight program,
-ffmpeg and the Intel/AMD video drivers; your settings and recordings live in
-two folders you mount.
+A prebuilt image is published with each release:
+
+| Image | For |
+|---|---|
+| `ghcr.io/huskerminion/ambersight:latest` | the newest release, `amd64` and `arm64` (such as a Raspberry Pi 5) |
+| `ghcr.io/huskerminion/ambersight:<version>` | one release, e.g. `0.11.0` |
+| `ghcr.io/huskerminion/ambersight:cuda` | the newest release with the AI on an NVIDIA card, `amd64` only (also `<version>-cuda`) |
+
+It holds the AmberSight program, ffmpeg and the Intel/AMD video drivers; your
+settings and recordings live in two folders you mount. You can also build the
+image yourself from this repository ([Building](#building)).
+
+Unraid: see [unraid/README.md](../unraid/README.md).
 
 ## Quick start
 
+Save [`docker/compose.yaml`](../docker/compose.yaml) in a folder of its own and
+run, in that folder:
+
 ```sh
-git clone https://github.com/HuskerMinion/AmberSight.git
-cd AmberSight
-docker compose -f docker/compose.yaml up -d --build
+docker compose -f compose.yaml up -d
 ```
 
-Then open `http://<this-computer>:8090`. The first build takes several minutes.
+(From a clone of this repository: `docker compose -f docker/compose.yaml up -d`.)
+Then open `http://<this-computer>:8090`.
 
 Add the first user (Settings > Users & security) before anything else.
 Until then, as with any new install, anyone who can reach port 8090 can
@@ -20,18 +32,16 @@ watch the cameras and change every setting. With host networking that is
 every network the computer is on. Don't forward the port on your router;
 use a VPN such as Tailscale or WireGuard to reach it from outside.
 
-Edit `docker/compose.yaml` first if you want the settings and recordings
-somewhere other than `docker/config` and `docker/data`, and set `TZ` to your
-time zone.
+Edit `compose.yaml` first if you want the settings and recordings somewhere
+other than `config` and `data` next to it, and set `TZ` to your time zone.
 
 Without Compose:
 
 ```sh
-docker build -t ambersight .
 docker run -d --name ambersight --restart unless-stopped --stop-timeout 30 --network host \
   -e TZ=America/New_York \
   -v /srv/ambersight/config:/config -v /srv/ambersight/data:/data \
-  --device /dev/dri ambersight
+  --device /dev/dri ghcr.io/huskerminion/ambersight:latest
 ```
 
 ## Folders
@@ -54,6 +64,10 @@ that already belongs to the user, are not changed: fix their owner by hand.
 Use `PUID`/`PGID` rather than `--user`: with `--user` the folders and the
 video devices' groups are not set up. `PUID=0` runs AmberSight as root, for
 rootless Docker or Podman, where root in the container is your own user.
+On Unraid, use `PUID=99` and `PGID=100` (`nobody:users`, who own the shares).
+
+`TZ` sets the time zone (for example `America/Chicago`); schedules and quiet
+hours use it. Without it the container runs on UTC.
 
 ## Network
 
@@ -114,20 +128,19 @@ motion analysis decodes on the processor.
 ## AI on an NVIDIA card
 
 The plain image runs the built-in AI on the processor. For an NVIDIA card,
-build the CUDA image instead (`Dockerfile.cuda`: NVIDIA's CUDA 13 + cuDNN 9
-runtime libraries with AmberSight and its NVIDIA add-on; it is large, about
-4 GB):
+use the CUDA image instead (`:cuda`, built from `Dockerfile.cuda`: NVIDIA's
+CUDA 13 + cuDNN 9 runtime libraries with AmberSight and its NVIDIA add-on; it
+is large, about 4 GB, and `amd64` only):
 
 ```sh
-docker build -f Dockerfile.cuda -t ambersight:cuda .
-docker run -d --name ambersight --restart unless-stopped --gpus all --network host \
-  -v ./config:/config -v ./data:/data ambersight:cuda
+docker run -d --name ambersight --restart unless-stopped --stop-timeout 30 --gpus all --network host \
+  -v ./config:/config -v ./data:/data ghcr.io/huskerminion/ambersight:cuda
 ```
 
 The host needs NVIDIA's driver and the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-(`--gpus all` passes the cards in). With compose, use `image: ambersight:cuda`,
-`build: { context: .., dockerfile: Dockerfile.cuda }` and add:
+(`--gpus all` passes the cards in). With compose, use
+`image: ghcr.io/huskerminion/ambersight:cuda` and add:
 
 ```yaml
     deploy:
@@ -163,14 +176,21 @@ docker exec -u 1000:1000 ambersight ambersight storage prune-missing --config /c
 
 The built-in updater does not install updates in a container (an update
 would be lost when the container is recreated); it still tells you when a new
-version is out. To update, pull the new source and rebuild:
+version is out. To update, pull the new image and recreate the container:
 
 ```sh
-git pull
-docker compose -f docker/compose.yaml up -d --build
+docker compose pull && docker compose up -d
 ```
 
-Settings and recordings stay in the mounted folders.
+(add `-f compose.yaml`, or `-f docker/compose.yaml` in a clone, when you are
+not in the folder that holds it). Without Compose: `docker pull
+ghcr.io/huskerminion/ambersight:latest`, then remove the container and run it
+again with the same `docker run` line. An image you built yourself: `git pull`
+and `docker compose -f docker/compose.yaml up -d --build`.
+
+`:latest` and `:cuda` always point at the newest release; use a version tag
+(e.g. `ghcr.io/huskerminion/ambersight:0.11.0`) to stay on one release and
+update when you choose. Settings and recordings stay in the mounted folders.
 
 ## Restarts and stopping
 
@@ -185,8 +205,20 @@ take longer than Docker's default 10 seconds. The examples allow 30
 
 ## Building
 
+To build the image from this repository instead of pulling it:
+
+```sh
+git clone https://github.com/HuskerMinion/AmberSight.git
+cd AmberSight
+docker build -t ambersight .                        # or: -f Dockerfile.cuda -t ambersight:cuda
+```
+
+With Compose, replace the `image:` line in `docker/compose.yaml` with the
+commented `build: ..` and `image: ambersight` lines, and run
+`docker compose -f docker/compose.yaml up -d --build`. The first build takes
+several minutes.
+
 The image builds with plain `docker build`; BuildKit is not needed. The
 build stage compiles AmberSight from source (a couple of minutes on a fast
 machine, longer on a Raspberry Pi), and the final image is Debian 13 slim
-with ffmpeg. It builds for the machine it is built on; it has been tested on
-`amd64` (`arm64`, such as a Raspberry Pi 5, should work but is not tested yet).
+with ffmpeg. It builds for the machine it is built on.

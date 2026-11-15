@@ -1,9 +1,13 @@
-# docker compose -f docker/compose.yaml up -d   (from the repository folder)
+# docker compose -f docker/compose.yaml up -d
 # Then open http://<this-computer>:8090
+# Update: docker compose -f docker/compose.yaml pull && docker compose -f docker/compose.yaml up -d
 services:
   ambersight:
-    build: ..
-    image: ambersight
+    image: ghcr.io/huskerminion/ambersight:latest   # :cuda for the AI on an NVIDIA card (docs/docker.md)
+    # To build from this repository instead of pulling, use these two lines
+    # in place of the image line above, and add --build to "up":
+    #   build: ..
+    #   image: ambersight
     container_name: ambersight
     restart: unless-stopped        # also how AmberSight restarts after a settings change
     stop_grace_period: 30s         # time to finish writing recordings and alerts on stop

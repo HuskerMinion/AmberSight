@@ -26,6 +26,20 @@ pub fn normalize_creds(cfg: &mut CameraConfig) {
         }
         cfg.url = format!("{}{}", head, host_and_path);
     }
+
+    // The sub-stream keeps its own userinfo in the URL, but encoded, so a
+    // space or other raw character in the password cannot break the URL or
+    // slip past log redaction.
+    if let Some(sub) = cfg.sub_url.as_mut() {
+        *sub = sub.trim().to_string();
+        if let Some((head, userinfo, host_and_path)) = split_userinfo(sub) {
+            let enc = match userinfo.split_once(':') {
+                Some((u, p)) => format!("{}:{}", pct_encode(&pct_decode(u)), pct_encode(&pct_decode(p))),
+                None => pct_encode(&pct_decode(&userinfo)),
+            };
+            *sub = format!("{head}{enc}@{host_and_path}");
+        }
+    }
 }
 
 /// Characters left unescaped in userinfo: unreserved only. Everything else
@@ -173,6 +187,20 @@ mod tests {
         let mut c2 = blank_cfg(&built);
         normalize_creds(&mut c2);
         assert_eq!(c2.password, "p@ss:w/rd#?%");
+    }
+
+    #[test]
+    fn sub_url_userinfo_is_encoded() {
+        let mut c = blank_cfg("rtsp://h/main");
+        c.sub_url = Some(" rtsp://admin:my pass@h/s ".into());
+        normalize_creds(&mut c);
+        let sub = c.sub_url.clone().unwrap();
+        assert_eq!(sub, "rtsp://admin:my%20pass@h/s");
+        assert!(!camera_url(&CameraConfig { url: sub.clone(), ..c.clone() }).contains(' '));
+        assert_eq!(crate::engine::worker::redact_text(&format!("{sub}: 401")), "rtsp://h/s: 401");
+        // Already encoded stays the same.
+        normalize_creds(&mut c);
+        assert_eq!(c.sub_url.unwrap(), sub);
     }
 
     #[test]

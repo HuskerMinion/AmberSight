@@ -79,6 +79,42 @@ is built into the program (`RELEASE_PUBKEY` in `src/update.rs`).
    leaked key means a new key, a new `ambersight-archive-keyring.*` and setup run again on
    every computer.
 
+7. Publish the Docker images (ask the owner first, as for any CI run). The
+   workflow `.github/workflows/docker.yml` in the public repository builds them
+   from the release tag with GitHub's own token and pushes them to ghcr.io:
+
+   ```sh
+   gh workflow run docker.yml -R HuskerMinion/AmberSight -f tag=v0.2.0
+   gh run watch -R HuskerMinion/AmberSight "$(gh run list -R HuskerMinion/AmberSight -w docker.yml -L 1 --json databaseId --jq '.[0].databaseId')"
+   ```
+
+   It makes `ghcr.io/huskerminion/ambersight:0.2.0` and `:latest` (amd64 and
+   arm64; arm64 builds on GitHub's ARM runner) and `:0.2.0-cuda` and `:cuda`
+   (amd64). For a fix to an older release, add `-f latest=false` so `:latest`
+   and `:cuda` stay on the newest one. Then check on a computer with Docker:
+
+   ```sh
+   for t in 0.2.0 latest cuda; do docker pull ghcr.io/huskerminion/ambersight:$t; done
+   docker pull --platform linux/arm64 ghcr.io/huskerminion/ambersight:0.2.0
+   docker run --rm --entrypoint ambersight ghcr.io/huskerminion/ambersight:0.2.0 --version
+   docker run --rm --platform linux/arm64 --entrypoint ambersight ghcr.io/huskerminion/ambersight:0.2.0 --version   # needs qemu-user-static, or run it on an arm64 computer
+   docker run --rm --entrypoint ambersight ghcr.io/huskerminion/ambersight:cuda --version
+   docker inspect -f '{{json .Config.Labels}}' ghcr.io/huskerminion/ambersight:0.2.0
+   docker buildx imagetools inspect ghcr.io/huskerminion/ambersight:0.2.0   # lists linux/amd64 and linux/arm64
+   ```
+
+   Each must report the release's version, and the labels its version and commit.
+
+   **Once, after the first run:** the package starts out private, so nobody
+   can pull it. On GitHub open the account's **Packages** tab >
+   **ambersight** > **Package settings**, set **Change visibility** to
+   **Public**, and check that it is linked to the AmberSight repository (the
+   `org.opencontainers.image.source` label links it). This is a manual step on
+   purpose.
+
+   The Unraid template (`unraid/ambersight.xml`) points at `:latest`, so it
+   needs no change per release.
+
 ## Automatic checks
 
 Servers look for a new release every 12 hours (`[update] check`, on by

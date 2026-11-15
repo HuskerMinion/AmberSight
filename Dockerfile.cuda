@@ -48,4 +48,18 @@ ENV HOME=/data PUID=1000 PGID=1000 \
     NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
 VOLUME ["/config", "/data"]
 EXPOSE 8090
+# Image labels (OCI). The release workflow (.github/workflows/docker.yml)
+# passes the real version, commit and date; a local build gets these defaults.
+# Last, so a new version does not rebuild the layers above.
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=unknown
+LABEL org.opencontainers.image.title="AmberSight" \
+      org.opencontainers.image.description="Self-hosted camera recording and AI detection, with the AI on an NVIDIA card (CUDA)" \
+      org.opencontainers.image.source="https://github.com/HuskerMinion/AmberSight" \
+      org.opencontainers.image.url="https://github.com/HuskerMinion/AmberSight" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION" \
+      org.opencontainers.image.created="$CREATED"
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ambersight-entrypoint"]

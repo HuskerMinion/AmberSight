@@ -9,6 +9,11 @@ set -eu
 CONFIG="${AMBERSIGHT_CONFIG:-/config/config.toml}"
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
+for v in "$PUID" "$PGID"; do
+    case "$v" in
+        '' | *[!0-9]*) echo "PUID and PGID must be numbers, not '$PUID' and '$PGID'" >&2; exit 1 ;;
+    esac
+done
 
 if [ "$(id -u)" = 0 ] && [ "$PUID" != 0 ]; then
     for d in /config /data; do

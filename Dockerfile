@@ -36,4 +36,18 @@ ENV HOME=/data PUID=1000 PGID=1000
 VOLUME ["/config", "/data"]
 # Web interface and API (HTTP, or HTTPS once turned on in Settings).
 EXPOSE 8090
+# Image labels (OCI). The release workflow (.github/workflows/docker.yml)
+# passes the real version, commit and date; a local build gets these defaults.
+# Last, so a new version does not rebuild the layers above.
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=unknown
+LABEL org.opencontainers.image.title="AmberSight" \
+      org.opencontainers.image.description="Self-hosted camera recording and AI detection" \
+      org.opencontainers.image.source="https://github.com/HuskerMinion/AmberSight" \
+      org.opencontainers.image.url="https://github.com/HuskerMinion/AmberSight" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION" \
+      org.opencontainers.image.created="$CREATED"
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ambersight-entrypoint"]

@@ -118,6 +118,8 @@ if [ $publish = 1 ]; then
   else
     echo "package repository not found: run scripts/package-repo.sh $v --commit when it exists (RELEASING.md)"
   fi
+  echo "next, with the owner's OK: the Docker images (RELEASING.md step 7):"
+  echo "  gh workflow run docker.yml -R $repo -f tag=v$v"
 else
   echo "not published (add --publish to publish it)"
 fi

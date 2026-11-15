@@ -300,7 +300,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let mut child = match crate::child::ffmpeg()
             .args(&args)
             .stdout(std::process::Stdio::piped())
-            .stderr(if local { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+            .stderr(std::process::Stdio::piped())
             .spawn()
         {
             Ok(c) => {
@@ -323,25 +323,9 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // here: a started ffmpeg is not yet a working camera.
 
         let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
-        // Local sources: keep ffmpeg's last error lines for a readable camera error.
-        let stderr_tail = child.stderr.take().map(|e| {
-            let tail = Arc::new(Mutex::new(String::new()));
-            let t = tail.clone();
-            thread::spawn(move || {
-                use std::io::BufRead;
-                for line in std::io::BufReader::new(e).lines().map_while(Result::ok) {
-                    let mut s = t.lock().unwrap();
-                    s.push_str(&line);
-                    s.push('\n');
-                    if s.len() > 4096 {
-                        let from = s.len() - 2048;
-                        let cut = (from..s.len()).find(|i| s.is_char_boundary(*i)).unwrap_or(s.len());
-                        s.drain(..cut);
-                    }
-                }
-            });
-            tail
-        });
+        // Keep ffmpeg's last error lines (drained continuously) for a readable camera error.
+        let stderr_tail = child.stderr.take().map(drain_stderr);
+        let mut extra_tails: Vec<(&'static str, StderrTail)> = Vec::new();
         let frames_at_start = handle.state.read().unwrap().frames;
         // Share processes with a watchdog so disabling the camera unblocks
         // the read loop immediately (kill ffmpeg -> EOF -> park).
@@ -367,11 +351,14 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             let rec_child: Option<std::process::Child> = match crate::child::ffmpeg()
                 .args(&rargs)
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
             {
-                Ok(c) => {
+                Ok(mut c) => {
                     crate::child::adopt(&c);
+                    if let Some(e) = c.stderr.take() {
+                        extra_tails.push(("direct recorder", drain_stderr(e)));
+                    }
                     Some(c)
                 }
                 Err(err) => {
@@ -396,9 +383,12 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             rargs.extend(["-reset_timestamps", "1", "-c", "copy"].map(String::from));
             rargs.extend(FRAGMENTED.map(String::from));
             rargs.push(seg_dir.join(format!("{slug_name}-sub-{run_ts}-seg%06d.mp4")).to_string_lossy().into_owned());
-            match crate::child::ffmpeg().args(&rargs).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
-                Ok(c) => {
+            match crate::child::ffmpeg().args(&rargs).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn() {
+                Ok(mut c) => {
                     crate::child::adopt(&c);
+                    if let Some(e) = c.stderr.take() {
+                        extra_tails.push(("sub stream recorder", drain_stderr(e)));
+                    }
                     children.push(Arc::new(Mutex::new(c)));
                 }
                 Err(err) => warn!("camera '{}': could not start the sub stream recorder: {}", cfg.name, err),
@@ -473,11 +463,16 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                             .args(&rargs)
                                             .stdin(std::process::Stdio::piped())
                                             .stdout(std::process::Stdio::null())
-                                            .stderr(std::process::Stdio::null())
+                                            .stderr(std::process::Stdio::piped())
                                             .spawn()
                                         {
-                                            Ok(c) => {
+                                            Ok(mut c) => {
                                                 crate::child::adopt(&c);
+                                                if let Some(e) = c.stderr.take() {
+                                                    // Kept per launch; a restart replaces the older one.
+                                                    extra_tails.retain(|(n, _)| *n != "motion recorder");
+                                                    extra_tails.push(("motion recorder", drain_stderr(e)));
+                                                }
                                                 recorder = Some(c)
                                             }
                                             Err(err) => warn!("camera '{}': motion-only recorder failed: {}", cfg.name, err),
@@ -520,18 +515,27 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             // Keep the time it first went offline across retries.
             st.offline_since.get_or_insert(Utc::now().timestamp());
             st.online_since = None;
-            if !local {
-                st.last_error = Some("ffmpeg stream ended".into());
-                st.last_error_at = Some(Utc::now().timestamp());
+        }
+        // Let the stderr readers collect ffmpeg's last lines (killed or exited,
+        // the pipes close at once).
+        thread::sleep(std::time::Duration::from_millis(if local { 200 } else { 100 }));
+        let main_text = stderr_tail.map(|t| t.lock().unwrap().clone()).unwrap_or_default();
+        if !local {
+            let why = tail_summary(&main_text);
+            handle.state.write().unwrap().last_error = Some(ended_text(why.as_deref()));
+            handle.state.write().unwrap().last_error_at = Some(Utc::now().timestamp());
+            for (name, t) in &extra_tails {
+                let text = t.lock().unwrap().clone();
+                if let Some(w) = tail_summary(&text) {
+                    warn!("camera '{}': {} ffmpeg: {}", cfg.name, name, w);
+                }
             }
         }
         if local {
             if handle.state.read().unwrap().frames > frames_at_start {
                 backoff = 3;
             }
-            // Give the stderr reader a moment to collect ffmpeg's last lines.
-            thread::sleep(std::time::Duration::from_millis(200));
-            let text = stderr_tail.map(|t| t.lock().unwrap().clone()).unwrap_or_default();
+            let text = main_text;
             let why = crate::local_source::explain_error(&cfg.url, &text, crate::local_source::host_os());
             if handle.active.load(Ordering::Relaxed) {
                 fail_local(&handle, &cfg, why, &mut backoff);
@@ -544,7 +548,8 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             if handle.state.read().unwrap().frames > frames_at_start {
                 backoff = 3;
             }
-            warn!("camera '{}': stream ended, retrying in {}s", cfg.name, backoff);
+            let why = tail_summary(&main_text);
+            warn!("camera '{}': {}, retrying in {}s", cfg.name, ended_text(why.as_deref()), backoff);
             let until = std::time::Instant::now() + std::time::Duration::from_secs(backoff);
             while std::time::Instant::now() < until && handle.active.load(Ordering::Relaxed) {
                 thread::sleep(std::time::Duration::from_millis(300));
@@ -994,5 +999,125 @@ mod fragmented_tests {
         let plain = record(&base.join("plain"), false).unwrap();
         assert!(VirtualClip::plan(&plain, t0 + 500, t0 + 5000).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+type StderrTail = Arc<Mutex<String>>;
+
+/// Read a child's stderr on its own thread so a full pipe never blocks ffmpeg;
+/// only the last few KB are kept.
+fn drain_stderr(e: std::process::ChildStderr) -> StderrTail {
+    let tail: StderrTail = Arc::new(Mutex::new(String::new()));
+    let t = tail.clone();
+    thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(e).split(b'\n').map_while(Result::ok) {
+            let line = String::from_utf8_lossy(&line);
+            let mut s = t.lock().unwrap();
+            s.push_str(&line);
+            s.push('\n');
+            if s.len() > 4096 {
+                let from = s.len() - 2048;
+                let cut = (from..s.len()).find(|i| s.is_char_boundary(*i)).unwrap_or(s.len());
+                s.drain(..cut);
+            }
+        }
+    });
+    tail
+}
+
+/// Remove sign-in details from free text: any `scheme://user:pw@host` token
+/// loses its userinfo (looked for only in the authority, up to the first '/',
+/// '?' or '#', and up to its last '@'), and secret query values are hidden.
+/// Punctuation after the URL (as in "...: 401") is kept.
+pub(crate) fn redact_text(line: &str) -> String {
+    line.split(' ')
+        .map(|tok| {
+            let Some(i) = tok.find("://") else { return tok.to_string() };
+            let body_end = tok.trim_end_matches(|c: char| matches!(c, ':' | ',' | ';' | ')' | ']' | '"' | '\'' | '.')).len();
+            let (body, tail) = tok.split_at(body_end.max(i + 3));
+            let (head, rest) = body.split_at(i + 3);
+            let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let rest = match rest[..auth_end].rfind('@') {
+                Some(at) => &rest[at + 1..],
+                None => rest,
+            };
+            format!("{}{}", super::creds::redact_url(format!("{head}{rest}")), tail)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The last meaningful lines of ffmpeg's stderr (at most two), credentials
+/// removed. None when nothing useful was printed.
+pub(crate) fn tail_summary(text: &str) -> Option<String> {
+    const SKIP: [&str; 4] = ["ffmpeg version", "built with", "configuration:", "press [q]"];
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            let low = l.to_ascii_lowercase();
+            // Banner library versions look like "libavutil      58. 29.100".
+            let lib_banner = low.starts_with("lib") && low.contains(". ") && low.chars().any(|c| c.is_ascii_digit()) && low.split_whitespace().count() <= 4;
+            !lib_banner && !SKIP.iter().any(|p| low.starts_with(p))
+        })
+        .map(|l| redact_text(l))
+        .collect();
+    let keep = &lines[lines.len().saturating_sub(2)..];
+    if keep.is_empty() {
+        return None;
+    }
+    let mut out = keep.join("; ");
+    if out.chars().count() > 240 {
+        out = out.chars().take(240).collect::<String>() + "...";
+    }
+    Some(out)
+}
+
+/// Text for the log and the camera's last_error when a network stream ends.
+pub(crate) fn ended_text(why: Option<&str>) -> String {
+    match why {
+        Some(w) => format!("stream ended (ffmpeg: {w})"),
+        None => "stream ended".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_special_password() {
+        let l = "[rtsp @ 0x1] rtsp://admin:p%40ss%2Fw%3Ard%3F%23x@192.168.1.5:554/stream1: 401 Unauthorized";
+        let r = redact_text(l);
+        assert!(!r.contains("p%40ss") && !r.contains("w%3Ard") && !r.contains("admin"), "{r}");
+        assert!(r.contains("rtsp://192.168.1.5:554/stream1:"), "{r}");
+        assert!(r.ends_with("401 Unauthorized"), "{r}");
+        assert_eq!(redact_text("no url here"), "no url here");
+        // '@' outside the authority is not userinfo.
+        assert_eq!(redact_text("http://h/api?cmd=Snap&user=admin&password=ab@cd: 401"), "http://h/api?cmd=Snap&user=admin&password=***: 401");
+        assert_eq!(redact_text("rtsp://h/stream@1: 404"), "rtsp://h/stream@1: 404");
+        assert_eq!(redact_text("http://h/x?token=abc 404"), "http://h/x?token=*** 404");
+        assert_eq!(redact_text("http://h/x?token=abc: 404"), "http://h/x?token=***: 404");
+        assert_eq!(redact_text("rtsp://u:p%40ss@h:554/s, retry"), "rtsp://h:554/s, retry");
+        assert_eq!(redact_text("rtsp://u:p@ss@h/s?x=1#a@b"), "rtsp://h/s?x=1#a@b");
+        assert!(redact_text("http://h/x?password=secret&a=1").contains("password=***"));
+    }
+
+    #[test]
+    fn tail_picks_last_meaningful_lines() {
+        let t = "ffmpeg version 6.1 Copyright\n  built with gcc\n  configuration: --x\n\nfirst problem\nsecond\n\nrtsp://u:pw@h/s: 401 Unauthorized\n\n";
+        assert_eq!(tail_summary(t).unwrap(), "second; rtsp://h/s: 401 Unauthorized");
+        assert!(tail_summary("\n  \nffmpeg version 7\n").is_none());
+        assert!(tail_summary("").is_none());
+        let long = "x".repeat(1000);
+        assert!(tail_summary(&long).unwrap().len() < 260);
+    }
+
+    #[test]
+    fn ended_text_forms() {
+        assert_eq!(ended_text(Some("401 Unauthorized")), "stream ended (ffmpeg: 401 Unauthorized)");
+        assert_eq!(ended_text(None), "stream ended");
     }
 }

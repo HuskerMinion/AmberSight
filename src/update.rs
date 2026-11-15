@@ -267,7 +267,7 @@ pub fn is_packaged(exe: &Path) -> bool {
     exe.starts_with("/usr") && !exe.starts_with("/usr/local")
 }
 
-const CONTAINER: &str = "AmberSight is running in a container: update by building or pulling a new image";
+const CONTAINER: &str = "AmberSight is running in a container: update by pulling the new image and recreating the container (with Docker Compose: docker compose pull && docker compose up -d)";
 
 /// Docker and Podman mark their containers with these files. An update
 /// installed inside one would be lost when the container is recreated.
@@ -668,7 +668,7 @@ pub fn check(repo: &str) -> Result<Release> {
                 }
             }
             if in_container() {
-                tracing::info!("AmberSight {} is available (this is {CURRENT}); this copy runs in a container: build or pull a new image", r.version);
+                tracing::info!("AmberSight {} is available (this is {CURRENT}); this copy runs in a container: update it with docker compose pull && docker compose up -d", r.version);
             } else if program_path().is_ok_and(|p| is_packaged(&p)) {
                 tracing::info!("AmberSight {} is available (this is {CURRENT}); this copy came from a package: update it with apt or dnf", r.version);
             } else {
