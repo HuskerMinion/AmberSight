@@ -29,11 +29,17 @@ down, under each system's name.
 
 | System | Package | Notes |
 |---|---|---|
-| Windows 10 / 11, 64-bit | `ambersight-<version>-windows-x86_64-setup.exe` (installer) or `ambersight-<version>-windows-x86_64.zip` | AI uses the graphics card (DirectML) |
-| macOS on Apple silicon (M1 and later) | `ambersight-<version>-darwin-arm64.tar.gz` | AI uses the Neural Engine and GPU (Core ML) |
-| macOS on Intel | `ambersight-<version>-darwin-x86_64.tar.gz` | Built-in AI is not available; an external AI server can be used |
-| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer. AI uses an NVIDIA card (CUDA) when NVIDIA's libraries are installed |
-| Raspberry Pi 4 / 5 (and other 64-bit ARM Linux) | `ambersight_<version>_arm64.deb`, `ambersight-<version>-1.aarch64.rpm` or `ambersight-<version>-linux-aarch64.tar.gz` | Needs the **64-bit** Raspberry Pi OS, trixie (2025) or newer. See [Raspberry Pi](#raspberry-pi). |
+| Windows 10 / 11, 64-bit | `ambersight-<version>-windows-x86_64-setup.exe` (installer) or `ambersight-<version>-windows-x86_64.zip` | Built-in AI runs on the graphics card (DirectML) |
+| macOS on Apple silicon (M1 and later) | `ambersight-<version>-darwin-arm64.tar.gz` | Built-in AI runs on the Neural Engine and GPU (Core ML) |
+| macOS on Intel | `ambersight-<version>-darwin-x86_64.tar.gz` | Everything works except built-in AI detection. To check events for people and vehicles, connect your own detector program (Settings > Connections > External detector) |
+| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer. Built-in AI runs on the processor, or on an NVIDIA card (CUDA) when NVIDIA's libraries are installed |
+| Raspberry Pi 4 / 5 (and other 64-bit ARM Linux) | `ambersight_<version>_arm64.deb`, `ambersight-<version>-1.aarch64.rpm` or `ambersight-<version>-linux-aarch64.tar.gz` | Needs the **64-bit** Raspberry Pi OS, trixie (2025) or newer. Built-in AI runs on the processor. See [Raspberry Pi](#raspberry-pi). |
+
+**Built-in AI costs nothing and needs nothing downloaded in advance.** The packages above are
+all you install. When you turn AI on (Settings > Detection & alerts > Objects (AI)), AmberSight
+downloads the model you pick, once: Tiny about 20 MB, Small about 35 MB, Large about 217 MB. On
+Linux with an NVIDIA card it also downloads its NVIDIA add-on (about 70 MB) by itself. All of
+these are free, are checked before use, and are kept for next time.
 
 The `.zip` and `.tar.gz` packages hold the AmberSight program, an example settings file
 (`config.example.toml`), the README, and a short install note (`install.cmd` on Windows,
