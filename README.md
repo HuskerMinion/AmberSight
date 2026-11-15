@@ -56,7 +56,7 @@ Step-by-step instructions for every system are in the
 | Debian, Ubuntu, Linux Mint, Raspberry Pi OS (64-bit) | `ambersight_<version>_amd64.deb` or `_arm64.deb` | Add the [package repository](https://huskerminion.github.io/ambersight-packages/) once (`curl -fsSL https://huskerminion.github.io/ambersight-packages/setup.sh \| sudo sh`), then `sudo apt update && sudo apt install ambersight`; updates come with `apt upgrade`. Or install the file: `sudo apt install ./ambersight_<version>_amd64.deb`. Installs `/usr/bin/ambersight`, `/etc/ambersight/config.toml`, data in `/var/lib/ambersight`, a systemd service running as the user `ambersight`, an app menu entry, and ffmpeg. |
 | Fedora | `ambersight-<version>-1.x86_64.rpm` or `.aarch64.rpm` | Add [RPM Fusion](https://rpmfusion.org/Configuration) first, then add the same repository (the setup script above) and `sudo dnf install ambersight --allowerasing`, or install the file with `sudo dnf install ./ambersight-<version>-1.x86_64.rpm --allowerasing`. Same layout as the .deb. |
 | macOS and other Linux | `.tar.gz` (Windows also has a `.zip`) | Unpack, then run `./ambersight setup` (see below). |
-| Docker | build from this repository | `docker compose -f docker/compose.yaml up -d --build`. See [docs/docker.md](docs/docker.md) for folders, networking and hardware decode. |
+| Docker (and Unraid) | `ghcr.io/huskerminion/ambersight:latest` (`amd64` and `arm64`; `:cuda` for AI on an NVIDIA card) | See [docs/docker.md](docs/docker.md) for the run command, folders, networking and hardware decoding, or build the image from this repository. On Unraid, add the AmberSight template ([unraid/README.md](unraid/README.md)). |
 
 The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer (and 64-bit
 Raspberry Pi OS, trixie or newer). Intel Macs have no built-in AI; use an AI
@@ -222,6 +222,20 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
 - **Find cameras:** ONVIF discovery on this subnet and any other subnets you
   list, sign-in with your usual camera login, and an optional hourly check
   that tells you when a new camera appears.
+- **Adding cameras by address:** the camera form asks for the address, port,
+  protocol, user name and password once, then the main and sub stream paths. A
+  brand list fills the usual paths, Find via ONVIF asks the camera, and a pasted
+  `rtsp://` address is split for you. The [camera guide](docs/cameras.md) lists
+  paths and known problems by brand. Transport is Auto, TCP or UDP (Auto tries
+  UDP when a camera only offers it).
+- **Hardware decoding:** on Linux, motion detection decodes on an Intel or AMD
+  graphics card (VAAPI or Quick Sync) when one passes a test decode at start,
+  and falls back to the processor. Cameras with burned-in text or privacy masks
+  use the sub stream for motion and re-encode recordings on the card's encoder.
+  Status says when a large camera has no sub stream and offers to find one.
+- **Camera report:** a text file with what a camera sends and its recent
+  errors, without user names or passwords, to attach to a bug report
+  (Settings > Cameras > the camera > Network > Camera report).
 - **Linked servers:** several sites in one interface.
 - **Users and per-camera access.** Three roles: viewers watch; operators also arm and
   disarm, move PTZ cameras, talk, record clips, keep and mark events and tune their cameras'
