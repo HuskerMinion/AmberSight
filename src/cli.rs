@@ -189,6 +189,9 @@ enum Commands {
         /// Only check; install nothing
         #[arg(long)]
         check: bool,
+        /// Do not ask before installing (for scripts)
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// For making releases: create a release signing key (kept offline)
     /// and print its public key
@@ -518,9 +521,9 @@ pub async fn run() -> Result<()> {
             let pair = pair.map(|v| (v[0].clone(), v[1].clone()));
             crate::capture::main(crate::capture::Opts { pair, unpair, yes, list }).await
         }
-        Commands::Update { config, check } => {
+        Commands::Update { config, check, yes } => {
             let cfg = Config::load(&config)?;
-            tokio::task::spawn_blocking(move || crate::update::cli(&cfg.update, &cfg.storage.data_dir, check)).await?
+            tokio::task::spawn_blocking(move || crate::update::cli(&cfg.update, &cfg.storage.data_dir, check, yes)).await?
         }
         Commands::ReleaseKeygen { out } => {
             let public = crate::update::keygen(std::path::Path::new(&out))?;

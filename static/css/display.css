@@ -1,0 +1,105 @@
+/* Display mode (/display, display.js): cameras edge to edge on black, overlays small and quiet,
+   readable from across a room. The settings panel and the pairing card use the app's tokens
+   (app.css), so they follow the light and dark themes. */
+html[data-display], html[data-display] body { height: 100%; overflow: hidden; }
+body.dsp { background: #000; color: var(--text); --sx: 0px; --sy: 0px; }
+body.dsp.dsp-idle, body.dsp.dsp-idle * { cursor: none; }
+html[data-display] #dsp { position: fixed; inset: 0; padding: 0; margin: 0; max-width: none; }
+
+.dsp-grid { position: absolute; inset: 0; display: grid; gap: 2px; background: #000; }
+.dsp-tile { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #0a0c0f; cursor: pointer; }
+.dsp-frame { position: absolute; inset: 0; }
+.dsp-media { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+.dsp-tile.offline .dsp-media { opacity: .45; filter: grayscale(.6); }
+.dsp-ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #8a95a3; font-size: calc(15px * var(--ts)); background: #0a0c0f; }
+.dsp-ph span { display: inline-flex; align-items: center; gap: 8px; }
+
+/* Text on pictures: white on a soft dark pill, the same in both themes (cameras are not themed). */
+.dsp-name, .dsp-badge, .dsp-plabel, .dsp-chip, .dsp-clock {
+  position: absolute; color: #f2f4f7; background: rgba(8, 10, 14, .55); border-radius: 8px; padding: 3px 9px;
+  font-size: clamp(12px, 1.15vw, 22px); line-height: 1.35; font-weight: 500; letter-spacing: .01em;
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); pointer-events: none; white-space: nowrap;
+}
+.dsp-name { left: 10px; bottom: 10px; max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; }
+.dsp-badge { right: 10px; top: 10px; color: #ffd1cc; background: rgba(120, 24, 16, .6); }
+/* Burn-in: everything that stands still moves a few pixels now and then (display.js shift()). */
+.dsp-shift, .dsp-ovl > div { transform: translate(var(--sx), var(--sy)); transition: transform 2s ease; }
+
+.dsp-big { position: absolute; inset: 0; z-index: 5; display: flex; gap: 2px; background: #000; }
+.dsp-big[data-n="2"] { flex-direction: row; }
+@media (orientation: portrait) { .dsp-big[data-n="2"] { flex-direction: column; } }
+.dsp-pane { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; cursor: pointer; animation: dspIn .25s ease; }
+@keyframes dspIn { from { opacity: 0; transform: scale(.985); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .dsp-pane { animation: none; } .dsp-shift, .dsp-ovl > div { transition: none; } }
+.dsp-plabel { left: 14px; top: 14px; display: inline-flex; align-items: center; gap: 10px; font-size: clamp(14px, 1.5vw, 28px); padding: 5px 12px; }
+.dsp-plabel .dsp-why:empty { display: none; }
+.dsp-plabel .dsp-why { font-weight: 700; }
+.dsp-dot { width: .6em; height: .6em; border-radius: 50%; background: #e8ecf1; flex: none; }
+.dsp-plabel[data-cls="person"] .dsp-dot { background: #ff7a45; } .dsp-plabel[data-cls="person"] .dsp-why { color: #ffb08f; }
+.dsp-plabel[data-cls="vehicle"] .dsp-dot { background: #6ea8ff; } .dsp-plabel[data-cls="vehicle"] .dsp-why { color: #a9caff; }
+.dsp-plabel[data-cls="animal"] .dsp-dot { background: #4cc38a; } .dsp-plabel[data-cls="animal"] .dsp-why { color: #8fe0b8; }
+.dsp-plabel[data-cls="package"] .dsp-dot, .dsp-plabel[data-cls="face"] .dsp-dot { background: #b78cff; }
+.dsp-plabel[data-cls="motion"] .dsp-dot { background: #e3c650; } .dsp-plabel[data-cls="motion"] .dsp-why { color: #f0dc8a; }
+.dsp-plabel[data-cls="clip"] .dsp-dot { background: #ec7869; }
+.dsp-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, .12); }
+.dsp-bar i { display: block; height: 100%; background: #f2a650; transform-origin: left; }
+
+.dsp-ovl { position: absolute; inset: 0; z-index: 7; pointer-events: none; }
+.dsp-tr { position: absolute; top: 14px; right: 14px; display: flex; gap: 10px; align-items: flex-start; }
+.dsp-tl { position: absolute; top: 14px; left: 14px; }
+.dsp-tr > *, .dsp-tl > * { position: static; }
+.dsp-clock { display: inline-flex; flex-direction: column; align-items: flex-end; padding: 4px 12px; }
+.dsp-clock[hidden], .dsp-chip[hidden] { display: none; }
+.dsp-clock b { font-size: clamp(18px, 2.2vw, 44px); font-weight: 600; line-height: 1.1; letter-spacing: -.01em; }
+.dsp-clock small { font-size: clamp(11px, .95vw, 18px); color: #c7ced8; }
+.dsp-chip { display: inline-flex; align-items: center; gap: 6px; }
+.dsp-chip .ic { width: 1em; height: 1em; }
+.dsp-chip.ok { color: #9fe3c0; } .dsp-chip.off { color: #c7ced8; } .dsp-chip.warn { color: #f0dc8a; }
+body.dsp-isbig .dsp-tl { top: auto; bottom: 14px; }
+
+.dsp-dim { position: absolute; inset: 0; z-index: 9; background: #000; pointer-events: none; transition: opacity 1.5s ease; }
+
+.dsp-ctl { position: absolute; z-index: 10; right: 14px; bottom: 14px; display: flex; gap: 8px; }
+.dsp-ctl[hidden] { display: none; }
+.dsp-ctl .btn { background: rgba(20, 24, 30, .82); color: #e8ecf1; border-color: rgba(255, 255, 255, .18); padding: 10px 14px; font-size: calc(14px * var(--ts)); }
+.dsp-ctl .btn:focus-visible { outline: 3px solid #f2a650; outline-offset: 2px; }
+
+/* Messages and the pairing card. */
+.dsp-msg { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--bg); overflow: auto; }
+.dsp-msg[hidden] { display: none; }
+.dsp-pair { max-width: 640px; width: 100%; text-align: center; color: var(--text); }
+.dsp-pair p { color: var(--muted); font-size: calc(16px * var(--ts)); }
+.dsp-brand { display: inline-flex; align-items: center; gap: 10px; font-size: 22px; color: var(--text); margin-bottom: 8px; }
+.dsp-brand .mark { width: 34px; height: 34px; color: var(--accent); }
+.dsp-brand span b { color: var(--accent); font-weight: 700; }
+.dsp-pair h1 { font-size: clamp(22px, 3vw, 40px); margin: 8px 0 18px; font-weight: 650; }
+.dsp-code { white-space: nowrap; font: 700 clamp(36px, 6.5vw, 104px)/1.1 var(--mono); letter-spacing: .08em; padding: 18px 26px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line2); display: inline-block; margin-bottom: 22px; color: var(--text); }
+.dsp-code.wait { color: var(--muted); min-width: 6em; }
+.dsp-steps { text-align: left; display: inline-block; margin: 0 auto 6px; padding-left: 1.4em; font-size: clamp(16px, 1.6vw, 24px); line-height: 1.6; }
+.dsp-sub { margin-top: 10px; }
+.dsp-alt a { color: var(--accent); }
+.dsp-empty { grid-column: 1 / -1; grid-row: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #c7ced8; font-size: calc(18px * var(--ts)); text-align: center; padding: 16px; }
+.dsp-empty p { margin: 4px 0; }
+
+/* Settings panel: a sheet over the cameras, big targets for touch and TV remotes. */
+.dsp-set { position: fixed; inset: 0; z-index: 30; background: var(--scrim); display: flex; justify-content: center; align-items: flex-start; overflow: auto; padding: 24px 16px; }
+.dsp-card { width: 100%; max-width: 620px; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 18px 20px; }
+.dsp-head { display: flex; align-items: center; justify-content: space-between; }
+.dsp-head h2 { margin: 0; font-size: calc(20px * var(--ts)); }
+.dsp-sec { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
+.dsp-sec h3 { margin: 0 0 8px; font-size: calc(13px * var(--ts)); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 650; }
+.dsp-f { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: calc(14px * var(--ts)); }
+.dsp-f > span { color: var(--muted); }
+.dsp-f select, .dsp-f input[type=number], .dsp-f input[type=time] { font: inherit; font-size: calc(15px * var(--ts)); padding: 9px 10px; border-radius: 10px; border: 1px solid var(--field-line); background: var(--surface2); color: var(--text); min-height: 42px; }
+.dsp-f input[type=range] { width: 100%; accent-color: var(--accent); }
+.dsp-row { display: flex; gap: 12px; } .dsp-row > * { flex: 1; }
+.dsp-c { display: flex; align-items: center; gap: 10px; min-height: 40px; font-size: calc(15px * var(--ts)); cursor: pointer; }
+.dsp-c input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+.dsp-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0 12px; max-height: 240px; overflow: auto; padding: 4px 2px; }
+.dsp-pick[hidden] { display: none; }
+.dsp-hint { color: var(--muted); font-size: calc(13px * var(--ts)); margin: 6px 0; }
+.dsp-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; }
+.dsp-foot .btn, .dsp-foot .primary { min-height: 42px; padding: 9px 16px; text-decoration: none; display: inline-flex; align-items: center; }
+.dsp-grow { flex: 1; }
+.dsp-set :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 560px) { .dsp-card { padding: 14px; border-radius: 12px; } .dsp-row { flex-direction: column; gap: 0; } }

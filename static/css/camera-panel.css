@@ -331,6 +331,7 @@ html[data-touch="1"] .ni-copy, html[data-touch="1"] .ni-bar .btn { min-height: 4
 .ca-r1 { grid-template-columns: minmax(0, 1fr) 5.5rem 6.5rem; }
 .ca-r2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .ca-cell { min-width: 0; }
+.ca-batdef { align-self: end; }
 .cs-drawer .cs-pane .ca .cs-f { display: flex; flex-direction: column; align-items: stretch; gap: 4px; margin: 0; min-width: 0; }
 .cs-drawer .cs-pane .ca .cs-f > span:first-child { font-size: var(--fs-s); }
 .ca .cs-f em { font-style: normal; color: var(--muted); margin-left: 4px; }

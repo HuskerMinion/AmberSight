@@ -623,7 +623,7 @@ impl Conn {
         };
         // A battery camera wakes for this; a stream still starting gets a moment.
         if h.running.read().unwrap().on_demand {
-            self.engine.wake_camera(h.id);
+            self.engine.wake_camera(h.id, "an RTSP viewer");
         }
         let deadline = Instant::now() + WAIT_FOR_STREAM;
         let info = loop {

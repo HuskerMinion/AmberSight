@@ -719,7 +719,7 @@ fn handle_command(engine: &Arc<Engine>, prefix: &str, topic: &str, payload: &[u8
         match camera_id_by_slug(engine, cam) {
             Some(id) => {
                 info!("mqtt: waking '{cam}'");
-                engine.wake_camera(id);
+                engine.wake_camera(id, "an MQTT wake message");
             }
             None => warn!("mqtt: wake for unknown camera '{cam}'"),
         }

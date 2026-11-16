@@ -63,8 +63,11 @@ impl CameraDetections {
 /// Subscribe to the camera's events for as long as this camera handle is
 /// the active occupant of its slot.
 pub(super) fn spawn_camera_events(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &CameraConfig) {
-    if let Some(uid) = cfg.uid.clone().filter(|u| !u.is_empty() && cfg.url.starts_with("baichuan://")) {
-        spawn_baichuan_poller(engine, handle, cfg, uid);
+    if crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
+        match cfg.battery_uid() {
+            Some(uid) => spawn_baichuan_poller(engine, handle, cfg, uid),
+            None => warn!("camera '{}': {NEEDS_UID}", cfg.name),
+        }
         return;
     }
     if let Some(ch) = cfg.reolink_channel {
@@ -157,6 +160,30 @@ pub fn note_battery(handle: &CameraHandle, b: &crate::ingest::baichuan::client::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_poller_starts_for_a_uid_that_is_only_in_the_address() {
+        use crate::ingest::baichuan::registry;
+        let engine = Engine::for_test(toml::from_str("").unwrap());
+        let uid = "TESTURLONLYUID0001";
+        let cfg: CameraConfig = toml::from_str(&format!("name = \"Argus\"\nurl = \"baichuan://127.0.0.1?uid={uid}\"\non_demand = true")).unwrap();
+        assert!(cfg.uid.is_none());
+        let h = super::super::make_handle(0, cfg.clone());
+        engine.cameras.write().unwrap().push(Some(h.clone()));
+        spawn_camera_events(engine.clone(), h, &cfg);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while registry::get(uid).is_none() && std::time::Instant::now() < until {
+            thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let started = registry::get(uid).is_some();
+        // Remove the camera: the session ends and unregisters.
+        engine.cameras.write().unwrap()[0] = None;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while engine.live_sessions.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < until {
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(started, "no session was started from the uid in the address");
+    }
 
     #[test]
     fn a_battery_report_is_kept_as_the_latest_level() {
@@ -288,6 +315,9 @@ fn spawn_reolink_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &Ca
     });
 }
 
+/// Why a battery Argus camera with no UID does nothing.
+pub(crate) const NEEDS_UID: &str = "a battery Argus needs its UID (Reolink app > Device info); set it in the camera's settings";
+
 /// Keep a persistent Baichuan session to a battery Argus (no hub): it reports
 /// motion and battery and streams video on demand. Registers the client so the
 /// ingest reader (`recorder::open_stream`) can pull frames from the same
@@ -317,7 +347,7 @@ fn spawn_baichuan_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &C
         let _done = Done(engine.clone());
         // (Here, not before the spawn: the caller holds the camera list's write lock.)
         let dup = engine.cameras.read().unwrap().iter().flatten().any(|h| {
-            h.id != handle.id && h.cfg.read().unwrap().uid.as_deref() == Some(uid.as_str())
+            h.id != handle.id && h.cfg.read().unwrap().battery_uid().as_deref() == Some(uid.as_str())
         });
         if dup {
             warn!("camera '{name}': another camera has the same uid; only one of them will work");

@@ -13,6 +13,7 @@ pub mod push;
 pub mod fmp4;
 pub mod g711;
 pub mod live;
+pub mod mp4read;
 pub mod preroll;
 pub mod recorder;
 pub mod splice;

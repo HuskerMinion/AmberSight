@@ -15,7 +15,12 @@ mod digest;
 mod missing;
 pub use missing::path_hash;
 mod plates;
+mod preupgrade;
 mod snooze;
+mod bookmarks;
+pub(crate) mod walk;
+pub use walk::{list_dir_files, ListedFile};
+pub use bookmarks::{Bookmark, BookmarkCap, BookmarkFilter, KEEP_WINDOW_MS};
 pub use account::{AccountRequest, TokenRow};
 pub use devices::StoredSession;
 pub use digest::DigestEvent;
@@ -24,7 +29,10 @@ pub use plates::{PlateFilter, PlateRow};
 /// The newest database version (`PRAGMA user_version`; see `Db::init`). A
 /// number is never used twice, also one only a pre-release build used: a
 /// database it touched is at that number already, and would skip the step.
-const SCHEMA_VERSION: i64 = 28;
+/// Events whose rows `smart_prune` removes in one hold of the database.
+const SMART_PRUNE_BATCH: usize = 200;
+
+const SCHEMA_VERSION: i64 = 30;
 
 /// Remove the sessions a pre-release build kept for demo sign-in (a `demo`
 /// column it added to `sessions`), if there are any.
@@ -165,6 +173,39 @@ impl Drop for TimedLock<'_> {
     }
 }
 
+/// The longest recording's length is kept in `seg_longest` by triggers (it only grows), so
+/// opening the database does not read every segment row for it. Made, and counted once, when
+/// missing; the triggers belong to the database, so an older version run in between keeps it too.
+fn ensure_seg_longest(conn: &mut Connection) -> Result<()> {
+    let have: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE (type = 'table' AND name = 'seg_longest') OR (type = 'trigger' AND name IN ('seg_longest_ins', 'seg_longest_upd'))",
+        [],
+        |r| r.get(0),
+    )?;
+    let filled: Option<i64> = if have == 3 { conn.query_row("SELECT ms FROM seg_longest WHERE id = 1", [], |r| r.get(0)).optional()? } else { None };
+    if filled.is_some() {
+        return Ok(());
+    }
+    let t0 = std::time::Instant::now();
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TRIGGER IF EXISTS seg_longest_ins; DROP TRIGGER IF EXISTS seg_longest_upd; DROP TABLE IF EXISTS seg_longest;
+         CREATE TABLE seg_longest (id INTEGER PRIMARY KEY, ms INTEGER NOT NULL);
+         INSERT INTO seg_longest (id, ms) SELECT 1, COALESCE(MAX(end_ms - start_ms), 0) FROM segments;
+         CREATE TRIGGER seg_longest_ins AFTER INSERT ON segments BEGIN
+             UPDATE seg_longest SET ms = MAX(ms, NEW.end_ms - NEW.start_ms) WHERE id = 1;
+         END;
+         CREATE TRIGGER seg_longest_upd AFTER UPDATE OF start_ms, end_ms ON segments BEGIN
+             UPDATE seg_longest SET ms = MAX(ms, NEW.end_ms - NEW.start_ms) WHERE id = 1;
+         END;",
+    )?;
+    tx.commit()?;
+    if t0.elapsed().as_secs() >= 5 {
+        tracing::info!("database: worked out the longest recording once, in {} s", t0.elapsed().as_secs());
+    }
+    Ok(())
+}
+
 /// Keep the one-line verdict of an AI review (see `ai_review_sums`).
 fn put_review_sum(conn: &Connection, event_id: &str, camera: &str, start: i64, alerted: bool, detail: &str) {
     if let Ok(d) = serde_json::from_str::<serde_json::Value>(detail) {
@@ -192,6 +233,9 @@ pub struct Db {
     longest_segment: std::sync::atomic::AtomicI64,
     /// True while the start-up indexing of existing recordings runs.
     importing: std::sync::atomic::AtomicBool,
+    /// (folder, camera) pairs this run's start-up walk read in full or skipped by a matching mark:
+    /// the only ones a clean stop may mark as fully indexed.
+    walk_ok: Mutex<std::collections::HashSet<(String, String)>>,
     import_started: Mutex<Option<std::time::Instant>>,
     import_warned: std::sync::atomic::AtomicBool,
     /// The one-line verdicts were checked against the reviews in this run
@@ -426,6 +470,8 @@ fn smart_row_from(r: &rusqlite::Row) -> rusqlite::Result<SmartRow> {
 
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
+        // An older layout is about to be upgraded: keep a copy of it first.
+        preupgrade::copy_before_upgrade(path, SCHEMA_VERSION);
         let conn = Connection::open(path).map_err(|e| {
             let hint = crate::lockdown::access_hint(path).map(|h| format!(" ({h})")).unwrap_or_default();
             anyhow::Error::new(e).context(format!("open {}{hint}", path.display()))
@@ -1052,6 +1098,53 @@ impl Db {
             // at 28, so the next real change must be 29 on all of them.
             conn.pragma_update(None, "user_version", 28)?;
         }
+        if version < 29 {
+            // v29: timeline bookmarks (db/bookmarks.rs). `camera` is a slug, NULL = all
+            // cameras; kept ones hold the recordings around them back from cleanup.
+            // `user` made it (shown); `owner` may edit it (NULL once that account is deleted).
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS bookmarks (
+                    id INTEGER PRIMARY KEY,
+                    camera TEXT,
+                    at_ms INTEGER NOT NULL,
+                    note TEXT NOT NULL,
+                    user TEXT NOT NULL,
+                    owner TEXT,
+                    created_ms INTEGER NOT NULL,
+                    updated_ms INTEGER NOT NULL,
+                    keep INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_bookmarks_at ON bookmarks (at_ms);
+                 CREATE INDEX IF NOT EXISTS idx_bookmarks_keep ON bookmarks (at_ms) WHERE keep = 1;",
+            )?;
+            tx.pragma_update(None, "user_version", 29)?;
+            tx.commit()?;
+        }
+        if version < 30 {
+            // v30: what a start-up walk of the recording folders needs to skip a folder that has
+            // not changed (`walk_marks`); the longest recording is kept by `seg_longest` (below).
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS walk_marks (
+                    folder TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    dir_mtime_ns INTEGER NOT NULL,
+                    files INTEGER NOT NULL,
+                    full_ms INTEGER NOT NULL,
+                    PRIMARY KEY (folder, camera)
+                 );",
+            )?;
+            tx.pragma_update(None, "user_version", 30)?;
+            tx.commit()?;
+        }
+        ensure_seg_longest(&mut conn)?;
+        // A development build made the v29 bookmarks table without `owner`: add
+        // it (whoever made a bookmark owns it), so the bookmark queries work there.
+        let has_owner: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('bookmarks') WHERE name = 'owner'", [], |r| r.get(0))?;
+        if has_owner == 0 {
+            conn.execute_batch("ALTER TABLE bookmarks ADD COLUMN owner TEXT; UPDATE bookmarks SET owner = user;")?;
+        }
         // Demo sessions that pre-release build kept: never valid (demo sessions
         // live in memory only). Done at every start: its databases are at 28
         // already. The column itself stays, unused.
@@ -1072,8 +1165,8 @@ impl Db {
             tx.execute_batch("DELETE FROM seg_totals; DELETE FROM seg_days; INSERT OR REPLACE INTO seg_totals_fill (id, upto) VALUES (1, 0);")?;
             tx.commit()?;
         }
-        let longest: i64 = conn.query_row("SELECT COALESCE(MAX(end_ms - start_ms), 0) FROM segments", [], |r| r.get(0))?;
-        let db = Db { conn: Mutex::new(conn), ro: Vec::new(), ro_next: std::sync::atomic::AtomicUsize::new(0), longest_segment: std::sync::atomic::AtomicI64::new(longest), importing: std::sync::atomic::AtomicBool::new(false), import_started: Mutex::new(None), import_warned: std::sync::atomic::AtomicBool::new(false), sums_checked: std::sync::atomic::AtomicBool::new(false), totals_ready: std::sync::atomic::AtomicBool::new(false), smart_hint: Mutex::new(None), smart_counts_cache: Mutex::new(None) };
+        let longest: i64 = conn.query_row("SELECT ms FROM seg_longest WHERE id = 1", [], |r| r.get(0))?;
+        let db = Db { conn: Mutex::new(conn), ro: Vec::new(), ro_next: std::sync::atomic::AtomicUsize::new(0), longest_segment: std::sync::atomic::AtomicI64::new(longest), importing: std::sync::atomic::AtomicBool::new(false), walk_ok: Mutex::new(Default::default()), import_started: Mutex::new(None), import_warned: std::sync::atomic::AtomicBool::new(false), sums_checked: std::sync::atomic::AtomicBool::new(false), totals_ready: std::sync::atomic::AtomicBool::new(false), smart_hint: Mutex::new(None), smart_counts_cache: Mutex::new(None) };
         // A small index is counted now; a big one in the background (see fill_segment_totals).
         let max_id: i64 = db.lock().query_row("SELECT COALESCE(MAX(id), 0) FROM segments", [], |r| r.get(0))?;
         if max_id <= SEG_TOTALS_FILL_NOW {
@@ -1406,9 +1499,53 @@ impl Db {
     #[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
     /// Drop fingerprints of events that no longer exist.
     pub fn smart_prune(&self) -> Result<usize> {
-        let conn = self.lock();
-        let n = conn.execute("DELETE FROM smart_vecs WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.id = smart_vecs.event_id)", [])?;
-        conn.execute("DELETE FROM smart_done WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.id = smart_done.event_id)", [])?;
+        // The slow part is finding the orphans. That is read on the read-only
+        // connection and from the indexes only (the picture fingerprints in
+        // the table are big, a scan of the table reads them all), so nothing
+        // waits for it. The deletes then go in small batches, the database
+        // let go of between them.
+        let orphans = |sql: &str| -> Result<Vec<String>> {
+            let conn = self.lock_ro();
+            let mut ids = conn.prepare(sql)?;
+            let ids: Vec<String> = ids.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let mut alive = conn.prepare_cached("SELECT 1 FROM events WHERE id = ?1")?;
+            let mut gone = Vec::new();
+            for id in ids {
+                if !alive.exists(params![id])? {
+                    gone.push(id);
+                }
+            }
+            Ok(gone)
+        };
+        let vec_orphans = orphans("SELECT DISTINCT event_id FROM smart_vecs")?;
+        let done_orphans = orphans("SELECT event_id FROM smart_done")?;
+        let mut n = 0;
+        for batch in vec_orphans.chunks(SMART_PRUNE_BATCH) {
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            {
+                let mut del = tx.prepare_cached("DELETE FROM smart_vecs WHERE event_id = ?1")?;
+                for id in batch {
+                    n += del.execute(params![id])?;
+                }
+            }
+            tx.commit()?;
+            drop(conn);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for batch in done_orphans.chunks(SMART_PRUNE_BATCH) {
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            {
+                let mut del = tx.prepare_cached("DELETE FROM smart_done WHERE event_id = ?1")?;
+                for id in batch {
+                    del.execute(params![id])?;
+                }
+            }
+            tx.commit()?;
+            drop(conn);
+            std::thread::sleep(Duration::from_millis(2));
+        }
         Ok(n)
     }
 
@@ -1703,6 +1840,29 @@ impl Db {
         self.longest_segment.fetch_max(seg.end_ms - seg.start_ms, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The longest recording's length again, from the recordings now indexed. The kept value
+    /// only grows, so one bogus long row (a clock jump) would widen every overlap query for
+    /// good; this lets it shrink once the row is gone. The full read runs off the write
+    /// connection; the write itself is brief and never goes below a recent row's length.
+    /// Returns (before, after) in ms.
+    pub fn recompute_longest_segment(&self) -> Result<(i64, i64)> {
+        let scanned: i64 = self.lock_ro().query_row("SELECT COALESCE(MAX(end_ms - start_ms), 0) FROM segments", [], |r| r.get(0))?;
+        let conn = self.lock();
+        // Rows added or lengthened while the scan ran are recent ones.
+        let recent: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(end_ms - start_ms), 0) FROM (SELECT start_ms, end_ms FROM segments ORDER BY id DESC LIMIT 5000)",
+            [],
+            |r| r.get(0),
+        )?;
+        let now = scanned.max(recent);
+        let before: i64 = conn.query_row("SELECT ms FROM seg_longest WHERE id = 1", [], |r| r.get(0))?;
+        if now != before {
+            conn.execute("UPDATE seg_longest SET ms = ?1 WHERE id = 1", [now])?;
+        }
+        self.longest_segment.store(now, std::sync::atomic::Ordering::Relaxed);
+        Ok((before, now))
+    }
+
     /// Earliest start a segment overlapping `from_ms` can have.
     fn earliest_start(&self, from_ms: i64) -> i64 {
         // (A minute of slack over the longest one stored.)
@@ -1739,6 +1899,31 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The highest recording id (0 with none).
+    pub fn max_segment_id(&self) -> Result<i64> {
+        Ok(self.lock_ro().query_row("SELECT COALESCE(MAX(id), 0) FROM segments", [], |r| r.get(0))?)
+    }
+
+    /// How many recordings are in the format the layout index holds.
+    pub fn native_segment_count(&self) -> Result<i64> {
+        Ok(self.lock_ro().query_row("SELECT COUNT(*) FROM segments WHERE kind IN ('continuous', 'triggered', 'sub')", [], |r| r.get(0))?)
+    }
+
+    /// Recordings with `after_id < id <= through_id`, by id.
+    pub fn segments_after_id(&self, after_id: i64, through_id: i64, limit: usize) -> Result<Vec<(i64, SegmentRow)>> {
+        let conn = self.lock_ro();
+        let mut st = conn.prepare(&format!(
+            "SELECT id, {SEG_COLS} FROM segments WHERE id > ?1 AND id <= ?2 ORDER BY id LIMIT ?3"
+        ))?;
+        let rows = st.query_map(params![after_id, through_id, limit as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                SegmentRow { path: r.get(1)?, start_ms: r.get(2)?, end_ms: r.get(3)?, bytes: r.get(4)?, video_frames: r.get(5)?, kind: r.get(6)?, folder: r.get(7)? },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Segment containing `at_ms` (start inclusive, end exclusive).
     pub fn segment_at(&self, camera: &str, at_ms: i64) -> Result<Option<SegmentRow>> {
         let conn = self.lock();
@@ -1751,7 +1936,9 @@ impl Db {
         Ok(rows.next().transpose()?)
     }
 
-    /// Oldest segments across all cameras as `(camera, row)`.
+    /// Oldest segments across all cameras as `(camera, row)` (retention uses
+    /// `oldest_unkept_segments`, which leaves out what kept bookmarks hold).
+    #[cfg(test)]
     pub fn oldest_segments(&self, limit: usize) -> Result<Vec<(String, SegmentRow)>> {
         let conn = self.lock();
         let mut st = conn.prepare(&format!(
@@ -1781,7 +1968,8 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Recordings of one folder in the order a full folder gives them up:
+    /// Recordings of one folder in the order a full folder gives them up
+    /// (never those a kept bookmark holds, see bookmarks::KEEP_WINDOW_MS):
     /// quiet footage and event footage that started before `events_kept_from_ms`
     /// oldest first, then the newer event footage oldest first.
     /// Each row comes with whether it is kept event footage (the second part).
@@ -1789,14 +1977,14 @@ impl Db {
         let conn = self.lock();
         let mut out: Vec<(SegmentRow, bool)> = {
             let mut st = conn.prepare(&format!(
-                "SELECT {SEG_COLS} FROM segments WHERE folder = ?1 AND (event = 0 OR start_ms < ?2) ORDER BY start_ms, id LIMIT ?3"
+                "SELECT {SEG_COLS} FROM segments WHERE folder = ?1 AND (event = 0 OR start_ms < ?2) AND NOT {kept} ORDER BY start_ms, id LIMIT ?3", kept = bookmarks::KEPT_BY_BOOKMARK
             ))?;
             let rows = st.query_map(params![folder, events_kept_from_ms, limit as i64], |r| Ok((segment_from_row(r)?, false)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         if out.len() < limit {
             let mut st = conn.prepare(&format!(
-                "SELECT {SEG_COLS} FROM segments WHERE folder = ?1 AND event = 1 AND start_ms >= ?2 ORDER BY start_ms, id LIMIT ?3"
+                "SELECT {SEG_COLS} FROM segments WHERE folder = ?1 AND event = 1 AND start_ms >= ?2 AND NOT {kept} ORDER BY start_ms, id LIMIT ?3", kept = bookmarks::KEPT_BY_BOOKMARK
             ))?;
             let rows = st.query_map(params![folder, events_kept_from_ms, (limit - out.len()) as i64], segment_from_row)?;
             for r in rows {
@@ -1814,6 +2002,15 @@ impl Db {
         ))?;
         let rows = st.query_map(params![folder, limit as i64], segment_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Start of the oldest recording indexed in a folder, read on the read-only connection (the
+    /// storage plan asks it for each folder, and on a cold drive it can take a while).
+    pub fn oldest_segment_start_in(&self, folder: &str) -> Result<Option<i64>> {
+        Ok(self
+            .lock_ro()
+            .query_row("SELECT start_ms FROM segments WHERE folder = ?1 ORDER BY start_ms, id LIMIT 1", params![folder], |r| r.get(0))
+            .optional()?)
     }
 
     /// Whether the running recording totals are complete (checked again
@@ -2123,6 +2320,24 @@ impl Db {
         Ok(())
     }
 
+    pub fn ui_delete(&self, scope: &str, key: &str) -> Result<()> {
+        self.lock().execute("DELETE FROM ui_kv WHERE scope = ?1 AND key = ?2", params![scope, key])?;
+        Ok(())
+    }
+
+    /// The (key, value) pairs of one scope whose key starts with `prefix`.
+    pub fn ui_scope_prefix(&self, scope: &str, prefix: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut st = conn.prepare("SELECT key, value FROM ui_kv WHERE scope = ?1 AND substr(key, 1, length(?2)) = ?2 ORDER BY key")?;
+        let rows = st.query_map(params![scope, prefix], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Delete the keys of one scope that start with `prefix`.
+    pub fn ui_delete_prefix(&self, scope: &str, prefix: &str) -> Result<usize> {
+        Ok(self.lock().execute("DELETE FROM ui_kv WHERE scope = ?1 AND substr(key, 1, length(?2)) = ?2", params![scope, prefix])?)
+    }
+
     /// All (key, value) pairs of one scope.
     pub fn ui_scope(&self, scope: &str) -> Result<Vec<(String, String)>> {
         let conn = self.lock();
@@ -2295,10 +2510,18 @@ impl Db {
         tx.execute("UPDATE faces SET camera = ?2 WHERE camera = ?1", params![crate::config::slug(old), crate::config::slug(new)])?;
         tx.execute("UPDATE smart_vecs SET camera = ?2 WHERE camera = ?1", params![old, new])?;
         tx.execute("UPDATE plates SET camera = ?2 WHERE camera = ?1", params![crate::config::slug(old), crate::config::slug(new)])?;
+        tx.execute("UPDATE bookmarks SET camera = ?2 WHERE camera = ?1", params![crate::config::slug(old), crate::config::slug(new)])?;
         tx.execute("UPDATE tamper_log SET camera = ?2 WHERE camera = ?1", params![old, new])?;
         tx.execute("UPDATE camera_outages SET camera = ?2 WHERE camera = ?1", params![old, new])?;
         tx.execute("UPDATE activity_days SET camera = ?2 WHERE camera = ?1", params![old, new])?;
         tx.execute("UPDATE activity_meta SET camera = ?2 WHERE camera = ?1", params![old, new])?;
+        // What filling holes from the camera's card tried (`{slug}|{from_ms}`) and its recording mode (`{slug}`).
+        let (so, sn) = (crate::config::slug(old), crate::config::slug(new));
+        tx.execute(
+            "UPDATE OR REPLACE ui_kv SET key = ?2 || substr(key, length(?1) + 1) WHERE scope = 'card_fill' AND substr(key, 1, length(?1)) = ?1",
+            params![format!("{so}|"), format!("{sn}|")],
+        )?;
+        tx.execute("UPDATE OR REPLACE ui_kv SET key = ?2 WHERE scope = 'card_fill_mode' AND key = ?1", params![so, sn])?;
         tx.commit()?;
         Ok(())
     }
@@ -2615,7 +2838,7 @@ impl Db {
 
     /// Event ids that still exist, of those given.
     pub fn existing_events(&self, ids: &[String]) -> Result<std::collections::HashSet<String>> {
-        let conn = self.lock();
+        let conn = self.lock_ro();
         let mut st = conn.prepare("SELECT 1 FROM events WHERE id = ?1")?;
         let mut out = std::collections::HashSet::new();
         for id in ids {
@@ -2781,40 +3004,6 @@ impl Db {
         Ok(report)
     }
 
-    /// Index the recordings already on disk in every folder. The walk holds
-    /// no lock; what is found is added a camera at a time in small batches
-    /// (see `insert_found_segments`), so a stop half way loses nothing: the
-    /// next run adds what is left. Returns how many were added.
-    pub fn import_existing_recordings(&self, data_dir: &Path, folders: &[(String, PathBuf)], fallback_secs: u64) -> Result<usize> {
-        let started = std::time::Instant::now();
-        let mut added = 0;
-        let mut seen = 0;
-        let mut roots = vec![(String::new(), data_dir.to_path_buf())];
-        roots.extend(folders.iter().cloned());
-        for (folder, root) in &roots {
-            let cams = root.join("cameras");
-            let mut slugs: Vec<_> = match std::fs::read_dir(&cams) {
-                Ok(rd) => rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).collect(),
-                Err(_) => Vec::new(),
-            };
-            slugs.sort_by_key(|e| e.file_name());
-            for cam in slugs {
-                let slug = cam.file_name().to_string_lossy().into_owned();
-                let found = scan_segment_dir(folder, root, &slug, fallback_secs);
-                seen += found.len();
-                added += self.insert_found_segments(&found)?;
-            }
-        }
-        let took = started.elapsed();
-        if took.as_secs() >= 5 {
-            tracing::info!(
-                "indexing existing recordings looked at {seen} files and added {added} in {} s",
-                took.as_secs()
-            );
-        }
-        Ok(added)
-    }
-
     /// Index the finished recordings in these cameras' folders
     /// (slug, folder name, folder root): the periodic scan for cameras on
     /// the ffmpeg pipeline, whose recordings nothing else reports.
@@ -2842,6 +3031,20 @@ impl Db {
         let mut found = Vec::new();
         for (slug, folder, root) in dirs {
             found.extend(scan_segment_dir(folder, root, slug, fallback_secs).into_iter().filter(|f| f.end_ms >= since_ms));
+        }
+        if found.is_empty() {
+            return Ok(0);
+        }
+        self.insert_found_segments(&found)
+    }
+
+    /// At a clean stop, after every recorder has closed its file: index the last recordings of
+    /// these cameras, the one still within its writing time included (the 15 s scan leaves
+    /// that one out). Only files that ended at or after `since_ms` are added.
+    pub fn import_final_camera_dirs(&self, dirs: &[(String, String, PathBuf)], fallback_secs: u64, since_ms: i64) -> Result<usize> {
+        let mut found = Vec::new();
+        for (slug, folder, root) in dirs {
+            found.extend(scan_segment_dir_ex(folder, root, slug, fallback_secs, true).0.into_iter().filter(|f| f.end_ms >= since_ms));
         }
         if found.is_empty() {
             return Ok(0);
@@ -2940,21 +3143,36 @@ struct FoundSegment {
 /// needed). Start times come from the previous file of the same run, else
 /// `fallback_secs` before the file's time.
 fn scan_segment_dir(folder: &str, root: &Path, slug: &str, fallback_secs: u64) -> Vec<FoundSegment> {
+    scan_segment_dir_ex(folder, root, slug, fallback_secs, false).0
+}
+
+/// [`scan_segment_dir`], also telling whether a file that may still be being written was left
+/// out (`ignore_open` false) and whether the folder could be listed at all. With `ignore_open`
+/// every file counts (only when nothing is recording any more).
+fn scan_segment_dir_ex(folder: &str, root: &Path, slug: &str, fallback_secs: u64, ignore_open: bool) -> (Vec<FoundSegment>, bool, bool) {
     let seg_dir = root.join("cameras").join(slug).join("segments");
-    let Ok(rd) = std::fs::read_dir(&seg_dir) else { return Vec::new() };
+    let Some(listing) = walk::list_dir_files(&seg_dir, &mut || {}) else { return (Vec::new(), false, false) };
+    let (found, skipped_open) = found_from_listing_ex(folder, root, slug, fallback_secs, &listing, ignore_open);
+    (found, skipped_open, true)
+}
+
+/// The finished recordings among the entries of a camera's segments folder.
+fn found_from_listing(folder: &str, root: &Path, slug: &str, fallback_secs: u64, listing: &[walk::ListedFile]) -> Vec<FoundSegment> {
+    found_from_listing_ex(folder, root, slug, fallback_secs, listing, false).0
+}
+
+/// [`found_from_listing`]; the flag says a file still within its writing time was left out.
+fn found_from_listing_ex(folder: &str, root: &Path, slug: &str, fallback_secs: u64, listing: &[walk::ListedFile], ignore_open: bool) -> (Vec<FoundSegment>, bool) {
+    let mut skipped_open = false;
     // (prefix, number, path, mtime ms, bytes)
     let mut files: Vec<(String, u32, std::path::PathBuf, i64, i64)> = Vec::new();
-    for e in rd.filter_map(|e| e.ok()) {
-        let p = e.path();
-        let Some(name) = p.file_name().and_then(|n| n.to_str()) else { continue };
-        let Some((prefix, num)) = split_segment_name(name) else { continue };
-        let Ok(meta) = e.metadata() else { continue };
-        if !meta.is_file() {
+    for e in listing {
+        let Some((prefix, num)) = split_segment_name(&e.name) else { continue };
+        if !e.is_file {
             continue;
         }
-        let mtime = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok());
-        let Some(mtime) = mtime else { continue };
-        files.push((prefix.to_string(), num, p.clone(), mtime.as_millis() as i64, meta.len() as i64));
+        let Some(mtime_ms) = e.mtime_ms else { continue };
+        files.push((prefix.to_string(), num, e.path.clone(), mtime_ms, e.bytes));
     }
     files.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
     let fallback_ms = fallback_secs as i64 * 1000;
@@ -2976,7 +3194,8 @@ fn scan_segment_dir(folder: &str, root: &Path, slug: &str, fallback_secs: u64) -
             _ => None,
         };
         prev = Some((prefix, *num, *end_ms));
-        if still_open(*end_ms) {
+        if !ignore_open && still_open(*end_ms) {
+            skipped_open = true;
             continue;
         }
         // Sub-stream files (the built-in reader's, or fragmented MP4 from
@@ -2993,7 +3212,7 @@ fn scan_segment_dir(folder: &str, root: &Path, slug: &str, fallback_secs: u64) -
             kind,
         });
     }
-    out
+    (out, skipped_open)
 }
 
 /// The spans a signal was on in [from, to], given its state at `from` and
@@ -3155,7 +3374,7 @@ mod tests {
         // A fresh database.
         let fresh = dir.join("fresh.db");
         drop(Db::open(&fresh).unwrap());
-        assert_eq!(version(&fresh), 28);
+        assert_eq!(version(&fresh), SCHEMA_VERSION);
         // One at 27 (this release's schema before the step).
         let v27 = dir.join("v27.db");
         {
@@ -3164,7 +3383,7 @@ mod tests {
         }
         rusqlite::Connection::open(&v27).unwrap().pragma_update(None, "user_version", 27).unwrap();
         let db = Db::open(&v27).unwrap();
-        assert_eq!((version(&v27), users(&db)), (28, vec!["ann".to_string()]));
+        assert_eq!((version(&v27), users(&db)), (SCHEMA_VERSION, vec!["ann".to_string()]));
         drop(db);
         // One the pre-release build left at 28, with a demo session kept in its column.
         let pre = dir.join("pre.db");
@@ -3176,7 +3395,7 @@ mod tests {
             c.pragma_update(None, "user_version", 28).unwrap();
         }
         let db = Db::open(&pre).unwrap();
-        assert_eq!((version(&pre), users(&db)), (28, vec!["ann".to_string()]), "the demo session is gone, the other kept");
+        assert_eq!((version(&pre), users(&db)), (SCHEMA_VERSION, vec!["ann".to_string()]), "the demo session is gone, the other kept");
         // A new session there still saves (the unused column has a default).
         db.save_session(&stored("h2", "bob")).unwrap();
         assert_eq!(users(&db), vec!["ann".to_string(), "bob".to_string()]);
@@ -3956,6 +4175,31 @@ mod tests {
         }
         // Equal start times both come, once each.
         assert_eq!(seen, vec!["a2", "b1", "a1", "b0"]);
+    }
+
+    #[test]
+    fn segments_since_a_finished_layout_pass() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.max_segment_id().unwrap(), 0);
+        let row = |p: &str, a: i64| SegmentRow { path: p.into(), start_ms: a, end_ms: a + 10, bytes: 1, video_frames: 1, kind: "continuous".into(), folder: String::new() };
+        for (p, a) in [("a1", 100), ("a2", 200), ("a3", 300)] {
+            db.insert_segment("a", &row(p, a)).unwrap();
+        }
+        let done = db.max_segment_id().unwrap();
+        // Indexed after the pass: one recorded now, one found on disk (an older time).
+        db.insert_segment("a", &row("a4", 400)).unwrap();
+        db.insert_segment("a", &row("old", 10)).unwrap();
+        let through = db.max_segment_id().unwrap();
+        db.insert_segment("a", &row("later", 500)).unwrap();
+        let mut seen = Vec::new();
+        let mut after = done;
+        loop {
+            let page = db.segments_after_id(after, through, 1).unwrap();
+            let Some(&(last, _)) = page.last() else { break };
+            after = last;
+            seen.extend(page.into_iter().map(|(_, r)| r.path));
+        }
+        assert_eq!(seen, vec!["a4", "old"], "only those since, up to where this pass began");
     }
 
     #[test]

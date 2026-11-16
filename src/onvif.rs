@@ -545,6 +545,8 @@ struct DigestChallenge {
     nonce: String,
     opaque: Option<String>,
     qop_auth: bool,
+    /// The device says the nonce ran out (the login itself may be right).
+    stale: bool,
 }
 
 fn parse_digest_challenge(header: &str) -> Option<DigestChallenge> {
@@ -571,6 +573,7 @@ fn parse_digest_challenge(header: &str) -> Option<DigestChallenge> {
         nonce: map.get("nonce")?.clone(),
         opaque: map.get("opaque").cloned(),
         qop_auth: map.get("qop").map(|q| q.split(',').any(|x| x.trim() == "auth")).unwrap_or(false),
+        stale: map.get("stale").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
     })
 }
 
@@ -670,6 +673,9 @@ impl<'a> Client<'a> {
     pub(crate) fn call(&mut self, url_str: &str, action: &str, body: &str, secure: bool, timeout: Duration) -> Result<String> {
         let url = url::Url::parse(url_str).with_context(|| format!("bad url {url_str}"))?;
         let mut attempts = 0;
+        // Whether this call already took a new Digest challenge (a long-lived client has
+        // answered earlier calls; that must not stop a rotated nonce being taken once).
+        let mut took_challenge = false;
         loop {
             attempts += 1;
             let mut header = String::new();
@@ -691,11 +697,16 @@ impl<'a> Client<'a> {
             let resp = http_post(&url, action, &extra, &xml, timeout, self.stop);
             debug!(url = url_str, ms = started.elapsed().as_millis() as u64, ok = resp.is_ok(), "soap call");
             let resp = resp?;
+            // A second 401 after a Digest answer means the login was refused: asking again
+            // would only count as one more wrong password (cameras lock a login after a few),
+            // unless the device says the nonce was stale. Decided per call.
+            let answered = took_challenge;
             if resp.status == 401 && attempts < 3 {
-                if let Some(ch) = resp.www_authenticate.iter().find_map(|h| parse_digest_challenge(h)) {
+                if let Some(ch) = resp.www_authenticate.iter().find_map(|h| parse_digest_challenge(h)).filter(|c| !answered || c.stale) {
                     debug!("device wants HTTP Digest auth");
                     self.digest = Some(ch);
                     self.nc = 0;
+                    took_challenge = true;
                     continue;
                 }
             }
@@ -1070,5 +1081,73 @@ mod tests {
             credentials_from_url("rtsp://admin:p%40ss@h/x"),
             Some(("admin".into(), "p@ss".into()))
         );
+    }
+
+    /// A camera that refuses the login is asked once with the Digest answer, not again: every
+    /// extra try counts as a wrong password and cameras lock a login after a few.
+    #[test]
+    fn a_refused_digest_login_is_not_retried() {
+        use std::io::Write;
+        for (stale, want) in [("false", 2usize), ("true", 3)] {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen2 = seen.clone();
+            std::thread::spawn(move || {
+                for s in l.incoming() {
+                    let Ok(mut s) = s else { return };
+                    let _ = crate::test_ports::read_http_request(&mut s);
+                    seen2.fetch_add(1, Ordering::SeqCst);
+                    let _ = s.write_all(format!("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"r\", qop=\"auth\", nonce=\"n{}\", stale=\"{stale}\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", seen2.load(Ordering::SeqCst)).as_bytes());
+                }
+            });
+            let creds = Credentials { host: "127.0.0.1".into(), port, username: "u".into(), password: "p".into() };
+            let stop = AtomicBool::new(false);
+            let mut c = Client::new(&creds, &stop);
+            let e = c.call(&format!("http://127.0.0.1:{port}/onvif/device_service"), "", "<x/>", true, Duration::from_secs(5)).unwrap_err();
+            assert!(format!("{e}").contains("401"), "{e}");
+            assert_eq!(seen.load(Ordering::SeqCst), want, "stale={stale}");
+        }
+    }
+
+    /// A long-lived client (the events session) whose camera rotates its nonce without
+    /// `stale`: the next call takes the new challenge once, and a refusal after that is final.
+    #[test]
+    fn a_rotated_nonce_is_taken_on_a_later_call_but_a_refusal_is_not_repeated() {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { return };
+                let req = crate::test_ports::read_http_request(&mut s).0;
+                let k = seen2.fetch_add(1, Ordering::SeqCst) + 1;
+                // Requests 1 (no answer) -> 401 n1; 2 (answers n1) -> 200. Request 3 answers n1
+                // again -> the camera has rotated: 401 n2 (not stale). Request 4 answers n2 -> 200.
+                // After that every request is refused (wrong login) with a fresh nonce.
+                let ok = (k == 2 && req.contains("nonce=\"n1\"")) || (k == 4 && req.contains("nonce=\"n2\""));
+                let resp = if ok {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/soap+xml\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    let nonce = if k == 1 { "n1".to_string() } else { format!("n{}", k) };
+                    let nonce = if k == 3 { "n2".to_string() } else { nonce };
+                    format!("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"r\", qop=\"auth\", nonce=\"{nonce}\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                };
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        let creds = Credentials { host: "127.0.0.1".into(), port, username: "u".into(), password: "p".into() };
+        let stop = AtomicBool::new(false);
+        let mut c = Client::new(&creds, &stop);
+        let url = format!("http://127.0.0.1:{port}/onvif/device_service");
+        let _ = c.call(&url, "", "<x/>", true, Duration::from_secs(5));
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "first call: challenge then answer");
+        let _ = c.call(&url, "", "<x/>", true, Duration::from_secs(5));
+        assert_eq!(seen.load(Ordering::SeqCst), 4, "second call took the rotated nonce once");
+        let e = c.call(&url, "", "<x/>", true, Duration::from_secs(5)).unwrap_err();
+        assert!(format!("{e}").contains("401"), "{e}");
+        assert_eq!(seen.load(Ordering::SeqCst), 6, "a refusal after the answer is not repeated");
     }
 }

@@ -163,7 +163,7 @@ struct ParsedSegment {
 
 mod export;
 mod index;
-pub use index::{forget, moved, open_index, remember};
+pub use index::{checked_through, forget, layout_count, moved, open_index, remember, set_checked_through};
 
 fn be32(b: &[u8], at: usize) -> Result<u32> {
     Ok(u32::from_be_bytes(b.get(at..at + 4).context("truncated box")?.try_into().unwrap()))

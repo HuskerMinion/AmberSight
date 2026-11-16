@@ -2,6 +2,7 @@
 
 mod ai_check;
 mod battery_clips;
+pub mod card_fill;
 mod alerts;
 pub mod notify;
 pub mod health;
@@ -32,7 +33,7 @@ pub mod noisy;
 pub mod strangers;
 pub mod unusual;
 pub mod watchdog;
-mod reindex;
+pub(crate) mod reindex;
 pub mod smart;
 pub mod smart_rules;
 pub mod sound;
@@ -150,6 +151,10 @@ pub struct CameraState {
     /// whether the camera is currently asleep (not connected on purpose).
     pub wake_until: i64,
     pub sleeping: bool,
+    /// When it last woke from sleep (epoch ms; on-demand cameras).
+    pub woke_at_ms: i64,
+    /// What woke it last while it slept (for the "waking up" log line).
+    pub woken_by: Option<&'static str>,
     /// What the camera/hub itself says about sleeping (battery cameras).
     pub device_sleeping: Option<bool>,
     /// Its battery as last reported (battery cameras; None: not known).
@@ -267,6 +272,17 @@ pub struct OverlayVar {
 
 const MAX_EVENT_SECONDS: i64 = 30;
 
+/// Runs one start-up step, and says so when it took 5 s or more (a start that is slow
+/// should show which step was).
+fn timed_step<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let t0 = std::time::Instant::now();
+    let out = f();
+    if t0.elapsed().as_secs() >= 5 {
+        info!("start-up: {what} took {} s", t0.elapsed().as_secs());
+    }
+    out
+}
+
 impl Engine {
     pub fn start(config: Config, config_path: String) -> anyhow::Result<Arc<Engine>> {
         // Camera connections on Windows: a receive buffer large enough to
@@ -282,9 +298,9 @@ impl Engine {
         std::fs::create_dir_all(&data_dir).ok();
         std::fs::create_dir_all(data_dir.join("clips")).ok();
         std::fs::create_dir_all(data_dir.join("thumbs")).ok();
-        crate::transcode::cache::init(&data_dir, crate::transcode::cache::Limits::from_config(&config.transcode.sanitized().0));
-        let db = Arc::new(crate::db::Db::open(&data_dir.join("ambersight.db"))?);
-        crate::ingest::splice::open_index(&data_dir.join("layouts.db"));
+        timed_step("transcode cache", || crate::transcode::cache::init(&data_dir, crate::transcode::cache::Limits::from_config(&config.transcode.sanitized().0)));
+        let db = Arc::new(timed_step("opening the database", || crate::db::Db::open(&data_dir.join("ambersight.db")))?);
+        timed_step("opening the layout index", || crate::ingest::splice::open_index(&data_dir.join("layouts.db")));
         // Reviews from before the one-line verdicts were kept get theirs, a little at a time.
         {
             let db = db.clone();
@@ -307,7 +323,7 @@ impl Engine {
         }
         // One-time move of events.jsonl into the database (quick, and the
         // events should be there before cameras start).
-        match db.import_events_log(&data_dir) {
+        match timed_step("importing the events log", || db.import_events_log(&data_dir)) {
             Ok(r) if r.events_imported + r.events_skipped > 0 => {
                 info!("database: imported {} events ({} unreadable lines skipped)", r.events_imported, r.events_skipped)
             }
@@ -354,7 +370,7 @@ impl Engine {
                 }
             });
         }
-        let ai = match (&config.ai.enabled, &config.ai.model) {
+        let ai = timed_step("loading the AI", || match (&config.ai.enabled, &config.ai.model) {
             (true, Some(model)) => match crate::ai::AiDetector::load_on(model, config.ai.threads, config.ai.gpu, config.ai.gpu_name.as_deref(), config.ai.gpu_memory_mb) {
                 Ok(d) => {
                     info!("AI: loaded {} ({}x{} input, on {})", model.display(), d.input_size(), d.input_size(), d.gpu_name().unwrap_or("CPU"));
@@ -366,8 +382,8 @@ impl Engine {
                 }
             },
             _ => None,
-        };
-        let manual = profiles::saved_manual(&db, &config);
+        });
+        let manual = timed_step("reading the saved profile", || profiles::saved_manual(&db, &config));
         let engine = Arc::new(Engine {
             config: Arc::new(Mutex::new(config)),
             cameras: RwLock::new(Vec::new()),
@@ -393,11 +409,11 @@ impl Engine {
             tamper: Mutex::new(std::collections::HashMap::new()),
             overlay_vars: Mutex::new(std::collections::HashMap::new()),
         });
-        engine.load_alert_pauses();
+        timed_step("loading alert pauses", || engine.load_alert_pauses());
         // Once the NVIDIA add-on is downloaded, load the AI again onto the card.
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let _ = engine_slot.set(Arc::downgrade(&engine));
-        crate::push::init(&engine);
+        timed_step("starting push", || crate::push::init(&engine));
         {
             let mut cfgs = engine.config.lock().unwrap();
             for c in cfgs.cameras.iter_mut() {
@@ -407,11 +423,11 @@ impl Engine {
         let cams = engine.config.lock().unwrap().cameras.clone();
         // Pick the profile before cameras start, so they start with its
         // recording overrides.
-        engine.apply_profile();
-        if let Err(e) = engine.reload_faces() {
+        timed_step("applying the profile", || engine.apply_profile());
+        if let Err(e) = timed_step("loading faces", || engine.reload_faces()) {
             warn!("faces: {e:#}");
         }
-        if let Err(e) = engine.reload_lpr() {
+        if let Err(e) = timed_step("loading plates", || engine.reload_lpr()) {
             warn!("plates: {e:#}");
         }
         // The smart search and sound models load beside the cameras starting
@@ -488,6 +504,10 @@ impl Engine {
         }
         {
             let eng = engine.clone();
+            thread::spawn(move || card_fill::card_fill_loop(eng));
+        }
+        {
+            let eng = engine.clone();
             thread::spawn(move || smart::smart_loop(eng));
         }
         {
@@ -512,7 +532,7 @@ impl Engine {
                 .unwrap()
                 .cameras
                 .iter()
-                .filter(|c| c.uid.as_deref().is_some_and(|u| !u.is_empty()))
+                .filter(|c| c.battery_uid().is_some())
                 .map(|c| format!("{} motion", c.name))
                 .collect();
             let now = Utc::now().timestamp_millis();
@@ -660,7 +680,7 @@ impl Engine {
             .unwrap()
             .iter()
             .flatten()
-            .find(|h| h.cfg.read().unwrap().uid.as_deref() == Some(uid))
+            .find(|h| h.cfg.read().unwrap().battery_uid().as_deref() == Some(uid))
             .cloned()
         else {
             return PushOutcome::UnknownUid;
@@ -716,6 +736,8 @@ impl Engine {
         }
         let until = Utc::now().timestamp().saturating_add(seconds);
         handle.unwrap().state.write().unwrap().manual_until = until;
+        // A sleeping battery camera wakes for it (and stays awake until it ends).
+        self.wake_camera(id, "a manual recording");
         true
     }
 
@@ -776,7 +798,7 @@ impl Engine {
         for h in targets {
             // A sleeping battery camera is woken so it can record.
             if h.cfg.read().unwrap().on_demand && h.state.read().unwrap().sleeping {
-                self.wake_camera(h.id);
+                self.wake_camera(h.id, "another camera's motion");
             }
             let mut st = h.state.write().unwrap();
             if st.triggered_until < now {
@@ -868,7 +890,23 @@ impl Engine {
             (before, cfg)
         };
         self.sync_config_cameras();
+        self.note_recording_mode(id);
         Ok((before, after))
+    }
+
+    /// Note whether camera `id` now records continuously (filling holes from
+    /// its card goes by when that changed, see card_fill.rs). Called where a
+    /// camera's settings are applied; the card fill loop notes it too, but
+    /// only every so often, and a change back and forth in between would be
+    /// missed.
+    fn note_recording_mode(&self, id: usize) {
+        let Some(h) = self.camera(id) else { return };
+        let continuous = {
+            let r = h.running.read().unwrap();
+            h.active.load(Ordering::Relaxed) && r.record && !r.record_motion_only
+        };
+        let name = h.cfg.read().unwrap().name.clone();
+        card_fill::note_mode(&self.db, &name, continuous, Utc::now().timestamp_millis());
     }
 
     /// A camera is being renamed: move its "also trigger" links, profile
@@ -877,6 +915,7 @@ impl Engine {
     pub fn rename_camera_refs(&self, old: &str, new: &str) {
         self.rename_alert_pause(old, new);
         event_copy::rename_camera(old, new);
+        card_fill::rename_camera(old, new);
         // Snoozes follow the camera (they are kept by its name's slug).
         if let Err(e) = self.db.snooze_rename_camera(&crate::config::slug(old), &crate::config::slug(new)) {
             tracing::warn!("could not move the snoozes of {old} to {new}: {e:#}");
@@ -940,6 +979,7 @@ impl Engine {
         cams[id] = Some(h.clone());
         drop(cams);
         spawn_worker(self.clone(), h, base);
+        self.note_recording_mode(id);
     }
 
     pub fn remove_camera(&self, id: usize) -> bool {
@@ -960,6 +1000,12 @@ impl Engine {
             if let Err(e) = self.db.snooze_forget_camera(&crate::config::slug(name)) {
                 tracing::warn!("could not forget the snoozes of {name}: {e:#}");
             }
+            // Its kept bookmarks no longer hold its video (the notes stay).
+            if let Err(e) = self.db.bookmarks_camera_removed(&crate::config::slug(name)) {
+                tracing::warn!("could not release the kept bookmarks of {name}: {e:#}");
+            }
+            // ... nor what filling holes from its card tried.
+            card_fill::forget_camera(&self.db, name);
             // ... nor its plate reading or alert rules.
             let mut c = self.config.lock().unwrap();
             c.lpr.cameras.retain(|l| &l.name != name);
@@ -1107,7 +1153,19 @@ impl Engine {
     /// recording file, waiting up to `wait` for them. Nothing is written to
     /// config.toml (cameras keep their enabled setting).
     pub fn shutdown(&self, wait: std::time::Duration) {
+        card_fill::begin_stop();
         let cams: Vec<Arc<CameraHandle>> = self.cameras.read().unwrap().iter().flatten().cloned().collect();
+        // Cameras on the ffmpeg pipeline are indexed by the 15 s scan, which leaves out a file
+        // still being written: note their folders now, scan them once more when they have closed.
+        let ffmpeg_dirs: Vec<(String, String, std::path::PathBuf)> = cams
+            .iter()
+            .filter(|h| h.state.read().unwrap().ingest.starts_with("ffmpeg"))
+            .map(|h| {
+                let cfg = h.running.read().unwrap().clone();
+                let (folder, root) = self.record_folder(&cfg);
+                (crate::config::slug(&cfg.name), folder, root)
+            })
+            .collect();
         for h in &cams {
             h.active.store(false, Ordering::Relaxed);
         }
@@ -1121,18 +1179,45 @@ impl Engine {
         } else {
             info!("shutdown: all camera sessions closed");
         }
+        // Filling a hole from a camera's card ends first, so all it adds is indexed below.
+        if !card_fill::stop_and_wait(std::time::Duration::from_secs(5)) {
+            warn!("shutdown: filling a hole from a camera's card did not stop in time (it adds nothing now)");
+        }
+        if left == 0 && !ffmpeg_dirs.is_empty() {
+            let seg = self.config.lock().unwrap().storage.segment_seconds;
+            let since_ms = (Utc::now().timestamp() - 6 * 3600) * 1000;
+            if let Err(e) = self.db.import_final_camera_dirs(&ffmpeg_dirs, seg, since_ms) {
+                warn!("shutdown: last recordings scan failed: {e:#}");
+            }
+        }
         let unindexed = self.wait_for_indexing(std::time::Duration::from_secs(5));
         if unindexed > 0 {
             warn!("shutdown: {unindexed} recording(s) not yet in the database (the next folder sweep adds them)");
+        }
+        // Everything recorded is in the index: note the recording folders as they stand, so the
+        // next start does not list them again (see db/walk.rs). Not when the start-up indexing
+        // was still running, or recordings are left out.
+        if unindexed == 0 && left == 0 && !self.db.importing() {
+            let folders = self.config.lock().unwrap().storage.folder_roots();
+            match self.db.refresh_walk_marks(&self.data_dir, &folders) {
+                Ok(n) if n > 0 => info!("shutdown: noted {n} recording folder(s) as fully indexed"),
+                Ok(_) => {}
+                Err(e) => warn!("shutdown: could not note the recording folders: {e:#}"),
+            }
         }
     }
 
     /// Wake an on-demand camera (or keep it awake) for its idle timeout.
     /// Returns false for unknown cameras; always-on cameras are unaffected.
-    pub fn wake_camera(&self, id: usize) -> bool {
+    /// `why`: what wants it ("a viewer", "a picture request" ...), logged
+    /// when this is what wakes it.
+    pub fn wake_camera(&self, id: usize, why: &'static str) -> bool {
         let Some(h) = self.camera(id) else { return false };
         let idle = crate::config::idle_secs(h.running.read().unwrap().idle_timeout);
         let mut st = h.state.write().unwrap();
+        if st.sleeping && st.woken_by.is_none() {
+            st.woken_by = Some(why);
+        }
         st.wake_until = st.wake_until.max(Utc::now().timestamp() + idle);
         true
     }
@@ -1280,6 +1365,8 @@ fn copy_light_fields(to: &mut CameraConfig, from: &CameraConfig) {
     to.copy_events_to = from.copy_events_to.clone();
     to.copy_events_keep_days = from.copy_events_keep_days;
     to.copy_events_only_confirmed = from.copy_events_only_confirmed;
+    // Read by the card-fill loop each pass.
+    to.fill_from_card = from.fill_from_card;
     // Only Status reads it.
     to.no_sub_ok = from.no_sub_ok;
 }
@@ -1344,6 +1431,8 @@ fn make_handle(id: usize, cfg: CameraConfig) -> Arc<CameraHandle> {
             last_activity_at: 0,
             wake_until: 0,
             sleeping: false,
+            woke_at_ms: 0,
+            woken_by: None,
             device_sleeping: None,
             battery: None,
             ai_last: None,

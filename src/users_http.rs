@@ -611,6 +611,8 @@ pub async fn delete_user(
     let _ = tokio::task::spawn_blocking(move || {
         let _ = e.db.push_delete_user(&n);
         let _ = e.db.snooze_delete_user(&n);
+        // (A new account of the same name must not own its bookmarks: admins still can edit them.)
+        let _ = e.db.bookmarks_user_removed(&n);
         if e.db.presence_delete_user(&n).unwrap_or(0) > 0 {
             e.presence_evaluate(None);
         }

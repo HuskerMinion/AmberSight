@@ -306,11 +306,11 @@ fn run(
                 if let Some(b) = session.battery.take() {
                     let _ = event_tx.send(CamEvent::Battery(b));
                 }
-                serve(&mut session, Some(first), &cmd_rx, &event_tx, &shared);
+                let why = serve(&mut session, Some(first), &cmd_rx, &event_tx, &shared);
                 let _ = session.logout();
                 shared.connected.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(CamEvent::Connected(false));
-                info!("baichuan '{host}': signed out (idle), camera may sleep");
+                info!("baichuan '{host}': signed out ({why}), camera may sleep");
             }
             Err(e) => {
                 debug!("baichuan '{host}': connect failed: {e:#}; next try in {} s", backoff.as_secs());
@@ -334,7 +334,8 @@ const IDLE_SIGN_OUT: Duration = Duration::from_secs(15);
 
 /// Serve one connected session until it dies, shuts down, or has had no
 /// preview for IDLE_SIGN_OUT. `first` is the request that caused the sign-in.
-fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, event_tx: &Sender<CamEvent>, shared: &Shared) {
+/// Returns why it ended, for the log.
+fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, event_tx: &Sender<CamEvent>, shared: &Shared) -> String {
     // SD downloads asked for while preview runs wait here until it stops.
     let mut downloads: std::collections::VecDeque<(i64, i64, SyncSender<Download>)> = Default::default();
     let mut previewing = false;
@@ -384,7 +385,7 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
         // Idle: sign out so the camera can sleep. (A request already queued in
         // the channel is not lost: run() picks it up and signs in again.)
         if !previewing && pending.is_none() && downloads.is_empty() && idle_since.elapsed() >= IDLE_SIGN_OUT {
-            return;
+            return "idle".into();
         }
         // Commands first, so a start/stop takes effect before more media.
         while let Some(cmd) = pending.take().or_else(|| cmd_rx.try_recv().ok()) {
@@ -427,7 +428,7 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
                 Cmd::Download { .. } => {}
                 Cmd::Shutdown => {
                     shared.alive.store(false, Ordering::Relaxed);
-                    return;
+                    return "shutting down".into();
                 }
             }
         }
@@ -439,10 +440,10 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
 
         // One read; dispatch every complete message in the buffer.
         match session.read(&mut tmp) {
-            Ok(0) => return,
+            Ok(0) => return "the camera closed the session".into(),
             Ok(n) => rbuf.extend_from_slice(&tmp[..n]),
             Err(e) if is_wouldblock(&e) => {}
-            Err(_) => return, // connection aborted -> reconnect
+            Err(e) => return format!("the session ended: {e}"), // connection aborted -> reconnect
         }
         loop {
             match bc::parse_msg(&rbuf) {
@@ -477,6 +478,7 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
             last_start = Instant::now();
         }
     }
+    "shutting down".into()
 }
 
 #[allow(clippy::too_many_arguments)]

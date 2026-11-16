@@ -27,6 +27,7 @@ export async function refreshStatus() {
     armedCache = s.armed;
     unreachable = false;
     syncShieldBtn();
+    syncStartBanner(s);
     // (The health check takes a while on a big system: it fills the chip when
     // it comes, without holding up the status, or the start page waiting for it.)
     if (state.isAdmin && healthTick++ % 6 === 0) {
@@ -40,6 +41,24 @@ export async function refreshStatus() {
     unreachable = true;
     syncHealth();
   }
+}
+
+// "Just started" notice: while the server still works through its recordings after a start, playback
+// and the timeline can be slow. Shows by itself and goes away when the server says it is done.
+function syncStartBanner(s) {
+  let el = $('startBanner');
+  if (!s || !s.checking_recordings) { if (el) el.hidden = true; return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'startBanner';
+    el.className = 'startbanner';
+    el.setAttribute('role', 'status');
+    document.body.appendChild(el);
+  }
+  const m = Math.floor((s.uptime_seconds || 0) / 60);
+  const ago = m < 1 ? 'just now' : m < 120 ? m + ' min ago' : Math.floor(m / 60) + ' h ago';
+  el.textContent = 'AmberSight started ' + ago + ' and is still checking its recordings. Playback may be slow until it finishes.';
+  el.hidden = false;
 }
 
 // The health chip: nothing while all is well; at every width, an icon and a few

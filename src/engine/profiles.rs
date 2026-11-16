@@ -91,6 +91,17 @@ impl Engine {
         global && cam
     }
 
+    /// Camera id -> whether the AI checks it now (AI on, a detector there, and
+    /// on for the camera under the active profile).
+    pub fn cameras_ai_active(&self) -> std::collections::HashMap<usize, bool> {
+        let configured = {
+            let c = self.config.lock().unwrap();
+            c.ai.enabled && (self.detector().is_some() || c.ai.url.as_deref().is_some_and(|u| !u.is_empty()))
+        };
+        let cfgs: Vec<(usize, CameraConfig)> = self.cameras.read().unwrap().iter().flatten().map(|h| (h.id, h.cfg.read().unwrap().clone())).collect();
+        cfgs.into_iter().map(|(id, cfg)| (id, configured && self.ai_enabled(&cfg))).collect()
+    }
+
     /// AI checks enabled for this camera under the active profile.
     pub fn ai_enabled(&self, cfg: &CameraConfig) -> bool {
         self.camera_override(&cfg.name).ai.unwrap_or(cfg.ai.unwrap_or(true))
@@ -150,6 +161,18 @@ impl Engine {
             if let Err(e) = self.db.ui_put(MANUAL_SCOPE, MANUAL_KEY, &saved) {
                 tracing::warn!("could not save the profile choice: {e:#}");
             }
+            // When this profile began to be held (a new end time for the
+            // same profile keeps it): filling holes from a camera's card
+            // goes by which profile was in effect. A timed hold that ran out
+            // (not yet cleared by the schedule's loop) is no hold: holding
+            // that profile again starts a new one.
+            let now = Utc::now().timestamp();
+            let prev_live = prev.as_ref().filter(|(_, until)| until.is_none_or(|u| now < u));
+            let same = matches!((prev_live, &hold), (Some((a, _)), Some((b, _))) if a == b);
+            if !same {
+                let since = if hold.is_some() { Utc::now().timestamp_millis().to_string() } else { String::new() };
+                let _ = self.db.ui_put(MANUAL_SCOPE, MANUAL_SINCE_KEY, &since);
+            }
             self.record_change(by, &manual_change_text(&hold), why);
         }
         self.apply_profile_inner(false, Some(by));
@@ -180,6 +203,7 @@ impl Engine {
             let mut m = self.manual_profile.lock().unwrap();
             if m.as_ref().is_some_and(|(_, until)| until.is_some_and(|u| Utc::now().timestamp() >= u)) {
                 *m = None; // timed override over
+                let _ = self.db.ui_put(MANUAL_SCOPE, MANUAL_SINCE_KEY, "");
             }
             m.clone()
         };
@@ -228,6 +252,8 @@ impl Engine {
             let running = h.running.read().unwrap().clone();
             if (eff.record, eff.record_motion_only) != (running.record, running.record_motion_only) {
                 info!("profile: camera '{}' recording mode changes; restarting it", base.name);
+                // Filling holes from the card goes by when this happened (see card_fill.rs).
+                super::card_fill::note_mode(&self.db, &base.name, h.active.load(Ordering::Relaxed) && eff.record && !eff.record_motion_only, Utc::now().timestamp_millis());
                 self.restart_camera(h.id);
             }
         }
@@ -282,6 +308,19 @@ fn manual_change_text(hold: &Option<(String, Option<i64>)>) -> String {
     }
 }
 const MANUAL_KEY: &str = "manual_profile";
+const MANUAL_SINCE_KEY: &str = "manual_profile_since";
+
+/// The profile held by hand now: (name, held since epoch ms, until epoch s).
+/// None when there is no hold, or when it is not known when it began (a
+/// hold from before this was noted).
+pub(super) fn manual_hold(engine: &Engine) -> Option<(String, i64, Option<i64>)> {
+    let (name, until) = engine.manual_profile.lock().unwrap().clone()?;
+    if until.is_some_and(|u| Utc::now().timestamp() >= u) {
+        return None;
+    }
+    let since = engine.db.ui_get(MANUAL_SCOPE, MANUAL_SINCE_KEY).ok().flatten()?.parse().ok()?;
+    Some((name, since, until))
+}
 
 /// The profile chosen by hand before the last restart, if it still exists
 /// and its time is not over.
@@ -328,6 +367,37 @@ mod tests {
         e.set_manual_profile(None, None, "ann", "").unwrap();
         assert_eq!(e.db.audit_rows().len(), 2);
         assert!(e.set_manual_profile(Some("Nope".into()), None, "ann", "").is_err());
+    }
+
+    #[test]
+    fn holding_a_profile_again_after_its_time_ran_out_starts_a_new_hold() {
+        let cfg: crate::config::Config = toml::from_str("[automation]\n[[automation.profiles]]\nname = \"Away\"\n").unwrap();
+        let e = Engine::for_test(cfg);
+        let since = |e: &Engine| e.db.ui_get(MANUAL_SCOPE, MANUAL_SINCE_KEY).unwrap().unwrap_or_default();
+        e.set_manual_profile(Some("Away".into()), Some(30), "ann", "").unwrap();
+        assert!(manual_hold(&e).is_some());
+        // The hold ran out a minute ago (the schedule's loop has not seen it
+        // yet); its start was long ago.
+        let past = Utc::now().timestamp() - 60;
+        *e.manual_profile.lock().unwrap() = Some(("Away".into(), Some(past)));
+        e.db.ui_put(MANUAL_SCOPE, MANUAL_SINCE_KEY, "1000").unwrap();
+        e.set_manual_profile(Some("Away".into()), None, "ann", "").unwrap();
+        let s: i64 = since(&e).parse().unwrap();
+        assert!(s > Utc::now().timestamp_millis() - 60_000, "a new hold starts now, not at the old start");
+        assert_eq!(manual_hold(&e).map(|(_, s2, _)| s2), Some(s));
+        // A new end time for a hold still running keeps its start.
+        e.set_manual_profile(Some("Away".into()), Some(10), "ann", "").unwrap();
+        assert_eq!(since(&e), s.to_string());
+        // When a timed hold ends, its start is cleared.
+        *e.manual_profile.lock().unwrap() = Some(("Away".into(), Some(past)));
+        e.apply_profile();
+        assert_eq!(since(&e), "");
+        assert!(manual_hold(&e).is_none());
+        // Back to the schedule clears it too.
+        e.set_manual_profile(Some("Away".into()), None, "ann", "").unwrap();
+        assert_ne!(since(&e), "");
+        e.set_manual_profile(None, None, "ann", "").unwrap();
+        assert_eq!(since(&e), "");
     }
 
     #[test]

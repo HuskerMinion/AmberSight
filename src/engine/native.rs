@@ -395,20 +395,42 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             let mut st = handle.state.write().unwrap();
             if st.camera_detections.active() {
                 st.wake_until = st.wake_until.max(now + crate::config::idle_secs(cfg.idle_timeout));
+                if st.sleeping && st.woken_by.is_none() {
+                    st.woken_by = Some(if st.camera_detections.pulse_active() { "its motion push" } else { "camera-reported motion" });
+                }
             }
             if now >= st.wake_until {
                 if !st.sleeping {
                     info!("camera '{}': asleep until needed", cfg.name);
                 }
+                let close = super::worker::closes_at_sleep(event_start.is_some(), pending.len());
                 st.sleeping = true;
+                st.woken_by = None;
                 st.online = false;
                 st.offline_since = None;
                 drop(st);
+                if close {
+                    // The session ended with an error (stream dropped, no
+                    // reconnect before the awake time ran out): the open
+                    // event ends now and its clips are built, not at the
+                    // next wake.
+                    let segment_seconds = engine.config.lock().unwrap().storage.segment_seconds;
+                    super::worker::close_events_for_sleep(
+                        &handle, &engine, &cfg, segment_seconds,
+                        &mut frames_over, &mut event_start, &mut event_score,
+                        &mut best_frame, &mut pending, &mut ai_state,
+                        &slug_name, &seg_dir, &clips_dir, &thumbs_dir,
+                    );
+                }
                 thread::sleep(Duration::from_millis(300));
                 continue;
             }
             if st.sleeping {
-                info!("camera '{}': waking up", cfg.name);
+                // (Says what woke it: a battery camera kept awake by something
+                // polling it drains its battery and posts no motion pushes.)
+                let by = st.woken_by.take().unwrap_or("a request");
+                info!("camera '{}': waking up for {by} (awake at least {} s)", cfg.name, (st.wake_until - now).max(0));
+                st.woke_at_ms = Utc::now().timestamp_millis();
             }
             st.sleeping = false;
         }
@@ -424,8 +446,8 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let creds = |url: &str| {
             // A battery Argus carries its UID in the URL so open_stream can find
             // the persistent session the event poller started.
-            let url = match &cfg.uid {
-                Some(u) if !u.is_empty() && crate::ingest::baichuan::is_baichuan_url(url) && !url.contains("uid=") => {
+            let url = match cfg.battery_uid() {
+                Some(u) if crate::ingest::baichuan::is_baichuan_url(url) && !url.contains("uid=") => {
                     format!("{url}{}uid={u}", if url.contains('?') { '&' } else { '?' })
                 }
                 _ => url.to_string(),
@@ -534,14 +556,23 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
             if cfg.on_demand && !idle_stop {
                 // Viewers, an event in progress or camera-reported activity
-                // keep it awake; otherwise it goes back to sleep.
-                let now = Utc::now().timestamp();
-                let busy = handle.live_main.viewers() + handle.live_sub.viewers() > 0 || event_start.is_some();
+                // keep it awake; otherwise it goes back to sleep. A battery
+                // camera's event counts only for a while after its last push;
+                // another camera's trigger counts while that camera has
+                // motion, and a manual recording until it ends.
+                let now_ms = Utc::now().timestamp_millis();
+                let now = now_ms / 1000;
+                let viewers = handle.live_main.viewers() + handle.live_sub.viewers() > 0;
+                let battery = crate::ingest::baichuan::is_baichuan_url(&cfg.url);
                 let mut st = handle.state.write().unwrap();
+                let held = super::worker::on_demand_held(st.triggered_until, st.manual_until, now);
+                let since = st.camera_detections.pulse_until().max(st.woke_at_ms);
+                let busy = super::worker::on_demand_busy(viewers, event_start.is_some(), held, battery, now_ms, since);
                 if busy || st.camera_detections.active() {
                     st.wake_until = st.wake_until.max(now + crate::config::idle_secs(cfg.idle_timeout));
                 }
                 if now >= st.wake_until {
+                    info!("camera '{}': nothing needs it for {} s; ending the stream so it can sleep", cfg.name, crate::config::idle_secs(cfg.idle_timeout));
                     idle_stop = true;
                     stop.store(true, Ordering::Relaxed);
                 }
@@ -553,7 +584,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                         &handle, &engine, &cfg, &mut detector, jpeg, segment_seconds,
                         &mut frames_over, &mut event_start, &mut event_score,
                         &mut best_frame, &mut pending, &mut ai_state,
-                        &slug_name, &seg_dir, &clips_dir, &thumbs_dir,
+                        &slug_name, &seg_dir, &clips_dir, &thumbs_dir, idle_stop,
                     );
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -572,6 +603,16 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         });
         engine.live_sessions.fetch_sub(1, Ordering::Relaxed);
         handle.decode.lock().unwrap().stopped();
+        if idle_stop {
+            // Going back to sleep: an event still open (a battery camera's
+            // awake time ran out) ends now, and waiting clips are built.
+            super::worker::close_events_for_sleep(
+                &handle, &engine, &cfg, segment_seconds,
+                &mut frames_over, &mut event_start, &mut event_score,
+                &mut best_frame, &mut pending, &mut ai_state,
+                &slug_name, &seg_dir, &clips_dir, &thumbs_dir,
+            );
+        }
         if back_to_sub && handle.active.load(Ordering::Relaxed) {
             // Ended on purpose to move motion back to the sub stream.
             let mut st = handle.state.write().unwrap();
@@ -816,6 +857,65 @@ enum Sink {
     MotionOnly(TriggeredRecorder),
 }
 
+/// The open recording of one stream task. However the task ends (its
+/// stream stops, an error returns early, or the session drops it because
+/// the other stream ended first), the file is finished and handed to the
+/// indexer. Finishing is synchronous, so Drop can do it.
+struct OpenSink<'a> {
+    sink: Option<Sink>,
+    engine: &'a Arc<Engine>,
+    slug: &'a str,
+}
+
+impl<'a> OpenSink<'a> {
+    fn new(engine: &'a Arc<Engine>, slug: &'a str) -> Self {
+        OpenSink { sink: None, engine, slug }
+    }
+}
+
+impl std::ops::Deref for OpenSink<'_> {
+    type Target = Option<Sink>;
+    fn deref(&self) -> &Option<Sink> {
+        &self.sink
+    }
+}
+
+impl std::ops::DerefMut for OpenSink<'_> {
+    fn deref_mut(&mut self) -> &mut Option<Sink> {
+        &mut self.sink
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: finishing a sink panics (as a writer left half-updated by an
+    /// earlier panic might).
+    static PANIC_IN_FINISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl Drop for OpenSink<'_> {
+    fn drop(&mut self) {
+        let Some(mut k) = self.sink.take() else { return };
+        // A task that panicked (inside the writer, say) drops this while
+        // unwinding, with the writer maybe half-updated; a second panic in
+        // here would abort the whole service, so it is caught.
+        let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if PANIC_IN_FINISH.with(|p| p.get()) {
+                panic!("finish failed (test)");
+            }
+            finish_sink(&mut k, self.engine, self.slug);
+        }));
+        if let Err(p) = finished {
+            if std::thread::panicking() {
+                tracing::error!("camera '{}': could not finish the recording after a failure; its last file may be missing", self.slug);
+            } else {
+                std::panic::resume_unwind(p);
+            }
+        }
+    }
+}
+
 impl Sink {
     /// Audio for a continuous recording (the sub stream's).
     fn push_audio(&mut self, ticks: i64, data: Vec<u8>, engine: &Arc<Engine>, slug: &str) {
@@ -863,7 +963,7 @@ async fn main_task(
     reached_play.store(true, Ordering::Relaxed);
     main_played.store(true, Ordering::Relaxed);
     info!("camera '{}': native stream playing ({})", handle.state.read().unwrap().name, redact_url(plan.main.url.clone()));
-    let mut sink: Option<Sink> = None;
+    let mut sink = OpenSink::new(engine, &plan.slug);
     let mut decoder: Option<FrameDecoder> = None;
     let mut seen_drops = 0u64;
     // The decoder started before the graphics card test finished.
@@ -937,7 +1037,7 @@ async fn main_task(
                     if let (Some(rec), Some(tracks)) = (plan.record, build_tracks(&s)?) {
                         let timescale = tracks[0].timescale;
                         let run = format!("{}-{}", plan.slug, Utc::now().timestamp_millis());
-                        sink = Some(match rec {
+                        *sink = Some(match rec {
                             RecordPlan::Continuous { segment_seconds } => {
                                 Sink::Continuous(SegmentWriter::new(&plan.seg_dir, &run, tracks, segment_seconds)?)
                             }
@@ -1053,7 +1153,7 @@ async fn decode_only_task(
     let mut seen_drops = 0u64;
     let mut dec_pending = false;
     let mut live: Option<LiveMuxer> = None;
-    let mut sink: Option<Sink> = None;
+    let mut sink = OpenSink::new(engine, &plan.slug);
     let shared = handle.restream_sub.clone();
     let _stop_sharing = crate::restream::hub::StopOnDrop(shared.clone());
     let mut sub_failed: Option<std::time::Instant> = None;
@@ -1114,7 +1214,7 @@ async fn decode_only_task(
             // The sub-stream recording is extra: if writing it fails, only it
             // stops (for a minute), never the session and its main recording.
             let retry_ok = sub_failed.is_none_or(|t: std::time::Instant| t.elapsed() > Duration::from_secs(60));
-            if let (None, Some(secs), true, true) = (&sink, segment_seconds, key, retry_ok) {
+            if let (None, Some(secs), true, true) = (&*sink, segment_seconds, key, retry_ok) {
                 if let Some(tracks) = build_tracks(&s)? {
                     // `{camera}-sub-{ms}-seg000000.mp4`: indexed as kind "sub".
                     let run = format!("{}-sub-{}", plan.slug, Utc::now().timestamp_millis());
@@ -1126,7 +1226,7 @@ async fn decode_only_task(
                                     k.observe_sender_report(n, *r);
                                 }
                             }
-                            sink = Some(k);
+                            *sink = Some(k);
                         }
                         Err(e) => {
                             warn!("camera '{}': cannot record the sub stream: {e}", plan.slug);
@@ -1377,8 +1477,12 @@ impl Engine {
             return;
         }
         INDEX_PENDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // (A piece from the camera's card says nothing about how its live stream is read.)
+        let from_card = super::card_fill::is_card_piece(&seg.path.to_string_lossy());
         let job = move || {
-            note_played(&engine, &slug);
+            if !from_card {
+                note_played(&engine, &slug);
+            }
             engine.index_segment(&slug, seg);
             INDEX_PENDING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         };
@@ -1433,6 +1537,79 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream task with an open recording, as main_task / decode_only_task
+    /// hold it: writes a few seconds, then either runs on (`pending`) or
+    /// fails with `?`.
+    async fn recording_task(engine: &Arc<Engine>, slug: &str, dir: &std::path::Path, then_fail: bool) -> anyhow::Result<()> {
+        use crate::ingest::fmp4::{TrackInfo, TrackKind};
+        let mut entry = vec![0, 0, 0, 16];
+        entry.extend_from_slice(b"avc1");
+        entry.extend_from_slice(&[0; 8]);
+        let track = TrackInfo { kind: TrackKind::Video, timescale: 90000, sample_entry: entry, width: 640, height: 480 };
+        let mut sink = OpenSink::new(engine, slug);
+        *sink = Some(Sink::Continuous(SegmentWriter::new(dir, &format!("{slug}-1"), vec![track], 600)?));
+        if let Some(Sink::Continuous(w)) = sink.as_mut() {
+            for i in 0..30i64 {
+                w.push_video_cts(i * 9000, 0, vec![0, 0, 0, 1, 0x65], i % 10 == 0)?;
+            }
+        }
+        if then_fail {
+            anyhow::bail!("stream error");
+        }
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_open_file_is_indexed_when_the_other_stream_ends_the_session() {
+        let dir = std::env::temp_dir().join(format!("amber-opensink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::for_test(toml::from_str("").unwrap());
+        let indexed = |slug: &str| engine.db.segment_ids_overlapping(slug, 0, i64::MAX).unwrap().len();
+        // The sub stream ends first: the main task is dropped mid-recording
+        // (as run_session's select does).
+        let main = recording_task(&engine, "cam_main", &dir, false);
+        let sub = async {
+            tokio::task::yield_now().await;
+            anyhow::Ok(())
+        };
+        tokio::select! {
+            biased;
+            _ = main => unreachable!(),
+            _ = sub => {}
+        }
+        assert_eq!(indexed("cam_main"), 1, "the dropped task's last file is in the index");
+        // A task that returns early with an error finishes its file too.
+        assert!(recording_task(&engine, "cam_err", &dir, true).await.is_err());
+        assert_eq!(indexed("cam_err"), 1, "an error return still indexes the file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_panic_while_finishing_after_a_panic_does_not_abort() {
+        use crate::ingest::fmp4::{TrackInfo, TrackKind};
+        let dir = std::env::temp_dir().join(format!("amber-opensink-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::for_test(toml::from_str("").unwrap());
+        let (e, d) = (engine.clone(), dir.clone());
+        // A stream task panics with an open recording whose finish panics
+        // too: the thread ends with the first panic, the process lives on.
+        let r = std::thread::spawn(move || {
+            let mut entry = vec![0, 0, 0, 16];
+            entry.extend_from_slice(b"avc1");
+            entry.extend_from_slice(&[0; 8]);
+            let track = TrackInfo { kind: TrackKind::Video, timescale: 90000, sample_entry: entry, width: 640, height: 480 };
+            let mut sink = OpenSink::new(&e, "cam_panic");
+            *sink = Some(Sink::Continuous(SegmentWriter::new(&d, "cam_panic-1", vec![track], 600).unwrap()));
+            PANIC_IN_FINISH.with(|p| p.set(true));
+            panic!("writer failed");
+        })
+        .join();
+        let msg = r.expect_err("the task panicked");
+        assert_eq!(msg.downcast_ref::<&str>(), Some(&"writer failed"), "the first panic is the one reported");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn drops_ignore_pre_keyframe_frames_and_new_decoders() {

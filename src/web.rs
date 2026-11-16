@@ -34,6 +34,7 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/cameras/:id/powercycle", post(camera_powercycle))
         .route("/cameras/:id/watchdog", get(camera_watchdog))
         .route("/cameras/:id/netinfo", get(camera_netinfo))
+        .route("/cameras/:id/card-fill", get(camera_card_fill))
         .route("/cameras/:id/report", get(camera_report))
         .route("/cameras/:id/tamper", get(tamper_status))
         .route("/cameras/:id/tamper/reference", post(tamper_set_reference))
@@ -83,6 +84,14 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/login", post(login))
         .route("/login/totp", post(crate::account_http::login_totp))
         .route("/pair", post(pair))
+        // Display mode (wall TV, tablet): a display code an admin approves (display.rs).
+        .route("/display/start", post(crate::display::start))
+        .route("/display/wait", post(crate::display::wait))
+        .route("/display/lookup", post(crate::display::lookup))
+        .route("/display/approve", post(crate::display::approve))
+        .route("/display/renew", post(crate::display::renew))
+        .route("/display/sessions", get(crate::display::sessions))
+        .route("/display/sessions/:id/sign-out", post(crate::display::sign_out))
         .route("/logout", post(logout))
         .route("/audit", get(audit_log))
         .route("/users", get(crate::users_http::list_users).post(crate::users_http::save_user))
@@ -138,6 +147,8 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/events/:id/track", get(crate::ai_review::event_track))
         .route("/signals", get(list_signals).post(set_signal))
         .route("/signals/:name", axum::routing::delete(forget_signal))
+        .route("/bookmarks", get(crate::bookmarks_http::list).post(crate::bookmarks_http::create).layer(axum::extract::DefaultBodyLimit::max(crate::bookmarks_http::BODY_MAX)))
+        .route("/bookmarks/:id", put(crate::bookmarks_http::update).delete(crate::bookmarks_http::remove).layer(axum::extract::DefaultBodyLimit::max(crate::bookmarks_http::BODY_MAX)))
         .route("/events/:id/ai/recheck", post(crate::ai_review::event_ai_recheck))
         .route("/events/:id/ai/:n", get(crate::ai_review::event_ai_frame))
         .route("/ai/reviews", get(crate::ai_review::reviews))
@@ -207,9 +218,11 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         ));
 
     Router::new()
-        .route("/", get(static_files::index))
-        .route("/ambs.htm", get(static_files::index))
-        .route("/index.html", get(static_files::index))
+        .route("/", get(index_page))
+        .route("/ambs.htm", get(index_page))
+        .route("/index.html", get(index_page))
+        // Display mode (wall TV, tablet): a page of its own, to bookmark.
+        .route("/display", get(static_files::display))
         .route("/favicon.ico", get(static_files::favicon))
         // The notification helper (service worker) must sit at the top to cover every page.
         .route("/sw.js", get(static_files::service_worker))
@@ -697,6 +710,7 @@ const TOKEN_ROUTES: &[(&str, &str, bool)] = &[
     ("/events", "GET", false),
     ("/events/:id/thumb", "GET", false),
     ("/timeline/events", "GET", false),
+    ("/bookmarks", "GET", false),
     ("/clips", "GET", false),
     ("/clips/:id", "GET", false),
     ("/recordings", "GET", false),
@@ -855,6 +869,19 @@ fn camera_allowed(engine: &Engine, access: &Access, req: &Request) -> bool {
     }
 }
 
+/// The web app, except for a display session (wall TV, tablet): it only
+/// watches, so it goes to display mode instead of half a web app.
+async fn index_page(State(engine): State<Arc<Engine>>, headers: axum::http::HeaderMap) -> Response {
+    let acc = accounts(&engine);
+    if crate::auth::session_from_headers(&headers, &acc).is_some_and(|(t, _)| crate::auth::session_is_display(t)) {
+        return Response::builder().status(StatusCode::FOUND).header(header::LOCATION, "/display").header(header::CACHE_CONTROL, "no-store").body(Body::empty()).unwrap();
+    }
+    let mut r = static_files::index(headers).await;
+    // (A browser must ask again: the same address answers a display differently.)
+    r.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding, cookie"));
+    r
+}
+
 /// Headers on every answer: no type sniffing, no framing by other sites, no
 /// page addresses leaking to other sites.
 async fn security_headers(mut r: Response) -> Response {
@@ -931,6 +958,8 @@ fn viewer_may_write(path: &str, method: &axum::http::Method) -> bool {
         || path == "/me/snooze"
         // Page timings and the sound tripwire from their own devices.
         || path == "/ui/diag"
+        // A display keeping its own session (display.rs; other sessions: nothing happens).
+        || path == "/display/renew"
         // Notifications on their own devices.
         || matches!(path, "/push/subscribe" | "/push/unsubscribe" | "/push/test")
         // Their own phones at home or away (and removing them).
@@ -956,6 +985,9 @@ fn operator_route(path: &str, method: &axum::http::Method) -> Option<Perm> {
         ("POST", ["shield"] | ["profile"]) => Some(Perm::Arm),
         ("POST", ["cameras", id, "pause"]) if cam(id) => Some(Perm::Arm),
         ("POST", ["events", id, "protect" | "review"]) if !id.is_empty() => Some(Perm::Events),
+        // Timeline bookmarks (the handlers: their own only, unless admin).
+        ("POST", ["bookmarks"]) => Some(Perm::Events),
+        ("PUT" | "DELETE", ["bookmarks", id]) if !id.is_empty() => Some(Perm::Events),
         ("PUT", ["cameras", id]) if cam(id) => Some(Perm::CameraDetection),
         _ => None,
     }
@@ -998,6 +1030,7 @@ fn admin_only_path(path: &str) -> bool {
         || path.starts_with("/event-copy")
         || path.starts_with("/digest/")
         || path == "/noisy"
+        || path.starts_with("/display/sessions")
         || path.starts_with("/update")
         || path.starts_with("/system")
         // A camera's tamper, unusual-activity and ONVIF settings windows (the
@@ -1098,7 +1131,7 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
     // Sign-in endpoints answer for themselves (but not to other web sites'
     // pages: no signing someone in as another account, no guessing
     // passwords from another site).
-    if matches!(path.as_str(), "/login" | "/login/totp" | "/logout" | "/whoami" | "/pair" | "/demo/signin") {
+    if matches!(path.as_str(), "/login" | "/login/totp" | "/logout" | "/whoami" | "/pair" | "/demo/signin" | "/display/start" | "/display/wait") {
         if req.method() != axum::http::Method::GET && !same_origin(req.headers(), request_host(&req).as_deref()) {
             return (StatusCode::FORBIDDEN, "request from another web site refused").into_response();
         }
@@ -1141,6 +1174,9 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
                 // An operator's device token has the operator's rights only
                 // when it was made with control rights.
                 let control = !by_token || req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).is_some_and(crate::auth::token_control);
+                // A display session (wall TV, tablet) only ever watches, whatever its account may do.
+                let display = !by_token && session.as_deref().is_some_and(crate::auth::session_is_display);
+                let control = control && !display;
                 let (r, limits, demo) = {
                     let cfg = engine.config.lock().unwrap();
                     (crate::auth::role_of(&cfg, &id.user, id.admin, control), crate::auth::camera_limits(&cfg, &id.user), crate::auth::is_demo(&acc, &id.user))
@@ -1153,6 +1189,16 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
                 // from a network not seen before (on a thread of its own).
                 if let Some(t) = &session {
                     crate::auth::session_seen(t, ip);
+                    // A display used from another network than it was paired on: admins hear of it.
+                    if let Some((user, label, made)) = crate::auth::display_moved(t, ip) {
+                        crate::account_http::tell_admins_once(
+                            &engine,
+                            &format!("display-moved:{user}:{}", crate::auth::wide_net(ip)),
+                            3600,
+                            format!("a display is used from another network ({user})"),
+                            format!("The display \"{}\" ({user}) was paired from {made} and is now used from {ip}. If that display did not move, sign it out in Settings, Users & security, Displays.", label.trim_start_matches(crate::auth::DISPLAY_LABEL)),
+                        );
+                    }
                 } else if basic {
                     crate::devices::note_direct(&engine, &id.user, ip);
                 }
@@ -1168,6 +1214,9 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
                 }
                 if demo && demo_refused(&path, req.method(), req.uri().query()) {
                     return (StatusCode::FORBIDDEN, DEMO_REFUSED).into_response();
+                }
+                if display && !crate::display::display_allowed(&path, req.method()) {
+                    return (StatusCode::FORBIDDEN, "this is a display: it only shows live cameras (sign in on another device for this)").into_response();
                 }
                 access = Access(limits);
                 is_admin = id.admin;
@@ -1211,7 +1260,7 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
     // (Page timing reports are diagnostics, not changes, and phones'
     // presence reports come every few hours and record their own real
     // changes: neither is audited here.)
-    if is_write && path != "/ui/diag" && !(path == "/presence" && method == "POST") {
+    if is_write && path != "/ui/diag" && path != "/display/renew" && !(path == "/presence" && method == "POST") {
         let action = match &token_used {
             Some(n) => format!("{method} (device token \"{n}\")"),
             None => method.clone(),
@@ -1299,6 +1348,7 @@ async fn whoami(State(engine): State<Arc<Engine>>, req: Request) -> Response {
     // whether it was right, so it must not allow endless guessing.
     let tries = req.headers().contains_key(header::AUTHORIZATION);
     let has_session = crate::auth::session_from_headers(req.headers(), &acc).is_some();
+    let display_session = crate::auth::session_from_headers(req.headers(), &acc).is_some_and(|(t, _)| crate::auth::session_is_display(t));
     if !has_session && tries && crate::auth::is_locked(ip) && !has_valid_token(&acc, &req) {
         return (StatusCode::TOO_MANY_REQUESTS, "too many failed sign-ins; try again in a few minutes").into_response();
     }
@@ -1326,6 +1376,7 @@ async fn whoami(State(engine): State<Arc<Engine>>, req: Request) -> Response {
     let role = match &id {
         Some(i) => {
             let control = !by_token || req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).is_some_and(crate::auth::token_control);
+            let control = control && !(!by_token && display_session);
             let cfg = engine.config.lock().unwrap();
             Some((crate::auth::role_of(&cfg, &i.user, i.admin, control), crate::auth::camera_limits(&cfg, &i.user).is_some()))
         }
@@ -1333,7 +1384,10 @@ async fn whoami(State(engine): State<Arc<Engine>>, req: Request) -> Response {
         None => None,
     };
     let cookie = !crate::auth::cookie_tokens(req.headers()).is_empty();
-    Json(whoami_json(&engine, id.as_ref(), role, acc.is_empty(), by_token, two_step_needed, cookie)).into_response()
+    let mut v = whoami_json(&engine, id.as_ref(), role, acc.is_empty(), by_token, two_step_needed, cookie);
+    // A display session (display.rs): it only watches.
+    v["display"] = (id.is_some() && !by_token && display_session).into();
+    Json(v).into_response()
 }
 
 /// The /api/whoami answer (also the demo sign-in's). `role`: the caller's
@@ -1817,7 +1871,7 @@ async fn set_overlay_var_http(
 /// What GET /api/cameras leaves out for anyone not an admin (viewers and
 /// operators alike): logins, folders, event copies, capture helpers, pushed
 /// senders, hardware and the watchdog.
-const HIDDEN_FROM_NON_ADMINS: [&str; 15] = ["username", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
+const HIDDEN_FROM_NON_ADMINS: [&str; 18] = ["username", "uid", "fill_from_card", "card_fill_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
 
 /// `GET /api/camera-defaults`: the shared detection and alert settings a
 /// camera uses where it sets none of its own (motion, AI, alert priority and
@@ -1844,6 +1898,10 @@ async fn list_cameras(
     axum::Extension(access): axum::Extension<Access>,
     axum::Extension(admin): axum::Extension<IsAdmin>,
 ) -> Json<serde_json::Value> {
+    // Which cameras the AI looks at now (display mode falls back to motion for the
+    // others). Worked out before the list: it takes the config lock, which must not
+    // wait while a camera's settings are held.
+    let ai_active = engine.cameras_ai_active();
     let cams = engine.cameras.read().unwrap();
     let list: Vec<serde_json::Value> = cams
         .iter()
@@ -1899,12 +1957,14 @@ async fn list_cameras(
             // json! above is at its macro's depth limit).
             v["battery"] = serde_json::json!(st.battery);
             v["ai_last"] = st.ai_last.as_ref().map(|(l, s, t)| serde_json::json!({"label": l, "score": s, "age_ms": (chrono::Utc::now().timestamp_millis() - t).max(0)})).into();
+            v["ai_active"] = ai_active.get(&h.id).copied().unwrap_or(false).into();
             // The camera's motion-detection setting ("motion" above is motion happening now).
             v["motion_enabled"] = cfg.motion.into();
             // A battery camera's pushed PIR motion (pushx) is active now: shown
             // even while the camera has no picture yet.
             v["push_motion"] = st.camera_detections.pulse_active().into();
             v["onvif_port"] = cfg.onvif_port.into();
+            v["uid"] = serde_json::json!(cfg.battery_uid());
             v["no_sub_ok"] = cfg.no_sub_ok.into();
             // Polygon zones and privacy masks (rectangles above are the simple kind).
             v["zone_polys"] = serde_json::json!(cfg.zone_polys);
@@ -1969,6 +2029,9 @@ async fn list_cameras(
             v["copy_events_keep_days"] = cfg.copy_events_keep_days.into();
             v["copy_events_only_confirmed"] = cfg.copy_events_only_confirmed.into();
             v["copy_events_status"] = cfg.copy_folder().map(|_| crate::engine::event_copy::status_json(&cfg.name)).into();
+            // Holes in the recording filled from the camera's own card (admins only).
+            v["fill_from_card"] = cfg.fill_from_card.into();
+            v["card_fill_status"] = if cfg.fill_from_card { serde_json::json!(crate::engine::card_fill::status(&cfg.name)) } else { serde_json::Value::Null };
             // How motion decoding runs: on the graphics card or the processor (admins only).
             v["decode"] = h.decode.lock().unwrap().json();
             // Why the camera is read by ffmpeg, and the setting that changes it (admins only).
@@ -2848,6 +2911,8 @@ fn status_json(engine: &Arc<Engine>) -> serde_json::Value {
         "name": crate::links::own_name(engine),
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": chrono::Utc::now().timestamp() - engine.started,
+        // True while the start-up work on the recordings (indexing, layout check) is still running.
+        "checking_recordings": engine.db.importing() || crate::engine::reindex::pass_running(),
         "cameras": total,
         "online": online,
         "armed": engine.armed_now(),
@@ -4530,7 +4595,7 @@ async fn wake_camera(State(engine): State<Arc<Engine>>, caller: Option<axum::Ext
             .body(Body::from("this camera was just woken; try again in a few seconds"))
             .unwrap();
     }
-    if engine.wake_camera(id) {
+    if engine.wake_camera(id, "the Wake button") {
         let st = engine.camera(id).map(|h| (h.state.read().unwrap().sleeping, h.state.read().unwrap().wake_until));
         Json(serde_json::json!({ "woken": true, "sleeping": st.map(|s| s.0), "awake_until": st.map(|s| s.1) })).into_response()
     } else {
@@ -4551,7 +4616,7 @@ pub(crate) async fn snapshot(State(engine): State<Arc<Engine>>, caller: Option<a
     // account: it gets the last picture there is).
     let user = caller.map(|c| c.0 .0).unwrap_or_default();
     if engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand) && may_wake(&engine, &user) {
-        engine.wake_camera(id);
+        engine.wake_camera(id, "a picture request (GET /api/snapshot)");
     }
     let handle = match engine.camera(id) {
         Some(h) => h,
@@ -4575,7 +4640,7 @@ async fn live(State(engine): State<Arc<Engine>>, caller: Option<axum::Extension<
     }
     let user = caller.map(|c| c.0 .0).unwrap_or_default();
     if engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand) && may_wake(&engine, &user) {
-        engine.wake_camera(id);
+        engine.wake_camera(id, "an MJPEG viewer (GET /api/live)");
     }
     let handle = match engine.camera(id) {
         Some(h) => h,
@@ -6644,6 +6709,7 @@ async fn discover_autologin(State(engine): State<Arc<Engine>>, Json(req): Json<A
         return api_error(StatusCode::BAD_REQUEST, "no login to try");
     }
     let xaddr = req.xaddr.clone();
+    let (rtsp_tries, rtsp_xaddr, rtsp_saved) = (tries.clone(), req.xaddr.clone(), saved.clone());
     let r = tokio::task::spawn_blocking(move || {
         let mut last = None;
         for (i, l) in tries.iter().enumerate() {
@@ -6666,11 +6732,45 @@ async fn discover_autologin(State(engine): State<Arc<Engine>>, Json(req): Json<A
     .await;
     match r {
         Ok(Ok((i, username, ins))) => Json(serde_json::json!({ "ok": true, "login": i, "username": username, "inspection": ins })).into_response(),
-        Ok(Err((auth, e))) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": false, "auth_failed": auth, "error": if auth { "None of the logins worked on this camera".to_string() } else { format!("{e:#}") } })),
-        )
-            .into_response(),
+        Ok(Err((onvif_auth, e))) => {
+            // ONVIF did not take the login. Dahua-style cameras (Dahua, Amcrest, and brands
+            // selling their hardware) may keep ONVIF off or on a user of its own while the
+            // video stream signs in with the web user: ask for that stream with the same logins.
+            let onvif_error = format!("{e:#}");
+            let host = saved_login_host(&rtsp_xaddr).unwrap_or_default();
+            let mut rtsp_result: Option<crate::dahua_login::RtspTry> = None;
+            // Send a password over RTSP only to a device that looks Dahua-style from an
+            // unauthenticated probe: other brands would count it as a wrong login.
+            let dahua = if host.is_empty() {
+                false
+            } else {
+                let h = host.clone();
+                tokio::task::spawn_blocking(move || crate::dahua_login::looks_dahua(&h)).await.unwrap_or(false)
+            };
+            if dahua {
+                for (i, l) in rtsp_tries.iter().enumerate() {
+                    let t = crate::dahua_login::try_rtsp(&host, &l.username, &l.password).await;
+                    if t == crate::dahua_login::RtspTry::Works {
+                        let (u, p) = (l.username.clone(), l.password.clone());
+                        let h = host.clone();
+                        let (vendor, model) = tokio::task::spawn_blocking(move || crate::dahua_login::identity(&h, &u, &p)).await.unwrap_or_default();
+                        if rtsp_saved.iter().any(|sv| sv.username == l.username && sv.password == l.password && !sv.password.is_empty()) {
+                            note_saved_login_worked(&host, &l.username);
+                        }
+                        tracing::info!("find cameras: {host} took the login over RTSP only (ONVIF: {onvif_error})");
+                        return Json(serde_json::json!({ "ok": true, "login": i, "username": l.username, "inspection": crate::dahua_login::inspection(&host, &l.username, &vendor, &model) })).into_response();
+                    }
+                    let stop = t != crate::dahua_login::RtspTry::LoginRefused;
+                    rtsp_result = Some(t);
+                    // No path or no answer: another login will not change that.
+                    if stop {
+                        break;
+                    }
+                }
+            }
+            let text = crate::dahua_login::failure_text(onvif_auth, &onvif_error, rtsp_result.as_ref());
+            (StatusCode::OK, Json(serde_json::json!({ "ok": false, "auth_failed": onvif_auth, "error": text }))).into_response()
+        }
         Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "sign-in check failed"),
     }
 }
@@ -6837,6 +6937,22 @@ async fn camera_netinfo(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<us
     };
     let refresh = q.refresh.as_deref().is_some_and(|v| !v.is_empty() && v != "0");
     match tokio::task::spawn_blocking(move || crate::netinfo::collect(id, &cfg, refresh, ingest, online)).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `GET /api/cameras/:id/card-fill` (admin): whether this camera's holes can
+/// be filled from its own memory card, and why not: `{offered, why?, card_mb?,
+/// stream?}`. Asks the camera (a sign-in and two quick questions); answers are
+/// kept for five minutes.
+async fn camera_card_fill(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>, axum::Extension(admin): axum::Extension<IsAdmin>) -> Response {
+    if !admin.0 {
+        return api_error(StatusCode::FORBIDDEN, "admin access required");
+    }
+    let Some(h) = engine.camera(id) else { return api_error(StatusCode::NOT_FOUND, "no such camera") };
+    let cfg = h.cfg.read().unwrap().clone();
+    match tokio::task::spawn_blocking(move || crate::engine::card_fill::check(&cfg)).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -7337,6 +7453,7 @@ mod viewer_write_tests {
     /// in neither this list nor `TOKEN_ROUTES` fails the test below.
     const TOKEN_REFUSED: &[&str] = &[
         "/cameras/:id",
+        "/bookmarks/:id",
         "/camera-defaults",
         "/cameras/:id/enable",
         "/cameras/:id/timesync",
@@ -7345,6 +7462,7 @@ mod viewer_write_tests {
         "/cameras/:id/powercycle",
         "/cameras/:id/watchdog",
         "/cameras/:id/netinfo",
+        "/cameras/:id/card-fill",
         "/cameras/:id/report",
         "/cameras/:id/tamper",
         "/cameras/:id/tamper/reference",
@@ -7385,6 +7503,13 @@ mod viewer_write_tests {
         "/login",
         "/login/totp",
         "/pair",
+        "/display/start",
+        "/display/wait",
+        "/display/lookup",
+        "/display/approve",
+        "/display/renew",
+        "/display/sessions",
+        "/display/sessions/:id/sign-out",
         "/demo/signin",
         "/logout",
         "/audit",
@@ -7555,6 +7680,7 @@ mod viewer_write_tests {
         ("/cameras/:id/powercycle", "POST", "admin"),
         ("/cameras/:id/watchdog", "GET", "viewer"),
         ("/cameras/:id/netinfo", "GET", "viewer"),
+        ("/cameras/:id/card-fill", "GET", "viewer"),
         ("/cameras/:id/report", "GET", "admin"),
         ("/cameras/:id/tamper", "GET", "admin"),
         ("/cameras/:id/tamper/reference", "POST", "admin"),
@@ -7610,6 +7736,13 @@ mod viewer_write_tests {
         ("/login", "POST", "admin"),
         ("/login/totp", "POST", "admin"),
         ("/pair", "POST", "admin"),
+        ("/display/start", "POST", "admin"),
+        ("/display/wait", "POST", "admin"),
+        ("/display/lookup", "POST", "admin"),
+        ("/display/approve", "POST", "admin"),
+        ("/display/renew", "POST", "viewer"),
+        ("/display/sessions", "GET", "admin"),
+        ("/display/sessions/:id/sign-out", "POST", "admin"),
         ("/logout", "POST", "admin"),
         ("/audit", "GET", "viewer"),
         ("/users", "GET", "admin"),
@@ -7667,6 +7800,10 @@ mod viewer_write_tests {
         ("/timeline/events", "GET", "viewer"),
         ("/events/:id/thumb", "GET", "viewer"),
         ("/events/:id/protect", "POST", "operator:events"),
+        ("/bookmarks", "GET", "viewer"),
+        ("/bookmarks", "POST", "operator:events"),
+        ("/bookmarks/:id", "PUT", "operator:events"),
+        ("/bookmarks/:id", "DELETE", "operator:events"),
         ("/events/:id/review", "POST", "operator:events"),
         ("/events/:id/ai", "GET", "viewer"),
         ("/events/:id/track", "GET", "viewer"),
@@ -8283,7 +8420,7 @@ mod operator_tests {
     fn event_copies_are_an_admins() {
         // Never in what an operator may change, and hidden from operators as from viewers.
         assert!(!super::OPERATOR_CAMERA_FIELDS.iter().any(|f| f.starts_with("copy_")));
-        for k in ["copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "folder", "username", "has_password"] {
+        for k in ["copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "folder", "username", "uid", "has_password"] {
             assert!(super::HIDDEN_FROM_NON_ADMINS.contains(&k), "{k}");
         }
     }
@@ -8353,6 +8490,135 @@ mod operator_tests {
         }
         assert!(super::json_close(&serde_json::json!([0.1, {"a": 0.3}]), &serde_json::json!([0.1000000000001, {"a": 0.3}])));
         assert!(!super::json_close(&serde_json::json!([0.1]), &serde_json::json!([0.11])));
+    }
+
+    #[tokio::test]
+    async fn bookmarks_through_the_whole_stack() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        let mut cfg: crate::config::Config = toml::from_str("[[cameras]]\nname = \"Porch\"\nurl = \"rtsp://x/\"\n\n[[cameras]]\nname = \"Garage\"\nurl = \"rtsp://y/\"\n").unwrap();
+        let no_events = crate::config::OperatorPerms { events: false, ..Default::default() };
+        let users: [(&str, bool, &str, crate::config::OperatorPerms, Vec<String>); 6] = [
+            ("ann", true, "", Default::default(), vec![]),
+            ("otto", false, "operator", Default::default(), vec![]),
+            ("oona", false, "operator", Default::default(), vec![]),
+            ("olga", false, "operator", Default::default(), vec!["Porch".to_string()]),
+            ("noe", false, "operator", no_events, vec![]),
+            ("vic", false, "", Default::default(), vec!["Porch".to_string()]),
+        ];
+        for (name, admin, role, perms, cams) in users {
+            cfg.server.users.push(crate::config::UserConfig { username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: cams, disabled: false, role: role.into(), perms });
+        }
+        let e = crate::engine::Engine::for_test(cfg);
+        let app = super::build_router(e.clone());
+        let call = |method: &str, path: &str, who: &str, body: &str| {
+            let b = Request::builder().method(method).uri(path).header(header::HOST, "localhost:8090").header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{who}:pw-{who}-1"))));
+            let req = b.body(Body::from(body.to_string())).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let s = r.status();
+                let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+                (s, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
+            }
+        };
+        let at = chrono::Utc::now().timestamp_millis() - 3_600_000;
+        let add = |cam: &str, note: &str| format!(r#"{{"at":{at},"camera":{cam},"note":"{note}","keep":true}}"#);
+        // Operators and admins add; viewers and operators without the right do not.
+        let (s, a) = call("POST", "/api/bookmarks", "otto", &add("\"Garage\"", "Otto's <b>van</b>")).await;
+        assert_eq!(s, StatusCode::CREATED, "{a}");
+        assert_eq!((a["camera"].as_str(), a["user"].as_str(), a["keep"].as_bool(), a["note"].as_str()), (Some("Garage"), Some("otto"), Some(true), Some("Otto's <b>van</b>")));
+        let otto_id = a["id"].as_i64().unwrap();
+        let (s, b) = call("POST", "/api/bookmarks", "ann", &add("null", "Power cut")).await;
+        assert_eq!(s, StatusCode::CREATED, "{b}");
+        assert!(b["camera"].is_null());
+        let ann_id = b["id"].as_i64().unwrap();
+        assert_eq!(call("POST", "/api/bookmarks", "vic", &add("\"Porch\"", "x")).await.0, StatusCode::FORBIDDEN, "viewer");
+        assert_eq!(call("POST", "/api/bookmarks", "noe", &add("\"Porch\"", "x")).await.0, StatusCode::FORBIDDEN, "operator without the events right");
+        // Checks: the note, the moment, the camera.
+        assert_eq!(call("POST", "/api/bookmarks", "otto", &add("\"Porch\"", "  ")).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call("POST", "/api/bookmarks", "otto", &add("\"Porch\"", &"a".repeat(501))).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call("POST", "/api/bookmarks", "otto", &add("\"Nowhere\"", "x")).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call("POST", "/api/bookmarks", "otto", &format!(r#"{{"at":{},"note":"x"}}"#, at + 86_400_000)).await.0, StatusCode::BAD_REQUEST, "the future");
+        assert_eq!(call("POST", "/api/bookmarks", "otto", "nonsense").await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call("POST", "/api/bookmarks", "otto", &format!(r#"{{"at":{at},"note":"{}"}}"#, "a".repeat(9000))).await.0, StatusCode::PAYLOAD_TOO_LARGE, "body limit");
+        // Limited to some cameras: theirs only, one at a time.
+        assert_eq!(call("POST", "/api/bookmarks", "olga", &add("\"Garage\"", "x")).await.0, StatusCode::NOT_FOUND, "another camera");
+        assert_eq!(call("POST", "/api/bookmarks", "olga", &add("null", "x")).await.0, StatusCode::FORBIDDEN, "all cameras");
+        assert_eq!(call("POST", "/api/bookmarks", "olga", &format!(r#"{{"at":{at},"note":"x"}}"#)).await.0, StatusCode::FORBIDDEN, "left out is all cameras");
+        let (s, o) = call("POST", "/api/bookmarks", "olga", &add("\"porch\"", "Olga's porch")).await;
+        assert_eq!(s, StatusCode::CREATED, "{o}");
+        let olga_id = o["id"].as_i64().unwrap();
+        // Reading: a viewer of the porch sees the porch and the all-cameras ones.
+        let ids = |v: &serde_json::Value| v["bookmarks"].as_array().unwrap().iter().map(|b| b["id"].as_i64().unwrap()).collect::<Vec<_>>();
+        let (s, l) = call("GET", "/api/bookmarks", "vic", "").await;
+        assert_eq!(s, StatusCode::OK);
+        let mut got = ids(&l);
+        got.sort();
+        let mut want = vec![ann_id, olga_id];
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(l["can_add"].as_bool(), Some(false));
+        assert!(l["bookmarks"].as_array().unwrap().iter().all(|b| b["can_edit"] == false));
+        assert_eq!(call("GET", "/api/bookmarks?camera=Garage", "vic", "").await.0, StatusCode::NOT_FOUND, "a camera they cannot see");
+        let (_, l) = call("GET", "/api/bookmarks", "ann", "").await;
+        assert_eq!(ids(&l).len(), 3);
+        assert_eq!(ids(&call("GET", "/api/bookmarks?q=VAN", "ann", "").await.1), [otto_id], "any case");
+        assert_eq!(ids(&call("GET", "/api/bookmarks?camera=Garage", "ann", "").await.1).len(), 2, "the camera's and the all-cameras ones");
+        assert_eq!(ids(&call("GET", &format!("/api/bookmarks?from={}&to={}", at + 1, at + 2), "ann", "").await.1).len(), 0);
+        assert_eq!(ids(&call("GET", "/api/bookmarks?limit=1", "ann", "").await.1).len(), 1);
+        // Editing: one's own, or any as an admin.
+        let (_, l) = call("GET", "/api/bookmarks", "oona", "").await;
+        assert!(l["bookmarks"].as_array().unwrap().iter().all(|b| b["can_edit"] == false), "oona made none");
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{otto_id}"), "oona", r#"{"note":"mine now"}"#).await.0, StatusCode::FORBIDDEN, "another operator's");
+        assert_eq!(call("DELETE", &format!("/api/bookmarks/{otto_id}"), "oona", "").await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{ann_id}"), "otto", r#"{"keep":false}"#).await.0, StatusCode::FORBIDDEN, "an admin's");
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{otto_id}"), "vic", r#"{"note":"x"}"#).await.0, StatusCode::FORBIDDEN, "viewer");
+        let (s, u) = call("PUT", &format!("/api/bookmarks/{otto_id}"), "otto", r#"{"note":"Van left","keep":false}"#).await;
+        assert_eq!((s, u["note"].as_str(), u["keep"].as_bool(), u["camera"].as_str()), (StatusCode::OK, Some("Van left"), Some(false), Some("Garage")), "{u}");
+        let (s, u) = call("PUT", &format!("/api/bookmarks/{otto_id}"), "ann", r#"{"camera":null}"#).await;
+        assert_eq!((s, u["camera"].is_null(), u["note"].as_str()), (StatusCode::OK, true, Some("Van left")), "admin edits any");
+        // Limited: an all-cameras bookmark is not theirs to change, nor is another camera's.
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{ann_id}"), "olga", r#"{"note":"x"}"#).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{olga_id}"), "olga", r#"{"camera":"Garage"}"#).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{olga_id}"), "olga", r#"{"camera":null}"#).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{olga_id}"), "olga", r#"{"note":"Porch light"}"#).await.0, StatusCode::OK);
+        assert_eq!(call("PUT", "/api/bookmarks/99999", "ann", r#"{"note":"x"}"#).await.0, StatusCode::NOT_FOUND);
+        // A bookmark of a camera the caller cannot see: not found, not refused.
+        let (_, g) = call("POST", "/api/bookmarks", "ann", &add("\"Garage\"", "garage only")).await;
+        let garage_id = g["id"].as_i64().unwrap();
+        assert_eq!(call("DELETE", &format!("/api/bookmarks/{garage_id}"), "olga", "").await.0, StatusCode::NOT_FOUND);
+        // Deleting.
+        assert_eq!(call("DELETE", &format!("/api/bookmarks/{otto_id}"), "otto", "").await.0, StatusCode::OK);
+        assert_eq!(call("DELETE", &format!("/api/bookmarks/{otto_id}"), "otto", "").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call("DELETE", &format!("/api/bookmarks/{olga_id}"), "ann", "").await.0, StatusCode::OK);
+        // The audit log names them.
+        let rows = e.db.audit_rows();
+        assert!(rows.iter().any(|r| r.1.contains("bookmark added")) && rows.iter().any(|r| r.1.contains("bookmark deleted")) && rows.iter().any(|r| r.1.contains("no longer kept")) && rows.iter().any(|r| r.1.contains("camera garage to all cameras") && r.1.contains("(made by otto)")), "{rows:?}");
+        // Device tokens read, never write (even with control rights).
+        let (tok, _) = crate::auth::add_token("otto", "app", true, crate::auth::generation("otto")).unwrap().unwrap();
+        let tcall = |method: &str, path: &str, body: &str| {
+            let req = Request::builder().method(method).uri(path).header(header::HOST, "localhost:8090").header(header::CONTENT_TYPE, "application/json").header(header::AUTHORIZATION, format!("Bearer {tok}")).body(Body::from(body.to_string())).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let s = r.status();
+                (s, serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap_or_default())
+            }
+        };
+        let (s, l) = tcall("GET", "/api/bookmarks", "").await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(l["can_add"] == false && l["bookmarks"].as_array().unwrap().iter().all(|b| b["can_edit"] == false), "a token edits nothing: {l}");
+        assert_eq!(tcall("POST", "/api/bookmarks", &add("\"Porch\"", "x")).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(tcall("DELETE", &format!("/api/bookmarks/{ann_id}"), "").await.0, StatusCode::FORBIDDEN);
+        // A deleted account's bookmarks are no one's: a new account of that name cannot edit them.
+        let (_, g2) = call("POST", "/api/bookmarks", "otto", &add("\"Garage\"", "otto's last")).await;
+        e.db.bookmarks_user_removed("otto").unwrap();
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{}", g2["id"]), "otto", r#"{"note":"x"}"#).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call("PUT", &format!("/api/bookmarks/{}", g2["id"]), "ann", r#"{"note":"x"}"#).await.0, StatusCode::OK);
     }
 
     #[tokio::test]

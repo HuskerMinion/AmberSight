@@ -846,7 +846,8 @@ function storagePage(el, mode) {
     '<div class="ac-tile"><b>' + fmtSize(st.bytes || 0) + '</b><span>used in data folder</span></div>' +
     '<div class="ac-tile"><b>' + (st.segments || 0) + '</b><span>recording files</span></div>' +
     '<div class="ac-tile"><b>' + (st.clips || 0) + '</b><span>saved clips</span></div>' +
-    '<div class="ac-tile"><b>' + fmtSize(st.indexed_bytes || 0) + '</b><span>indexed recordings</span></div></div>';
+    '<div class="ac-tile"><b>' + fmtSize(st.indexed_bytes || 0) + '</b><span>indexed recordings</span></div></div>' +
+    (st.kept_bookmarks && st.kept_bookmarks.count ? '<div class="hint">' + st.kept_bookmarks.count + ' kept bookmark' + (st.kept_bookmarks.count === 1 ? '' : 's') + ' hold ' + fmtSize(st.kept_bookmarks.bytes || 0) + ' of recordings back from cleanup (2 min either side of each). Only a full drive deletes them, as a last resort.</div>' : '');
 
   function paintRetention() {
     const usage = {}, capInfo = {}; (st.folders || []).forEach(f => { usage[f.name] = f.bytes; capInfo[f.name] = f.cap; });
@@ -1133,6 +1134,7 @@ function discoveryPage(el) {
         }
         if (!isCfg && !v.state && xa) h += '<div class="ac-ins"><button class="btn" data-manual>Enter a login for this camera</button></div>';
         if (v.state === 'ok') {
+          if (v.note) h += '<div class="hint ac-note">' + esc(v.note) + '</div>';
           h += (v.cams || []).map((c, ci) => '<div class="ac-cand dl-cand" data-ci="' + ci + '">' +
             (c.added ? '<span class="badge on dot">added</span>' : '<label class="asys-chk"><input type="checkbox" data-pick' + (c.pick ? ' checked' : '') + '></label>') +
             '<label class="dl-name">Name <input data-cn value="' + esc(c.name) + '"' + (c.added ? ' disabled' : '') + '></label>' +
@@ -1173,12 +1175,12 @@ function discoveryPage(el) {
   // Sign in to one device with the given logins (or the page's list).
   async function signIn(xa, list) {
     const v = devs[xa] = devs[xa] || {};
-    v.state = 'trying'; v.msg = ''; paint();
+    v.state = 'trying'; v.msg = ''; v.note = ''; paint();
     try {
       const r = await api('/api/discover/autologin', { json: { xaddr: xa, logins: list.map(l => ({ username: l.username, password: l.password || '' })) } });
       if (r.ok) {
         const typed = list.find(l => l.username === r.username);
-        Object.assign(v, { state: 'ok', ins: r.inspection, username: r.username, password: typed ? typed.password : '' });
+        Object.assign(v, { state: 'ok', ins: r.inspection, username: r.username, password: typed ? typed.password : '', note: r.inspection.note || '' });
         const cands = (r.inspection.cameras && r.inspection.cameras.length) ? r.inspection.cameras : [r.inspection.suggested];
         v.cams = cands.filter(c => c && c.url).map(c => ({ base: c, name: c.name || 'Camera', pick: true, added: false }));
         if (!v.cams.length) { v.state = 'error'; v.msg = 'Signed in, but the camera reported no video stream.'; }

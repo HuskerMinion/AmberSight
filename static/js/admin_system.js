@@ -17,7 +17,7 @@ const PERMS = [
   ['ptz', 'Move PTZ cameras, go to presets, click to aim'],
   ['talk_clip', 'Talk through a camera’s speaker, record a clip now'],
   ['arm', 'Arm and disarm, switch profiles, pause notifications (an operator limited to some cameras can only pause theirs: arming and profiles change every camera)'],
-  ['events', 'Keep events forever, mark them “not a real alert” or “looks fine”'],
+  ['events', 'Keep events forever, mark them “not a real alert” or “looks fine”, add timeline bookmarks'],
   ['camera_detection', 'Change detection and alert settings of their cameras (zones, sensitivity, AI, alert times)'],
 ];
 const ALL_PERMS = Object.fromEntries(PERMS.map(([k]) => [k, true]));

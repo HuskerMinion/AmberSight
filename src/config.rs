@@ -93,7 +93,8 @@ pub struct OperatorPerms {
     /// Arm and disarm, switch profiles, pause a camera's notifications.
     #[serde(default = "yes")]
     pub arm: bool,
-    /// Keep events forever (and undo it), mark them "not a real alert" or "looks fine".
+    /// Keep events forever (and undo it), mark them "not a real alert" or "looks fine";
+    /// add timeline bookmarks (and change or delete their own).
     #[serde(default = "yes")]
     pub events: bool,
     /// Change the detection and alert settings of the cameras they may see.
@@ -529,6 +530,11 @@ pub struct CameraConfig {
     /// "notify me for", areas that don't notify) play no part.
     #[serde(default, alias = "copy_events_only_alerts", skip_serializing_if = "std::ops::Not::not")]
     pub copy_events_only_confirmed: bool,
+    /// Fill holes in the continuous recording (a dropped connection, a
+    /// restart) from the camera's own memory card, once it is back. Reolink
+    /// cameras with a card only (engine/card_fill.rs). Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fill_from_card: bool,
     /// Device credentials for the stream itself (separate from app users).
     /// Injected into the URL as scheme://user:pass@host when username is set
     /// and the URL has no userinfo yet. On PUT, an empty password keeps the
@@ -1326,6 +1332,18 @@ fn is_zero_u32(v: &u32) -> bool {
 }
 
 impl CameraConfig {
+    /// A battery Argus's UID: the `uid` setting when it is set (it wins), else
+    /// the `uid` in a `baichuan://<host>?uid=<UID>` address. None when neither
+    /// gives one.
+    pub fn battery_uid(&self) -> Option<String> {
+        self.uid
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
+            .or_else(|| crate::ingest::baichuan::parse_url(&self.url).and_then(|(_, u)| u))
+    }
+
     /// The folder event clips are also saved to, when that is on.
     pub fn copy_folder(&self) -> Option<&str> {
         self.copy_events_to.as_deref().map(str::trim).filter(|p| !p.is_empty())
@@ -2588,6 +2606,20 @@ pub fn slug(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Config, parse_schedule, schedule_active};
+
+    #[test]
+    fn battery_uid_comes_from_the_setting_or_the_address() {
+        let cam = |extra: &str, url: &str| -> super::CameraConfig { toml::from_str(&format!("name = \"c\"\nurl = \"{url}\"\n{extra}")).unwrap() };
+        let a = "baichuan://192.0.2.9?uid=FROMURL000000001";
+        assert_eq!(cam("", a).battery_uid().as_deref(), Some("FROMURL000000001"));
+        // The setting wins over the address.
+        assert_eq!(cam("uid = \"FROMCONF000000002\"", a).battery_uid().as_deref(), Some("FROMCONF000000002"));
+        // An empty setting does not hide the address's.
+        assert_eq!(cam("uid = \"\"", a).battery_uid().as_deref(), Some("FROMURL000000001"));
+        assert_eq!(cam("uid = \"FROMCONF000000002\"", "baichuan://192.0.2.9").battery_uid().as_deref(), Some("FROMCONF000000002"));
+        assert_eq!(cam("", "baichuan://192.0.2.9").battery_uid(), None);
+        assert_eq!(cam("", "rtsp://192.0.2.9/x?uid=NOTBATTERY").battery_uid(), None);
+    }
 
     #[test]
     fn the_demo_account_must_be_an_enabled_plain_viewer() {

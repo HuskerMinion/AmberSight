@@ -62,6 +62,8 @@ pub fn merge_spans(mut spans: Vec<(i64, i64)>, gap_ms: i64) -> Vec<(i64, i64)> {
 pub struct Coverage {
     pub camera: String,
     pub spans: Vec<(i64, i64)>,
+    /// The parts of `spans` filled in from the camera's own card.
+    pub card_spans: Vec<(i64, i64)>,
     pub segments: usize,
     pub bytes: i64,
 }
@@ -69,9 +71,11 @@ pub struct Coverage {
 pub fn coverage(db: &Db, camera: &str, from_ms: i64, to_ms: i64) -> anyhow::Result<Coverage> {
     let rows = db.segments_overlapping(&slug(camera), from_ms, to_ms)?;
     let spans = rows.iter().map(|r| (r.start_ms.max(from_ms), r.end_ms.min(to_ms))).collect();
+    let card = rows.iter().filter(|r| super::card_fill::is_card_piece(&r.path)).map(|r| (r.start_ms.max(from_ms), r.end_ms.min(to_ms))).collect();
     Ok(Coverage {
         camera: camera.to_string(),
         spans: merge_spans(spans, SPAN_GAP_MS),
+        card_spans: merge_spans(card, SPAN_GAP_MS),
         segments: rows.len(),
         bytes: rows.iter().map(|r| r.bytes).sum(),
     })

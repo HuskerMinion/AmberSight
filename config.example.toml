@@ -241,6 +241,15 @@ post_roll = 10          # seconds of footage after the trigger
 # [push]
 # app_hosts = ["ntfy.sh"]    # e.g. ["ntfy.sh", "ntfy.home.lan:8080", "ntfy.tail1234.ts.net"]
 
+# Motion messages from battery Reolink cameras without a hub: point the name
+# pushx.reolink.com at this computer in your local DNS (e.g. a Pi-hole local
+# record). Port 80 must be free and allowed through the firewall; on Linux the
+# service needs CAP_NET_BIND_SERVICE for it (see the install guide).
+# [pushx]
+# enabled = true
+# listen = "0.0.0.0:80"
+# motion_seconds = 20
+
 # New versions (Settings > System > Status & updates shows them; installing always needs an
 # admin's click, or: ambersight update --config config.toml).
 # [update]
@@ -292,6 +301,9 @@ post_roll = 10          # seconds of footage after the trigger
 # # copy_events_keep_days = 30         # delete copies after this many days; 0 = keep
 # # copy_events_only_confirmed = false  # true: only events AI confirmed (AI off: all);
 # #                                     # notification settings never leave one out
+# # Fill holes in the recording (the camera dropped off the network) from the
+# # camera's memory card. Reolink only; off unless set.
+# # fill_from_card = false
 # # Device credentials, separate from app users: injected into the URL as
 # # scheme://user:pass@host when username is set and the URL has no userinfo.
 # # The API never echoes the password back; on PUT a blank password keeps the
@@ -387,6 +399,20 @@ post_roll = 10          # seconds of footage after the trigger
 # # trigger = "camera"
 # # record_motion_only = true
 # # # For a hub with several cameras on ONVIF instead: onvif_source = "000"
+
+# # Battery Reolink camera without a hub (Argus): AmberSight talks Reolink's own
+# # protocol to it. In the web page: Brand "Reolink battery (Argus, no hub)".
+# # The UID is in the Reolink app's device info. Motion arrives through the
+# # [pushx] listener below; turn Push on for the camera in the Reolink app.
+# # [[cameras]]
+# # name = "Back Yard"
+# # url = "baichuan://192.168.1.60"   # give the camera a fixed address
+# # uid = "95270000XXXXXXXX"
+# # username = "admin"
+# # password = "device-password"
+# # on_demand = true
+# # idle_timeout = 30
+# # record_motion_only = true
 
 # # Local sources (encoded to H.264 by ffmpeg; list them with GET /api/devices):
 # # url = "device://USB Video?size=1920x1080&fps=30&audio=Microphone (USB Audio)"  # Windows (dshow)

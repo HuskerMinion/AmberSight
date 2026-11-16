@@ -361,11 +361,14 @@ function statusPage(el) {
     const u = d.upd;
     if (!u || !u.can_install || raiseDlg(updDlg)) return;
     const restart = u.restarts_itself
-      ? 'Then AmberSight restarts by itself; cameras stop recording for a few seconds.'
-      : 'Then restart AmberSight yourself to start using it.';
+      ? 'AmberSight stops while it updates and then starts again by itself: no recording and no live view for about a minute (longer on big sites).'
+      : 'This AmberSight does not restart itself. It keeps running the old version until you restart it, and the restart means about a minute with no recording and no live view (longer on big sites).';
     updDlg = openDlg('Update AmberSight', '<div>Update from <b>v' + esc(u.current) + '</b> to <b>v' + esc(u.latest) + '</b>? ' +
-      'AmberSight downloads it, checks its signature, and keeps this version in the <b>previous</b> folder next to the program. ' + restart + '</div>' +
-      '<div class="row"><button class="primary" data-yes>Update</button><button class="btn" data-no>Cancel</button></div>', true);
+      'AmberSight downloads it, checks its signature, and keeps this version in the <b>previous</b> folder next to the program.</div>' +
+      '<ul class="upd-warn"><li>' + restart + '</li>' +
+      '<li>Right after the restart, playback and the timeline can be slow for a few minutes while it checks its recordings.</li>' +
+      '<li>If the update changes the database, a copy of it is saved first, if there is room, in the <b>backups</b> folder of the data folder (pre-upgrade-...). Going back to the older version afterwards is not recommended: it runs, but warns, and ignores the newer parts.</li></ul>' +
+      '<div class="row"><button class="primary" data-yes>Update now</button><button class="btn" data-no>Cancel</button></div>', true);
     const dlg = updDlg;
     const close = () => { updDlg = null; dlg.__close(); };
     dlg.querySelector('.bar button').onclick = close;
@@ -746,7 +749,9 @@ registerAdminPage({ id: 'status', title: 'Status', order: 5, render: statusPage,
 // its own line to copy, and the download as a link (both from the server's text).
 function whyNotHtml(why) {
   const m = /^(.*?download )(\S+) \((https:\/\/[^)\s]+)\) and run: (.+)$/.exec(why);
-  if (!m) return '<div class="muted">' + esc(why) + '</div>';
+  if (!m) return '<div class="muted">' + esc(why) + '</div>' + (/package manager/.test(why) ? PKG_NOTE : '');
   return '<div class="upd-steps">' + esc(m[1]) + '<a href="' + esc(m[3]) + '" target="_blank" rel="noopener">' + esc(m[2]) + '</a> and run:' +
-    '<pre class="upd-cmd">' + esc(m[4]) + '</pre></div>';
+    '<pre class="upd-cmd">' + esc(m[4]) + '</pre>' +
+    PKG_NOTE + '</div>';
 }
+const PKG_NOTE = '<div class="muted">The package manager cannot warn first: AmberSight stops while it updates (about a minute with no recording or live view), playback can be slow for a few minutes after the restart, and a database change is copied to the backups folder first if there is room. Going back to an older version afterwards is not recommended.</div>';

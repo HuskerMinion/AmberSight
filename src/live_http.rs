@@ -43,7 +43,7 @@ fn wake_if_on_demand(engine: &Engine, id: usize, user: Option<&str>) -> bool {
     let on_demand = engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand);
     let wake = on_demand && user.is_none_or(|u| crate::web::may_wake(engine, u));
     if wake {
-        engine.wake_camera(id);
+        engine.wake_camera(id, "a live viewer");
     }
     wake
 }
@@ -125,7 +125,7 @@ async fn plan_live(engine: &Arc<Engine>, id: usize, q: &StreamQ, caps: &crate::t
     let deadline = std::time::Instant::now() + if on_demand && start { std::time::Duration::from_secs(60) } else { std::time::Duration::ZERO };
     while order.iter().all(|(_, h)| h.info().is_none()) && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        engine.wake_camera(id);
+        engine.wake_camera(id, "a live viewer");
     }
     let avail: Vec<(bool, Arc<LiveHub>, tc::Source)> = order
         .iter()
@@ -236,7 +236,7 @@ async fn subscribe(engine: &Arc<Engine>, id: usize, q: Option<&str>, quiet: bool
     while got.is_none() && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         if on_demand {
-            engine.wake_camera(id);
+            engine.wake_camera(id, "a live viewer");
         }
         got = order.iter().find_map(|h| h.subscribe_for(quiet).map(|s| (h.info(), s)));
     }

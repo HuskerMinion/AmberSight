@@ -1082,7 +1082,7 @@ pub fn start_install(data_dir: PathBuf) -> Result<(), String> {
 // ---------------------------------------------------------------------
 
 /// Check (and unless `check_only`, install) from a terminal, waiting for it.
-pub fn cli(cfg: &UpdateConfig, data_dir: &Path, check_only: bool) -> Result<()> {
+pub fn cli(cfg: &UpdateConfig, data_dir: &Path, check_only: bool, yes: bool) -> Result<()> {
     cleanup_after_update(data_dir);
     let exe = program_path()?;
     println!("AmberSight {CURRENT} ({})", exe.display());
@@ -1097,6 +1097,13 @@ pub fn cli(cfg: &UpdateConfig, data_dir: &Path, check_only: bool) -> Result<()> 
     }
     if check_only {
         println!("install it with: ambersight update --config <file>");
+        return Ok(());
+    }
+    println!();
+    println!("{}", before_update_notice(data_dir));
+    println!();
+    if !yes && !confirm_on_terminal("Update now?")? {
+        println!("nothing was changed");
         return Ok(());
     }
     let last = std::sync::atomic::AtomicU64::new(u64::MAX);
@@ -1120,6 +1127,33 @@ pub fn cli(cfg: &UpdateConfig, data_dir: &Path, check_only: bool) -> Result<()> 
     println!("the previous version is kept in {}", prev.display());
     println!("restart AmberSight to use it (as a service: ambersight service stop, then ambersight service start)");
     Ok(())
+}
+
+/// What an update does to a running AmberSight, said before it starts (the
+/// web page shows the same in its confirm window).
+pub fn before_update_notice(data_dir: &Path) -> String {
+    let backups = crate::backup::backups_dir(data_dir);
+    format!(
+        "Before you update:\n\
+         - A running AmberSight keeps running the old version until you restart it. The restart means about a minute with no recording and no live view (longer on big sites).\n\
+         - Right after the restart, playback and the timeline can be slow for a few minutes while it checks its recordings.\n\
+         - If the update changes the database, a copy of it is saved first, if there is room, in {} (pre-upgrade-...). Going back to the older version afterwards is not recommended: it runs, but warns, and ignores the newer parts.",
+        backups.display()
+    )
+}
+
+/// Ask y/N on the terminal. With no terminal to ask on (a script or a
+/// service), nothing can be asked: the answer is yes, as before this question existed.
+fn confirm_on_terminal(question: &str) -> Result<bool> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Ok(true);
+    }
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Web API for the Updates row of Settings > System > Status & updates (admins only, for reading

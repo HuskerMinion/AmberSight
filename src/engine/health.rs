@@ -151,6 +151,8 @@ impl Engine {
                 "frames": st.frames,
                 "last_recording_end_ms": last_rec,
                 "live_viewers": h.live_main.viewers() + h.live_sub.viewers(),
+                // Holes filled from the camera's own card (null: not turned on).
+                "card_fill": if run.fill_from_card { serde_json::json!(super::card_fill::status(&run.name)) } else { serde_json::Value::Null },
             }));
         }
         // Event clips that cannot be saved to a camera's copy folder.

@@ -318,6 +318,9 @@ pub struct SessionMeta {
     ip_made: Option<IpAddr>,
     /// The order sessions were made in (since the server started).
     seq: u64,
+    /// A display session: the network (`wide_net`) admins were last told it
+    /// is used from, away from the one it was paired on.
+    moved_net: Option<IpAddr>,
 }
 
 impl SessionMeta {
@@ -342,7 +345,11 @@ impl SessionMeta {
 /// A stored session as kept in memory. Those made before the list of devices
 /// existed have no creation time, label or address.
 fn session_from_row(r: crate::db::StoredSession) -> (String, Session) {
-    let meta = SessionMeta { created: r.created, ip: r.ip.parse().ok(), label: r.label, device: r.device, last_seen: r.last_seen, saved_seen: r.last_seen, demo: false, ip_made: None, seq: 0 };
+    let ip: Option<IpAddr> = r.ip.parse().ok();
+    // (A display's network is compared with the one it was last used from before the
+    // restart: where it was paired is not kept, and a move before that was told then.)
+    let ip_made = ip.filter(|_| r.label.starts_with(DISPLAY_LABEL));
+    let meta = SessionMeta { created: r.created, ip, label: r.label, device: r.device, last_seen: r.last_seen, saved_seen: r.last_seen, demo: false, ip_made, seq: 0, moved_net: None };
     (r.hash, Session { id: Identity { user: r.user, admin: r.admin }, expires: r.expires, meta })
 }
 
@@ -1653,6 +1660,146 @@ fn devices_ending_in(s: &State, user: &str, keep: Option<&String>) -> Vec<String
     v.sort();
     v.dedup();
     v
+}
+
+// ---------- display sessions (wall TV, tablet: see display.rs) ----------
+//
+// A display session is an ordinary session of a viewer account that an admin
+// paired with a display code. It differs in three ways: it is never an
+// admin's (made with admin false, so `session_identity` never grants it),
+// its expiry moves forward while it is used (`renew_display_session`) instead
+// of ending 30 days after sign-in, so a display that is used stays signed in
+// and one left unused for `DISPLAY_IDLE_SECS` ends; and the web layer holds
+// it to watching (no operator rights, nothing under /me/: see web.rs). It is
+// told apart by its device-list label, which starts with `DISPLAY_LABEL`
+// (the other labels come from a fixed set of browser names, see
+// devices::device_label), so no database change was needed.
+
+/// The start of every display session's label in the list of devices.
+pub const DISPLAY_LABEL: &str = "Display: ";
+/// A display session ends when it has not been used (renewed) for this long.
+pub const DISPLAY_IDLE_SECS: i64 = 14 * 86400;
+/// However much it is used, a display is paired again this long after pairing.
+pub const DISPLAY_MAX_SECS: i64 = 180 * 86400;
+
+/// The network an address belongs to for display codes and display moves: an
+/// IPv4 address by its /24, IPv6 by its /48 (a home's whole range).
+pub fn wide_net(ip: IpAddr) -> IpAddr {
+    let v4 = |a: std::net::Ipv4Addr| { let o = a.octets(); IpAddr::V4(std::net::Ipv4Addr::new(o[0], o[1], o[2], 0)) };
+    match ip {
+        IpAddr::V4(a) => v4(a),
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(m) => v4(m),
+            None => { let s = a.segments(); IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0)) }
+        },
+    }
+}
+
+/// Whether a display session used from `ip` has moved to another network than
+/// the one it was paired on (`wide_net`), not told yet for that network:
+/// (account, label, where it was paired from). Told once per new network.
+pub fn display_moved(token: &str, ip: IpAddr) -> Option<(String, String, IpAddr)> {
+    let mut s = state().lock().unwrap();
+    let sess = s.sessions.get_mut(&token_hash(token)).filter(|v| v.meta.is_display())?;
+    let made = sess.meta.ip_made?;
+    let net = wide_net(ip);
+    if net == wide_net(made) || sess.meta.moved_net == Some(net) {
+        return None;
+    }
+    sess.meta.moved_net = Some(net);
+    Some((sess.id.user.clone(), sess.meta.label.clone(), made))
+}
+
+impl SessionMeta {
+    /// A display session (see `DISPLAY_LABEL`).
+    pub fn is_display(&self) -> bool {
+        self.label.starts_with(DISPLAY_LABEL)
+    }
+}
+
+/// A display session for `id` (never an admin one). `meta.label` must start
+/// with `DISPLAY_LABEL`. None if the account changed since `generation_then`.
+pub fn new_display_session_if_current(id: Identity, generation_then: u64, meta: SessionMeta) -> Option<String> {
+    if !meta.is_display() || meta.demo {
+        return None;
+    }
+    new_session_if_current_lasting(Identity { user: id.user, admin: false }, generation_then, meta, DISPLAY_IDLE_SECS)
+}
+
+/// Whether `token` is a live display session.
+pub fn session_is_display(token: &str) -> bool {
+    let now = now_secs();
+    state().lock().unwrap().sessions.get(&token_hash(token)).is_some_and(|v| v.expires > now && v.meta.is_display())
+}
+
+/// A display in use: its session now ends `DISPLAY_IDLE_SECS` from now (kept
+/// in the database too), but never later than `DISPLAY_MAX_SECS` after it was
+/// paired. Only from the browser it was paired in: `device` is the hash of the
+/// request's device cookie (devices::browser_of), and must be the session's.
+/// None: not a live display session of that browser. Returns (the new expiry,
+/// when it must be paired again), unix seconds.
+pub fn renew_display_session(token: &str, device: Option<&str>) -> Option<(i64, i64)> {
+    let hash = token_hash(token);
+    let now = now_secs();
+    let (store, expires, pair_by) = {
+        let mut s = state().lock().unwrap();
+        let sess = s.sessions.get_mut(&hash).filter(|v| v.expires > now && v.meta.is_display())?;
+        if sess.meta.device.is_empty() || device != Some(sess.meta.device.as_str()) {
+            return None;
+        }
+        let pair_by = sess.meta.created + DISPLAY_MAX_SECS;
+        sess.expires = (now + DISPLAY_IDLE_SECS).min(pair_by).max(sess.expires.min(pair_by));
+        let expires = sess.expires;
+        (s.store.clone(), expires, pair_by)
+    };
+    if let Some(db) = store {
+        if let Err(e) = db.extend_session(&hash, expires) {
+            tracing::warn!("could not keep a display's new sign-in expiry (it may end sooner after a restart): {e:#}");
+        }
+    }
+    Some((expires, pair_by))
+}
+
+/// Every live display session, of every account: (account, session, expiry).
+pub fn display_sessions() -> Vec<(String, SessionInfo, i64)> {
+    let now = now_secs();
+    let s = state().lock().unwrap();
+    let mut v: Vec<(String, SessionInfo, i64)> = s
+        .sessions
+        .iter()
+        .filter(|(_, x)| x.expires > now && x.meta.is_display())
+        .map(|(h, x)| (x.id.user.clone(), SessionInfo { id: session_id(h), meta: x.meta.clone(), this: false }, x.expires))
+        .collect();
+    v.sort_by(|a, b| a.1.meta.label.cmp(&b.1.meta.label).then_with(|| a.1.id.cmp(&b.1.id)));
+    v
+}
+
+/// Sign a display out (an admin, from Settings > Displays): only display
+/// sessions are found this way. As `end_session_of`, with the account it was of.
+pub fn end_display_session(id: &str) -> Result<Option<(String, SessionInfo)>, ()> {
+    let now = now_secs();
+    let user = {
+        let s = state().lock().unwrap();
+        s.sessions.iter().find(|(h, v)| v.expires > now && v.meta.is_display() && session_id(h) == id).map(|(_, v)| v.id.user.clone())
+    };
+    let Some(user) = user else { return Ok(None) };
+    Ok(end_session_of(&user, id, None)?.map(|i| (user, i)))
+}
+
+/// Make a session's expiry `at` (unix seconds), as tests need.
+#[cfg(test)]
+pub fn session_expire_at(token: &str, at: i64) {
+    if let Some(v) = state().lock().unwrap().sessions.get_mut(&token_hash(token)) {
+        v.expires = at;
+    }
+}
+
+/// Make a session's creation time `at` (unix seconds), as tests need.
+#[cfg(test)]
+pub fn session_created_at(token: &str, at: i64) {
+    if let Some(v) = state().lock().unwrap().sessions.get_mut(&token_hash(token)) {
+        v.meta.created = at;
+    }
 }
 
 pub fn end_session(token: &str) {

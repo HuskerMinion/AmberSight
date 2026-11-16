@@ -389,6 +389,8 @@ pub(crate) enum Auth<'a> {
     /// Sent without sign-in first; after a 401, Digest (MD5 or SHA-256) or
     /// Basic, whichever the device asks for.
     Login(&'a str, &'a str),
+    /// Like `Login`, but never Basic: a device that asks for Basic gets no password.
+    Digest(&'a str, &'a str),
 }
 
 pub(crate) struct Answer {
@@ -448,7 +450,8 @@ pub(crate) fn request(method: &str, url: &str, body: Option<&str>, auth: &Auth) 
     };
     let (status, www, text) = send_once(&agent, method, url, body, first.as_deref())?;
     if status == 401 {
-        if let Auth::Login(user, pass) = auth {
+        if let Auth::Login(user, pass) | Auth::Digest(user, pass) = auth {
+            let allow_basic = matches!(auth, Auth::Login(..));
             let parsed = url::Url::parse(url).context("bad address")?;
             let mut uri = parsed.path().to_string();
             if let Some(q) = parsed.query() {
@@ -458,7 +461,7 @@ pub(crate) fn request(method: &str, url: &str, body: Option<&str>, auth: &Auth) 
             let authz = if let Some(ch) = www.iter().filter_map(|h| parse_challenge(h)).find(|c| c.supported()) {
                 let cnonce: String = crate::onvif::random_bytes::<8>().iter().map(|b| format!("{b:02x}")).collect();
                 digest_header(&ch, user, pass, method, &uri, 1, &cnonce)
-            } else if www.iter().any(|h| h.trim_start().to_ascii_lowercase().starts_with("basic")) {
+            } else if allow_basic && www.iter().any(|h| h.trim_start().to_ascii_lowercase().starts_with("basic")) {
                 basic(user, pass)
             } else {
                 return Ok(Answer { status, body: text });
@@ -468,6 +471,12 @@ pub(crate) fn request(method: &str, url: &str, body: Option<&str>, auth: &Auth) 
         }
     }
     Ok(Answer { status, body: text })
+}
+
+/// One request with no login: the status and the WWW-Authenticate headers it answered.
+pub(crate) fn probe(url: &str) -> Result<(u16, Vec<String>)> {
+    let (status, www, _) = send_once(&agent(), "GET", url, None, None)?;
+    Ok((status, www))
 }
 
 /// An HTTP Digest challenge (RFC 7616).
@@ -966,7 +975,8 @@ mod tests {
         assert!(answers(&cam(&format!("rtsp://127.0.0.1:{port}/x"))));
         drop(l);
         // Nothing listens on the closed port; port 80 is not expected on the test machine either.
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let held = crate::test_ports::closed_port();
+        let closed = held.port;
         let mut c = cam(&format!("rtsp://127.0.0.1:{closed}/x"));
         c.watchdog = Some(crate::config::CameraWatchdog { http_port: Some(closed), ..Default::default() });
         if !tcp_answers("127.0.0.1", 80) {

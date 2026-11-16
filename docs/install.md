@@ -635,6 +635,108 @@ Assistant and MQTT.
 
 ---
 
+## A wall TV or tablet (display mode)
+
+Display mode shows cameras full screen on a TV, an old tablet or a spare monitor, and keeps
+running on its own: when something happens on a camera, that camera goes big for a while, then
+the grid comes back. It reconnects by itself after a Wi-Fi drop or a restart of AmberSight, and
+reloads itself after an update.
+
+1. **Make an account for displays.** In **Settings > Users & security > Users**, add a **viewer**
+   account (for example `display`) and limit it to the cameras the display should show. A display
+   never signs in as an admin.
+2. **Open display mode on the device.** In its browser, open `https://<server address>:8090/display`
+   and bookmark it (or add it to the home screen). It shows a code such as `ABCD-EFGH`.
+3. **Approve the code.** On your phone or computer, signed in as an admin, open **Settings > Users
+   & security > Displays**, enter the code, pick the account and give the display a name. The
+   display signs in within a few seconds. It stays signed in while it is on, signs out by itself
+   when it has not been used for two weeks, and asks to be paired again every six months. The
+   display can only show live cameras (no recordings or events). Admins get an alert if it is
+   used from another network. The same page lists every display with a **Sign out** button.
+   Treat a display like a signed-in phone: someone who can use its browser could copy its
+   sign-in. A copy cannot keep itself signed in, but it works as long as the real display stays
+   on (up to the six months). If a display is lost or stolen, sign it out from the Displays list.
+4. **Choose what it shows.** Move the mouse, tap the screen or press a key on the remote to show
+   **Settings**: which cameras (all, a layout, a group or picked by hand), what makes a camera go
+   big (alerts the AI confirmed, with motion for cameras the AI does not check; any motion; or never) and for how long, the clock and armed state,
+   and dimming at night. These settings are kept on that device.
+
+Use HTTPS (step 5 of First steps) if you can: only then can the browser keep the screen on by
+itself. Over plain HTTP, set the device's own screen timeout to Never as below.
+
+**Fire TV or Android TV.** Install a browser from the app store (Silk on Fire TV; on Android TV,
+any Chromium-based browser), open the address and bookmark it. Turn off the screen saver
+(Fire TV: Settings > Display & Sounds > Screen Saver > Start Time: Never; Android TV: Settings >
+Device Preferences > Screen saver). A browser's own full-screen mode hides its address bar.
+
+**iPad (or iPhone).** Open the address in Safari, choose **Share > Add to Home Screen**, and open
+it from there (it runs without Safari's bars). Set **Settings > Display & Brightness > Auto-Lock**
+to Never. To keep it on display mode only, turn on **Guided Access** (**Settings > Accessibility
+> Guided Access**), open display mode and triple-click the side (or Home) button to start it;
+triple-click again and enter the passcode to leave. With **Night** dimming in the display's
+settings, a bedroom tablet stays dark until something happens.
+
+**Raspberry Pi (or any small computer with a monitor).** Raspberry Pi OS with the desktop can
+start Chromium full screen at login. For example, in `~/.config/labwc/autostart` (Raspberry Pi
+OS Bookworm and newer):
+
+```sh
+chromium-browser --kiosk --noerrdialogs --disable-infobars --no-first-run \
+  --autoplay-policy=no-user-gesture-required --check-for-update-interval=31536000 \
+  https://nvr.example:8090/display &
+```
+
+(Replace the address with your server's; newer releases name the browser `chromium`.) Turn off screen blanking in **Raspberry Pi
+Configuration > Display**. `--kiosk` hides the browser's bars; leave it with `Alt+F4`. For
+AmberSight's own certificate, trust it once in Chromium first (open the server's address, sign
+in with a password, account menu, **Trust this server**), or use plain HTTP on a home network.
+
+Keep the load low on an old device: the grid uses the light picture stream and the big view the
+sub stream by default. Two or four cameras suit most TVs; a display shows at most 16.
+
+---
+
+## Filling gaps from a camera's memory card
+
+When a camera that records to its own card drops off for a while (a Wi-Fi hiccup, a router
+restart, AmberSight restarting or updating), the recordings have a hole although the camera
+kept recording. With **Fill gaps from the camera's card** (camera settings, Recording) AmberSight
+finds the hole once the camera is back, asks the camera for what its card holds for that time,
+downloads only the part that fits the hole, and adds it to the camera's recordings. It then plays
+on the timeline like anything else; a thin amber line under the timeline marks the stretches that
+came from the card. The camera's settings show what it last filled.
+
+- **Cameras:** Reolink cameras and hubs with a memory card, read over RTSP and recording
+  continuously (including "sub stream all the time"). The switch is offered only after the camera
+  answers with a card in it. Tested on one camera: a Reolink Duo Floodlight WiFi v2 (Wi-Fi), a hole
+  of two and a half minutes in its sub-stream recording filled from its card and played back. A Reolink E1
+  Outdoor SE (PoE) and a Reolink Home Hub were only listed and downloaded from, not filled; other models and
+  firmware are untested (a camera that records its card only on motion has only those events to give).
+  Battery Argus cameras already get the start of each event from their card. Cameras of other brands
+  (ONVIF Profile G) are not supported yet.
+- **What is filled:** holes between 20 seconds and 2 hours, from the last 12 hours, that ended at
+  least 3 minutes ago. Holes are filled from the card's recording of the same stream (main, or sub
+  when the camera records its sub stream all the time); the other stream is used when the card has
+  nothing of the first. A hole is tried a few times at most, then left.
+- **Gentle:** one download at a time on the server, in small pieces with pauses, at most about
+  1 GB and 20 minutes for one hole (what came by then is kept). Footage is placed by the camera's
+  clock corrected for its time zone and its clock error; a camera whose clock is more than 5
+  minutes off is not used. A hole from before a daylight-saving change is left alone, since the
+  camera's clock is read after the change.
+- **Holes made on purpose stay:** only time when the camera was recording continuously is filled.
+  A hole from while recording was off or motion-only (in the camera's settings or under a
+  profile, including the weekly schedule) is left empty.
+- **Sign-in:** AmberSight signs in to the camera's web interface over HTTPS and signs out when
+  done. Only when nothing answers on the camera's HTTPS port is plain HTTP used, and then the
+  camera's user name and password go over the network unencrypted.
+- **Limits:** the picture starts at the card's next keyframe, so a few seconds at the start of a
+  hole can stay empty. Recordings are never overwritten or doubled: only time with nothing
+  recorded is filled. Pieces from the card count toward recording space and are deleted by retention like
+  any other recording.
+- **Camera load:** the camera reads its card for each download, which it does alongside recording.
+
+---
+
 ## Battery Reolink cameras without a hub (Argus)
 
 Battery Reolink cameras such as the Argus 2 and Argus 3 Pro have no RTSP stream and sleep most of
@@ -646,15 +748,18 @@ the battery lasts.
 
 - **PIR motion sensor: on**, with no schedule turning it off. Without it the camera never wakes on
   motion.
-- **Push notifications: on.** The camera tells AmberSight about motion through the same message it
-  sends for a phone notification; with push off it sends nothing.
+- **Push notifications: on** for this camera (in the camera's settings in the app). The camera
+  tells AmberSight about motion through the same message it sends for a phone notification; with
+  push off it sends nothing, and the camera only wakes when you open it. If push won't turn on,
+  turn it on before adding the DNS entry below, or restart the camera after turning it on.
 - **SD card in, recording on.** AmberSight adds the first seconds of each event from the camera's own
   recording (see below). If the app shows no recordings for a while although things moved, format
   the card in the app.
 - **Time zone** set to where the camera lives, with automatic time sync on. (AmberSight reads the
   camera's clock itself, so a different zone does not break anything, but the time burned into the
   picture should be local.)
-- Note the camera's **UID** (in the app's device info) and its address on your network.
+- Note the camera's **UID** (in the app's device info: 16 letters and digits) and its address on
+  your network.
 
 **2. On your network:** point the name `pushx.reolink.com` at the AmberSight computer with a local
 DNS entry (a Pi-hole "Local DNS record", or your router's DNS override). The cameras send their
@@ -662,7 +767,16 @@ motion message to that name. Use every DNS server your network hands out, or a c
 without the entry. While the entry is in place, the Reolink phone app no longer gets notifications
 from these cameras: AmberSight's own alerts take over.
 
-**3. In AmberSight's `config.toml`:**
+**3. Add the camera in AmberSight.** In Settings > Cameras, add a camera, pick **Reolink battery
+(Argus, no hub)** under Brand, and type the camera's address, its **UID**, and the user name and
+password. AmberSight turns on **Battery camera** with a 30 second idle time and motion-only
+recording. (A camera added before this type existed: open it and click **Use battery settings**.)
+The camera's motion message always starts an event, and while the camera is awake its picture's
+motion counts too, so the `trigger` setting does not apply to these cameras. Picture motion counts only for 90 seconds after the camera's last motion message or wake (up to 3 minutes once AI has confirmed a person, vehicle or other object the camera alerts on, and always while someone watches it live). An event keeps the camera awake for at most 3 minutes after that message or wake; the camera then stays awake for its idle time before it sleeps. So rain or a swaying bush cannot keep it awake. A live viewer, another camera's trigger while that camera sees motion, and a manual recording (until it ends) still do. If the log says `a battery Argus needs its UID`, the
+UID is missing. Then turn on the listener below (the `[pushx]` block, which is not in the camera
+form).
+
+The same thing in `config.toml`:
 
 ```toml
 [pushx]
@@ -677,7 +791,6 @@ uid = "95270000XXXXXXXX"          # the camera's UID from the Reolink app
 username = "admin"
 password = "the camera password"
 on_demand = true                  # sleeps until motion, the wake button or a viewer
-trigger = "camera"                # the camera's own motion starts recording
 record_motion_only = true
 idle_timeout = 30                 # back to sleep 30 s after the last activity
 ```
@@ -704,7 +817,10 @@ show the whole picture.
 timeline, connects (2–3 s), records the live picture, and lets the camera sleep again about 30 s
 after the motion ends. The live recording starts a few seconds into the event, so about a minute and
 a half later AmberSight fetches the camera's own recording of those first seconds from its SD card
-and adds it in front. The Wake button and opening the camera's live view also wake it.
+and adds it in front. The Wake button and opening the camera's live view also wake it, and so does
+anything asking for its picture (`/api/snapshot`, an MJPEG or RTSP viewer, a Home Assistant camera
+entity): each request keeps it awake for another idle time. While it is awake it sends no motion
+messages. The log line `waking up for ...` says what woke it.
 
 ---
 
@@ -722,7 +838,22 @@ only its name and version); to stop that, add this to `config.toml`:
 check = false
 ```
 
-Nothing is installed until an admin clicks **Update** (and confirms).
+Nothing is installed until an admin clicks **Update** and confirms in a window that says what
+happens:
+
+- When AmberSight restarts itself after the update (a service, a container that restarts), it stops
+  while it updates and starts again: no recording and no live view for about a minute (longer on
+  big sites). When it does not restart itself, it keeps running the old version until you restart
+  it, and the restart takes the same minute. `ambersight update` on a terminal says the same.
+- Right after the restart, playback and the timeline can be slow for a few minutes while it
+  checks its recordings. A small notice at the bottom of the page says so until it is done (a big site with a
+  spinning recordings drive can take longer).
+- If the update changes the database, a copy of it is saved first, if there is room, in the `backups` folder of the
+  data folder (`pre-upgrade-v<old version>-<date>/ambersight.db`; the two newest are kept; skipped
+  with a warning when the drive is nearly full). Going back to the older version afterwards is not
+  recommended: it runs, but warns, and ignores the newer parts. To really go back, restore that
+  copy with the older program.
+
 AmberSight then:
 
 1. downloads the package for this computer from the project's published releases,
@@ -737,7 +868,9 @@ AmberSight then:
 Your settings, recordings and database are not touched.
 
 On a computer without a browser, the same from a terminal:
-`ambersight update --config config.toml` (add `--check` to only look).
+`ambersight update --config config.toml` (add `--check` to only look). It prints the same
+warning and asks `Update now? [y/N]`; `--yes` skips the question, and with no terminal to ask on
+(a script) it goes ahead.
 
 **Going back**: stop the service, copy the files from the `previous` folder
 over the program next to it, start the service.
@@ -745,6 +878,9 @@ over the program next to it, start the service.
 **Installed with a .deb or .rpm package?** The updater refuses (the program
 lives under `/usr`); update with `sudo apt update && sudo apt upgrade` or `sudo dnf upgrade` (with the
 repository set up as above, the panel says so; otherwise it shows the package's link).
+Updates made with apt, dnf or the Windows installer cannot warn first, but have the same effects: AmberSight is
+stopped for about a minute, can be slow for a few minutes afterwards, and a database change is copied
+to `backups` first. Pick a quiet time.
 It also refuses when it cannot write to the program's folder; then update
 by hand as below.
 
@@ -899,6 +1035,13 @@ trusted_proxies = ["127.0.0.1"]   # the proxy's address as AmberSight sees it
 Without `trusted_proxies`, everyone behind the proxy shares one address as described above. The alert
 for a password sent directly by a program (HTTP Basic or RTSP) is once per account and network, so
 behind a proxy that is not listed it sees only one network.
+
+### Recordings on a merged drive (Unraid, mergerfs)
+
+At a start, AmberSight skips a camera's folder when its modified time has not changed since
+the last full look. A merged drive (Unraid's shared folders, mergerfs and similar) might not update that
+time when a file lands on one of the disks behind it. A full look at every folder happens weekly
+and after any unclean stop, so nothing is lost: a recording the index missed might only be noticed later.
 
 ### Event clips not saved to the copy folder
 

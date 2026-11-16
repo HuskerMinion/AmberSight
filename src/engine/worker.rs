@@ -730,7 +730,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                     segment_seconds,
                                     &mut frames_over, &mut event_start, &mut event_score,
                                     &mut best_frame, &mut pending, &mut ai_state,
-                                    &slug_name, &seg_dir, &clips_dir, &thumbs_dir,
+                                    &slug_name, &seg_dir, &clips_dir, &thumbs_dir, false,
                                 );
                                 if motion_only {
                                     let m = handle.state.read().unwrap().motion;
@@ -1175,6 +1175,348 @@ pub(super) struct PendingEvent {
     ai: super::ai_check::AiOutcome,
 }
 
+/// Builds the clips of finished events, off the frame loop (clip building
+/// shells out to ffmpeg).
+#[allow(clippy::too_many_arguments)]
+fn build_clips(
+    engine: &Arc<Engine>,
+    handle: &Arc<CameraHandle>,
+    cfg: &CameraConfig,
+    motion_cfg: &crate::config::MotionConfig,
+    segment_seconds: u64,
+    due: Vec<PendingEvent>,
+    slug_name: &str,
+    seg_dir: &std::path::Path,
+    clips_dir: &std::path::Path,
+    thumbs_dir: &std::path::Path,
+) {
+    for p in due {
+        // Clip building shells out to ffmpeg; keep it off the frame loop.
+        let engine = engine.clone();
+        let handle = handle.clone();
+        let cfg = cfg.clone();
+        let motion_cfg = motion_cfg.clone();
+        let slug_name = slug_name.to_string();
+        let seg_dir = seg_dir.to_path_buf();
+        let clips_dir = clips_dir.to_path_buf();
+        let thumbs_dir = thumbs_dir.to_path_buf();
+        thread::spawn(move || {
+            finalize_event(
+                &engine, &handle, &cfg, segment_seconds,
+                p.start, p.end, p.score, p.thumb, p.ai,
+                &motion_cfg, &slug_name, &seg_dir, &clips_dir, &thumbs_dir,
+            );
+        });
+    }
+}
+
+/// A battery camera going back to sleep: no more footage is coming, so an
+/// open event ends now and every waiting clip is built at once (otherwise
+/// they would wait for the next wake, maybe hours later).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn close_events_for_sleep(
+    handle: &Arc<CameraHandle>,
+    engine: &Arc<Engine>,
+    cfg: &CameraConfig,
+    segment_seconds: u64,
+    frames_over: &mut u32,
+    event_start: &mut Option<i64>,
+    event_score: &mut f64,
+    best_frame: &mut Vec<u8>,
+    pending: &mut Vec<PendingEvent>,
+    ai: &mut super::ai_check::AiState,
+    slug_name: &str,
+    seg_dir: &std::path::Path,
+    clips_dir: &std::path::Path,
+    thumbs_dir: &std::path::Path,
+) {
+    let motion_cfg = engine.config.lock().unwrap().motion.for_camera(cfg);
+    let now = Utc::now().timestamp();
+    *frames_over = 0;
+    if let Some(start) = event_start.take() {
+        pending.push(PendingEvent {
+            start,
+            end: now,
+            score: *event_score,
+            deadline: now,
+            thumb: std::mem::take(best_frame),
+            ai: super::ai_check::AiOutcome::take(ai, &super::ai_check::wanted_labels(engine, cfg)),
+        });
+        handle.state.write().unwrap().motion = false;
+    }
+    best_frame.clear();
+    *event_score = 0.0;
+    let due = std::mem::take(pending);
+    build_clips(engine, handle, cfg, &motion_cfg, segment_seconds, due, slug_name, seg_dir, clips_dir, thumbs_dir);
+}
+
+/// Whether an on-demand camera going to sleep must first close an event
+/// still open or build clips still waiting (a session that ended with an
+/// error, not by idle_stop, which closes them itself).
+pub(super) fn closes_at_sleep(event_open: bool, pending: usize) -> bool {
+    event_open || pending > 0
+}
+
+/// Whether enough frames over the threshold open a new event. Not once the
+/// session is `ending` (an on-demand camera going back to sleep): the event
+/// would be closed at once and the push that started it wakes the camera
+/// again, one event becoming two; the next session's frames start it.
+pub(super) fn opens_event(frames_over: u32, min_frames: u32, ending: bool) -> bool {
+    frames_over >= min_frames && !ending
+}
+
+/// A battery camera counts its picture's own motion only this long after its
+/// last motion push ended: rain, insects in the night light or a swaying bush
+/// would otherwise keep an event (and so the camera) going for ever.
+pub(super) const BATTERY_PICTURE_WINDOW_MS: i64 = 90_000;
+/// An event keeps a battery camera awake at most this long after its last
+/// push ended; after that only viewers (or a new push) keep it awake.
+pub(super) const BATTERY_EVENT_AWAKE_MS: i64 = 180_000;
+
+/// When a battery camera's picture motion counts (see starts_event).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PictureWindow {
+    /// When the last push's pulse ends (epoch ms).
+    pub pulse_until_ms: i64,
+    /// When the camera last woke (epoch ms): woken by a viewer, the Wake
+    /// button or MQTT, no push came, but someone walking past counts too.
+    pub woke_at_ms: i64,
+    /// Someone watches it live (who keeps it awake anyway): its picture
+    /// motion always counts.
+    pub viewers: bool,
+    /// AI confirmed a wanted object (a person, a vehicle ...) in the open
+    /// event: someone walking about for minutes sends no new push, so the
+    /// picture counts up to the BATTERY_EVENT_AWAKE_MS cap instead of only
+    /// BATTERY_PICTURE_WINDOW_MS. (Rain and insects confirm nothing. Once
+    /// confirmed, AI stops looking, so the confirmation's own time says
+    /// nothing about whether the object is still there: the cap bounds it.)
+    pub ai_confirmed: bool,
+}
+
+impl PictureWindow {
+    pub(super) fn counts(&self, now_ms: i64) -> bool {
+        let window = if self.ai_confirmed { BATTERY_EVENT_AWAKE_MS } else { BATTERY_PICTURE_WINDOW_MS };
+        self.viewers || now_ms < self.pulse_until_ms.max(self.woke_at_ms) + window
+    }
+}
+
+/// Whether the open event holds an object AI confirmed (with a box: the
+/// camera's own reports and sounds have none) of a label the camera wants.
+pub(super) fn ai_confirmed_object(found: &[crate::ai::Detection], wanted: &[String]) -> bool {
+    found.iter().any(|d| d.w > 0.0 && wanted.contains(&d.label))
+}
+
+/// Whether this frame counts as motion that starts (or keeps) an event:
+/// the picture's own motion (`video`), the camera's report (`camera`), or
+/// both, as the camera's `trigger` says. A battery Argus (baichuan://)
+/// ignores `trigger`: its PIR push wakes it for a moment only, so the push
+/// must start the event itself, and while it is awake and streaming it
+/// posts no pushes, so only the picture can show further motion, but only
+/// within `window` (BATTERY_PICTURE_WINDOW_MS after the push or the wake,
+/// longer once AI confirmed a wanted object, always while watched live).
+fn starts_event(cfg: &CameraConfig, video: bool, camera: bool, now_ms: i64, window: PictureWindow) -> bool {
+    if crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
+        return camera || (video && window.counts(now_ms));
+    }
+    match cfg.trigger.as_str() {
+        "camera" => camera,
+        "both" => video || camera,
+        _ => video,
+    }
+}
+
+/// Whether an on-demand camera is still needed: a viewer always keeps it
+/// awake; an open event does too, except that a battery camera's event
+/// stops counting BATTERY_EVENT_AWAKE_MS after its last push or wake
+/// (`pulse_until_ms`: the later of the two). `held`:
+/// something outside the picture still wants it recording: another
+/// camera's trigger (`triggered_until`, refreshed a few seconds at a time
+/// only while that camera has motion).
+pub(super) fn on_demand_busy(viewers: bool, event_open: bool, held: bool, battery: bool, now_ms: i64, pulse_until_ms: i64) -> bool {
+    viewers || held || (event_open && (!battery || now_ms < pulse_until_ms + BATTERY_EVENT_AWAKE_MS))
+}
+
+/// `held` for on_demand_busy (epoch s): another camera's trigger, or a
+/// manual "record N minutes" (API or MQTT) still running.
+pub(super) fn on_demand_held(triggered_until: i64, manual_until: i64, now: i64) -> bool {
+    now < triggered_until || now < manual_until
+}
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::*;
+
+    #[test]
+    fn a_battery_push_starts_an_event_whatever_the_trigger_says() {
+        for trigger in ["video", "camera", "both"] {
+            let mut cfg: CameraConfig = toml::from_str(&format!(
+                "name = \"Garden\"\nurl = \"baichuan://192.0.2.10?uid=95270000ABCDEFGH\"\non_demand = true\ntrigger = \"{trigger}\""
+            ))
+            .unwrap();
+            // A push whose pulse ends 10 s from now.
+            let (now, pulse) = (1_000_000, 1_010_000);
+            let w = PictureWindow { pulse_until_ms: pulse, ..Default::default() };
+            assert!(starts_event(&cfg, false, true, now, w), "{trigger}: the push alone starts the event");
+            assert!(starts_event(&cfg, true, false, now, w), "{trigger}: picture motion while awake counts too");
+            assert!(!starts_event(&cfg, false, false, now, w));
+            assert!(!starts_event(&cfg, true, false, pulse + BATTERY_PICTURE_WINDOW_MS, w), "{trigger}: not long after the push");
+            // A network camera follows its setting.
+            cfg.url = "rtsp://192.0.2.11/stream1".into();
+            let w = PictureWindow::default();
+            let (v, c) = (starts_event(&cfg, true, false, now, w), starts_event(&cfg, false, true, now, w));
+            assert_eq!((v, c), match trigger { "video" => (true, false), "camera" => (false, true), _ => (true, true) }, "{trigger}");
+        }
+    }
+
+    /// One simulated second at a time, the event and wake rules of the frame
+    /// loop (process_frame) and the on-demand check (native_worker): steady
+    /// picture motion from second 0 on, one push at second 0 whose pulse
+    /// lasts 10 s. `force_motion` stands for something else that keeps the
+    /// event open (another camera's trigger, a sound). Returns the second
+    /// the camera may sleep and whether an event was still open then.
+    fn simulate(viewers: bool, force_motion: bool, until: i64) -> Option<(i64, bool)> {
+        simulate_with(viewers, force_motion, None, until)
+    }
+
+    /// `confirmed_at`: the second AI confirms a wanted object in the event.
+    fn simulate_with(viewers: bool, force_motion: bool, confirmed_at: Option<i64>, until: i64) -> Option<(i64, bool)> {
+        let cfg: CameraConfig = toml::from_str(
+            "name = \"Garden\"\nurl = \"baichuan://192.0.2.10?uid=95270000ABCDEFGH\"\non_demand = true",
+        )
+        .unwrap();
+        let (break_time, idle) = (20, crate::config::idle_secs(cfg.idle_timeout));
+        let pulse_until_ms = 10_000;
+        let (mut event_start, mut last_motion, mut wake_until) = (None::<i64>, 0i64, 0i64);
+        for t in 0..until {
+            let now_ms = t * 1000;
+            let camera = now_ms < pulse_until_ms;
+            // native_worker's check comes first in each pass.
+            let busy = on_demand_busy(viewers, event_start.is_some(), false, true, now_ms, pulse_until_ms);
+            if busy || camera {
+                wake_until = wake_until.max(t + idle);
+            }
+            if t >= wake_until {
+                return Some((t, event_start.is_some()));
+            }
+            let w = PictureWindow { pulse_until_ms, ai_confirmed: event_start.is_some() && confirmed_at.is_some_and(|c| t >= c), viewers, woke_at_ms: 0 };
+            if starts_event(&cfg, true, camera, now_ms, w) || force_motion {
+                last_motion = t;
+                let start = *event_start.get_or_insert(t);
+                if t - start >= MAX_EVENT_SECONDS {
+                    event_start = Some(t); // rolls over, never None
+                }
+            } else if event_start.is_some() && t - last_motion < break_time {
+            } else {
+                event_start = None;
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn steady_picture_motion_does_not_keep_a_battery_camera_awake() {
+        let idle = crate::config::idle_secs(300);
+        // Rain all night: the picture counts for 90 s after the push, the
+        // event ends a break time later, and the camera sleeps once idle.
+        let (slept, open) = simulate(false, false, 3600).expect("the camera must be allowed to sleep");
+        assert!(!open, "the event ended before sleep");
+        assert!(slept <= 10 + BATTERY_PICTURE_WINDOW_MS / 1000 + 20 + idle + 1, "slept at {slept}");
+        // Something else keeps the event open: the hard cap still lets it sleep
+        // (the worker then closes the event and builds its clip).
+        let (slept, open) = simulate(false, true, 3600).expect("the cap must let it sleep");
+        assert!(open);
+        assert!(slept <= 10 + BATTERY_EVENT_AWAKE_MS / 1000 + idle + 1, "slept at {slept}");
+        // A live viewer keeps it awake.
+        assert_eq!(simulate(true, false, 3600), None);
+        assert_eq!(simulate(true, true, 3600), None);
+    }
+
+    #[test]
+    fn a_confirmed_person_keeps_picture_motion_counting_up_to_the_cap() {
+        let idle = crate::config::idle_secs(300);
+        let w = PictureWindow { pulse_until_ms: 10_000, ai_confirmed: true, ..Default::default() };
+        assert!(w.counts(10_000 + BATTERY_PICTURE_WINDOW_MS + 30_000), "past the plain window");
+        assert!(!w.counts(10_000 + BATTERY_EVENT_AWAKE_MS), "never past the cap");
+        // Someone walking about for many minutes, confirmed at second 5: the
+        // event runs to the cap, then ends a break time later, and the camera sleeps.
+        let (slept, open) = simulate_with(false, false, Some(5), 3600).expect("the cap must let it sleep");
+        assert!(!open);
+        let plain = simulate(false, false, 3600).unwrap().0;
+        assert!(slept > plain, "confirmed {slept} vs plain {plain}");
+        assert!(slept <= 10 + BATTERY_EVENT_AWAKE_MS / 1000 + 20 + idle + 1, "slept at {slept}");
+        // Only an object AI saw (with a box) and the camera wants counts.
+        let d = |label: &str, w: f32| crate::ai::Detection { label: label.into(), score: 0.9, x: 0.1, y: 0.1, w, h: w };
+        let wanted = vec!["person".to_string(), "vehicle".to_string()];
+        assert!(ai_confirmed_object(&[d("person", 0.2)], &wanted));
+        assert!(!ai_confirmed_object(&[d("person", 0.0)], &wanted), "the camera's own report");
+        assert!(!ai_confirmed_object(&[d("bird", 0.2)], &wanted), "not wanted");
+        assert!(!ai_confirmed_object(&[], &wanted));
+    }
+
+    #[test]
+    fn picture_motion_counts_after_a_wake_without_a_push_and_while_watched() {
+        let cfg: CameraConfig = toml::from_str(
+            "name = \"Garden\"\nurl = \"baichuan://192.0.2.10?uid=95270000ABCDEFGH\"\non_demand = true",
+        )
+        .unwrap();
+        // Woken by the Wake button (or MQTT) at 1_000_000 ms; the last push was long before.
+        let woke = PictureWindow { pulse_until_ms: 5_000, woke_at_ms: 1_000_000, ..Default::default() };
+        assert!(starts_event(&cfg, true, false, 1_000_000 + 30_000, woke));
+        assert!(!starts_event(&cfg, true, false, 1_000_000 + BATTERY_PICTURE_WINDOW_MS, woke), "only for a while");
+        // A live viewer: any time.
+        let watched = PictureWindow { pulse_until_ms: 5_000, viewers: true, ..Default::default() };
+        assert!(starts_event(&cfg, true, false, i64::MAX / 2, watched));
+        assert!(!starts_event(&cfg, false, false, i64::MAX / 2, watched), "still needs motion");
+        // The awake cap counts from the wake too, and still ends.
+        assert!(on_demand_busy(false, true, false, true, 1_000_000 + 60_000, 1_000_000));
+        assert!(!on_demand_busy(false, true, false, true, 1_000_000 + BATTERY_EVENT_AWAKE_MS, 1_000_000));
+    }
+
+    #[test]
+    fn no_new_event_starts_while_the_stream_ends_for_sleep() {
+        assert!(opens_event(3, 3, false));
+        assert!(!opens_event(2, 3, false));
+        assert!(!opens_event(3, 3, true), "going back to sleep");
+    }
+
+    #[test]
+    fn a_network_cameras_event_still_keeps_it_awake() {
+        assert!(on_demand_busy(false, true, false, false, i64::MAX / 2, 0));
+        assert!(!on_demand_busy(false, false, false, false, 0, 0));
+        assert!(on_demand_busy(true, false, false, true, i64::MAX / 2, 0));
+    }
+
+    #[test]
+    fn another_cameras_trigger_keeps_a_battery_camera_awake() {
+        // Long after its last push, with the event open: only the trigger's hold counts.
+        let late = 10_000 + BATTERY_EVENT_AWAKE_MS + 1;
+        assert!(!on_demand_busy(false, true, false, true, late, 10_000));
+        assert!(on_demand_busy(false, true, true, true, late, 10_000));
+        assert!(on_demand_busy(false, false, true, true, late, 10_000));
+        // In the native loop: held while now < triggered_until (seconds).
+        assert!(on_demand_held(100, 0, 99) && !on_demand_held(100, 0, 100));
+    }
+
+    #[test]
+    fn falling_asleep_after_a_failed_session_closes_the_open_event() {
+        assert!(closes_at_sleep(true, 0), "an open event");
+        assert!(closes_at_sleep(false, 2), "clips still waiting");
+        assert!(!closes_at_sleep(false, 0), "nothing open");
+    }
+
+    #[test]
+    fn a_manual_recording_keeps_a_battery_camera_awake_until_it_ends() {
+        // "Record 5 minutes" at second 0: held to second 300, not past it.
+        let manual_until = 300;
+        for now in [0, 120, 299] {
+            let held = on_demand_held(0, manual_until, now);
+            assert!(on_demand_busy(false, true, held, true, now * 1000, 0), "second {now}");
+        }
+        let held = on_demand_held(0, manual_until, 300);
+        assert!(!held && !on_demand_busy(false, true, held, true, 300_000, 0));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn process_frame(
     handle: &Arc<CameraHandle>,
@@ -1193,6 +1535,7 @@ pub(super) fn process_frame(
     seg_dir: &std::path::Path,
     clips_dir: &std::path::Path,
     thumbs_dir: &std::path::Path,
+    ending: bool,
 ) {
     let motion_cfg = engine.config.lock().unwrap().motion.for_camera(cfg);
     let sensitivity = motion_cfg.sensitivity;
@@ -1244,15 +1587,19 @@ pub(super) fn process_frame(
     let win = if cam_window.is_some() { cam_window } else { global_window };
     // The camera's own detection: starts events in "camera"/"both" mode,
     // and always labels them.
-    let (cam_active, cam_labels) = {
+    let (cam_active, cam_labels, pulse_until_ms, woke_at_ms) = {
         let st = handle.state.read().unwrap();
-        (st.camera_detections.active(), st.camera_detections.labels())
+        (st.camera_detections.active(), st.camera_detections.labels(), st.camera_detections.pulse_until(), st.woke_at_ms)
     };
-    let over = match cfg.trigger.as_str() {
-        "camera" => cam_active,
-        "both" => over || cam_active,
-        _ => over,
+    let window = PictureWindow {
+        pulse_until_ms,
+        woke_at_ms,
+        viewers: handle.live_main.viewers() + handle.live_sub.viewers() > 0,
+        ai_confirmed: event_start.is_some()
+            && crate::ingest::baichuan::is_baichuan_url(&cfg.url)
+            && ai_confirmed_object(&ai.found, &super::ai_check::wanted_labels(engine, cfg)),
     };
+    let over = starts_event(cfg, over, cam_active, Utc::now().timestamp_millis(), window);
     // Anything moving at all, armed or not (the no-motion alert).
     if over {
         handle.state.write().unwrap().last_activity_at = now;
@@ -1310,24 +1657,7 @@ pub(super) fn process_frame(
     let (due, waiting): (Vec<PendingEvent>, Vec<PendingEvent>) =
         std::mem::take(pending).into_iter().partition(|p| now >= p.deadline);
     *pending = waiting;
-    for p in due {
-        // Clip building shells out to ffmpeg; keep it off the frame loop.
-        let engine = engine.clone();
-        let handle = handle.clone();
-        let cfg = cfg.clone();
-        let motion_cfg = motion_cfg.clone();
-        let slug_name = slug_name.to_string();
-        let seg_dir = seg_dir.to_path_buf();
-        let clips_dir = clips_dir.to_path_buf();
-        let thumbs_dir = thumbs_dir.to_path_buf();
-        thread::spawn(move || {
-            finalize_event(
-                &engine, &handle, &cfg, segment_seconds,
-                p.start, p.end, p.score, p.thumb, p.ai,
-                &motion_cfg, &slug_name, &seg_dir, &clips_dir, &thumbs_dir,
-            );
-        });
-    }
+    build_clips(engine, handle, cfg, &motion_cfg, segment_seconds, due, slug_name, seg_dir, clips_dir, thumbs_dir);
 
     // Only this camera's own motion passes the trigger on (no loops).
     if armed && over && event_start.is_some() && fanout_due && !cfg.also_trigger.is_empty() {
@@ -1341,7 +1671,7 @@ pub(super) fn process_frame(
             *best_frame = f;
         }
         *event_score = event_score.max(score);
-        if event_start.is_none() && *frames_over >= motion_cfg.min_frames {
+        if event_start.is_none() && opens_event(*frames_over, motion_cfg.min_frames, ending) {
             *event_start = Some(now);
             handle.state.write().unwrap().motion = true;
         }

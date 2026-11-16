@@ -77,6 +77,13 @@ impl Db {
         Ok(())
     }
 
+    /// A display session's new expiry (it moves forward while the display is
+    /// used). Never makes a session: one that was ended meanwhile stays ended.
+    pub fn extend_session(&self, hash: &str, expires: i64) -> Result<()> {
+        self.lock().execute("UPDATE sessions SET expires = ?2 WHERE hash = ?1", params![hash, expires])?;
+        Ok(())
+    }
+
     pub fn load_sessions(&self) -> Result<Vec<StoredSession>> {
         let conn = self.lock();
         let mut st = conn.prepare("SELECT hash, user, admin, expires, created, ip, label, device, last_seen FROM sessions")?;

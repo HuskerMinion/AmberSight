@@ -5,7 +5,7 @@
 // as before. Split and join live in camaddr.js.
 
 import { api, esc } from './core.js';
-import { PROTOCOLS, DEFAULT_PORT, BRANDS, splitUrl, hasScheme, fieldsFromUrls, urlsFromFields, addrProblems, brandOf, brandPort } from './camaddr.js';
+import { PROTOCOLS, DEFAULT_PORT, BRANDS, splitUrl, hasScheme, fieldsFromUrls, urlsFromFields, addrProblems, brandOf, brandPort, batteryUrl, normUid, addrUid } from './camaddr.js';
 
 const GUIDE = 'https://github.com/HuskerMinion/AmberSight/blob/master/docs/cameras.md';
 const WHY = {
@@ -20,10 +20,15 @@ const errText = (e) => { const b = (e && e.body) || ''; try { const j = JSON.par
 const cell = (cls, label, input) => '<div class="ca-cell ' + cls + '"><label class="cs-f ca-f"><span>' + label + '</span>' + input + '</label></div>';
 const inp = (k, val, extra) => '<input data-k="' + k + '" value="' + esc(val == null ? '' : val) + '" ' + (extra || '') + '>';
 
+const BATTERY_HINT = 'This camera has no video address: AmberSight talks to it directly and needs its UID (Reolink app, Device info).';
+// (The brand note under the picker already shows BATTERY_HINT; the message line adds only this.)
+const BATTERY_PICKED = 'Battery camera is on, with 30 s idle, and recording is motion only. Set up the camera and your network as the camera guide says.';
+
 function brandOptions(cur) {
   const opt = (b) => '<option value="' + b.id + '"' + (b.id === cur ? ' selected' : '') + '>' + esc(b.name) + '</option>';
   return '<option value="">Pick a brand...</option>' +
-    '<optgroup label="Tested">' + BRANDS.filter(b => b.tested).map(opt).join('') + '</optgroup>' +
+    '<optgroup label="Tested">' + BRANDS.filter(b => b.tested && !b.battery).map(opt).join('') + '</optgroup>' +
+    '<optgroup label="Battery camera, no hub">' + BRANDS.filter(b => b.battery).map(opt).join('') + '</optgroup>' +
     '<optgroup label="Not tested">' + BRANDS.filter(b => !b.tested).map(opt).join('') + '</optgroup>';
 }
 
@@ -32,12 +37,18 @@ export function addrHtml(c, isNew, net) {
   const url = net ? (c.url || '') : '';
   const f = fieldsFromUrls(url, net ? c.sub_url : '', c.username);
   const full = f.mode === 'full';
+  const bat = f.mode === 'battery';
+  const uid = bat ? f.uid : '';
   const ns = 'data-nosig spellcheck="false" autocomplete="off" autocapitalize="off"';
   return '<div class="ca" data-addr data-mode="' + f.mode + '">' +
     '<div class="ca-r1" data-ca-split' + (full ? ' hidden' : '') + '>' +
       cell('ca-host', 'Camera address', inp('addr_host', f.host, ns + ' inputmode="url" placeholder="192.168.1.50"')) +
-      cell('ca-port', 'Port', inp('addr_port', f.port, 'data-nosig inputmode="numeric" maxlength="5" autocomplete="off" placeholder="' + (DEFAULT_PORT[f.scheme] || 554) + '"')) +
-      cell('ca-proto', 'Protocol', '<select data-k="addr_scheme" data-nosig>' + PROTOCOLS.map(([v, t]) => '<option value="' + v + '"' + (v === f.scheme ? ' selected' : '') + '>' + t + '</option>').join('') + '</select>') +
+      cell('ca-port', 'Port', inp('addr_port', f.port, 'data-nosig inputmode="numeric" maxlength="5" autocomplete="off" placeholder="' + (bat ? 'usual' : DEFAULT_PORT[f.scheme] || 554) + '"')) +
+      cell('ca-proto', 'Protocol', '<select data-k="addr_scheme" data-nosig>' + PROTOCOLS.map(([v, t]) => '<option value="' + v + '"' + (v === f.scheme ? ' selected' : '') + '>' + t + '</option>').join('') + '</select>').replace('<div class="ca-cell', '<div data-ca-nobat' + (bat ? ' hidden' : '') + ' class="ca-cell') +
+    '</div>' +
+    '<div class="ca-r2" data-ca-bat' + (bat ? '' : ' hidden') + '>' +
+      cell('ca-user', 'UID <em>Reolink app, Device info</em>', inp('uid', uid, 'spellcheck="false" autocomplete="off" autocapitalize="characters" maxlength="40" placeholder="95270000ABCDEFGH"')) +
+      (isNew ? '' : '<div class="ca-cell ca-batdef"><button type="button" class="btn" data-ca-batdef title="Battery camera on, 30 s idle, motion-only recording">Use battery settings</button></div>') +
     '</div>' +
     '<div class="ca-full" data-ca-full' + (full ? '' : ' hidden') + '>' +
       cell('ca-wide', 'Main stream address <em>records, full size</em>', inp('url', url, 'placeholder="rtsp://192.168.1.50:554/stream1" spellcheck="false" autocomplete="off"')) +
@@ -47,17 +58,17 @@ export function addrHtml(c, isNew, net) {
       cell('ca-user', 'User name', inp('username', c.username, 'autocomplete="off" autocapitalize="off" spellcheck="false"')) +
       cell('ca-pass', 'Password', '<input data-k="password" type="password" autocomplete="new-password" placeholder="' + (isNew ? 'camera password' : 'blank keeps the saved one') + '">') +
     '</div>' +
-    '<div class="ca-paths" data-ca-split' + (full ? ' hidden' : '') + '>' +
+    '<div class="ca-paths" data-ca-split data-ca-nobat' + (full || bat ? ' hidden' : '') + '>' +
       cell('ca-wide', 'Main stream <em>records, full size</em>', inp('addr_main', f.main, ns + ' placeholder="/stream1"')) +
       cell('ca-wide', 'Sub stream <em>motion and the Live grid (optional)</em>', inp('addr_sub', f.sub, ns + ' placeholder="/stream2"')) +
       '<div class="ca-prev" data-ca-prev aria-live="off"></div>' +
     '</div>' +
     '<div class="ca-tools" data-ca-split' + (full ? ' hidden' : '') + '>' +
-      '<label class="cs-f ca-f ca-brand"><span>Brand</span><select data-ca-brand data-nosig aria-describedby="ca-brandhint">' + brandOptions(brandOf(f.main, f.sub)) + '</select></label>' +
-      '<div class="ca-brandnote"><span id="ca-brandhint">Fills both paths.</span> <a href="' + GUIDE + '" target="_blank" rel="noopener noreferrer">Camera guide</a></div>' +
+      '<label class="cs-f ca-f ca-brand"><span>Brand</span><select data-ca-brand data-nosig aria-describedby="ca-brandhint">' + brandOptions(bat ? 'reolink-battery' : brandOf(f.main, f.sub)) + '</select></label>' +
+      '<div class="ca-brandnote"><span id="ca-brandhint">' + (bat ? esc(BATTERY_HINT) : 'Fills both paths.') + '</span> <a href="' + GUIDE + '" target="_blank" rel="noopener noreferrer">Camera guide</a></div>' +
     '</div>' +
     '<div class="ca-acts">' +
-      '<button type="button" class="btn" data-ca-onvif data-ca-split data-touch' + (full ? ' hidden' : '') + '>Find via ONVIF</button>' +
+      '<button type="button" class="btn" data-ca-onvif data-ca-split data-ca-nobat data-touch' + (full || bat ? ' hidden' : '') + '>Find via ONVIF</button>' +
       '<label class="asys-chk ca-fullchk"><input type="checkbox" data-ca-fullchk data-nosig' + (full ? ' checked' : '') + '> Use full addresses</label>' +
     '</div>' +
     '<div class="ca-msg" data-ca-msg role="status" aria-live="polite">' + (full && f.why ? esc(WHY[f.why] || '') : '') + '</div>' +
@@ -71,9 +82,10 @@ export function addrValidate(d) {
   if (!box) return [];
   const v = (k) => { const el = box.querySelector('[data-k="' + k + '"]'); return el ? el.value : ''; };
   const full = box.dataset.mode === 'full';
-  const f = full ? { url: v('url'), sub_url: v('sub_url') } : { host: v('addr_host'), port: v('addr_port'), main: v('addr_main'), sub: v('addr_sub') };
-  const key = { host: 'addr_host', port: 'addr_port', main: 'addr_main', sub: 'addr_sub', url: 'url', sub_url: 'sub_url' };
-  return addrProblems(f, full ? 'full' : 'split').map(([k, m]) => [key[k], m]);
+  const bat = box.dataset.mode === 'battery';
+  const f = full ? { url: v('url'), sub_url: v('sub_url') } : bat ? { host: v('addr_host'), port: v('addr_port'), uid: v('uid') } : { host: v('addr_host'), port: v('addr_port'), main: v('addr_main'), sub: v('addr_sub') };
+  const key = { host: 'addr_host', port: 'addr_port', main: 'addr_main', sub: 'addr_sub', url: 'url', sub_url: 'sub_url', uid: 'uid' };
+  return addrProblems(f, full ? 'full' : bat ? 'battery' : 'split').map(([k, m]) => [key[k], m]);
 }
 // The field a server message about the address belongs next to.
 export function addrErrKey(d, k) {
@@ -97,10 +109,12 @@ export function wireAddr(d, c, isNew) {
   const url = el('url'), subUrl = el('sub_url'), user = el('username'), pw = el('password');
   const brand = q('[data-ca-brand]'), fullChk = q('[data-ca-fullchk]'), msgEl = q('[data-ca-msg]'), found = q('[data-ca-found]'), prev = q('[data-ca-prev]');
   const onvifBtn = q('[data-ca-onvif]');
+  const uidEl = el('uid');
   const net = !/^(push|device|screen):\/\//i.test(c.url || '') && !c.capture;
   const storedUrl = net ? (c.url || '') : '', storedSub = net ? (c.sub_url || '') : '';
   const msg = (t) => { msgEl.textContent = t || ''; };
   const isFull = () => box.dataset.mode === 'full';
+  const isBat = () => box.dataset.mode === 'battery';
   const fields = () => ({ scheme: sch.value, host: host.value.trim(), port: port.value.trim(), main: main.value, sub: sub.value });
   // Something changed without a keystroke (ONVIF, a sub stream from elsewhere): the form repaints.
   const changed = () => box.dispatchEvent(new Event('input', { bubbles: true }));
@@ -114,21 +128,39 @@ export function wireAddr(d, c, isNew) {
   let lastScheme = sch.value;
   const sync = () => {
     lastScheme = sch.value;
-    port.placeholder = String(DEFAULT_PORT[sch.value] || '');
+    port.placeholder = isBat() ? 'usual' : String(DEFAULT_PORT[sch.value] || '');
     if (isFull()) return;
+    if (isBat()) {
+      url.value = batteryUrl({ host: host.value.trim(), port: port.value.trim(), uid: uidEl.value }, storedUrl);
+      subUrl.value = '';
+      prev.innerHTML = '';
+      return;
+    }
     const r = urlsFromFields(fields(), storedUrl, storedSub);
     url.value = r.url; subUrl.value = r.sub_url;
     paintPrev();
   };
   const setMode = (mode, why) => {
     box.dataset.mode = mode;
+    const hint = box.querySelector('#ca-brandhint');
+    if (hint) hint.textContent = mode === 'battery' ? BATTERY_HINT : 'Fills both paths.';
+    port.placeholder = mode === 'battery' ? 'usual' : String(DEFAULT_PORT[sch.value] || '');
     box.querySelectorAll('[data-ca-split]').forEach(x => { x.hidden = mode === 'full'; });
+    box.querySelectorAll('[data-ca-nobat]').forEach(x => { x.hidden = mode !== 'split'; });
+    box.querySelectorAll('[data-ca-bat]').forEach(x => { x.hidden = mode !== 'battery'; });
     q('[data-ca-full]').hidden = mode !== 'full';
     fullChk.checked = mode === 'full';
     msg(mode === 'full' && why ? WHY[why] : '');
     found.innerHTML = '';
   };
   const fill = (f, withCreds) => {
+    if (f.mode === 'battery') {
+      host.value = f.host; port.value = f.port; uidEl.value = f.uid || '';
+      if (withCreds && f.user) { user.value = f.user; pw.value = f.pass; }
+      brand.value = 'reolink-battery';
+      sync();
+      return;
+    }
     sch.value = f.scheme; host.value = f.host; port.value = f.port; main.value = f.main; sub.value = f.sub;
     if (withCreds && f.user) { user.value = f.user; pw.value = f.pass; }
     brand.value = brandOf(f.main, f.sub);
@@ -137,9 +169,10 @@ export function wireAddr(d, c, isNew) {
   const toFull = (why) => { sync(); setMode('full', why); };
   // Full addresses -> split fields, when they fit.
   const toSplit = () => {
-    const f = fieldsFromUrls(url.value, subUrl.value, user.value.trim() || c.username);
+    const f = fieldsFromUrls(url.value, subUrl.value, user.value.trim() || c.username, uidEl.value);
     if (f.mode === 'full') { setMode('full', f.why); fullChk.checked = true; return false; }
-    setMode('split');
+    setMode(f.mode);
+    // (In battery mode the brand note shows BATTERY_HINT.)
     fill(f, true);
     return true;
   };
@@ -148,6 +181,16 @@ export function wireAddr(d, c, isNew) {
   const takeAddress = (text, which) => {
     const s = splitUrl(text);
     if (!s) return false;
+    if (s.scheme === 'baichuan' && !/[?&](?!uid=)[^=&]+=/i.test(s.path.slice(1))) {
+      // A battery camera's address: its host, and the UID when the address carries one.
+      setMode('battery');
+      host.value = s.host; port.value = s.port; brand.value = 'reolink-battery';
+      const u = addrUid(s.path);
+      if (u) uidEl.value = u;
+      if (s.creds) { user.value = s.user; pw.value = s.pass; }
+      sync();
+      return true;
+    }
     if (!DEFAULT_PORT[s.scheme]) {
       if (which === 'sub') { sync(); subUrl.value = text.trim(); sub.value = ''; } else { url.value = text.trim(); main.value = ''; host.value = ''; }
       setMode('full', 'scheme');
@@ -198,15 +241,47 @@ export function wireAddr(d, c, isNew) {
     });
   });
   port.addEventListener('input', sync);
+  uidEl.addEventListener('input', () => { sync(); });
+  uidEl.addEventListener('change', () => { uidEl.value = normUid(uidEl.value); sync(); });
   sch.addEventListener('change', () => {
     // The usual port follows the protocol; a port typed by hand stays.
     if (port.value.trim() === '' || port.value.trim() === String(DEFAULT_PORT[lastScheme])) port.value = String(DEFAULT_PORT[sch.value]);
     sync();
   });
 
+  // The settings a battery camera needs, set when its type is picked (the person can change them after).
+  const setField = (k, v) => {
+    const e = d.querySelector('[data-k="' + k + '"]');
+    if (!e || e.value === v) return;
+    e.value = v;
+    e.dispatchEvent(new Event('input', { bubbles: true }));
+    e.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const batteryDefaults = () => {
+    setField('on_demand', '1');
+    setField('idle_timeout', '30');
+    setField('record_mode', '1');
+  };
+  // An existing camera already shows this type, so picking it again changes
+  // nothing: this button applies the same settings.
+  const batDef = q('[data-ca-batdef]');
+  if (batDef) batDef.addEventListener('click', () => { batteryDefaults(); msg('Battery camera is on, with 30 s idle, and recording is motion only.'); });
   brand.addEventListener('change', () => {
     const b = BRANDS.find(x => x.id === brand.value);
     if (!b) return;
+    if (b.battery) {
+      const wasFull = isFull();
+      if (wasFull) { url.value = ''; subUrl.value = ''; }
+      setMode('battery');
+      sch.value = 'rtsp';
+      port.value = '';
+      batteryDefaults();
+      sync();
+      msg(BATTERY_PICKED);
+      uidEl.focus();
+      return;
+    }
+    if (isBat()) { setMode('split'); port.value = ''; }
     sch.value = 'rtsp';
     port.value = brandPort(port.value, b, sch.value);
     main.value = b.main; sub.value = b.sub;
@@ -242,6 +317,7 @@ export function wireAddr(d, c, isNew) {
   onvifBtn.addEventListener('click', async () => {
     const f = fields();
     found.innerHTML = '';
+    if (isBat()) return;
     if (!f.host) { msg('Enter the camera address first.'); host.focus(); return; }
     onvifBtn.disabled = true;
     try {
@@ -284,22 +360,23 @@ export function wireAddr(d, c, isNew) {
   box.__setSub = (u) => {
     if (isFull()) { subUrl.value = u; return; }
     const s = splitUrl(u);
+    if (isBat()) return;
     const fit = fieldsFromUrls(url.value, u, user.value.trim() || c.username);
     // Only the sub stream changes: the main address is left as the fields say (no sync()).
     if (s && fit.mode === 'split') { sub.value = fit.sub; brand.value = brandOf(main.value, sub.value); subUrl.value = u; paintPrev(); }
     else { subUrl.value = u; setMode('full', fit.why); }
   };
-  if (!isFull()) paintPrev();
+  if (!isFull() && !isBat()) paintPrev();
   ADDR_KEYS.forEach(k => { const e = el(k); if (e) e.dataset.init = e.value; });
 }
 
 // "N changed" for the address: one per part edited (address, port, protocol, a path), or per
 // full address in full-address mode, not the two saved addresses each part rewrites.
-const ADDR_KEYS = ['addr_host', 'addr_port', 'addr_scheme', 'addr_main', 'addr_sub', 'url', 'sub_url'];
+const ADDR_KEYS = ['addr_host', 'addr_port', 'addr_scheme', 'addr_main', 'addr_sub', 'url', 'sub_url', 'uid'];
 export function addrChanged(d) {
   const box = d.querySelector('[data-addr]');
   if (!box) return 0;
-  const keys = box.dataset.mode === 'full' ? ['url', 'sub_url'] : ['addr_host', 'addr_port', 'addr_scheme', 'addr_main', 'addr_sub'];
+  const keys = box.dataset.mode === 'full' ? ['url', 'sub_url'] : box.dataset.mode === 'battery' ? ['addr_host', 'addr_port', 'uid'] : ['addr_host', 'addr_port', 'addr_scheme', 'addr_main', 'addr_sub'];
   return keys.filter(k => { const e = box.querySelector('[data-k="' + k + '"]'); return e && e.value.trim() !== (e.dataset.init || '').trim(); }).length;
 }
 // The sub stream was saved on its own: it is no longer an unsaved change.

@@ -218,6 +218,8 @@ async function checkSession() {
     setTimeout(checkSession, 3000);
     return;
   }
+  // A display (wall TV, tablet) only watches: its page is display mode.
+  if (who.display) { location.replace('/display'); return; }
   applyWho(who);
   if (who.auth_required && !who.signed_in) { showGate(pairMsg || ''); return; }
   start();

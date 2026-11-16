@@ -6,6 +6,7 @@ mod auth;
 mod twostep;
 mod account_http;
 mod devices;
+mod display;
 mod backup;
 mod lockdown;
 mod macnet;
@@ -27,6 +28,7 @@ mod digest_http;
 mod smart;
 mod follow;
 mod rules_http;
+mod bookmarks_http;
 mod alert_rules;
 mod sound;
 mod gpu;
@@ -55,7 +57,9 @@ mod unusual;
 mod mqtt;
 mod onvif;
 mod reolink;
+mod cardfill;
 mod camreboot;
+mod dahua_login;
 mod camreport;
 mod onvif_ptz;
 mod netinfo;
@@ -71,6 +75,8 @@ mod push_http;
 mod presence_http;
 mod snooze;
 mod web;
+#[cfg(test)]
+mod test_ports;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -79,3 +85,5 @@ async fn main() -> anyhow::Result<()> {
 }
 #[cfg(test)]
 mod device_list_tests;
+#[cfg(test)]
+mod display_tests;

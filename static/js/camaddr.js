@@ -5,8 +5,8 @@
 // Storage does not change: the config and the API keep `url` and `sub_url` as full addresses
 // and `username` / `password` on their own. The form only splits and joins.
 
-// The protocols the split form offers. Anything else (baichuan://, rtmp://, lavfi://...) is
-// edited as a full address.
+// The protocols the split form offers. Anything else (rtmp://, lavfi://...) is
+// edited as a full address (baichuan:// has its own form: a battery camera, see fieldsFromUrls).
 export const PROTOCOLS = [['rtsp', 'RTSP'], ['rtsps', 'RTSPS'], ['http', 'HTTP'], ['https', 'HTTPS']];
 export const DEFAULT_PORT = { rtsp: 554, rtsps: 322, http: 80, https: 443 };
 
@@ -130,12 +130,16 @@ const samePlace = (a, b) => a.scheme === b.scheme && hostPart(a.host).toLowerCas
 //   sub-login   the sub stream has its own, different user name
 // `username` is the camera's stored user name: a sub stream that carries the same one in its
 // address still fits (the split form leaves it to the camera's sign-in).
-export function fieldsFromUrls(url, subUrl, username) {
+export function fieldsFromUrls(url, subUrl, username, uid) {
   const out = { mode: 'split', why: '', scheme: 'rtsp', host: '', port: '554', main: '', sub: '', user: '', pass: '' };
   const u = String(url || '').trim(), su = String(subUrl || '').trim();
   if (!u && !su) return out;
   const m = splitUrl(u);
   if (!m) return Object.assign(out, { mode: 'full', why: u ? 'bad' : 'sub-place' });
+  // A battery Argus (no hub): baichuan://<host>, with its UID in the address or in the `uid` setting.
+  if (m.scheme === 'baichuan' && !su && !/[?&](?!uid=)[^=&]+=/i.test(m.path.slice(1))) {
+    return Object.assign(out, { mode: 'battery', scheme: 'baichuan', host: m.host, port: m.port, main: '', sub: '', user: m.user, pass: m.pass, uid: addrUid(m.path) || normUid(uid) });
+  }
   Object.assign(out, { scheme: m.scheme, host: m.host, port: m.port || String(DEFAULT_PORT[m.scheme] || ''), main: m.path, user: m.user, pass: m.pass });
   if (!DEFAULT_PORT[m.scheme]) return Object.assign(out, { mode: 'full', why: 'scheme' });
   if (SECRET_Q.test(m.path.split('?')[1] ? '?' + m.path.split('?')[1] : '')) return Object.assign(out, { mode: 'full', why: 'query-login' });
@@ -147,6 +151,34 @@ export function fieldsFromUrls(url, subUrl, username) {
     out.sub = s.path;
   }
   return out;
+}
+
+// ---- battery Argus (Reolink, no hub): baichuan://<host>, UID in its own field ----
+// Reolink UIDs are 16 letters and digits; the server takes any text, so this only turns away what
+// could never be one (spaces, symbols, a stray address).
+const UID_RE = /^[A-Za-z0-9]{6,40}$/;
+export const normUid = (s) => String(s == null ? '' : s).trim().toUpperCase();
+export const uidProblem = (s) => {
+  const u = normUid(s);
+  if (!u) return 'Enter the camera\'s UID (Reolink app > Device info). It is 16 letters and digits.';
+  return UID_RE.test(u) ? '' : 'A UID is letters and digits only, like 95270000ABCDEFGH (Reolink app > Device info).';
+};
+// The uid= in an address's query ('' when none).
+export function addrUid(pathOrUrl) {
+  const m = /[?&]uid=([^&#]*)/i.exec(String(pathOrUrl || ''));
+  return m ? normUid(dec(m[1])) : '';
+}
+// The address to save for a battery camera: baichuan://host[:port], no UID in it (the UID is its
+// own setting). A stored address that says the same keeps its text exactly (no reconnect on save).
+export function batteryUrl(f, storedUrl) {
+  const host = hostPart(f.host);
+  if (!host) return '';
+  const port = String(f.port == null ? '' : f.port).trim();
+  const url = 'baichuan://' + host + (port ? ':' + port : '');
+  const st = splitUrl(storedUrl);
+  if (st && st.scheme === 'baichuan' && !st.creds && hostPart(st.host).toLowerCase() === host.toLowerCase() && st.port === port &&
+    (!addrUid(st.path) || addrUid(st.path) === normUid(f.uid))) return String(storedUrl).trim();
+  return url;
 }
 
 // The addresses to save from the split fields. A stream whose address means the same as the
@@ -164,6 +196,16 @@ export function urlsFromFields(f, storedUrl, storedSub) {
 // Field problems as [field, message]; field is host, port, main, sub, url or sub_url.
 export function addrProblems(f, mode) {
   const out = [];
+  if (mode === 'battery') {
+    const h = String(f.host || '').trim();
+    if (!h) out.push(['host', 'Enter the camera\'s address, like 192.168.1.50 or camera.local.']);
+    else if (/[\s/?#@]/.test(h)) out.push(['host', 'Only the camera\'s address goes here, like 192.168.1.50.']);
+    const p = String(f.port == null ? '' : f.port).trim();
+    if (p && !(/^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 65535)) out.push(['port', 'The port is a number from 1 to 65535.']);
+    const w = uidProblem(f.uid);
+    if (w) out.push(['uid', w]);
+    return out;
+  }
   if (mode === 'full') {
     const u = String(f.url || '').trim(), s = String(f.sub_url || '').trim();
     if (!u) out.push(['url', 'Enter the camera\'s stream address, like rtsp://192.168.1.50:554/stream1.']);
@@ -186,21 +228,23 @@ export function addrProblems(f, mode) {
 export const BRANDS = [
   { id: 'reolink', name: 'Reolink', tested: true, main: '/Preview_01_main', sub: '/Preview_01_sub', port: 554 },
   { id: 'reolink-h264', name: 'Reolink (h264Preview)', tested: true, main: '/h264Preview_01_main', sub: '/h264Preview_01_sub', port: 554 },
-  { id: 'foscam', name: 'Foscam', tested: true, main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1', port: 554 },
   { id: 'wyze', name: 'Wyze (RTSP firmware)', tested: true, main: '/live', sub: '', port: 554 },
-  { id: 'dahua', name: 'Dahua / Amcrest', tested: false, main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1', port: 554 },
+  { id: 'amcrest', name: 'Amcrest', tested: true, main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1', port: 554 },
+  { id: 'dahua', name: 'Dahua (also Lorex, Empiretech and other rebrands)', tested: false, main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1', port: 554 },
   { id: 'hikvision', name: 'Hikvision', tested: false, main: '/Streaming/Channels/101', sub: '/Streaming/Channels/102', port: 554 },
   { id: 'uniview', name: 'Uniview', tested: false, main: '/media/video1', sub: '/media/video2', port: 554 },
   { id: 'tapo', name: 'Tapo / TP-Link', tested: false, main: '/stream1', sub: '/stream2', port: 554 },
   { id: 'axis', name: 'Axis', tested: false, main: '/axis-media/media.amp', sub: '/axis-media/media.amp?resolution=640x360', port: 554 },
   { id: 'annke', name: 'Annke (main only)', tested: false, main: '/H264/ch1/main/av_stream', sub: '', port: 554 },
-  { id: 'foscam-old', name: 'Foscam (older, /videoMain)', tested: false, main: '/videoMain', sub: '/videoSub', port: 88 },
+  { id: 'foscam', name: 'Foscam', tested: false, main: '/videoMain', sub: '/videoSub', port: 88 },
+  // Not a stream path: a battery camera talks Reolink's own protocol (baichuan://) and needs its UID.
+  { id: 'reolink-battery', name: 'Reolink battery (Argus, no hub)', tested: true, battery: true, main: '', sub: '', port: 0 },
 ];
 // The brand whose paths these are ('' when none, or when several brands share them, as
-// Foscam and Dahua do).
+// Amcrest and Dahua do).
 export function brandOf(main, sub) {
   const a = normPath(main).toLowerCase(), b = normPath(sub).toLowerCase();
-  const hits = BRANDS.filter(x => x.main.toLowerCase() === a && x.sub.toLowerCase() === b);
+  const hits = BRANDS.filter(x => !x.battery && x.main.toLowerCase() === a && x.sub.toLowerCase() === b);
   return hits.length === 1 ? hits[0].id : '';
 }
 // The port after picking a brand: the brand's usual port, unless one of a kind no brand uses was typed.

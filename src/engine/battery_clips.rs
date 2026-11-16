@@ -28,7 +28,7 @@ const RETRY_AFTER_MS: i64 = 4 * 60_000;
 /// uid, so a removed camera's id reused by a new one does not suppress it).
 pub(super) fn spawn_lead_in(engine: Arc<Engine>, handle: Arc<CameraHandle>, push_ms: i64) {
     static LAST: std::sync::OnceLock<Mutex<std::collections::HashMap<String, i64>>> = std::sync::OnceLock::new();
-    let Some(uid) = handle.cfg.read().unwrap().uid.clone().filter(|u| !u.is_empty()) else { return };
+    let Some(uid) = handle.cfg.read().unwrap().battery_uid() else { return };
     {
         let mut last = LAST.get_or_init(Default::default).lock().unwrap();
         if last.get(&uid).is_some_and(|&t| push_ms - t < SAME_EVENT_MS) {
@@ -144,7 +144,7 @@ fn live_recording(engine: &Engine, slug_name: &str, push_ms: i64) -> Result<i64,
 fn lead_in(engine: &Arc<Engine>, handle: &Arc<CameraHandle>, push_ms: i64) -> Result<(), LeadIn> {
     use anyhow::{anyhow, Context};
     let cfg = handle.cfg.read().unwrap().clone();
-    let uid = cfg.uid.clone().filter(|u| !u.is_empty()).ok_or_else(|| anyhow!("no camera uid"))?;
+    let uid = cfg.battery_uid().ok_or_else(|| anyhow!("no camera uid"))?;
     let slug_name = slug(&cfg.name);
     let (from, to) = (push_ms - BEFORE_PUSH_MS, push_ms + AFTER_PUSH_MS);
     let mut got = None;

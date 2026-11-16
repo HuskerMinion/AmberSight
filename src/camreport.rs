@@ -253,8 +253,8 @@ impl Secrets {
         if let Some(k) = crate::ingest::push::push_key(&cfg.url) {
             keys.push(k.to_string());
         }
-        if let Some(u) = &cfg.uid {
-            keys.push(u.clone());
+        if let Some(u) = cfg.battery_uid() {
+            keys.push(u);
         }
         // HTTP Basic sign-in as a camera may echo it (seen in an SDP "s=" line):
         // base64 of user:password, with and without its padding.
@@ -745,7 +745,7 @@ fn settings(cfg: &CameraConfig) -> Value {
         "onvif_host": crate::onvif::host_from_rtsp_url(&cfg.url),
         "onvif_port": cfg.onvif_port,
         "reolink_channel": cfg.reolink_channel,
-        "uid": cfg.uid.as_ref().map(|_| "set"),
+        "uid": cfg.battery_uid().map(|_| "set"),
         "on_demand": cfg.on_demand,
         "record": cfg.record,
         "record_motion_only": cfg.record_motion_only,

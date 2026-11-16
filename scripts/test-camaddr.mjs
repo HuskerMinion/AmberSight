@@ -24,7 +24,7 @@ eq(A.brandOf('/h264Preview_01_main', '/h264Preview_01_sub'), 'reolink-h264', 're
 // Dahua: the query stays in the path field.
 const dh = A.fieldsFromUrls('rtsp://192.0.2.7/cam/realmonitor?channel=1&subtype=0', 'rtsp://192.0.2.7:554/cam/realmonitor?channel=1&subtype=1');
 eq(pick(dh, ['mode', 'port', 'main', 'sub']), { mode: 'split', port: '554', main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1' }, 'dahua query paths');
-eq([A.brandOf(dh.main, dh.sub), A.BRANDS.find(b => b.id === 'dahua').tested], ['', false], 'dahua paths are also Foscam\'s: no brand named; dahua not tested');
+eq([A.brandOf(dh.main, dh.sub), A.BRANDS.find(b => b.id === 'dahua').tested], ['', false], 'dahua paths are also Amcrest\'s: no brand named; dahua not tested');
 eq([A.brandOf('/stream1', ''), A.brandOf('/live', ''), A.brandOf('stream1', 'stream2')], ['', 'wyze', 'tapo'], 'brand needs both paths to match');
 // Hikvision.
 eq(pick(A.fieldsFromUrls('rtsp://cam.local/Streaming/Channels/101', 'rtsp://cam.local/Streaming/Channels/102'), ['mode', 'host', 'main', 'sub']),
@@ -71,7 +71,7 @@ eq(pick(A.fieldsFromUrls('rtsp://192.0.2.3/main', 'rtsp://viewer:pw@192.0.2.3/su
 eq(pick(A.fieldsFromUrls('rtsp://192.0.2.3/main', 'rtsp://admin:pw@192.0.2.3/sub', 'admin'), ['mode', 'sub', 'pass']), { mode: 'split', sub: '/sub', pass: '' }, 'sub with the same user fits; its password is not shown');
 
 // Other sources stay full addresses.
-for (const [u, why] of [['push://abc123', 'scheme'], ['baichuan://192.168.1.60', 'scheme'], ['lavfi://testsrc=size=640x360', 'scheme'], ['rtmp://h/live/x', 'scheme'], ['device://USB Cam', 'scheme'], ['screen://0?fps=15', 'scheme'], ['not a url', 'bad']]) {
+for (const [u, why] of [['push://abc123', 'scheme'], ['lavfi://testsrc=size=640x360', 'scheme'], ['rtmp://h/live/x', 'scheme'], ['device://USB Cam', 'scheme'], ['screen://0?fps=15', 'scheme'], ['not a url', 'bad']]) {
   eq(pick(A.fieldsFromUrls(u, ''), ['mode', 'why']), { mode: 'full', why }, 'full for ' + u);
 }
 // A sign-in in the query (Reolink HTTP-FLV) is not put in a path field.
@@ -89,9 +89,9 @@ eq(A.addrProblems({ host: 'h', port: '554', main: '/a b' }).map(x => x[0]), ['ma
 eq(A.addrProblems({ url: '192.0.2.1/x' }, 'full').map(x => x[0]), ['url'], 'full needs a scheme');
 eq(A.addrProblems({ url: 'rtsp://h/x', sub_url: 'h/y' }, 'full').map(x => x[0]), ['sub_url'], 'full sub needs a scheme');
 eq(A.addrProblems({ url: 'rtsp://h/x' }, 'full'), [], 'full ok');
-eq(A.brandPort('554', A.BRANDS.find(b => b.id === 'foscam-old'), 'rtsp'), '88', 'older foscam port');
-eq([A.BRANDS.find(b => b.id === 'foscam').tested, A.BRANDS.find(b => b.id === 'foscam').main, A.brandPort('88', A.BRANDS.find(b => b.id === 'foscam'), 'rtsp')], [true, '/cam/realmonitor?channel=1&subtype=0', '554'], 'foscam tested, dahua-style paths');
-eq(A.brandPort('10554', A.BRANDS.find(b => b.id === 'foscam-old'), 'rtsp'), '10554', 'typed port kept');
+eq(A.brandPort('554', A.BRANDS.find(b => b.id === 'foscam'), 'rtsp'), '88', 'foscam port');
+eq([A.BRANDS.find(b => b.id === 'amcrest').tested, A.BRANDS.find(b => b.id === 'amcrest').main, A.brandPort('88', A.BRANDS.find(b => b.id === 'amcrest'), 'rtsp'), A.BRANDS.find(b => b.id === 'foscam').tested], [true, '/cam/realmonitor?channel=1&subtype=0', '554', false], 'amcrest tested, dahua-style paths; foscam not tested');
+eq(A.brandPort('10554', A.BRANDS.find(b => b.id === 'foscam'), 'rtsp'), '10554', 'typed port kept');
 
 // The sign-in rule, against the same cases the server's test reads (creds.rs
 // userinfo_cases_shared_with_the_web_form): same user, password and host.
@@ -107,6 +107,26 @@ for (const c of cases) {
   eq(got, c.user === null ? null : { user: c.user, pass: c.pass, host: c.host }, 'userinfo case ' + c.rest);
   const s = A.splitUrl('rtsp://' + c.rest);
   eq([s.creds, s.user], [c.user !== null, c.user === null ? '' : c.user], 'splitUrl follows userinfoAt: ' + c.rest);
+}
+
+// Battery Reolink (Argus, no hub): baichuan://<host>, the UID in its own field.
+{
+  const bat = A.BRANDS.find(b => b.id === 'reolink-battery');
+  eq([!!bat, bat && bat.battery, bat && bat.tested], [true, true, true], 'battery type is in the brand list');
+  eq([A.brandOf('', ''), A.BRANDS.filter(b => !b.battery).every(b => A.brandOf(b.main, b.sub) !== 'reolink-battery')], ['', true], 'the battery type is never detected from stream paths');
+  eq(pick(A.fieldsFromUrls('baichuan://192.0.2.60', '', 'admin', 'abcd1234efgh5678'), ['mode', 'host', 'port', 'main', 'uid']), { mode: 'battery', host: '192.0.2.60', port: '', main: '', uid: 'ABCD1234EFGH5678' }, 'uid from the setting, upper-cased');
+  eq(A.fieldsFromUrls('baichuan://192.0.2.60?uid=95270000ABCDEFGH', '', '', 'OTHER0000OTHER00').uid, '95270000ABCDEFGH', 'the address uid is shown when both exist');
+  eq(A.fieldsFromUrls('baichuan://192.0.2.60?uid=95270000ABCDEFGH&x=1', '').mode, 'full', 'an address with other query parts stays a full address');
+  eq(A.fieldsFromUrls('baichuan://192.0.2.60', 'rtsp://192.0.2.60/x').mode, 'full', 'a sub stream means a full address');
+  eq(A.fieldsFromUrls('rtsp://192.0.2.60/x', '').mode, 'split', 'rtsp is still split');
+  eq(A.batteryUrl({ host: '192.0.2.60', port: '', uid: 'X' }, ''), 'baichuan://192.0.2.60', 'battery address has no uid in it');
+  eq(A.batteryUrl({ host: 'fe80::1', port: '9000', uid: 'X' }, ''), 'baichuan://[fe80::1]:9000', 'battery address ipv6 and port');
+  eq(A.batteryUrl({ host: '192.0.2.60', port: '', uid: '95270000abcdefgh' }, 'baichuan://192.0.2.60?uid=95270000ABCDEFGH'), 'baichuan://192.0.2.60?uid=95270000ABCDEFGH', 'an unchanged stored address keeps its text');
+  eq(A.batteryUrl({ host: '192.0.2.60', port: '', uid: 'NEWUID00NEWUID00' }, 'baichuan://192.0.2.60?uid=95270000ABCDEFGH'), 'baichuan://192.0.2.60', 'a changed uid drops the old one from the address');
+  eq(A.addrProblems({ host: '192.0.2.60', port: '', uid: '95270000ABCDEFGH' }, 'battery'), [], 'a good battery address');
+  eq(A.addrProblems({ host: '', port: '70000', uid: '' }, 'battery').map(x => x[0]), ['host', 'port', 'uid'], 'battery problems name their fields');
+  eq(A.addrProblems({ host: '192.0.2.60', port: '', uid: '9527 0000' }, 'battery').map(x => x[0]), ['uid'], 'a uid with a space');
+  eq(A.addrProblems({ host: '192.0.2.60', port: '', uid: ' 95270000abcdefgh ' }, 'battery'), [], 'a uid is trimmed and may be typed in lower case');
 }
 
 console.log(bad ? bad + ' of ' + n + ' camaddr checks failed' : 'camaddr: all ' + n + ' checks passed');

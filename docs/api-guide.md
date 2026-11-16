@@ -26,6 +26,11 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/login/totp` | anyone | The two-step code that goes with a password; sets the `as_session` cookie |
 | POST | `/api/pair` | anyone | Sign in with a one-time pairing (QR) code |
 | POST | `/api/demo/signin` | anyone (when the server has a demo account) | Sign in to the demo account, no password; 24-hour session |
+| POST | `/api/display/start`, `/api/display/wait` | anyone | Display mode: get a display code, then the session once an admin approves it |
+| POST | `/api/display/lookup`, `/api/display/approve` | **admin** | Find a waiting display by its code; let it sign in as a viewer account |
+| GET | `/api/display/sessions` | **admin** | The signed-in displays |
+| POST | `/api/display/sessions/:id/sign-out` | **admin** | Sign a display out |
+| POST | `/api/display/renew` | viewer (a display session) | Keep a display session: it then ends 14 days after its last use |
 | GET | `/api/whoami` | anyone | Who am I, is sign-in required |
 | POST | `/api/logout` | anyone | End the session |
 | GET | `/api/status` | viewer | Server name, version, armed state, active profile |
@@ -44,6 +49,8 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/events/:id/review` | **admin**, operator (`events`) | Mark an event a false alarm / OK, or clear the mark |
 | GET | `/api/clips/:id` | viewer | Event clip (MP4, Range supported) |
 | GET | `/api/timeline/events` | viewer | Compact event marks for a timeline |
+| GET | `/api/bookmarks` | viewer (their cameras) | Timeline bookmarks: moments with a note |
+| POST / PUT / DELETE | `/api/bookmarks[/:id]` | **admin**, operator (`events`; their own) | Add / change / delete a bookmark |
 | GET | `/api/events/:id/ai` | viewer | What the AI saw for an event |
 | GET | `/api/plates`, `/api/plates/recent` | viewer (their cameras) | License plate readings / one line per plate seen |
 | GET | `/api/plates/:id/img` | viewer (their cameras) | A reading's plate picture (JPEG) |
@@ -461,6 +468,71 @@ are busy (`x-as-why: busy_fallback`); `/api/live/:id/info?caps=` says the same
 plays one only while it is awake already (else **503**, or `waking` stays as it is in `/info`). Show the refused buttons grayed out (or hide them) when
 `demo_account` is true.
 
+### Display sign-in (wall TV, tablet): `/api/display/…`
+
+The web app's display mode (`/display`) runs on a TV, a tablet or a spare monitor that has no
+keyboard. It signs in with a **display code** that an admin approves elsewhere, never with a
+password, and never as an admin. Apps for such devices can use the same flow.
+
+1. The display asks for a code: `POST /api/display/start` (no body, not signed in). **200**
+   `{"code": "ABCD-EFGH", "expires_in": 600}` and an `as_display_wait` cookie (HttpOnly,
+   SameSite=Strict, `Path=/api/display`, 10 minutes) that holds the secret this code belongs to.
+   The code is shown on screen; it signs nothing in by itself. Asking again with the cookie
+   replaces the earlier code. A server without accounts answers `{"open": true}` (nothing to
+   pair). **429** (with the reason as text, to show) when too many displays are waiting (4 per
+   network, an IPv4 /24 or an IPv6 /48; 64 in all, of which addresses outside the home network
+   get at most 16) or the address is locked out after failed sign-ins.
+2. An admin enters the code: `POST /api/display/lookup {"code"}` → `{"code", "ip", "browser",
+   "waiting_s", "approved"}` (where the request came from, to check it is the right device; 404
+   when no display waits with that code), then `POST /api/display/approve {"code", "user",
+   "name"}` → `{"ok": true, "user", "name"}`. `user` must be an enabled **viewer** account (400
+   for an admin, an operator, a disabled or the demo account); make one just for displays,
+   limited to the cameras they show. `name` (up to 40 characters) names the display in the lists
+   of devices. For an account with two-step codes it takes the admin's own password
+   (`my_password`, `my_code`), as the QR code does. A code is approved once (409, then 404).
+3. The display asks every few seconds: `POST /api/display/wait` (with the cookie). **200**
+   `{"pending": true, "code", "expires_in"}` while it waits; once approved **200**
+   `{"signed_in": true, "user", "name"}` with the `as_session` cookie (Max-Age 14 days) and the
+   wait cookie cleared. **410** when the code expired, was never there, is asked for from
+   another network than the one that started it (the same /24 or /48 when both requests use the
+   same address family; after a switch between IPv4 and IPv6 both must be home-network
+   addresses), or the account changed after it was approved (`{"expired": true}`): ask for a
+   new code.
+
+A **display session** is a session of that viewer account with these differences:
+
+- It only shows live cameras, whatever its account may do: no operator rights, and it may use
+  only `GET /api/cameras`, `/api/status`, `/api/ui/prefs`, `/api/ui/orders`,
+  `/api/snapshot/:id`, `/api/live/:id[/info|/ws|/jpeg|/stream]`, and `POST /api/display/renew`,
+  `/api/ui/diag` (plus `/api/whoami` and `/api/logout`). Everything else, recordings, playback,
+  clips, events, search, plates, bookmarks, exports and the account itself included, is **403**
+  `this is a display: it only shows live cameras`. It is never an admin's session, even if the
+  account is made an admin later. It sees the account's cameras only. `/` sends it to `/display`
+  (302).
+- It ends when it has not been used for **14 days**: `POST /api/display/renew` (every few hours
+  while it runs; the web app does it at start and every 6 hours) moves its end 14 days ahead and
+  gives the cookie again. Only from the browser it was paired in: the request must carry that
+  browser's `as_device` cookie (set with the session). `{"display": true, "renewed": true,
+  "expires", "pair_by", "idle_days"}`; from another browser `{"display": true, "renewed": false}`;
+  for any other session `{"display": false}`; nothing changes in either case. The web app
+  signs a display out and shows a new code when it gets `renewed: false`. What this does and
+  does not do: a session cookie copied to another browser cannot keep itself alive there, so it
+  ends within 14 days on its own; but it works there as long as the real display keeps renewing
+  it (up to the 180 days). Anyone who can use the display's browser can copy its cookies: put a
+  display where you would leave a signed-in phone, and sign it out from the Displays list if it
+  is lost or stolen.
+- However much it is used, it ends **180 days** after pairing (`pair_by`): the display shows a
+  new code and an admin approves it again.
+- Used from another network (IPv4 /24, IPv6 /48) than it was paired on, admins get a system
+  alert, once per network (and at most hourly).
+- `GET /api/whoami` has `"display": true`. In the account's own device list
+  (`GET /api/me/account`) its label starts with `Display: `, e.g. `Display: Hall TV (Chrome on
+  Android)`; the account's owner can sign it out there.
+- Admins list every display with `GET /api/display/sessions` → `{"displays": [{"id", "user",
+  "label", "ip", "signed_in", "last_seen", "expires", "pair_by"}], "idle_days"}` and sign one out with
+  `POST /api/display/sessions/:id/sign-out` (its video stops at once). A password change, a role
+  change, disabling or removing the account signs its displays out too, as all its sessions.
+
 ### Two-step codes (accounts with an authenticator app)
 
 Any account can turn on six-digit codes from an authenticator app. **Your app must handle this:**
@@ -537,7 +609,7 @@ gets **403** `sign in with a password for this`.
 
 | Scope | Allowed |
 |---|---|
-| `"viewer"` (default) | `GET`: `/api/cameras`, `/status`, `/live/:id` and `/live/:id/info`, `/stream`, `/ws`, `/jpeg`, `/snapshot/:id`, `/events`, `/events/:id/thumb`, `/timeline/events`, `/clips`, `/clips/:id`, `/recordings`, `/playback`, `/playback/picture`, `/seek`, `/still`, `/preview`, `/filmstrip`, `/smart/search`, `/smart/pic/:pic`. `POST`: `/cameras/:id/wake`, `/signals`. Also RTSP. |
+| `"viewer"` (default) | `GET`: `/api/cameras`, `/status`, `/live/:id` and `/live/:id/info`, `/stream`, `/ws`, `/jpeg`, `/snapshot/:id`, `/events`, `/events/:id/thumb`, `/timeline/events`, `/bookmarks`, `/clips`, `/clips/:id`, `/recordings`, `/playback`, `/playback/picture`, `/seek`, `/still`, `/preview`, `/filmstrip`, `/smart/search`, `/smart/pic/:pic`. `POST`: `/cameras/:id/wake`, `/signals`. Also RTSP. |
 | `"admin"` (only for an admin or operator account; "day-to-day control") | All of the above except RTSP, plus `POST`: `/shield`, `/profile`, `/cameras/:id/ptz` (moves and go-to-preset; **403** for `set_preset`, `remove_preset` and `tour`), `/cameras/:id/ptz/aim`, `/cameras/:id/pause`, `/clips/record`, `/events/:id/review`, `/events/:id/protect`. `GET`: `/profiles`, `/cameras/:id/ptz/presets`, `/cameras/:id/ptz/caps`. A token holds a profile or a pause for 24 hours at most, whatever it asks. Admins get a system alert when a token disarms, pauses or sets a profile, and the audit log names the token. An operator's token can do only what the operator's rights allow (**403** for the rest), on the operator's cameras. |
 
 `GET /api/whoami` also answers a token (`"by_token": true`).
@@ -685,7 +757,7 @@ with a valid session cookie is never blocked.
 | `ptz` | `POST /api/cameras/:id/ptz` (move, stop, go to a preset, tours; `set_preset` and `remove_preset` get **403** `only an admin can save or delete presets`) and `POST /api/cameras/:id/ptz/aim` |
 | `talk_clip` | Talk (`GET /api/cameras/:id/talk`, not with a device token) and `POST /api/clips/record` (also with an `"admin"`-scope device token, although `perms.talk_clip` is then `false`) |
 | `arm` | `POST /api/cameras/:id/pause` (for a day at most: a pause with no `minutes`, or more than 1440, lasts a day, as with a device token); and `POST /api/shield`, `POST /api/profile` unless the account is limited to some cameras (they change every camera: **403** `an account limited to some cameras cannot arm, disarm or switch profiles ...`) |
-| `events` | `POST /api/events/:id/protect` and `POST /api/events/:id/review` |
+| `events` | `POST /api/events/:id/protect` and `POST /api/events/:id/review`; adding bookmarks (`POST /api/bookmarks`) and changing or deleting their own |
 | `camera_detection` | `PUT /api/cameras/:id` changing only these fields: `motion`, `sensitivity`, `min_object`, `max_object`, `contrast`, `min_travel`, `min_frames`, `break_time`, `motion_algorithm`, `schedule`, `zones`, `ignore_zones`, `zone_polys`, `ignore_polys`, `named_zones`, `alerts`, `alert_interval`, `alert_schedule`, `alert_labels`, `alert_ignore_polys`, `alert_priority`, `no_motion_minutes`, `no_motion_schedule`, `audio_trigger`, `audio_margin_db`, `audio_min_db`, `audio_sounds`, `ai`, `ai_labels`, `ai_min_score`, `ai_ignore_parked`, `ai_strict`, `ai_hide_unconfirmed`, `ai_confirm_camera`. Any other field sent with a different value than it has gets **403** `{"error": "only an admin can change these settings of a camera: url, ...", "fields": [...]}` and nothing is saved (the same value sent back is fine, but **send only the fields you change**: some values `GET /api/cameras` shows, such as `url` or the live `motion` flag, are not the stored ones). Also refused: turning `motion` off on a camera that records only on motion (**403**); a change that would restart the camera when operators' changes restarted it 3 times in the last 10 minutes (**429**, with `retry_after` in seconds; admins are told once); and **409** when the camera's settings changed while the request was checked (load and send again). A camera of a linked server: **403**. Every operator change is reported to admins (one message per camera every few minutes, naming the changed settings in plain words), as is marking an event "not a <object>"; the audit log names the fields. |
 
 A change a right does not cover gets **403** `this account may not do that: an admin can allow it in
@@ -876,13 +948,15 @@ camera's network address.
   "arm_delay": 30,
   "events": 1234,
   "webhook": false,
+  "checking_recordings": false,
   "storage": { "…": "…" },
   "profile": { "…": "…" },
   "ffmpeg": { "…": "…" }
 }
 ```
 
-`armed` is the global arm state ("shield"). `arming_until` is the epoch-seconds time an arm
+`checking_recordings` is true while AmberSight checks its recordings after a start (the web app
+shows a notice while it is, and playback and the timeline can be slow). `armed` is the global arm state ("shield"). `arming_until` is the epoch-seconds time an arm
 delay will finish, or null. `profile` is the active profile. Viewers do not receive `data_dir`
 or storage folder paths. The exact shapes of `storage`, `profile` and `ffmpeg` are internal and
 not described here.
@@ -1492,6 +1566,70 @@ When a bucket is used, events are grouped by camera and kind in each slot. Packa
 now get their own rows instead of being folded into a person row.
 Without a bucket, at most 20,000 rows come back, and `more: true` means there were more.
 Unconfirmed events on cameras set to hide them are always left out here.
+
+### Timeline bookmarks: `/api/bookmarks`
+
+A bookmark marks a moment with a note: on one camera, or on all of this server's cameras
+(`camera: null`; never a linked server's). With `keep: true` the recordings from 2 minutes before
+to 2 minutes after the moment (on that camera, or on every camera of this server) are held back
+from automatic cleanup: age retention and the size caps skip them, as they skip a kept event's
+clip. (They may still move to an archive folder.) Recording never stops for them: when a drive is
+below its reserve and nothing else is left to delete, kept video goes too, oldest first, and the
+admins get a system alert ("Kept bookmark video was deleted to keep recording: drive full", at
+most every 6 hours). Unticking `keep`, deleting the bookmark or removing its camera lets them go
+again (the note stays). `GET /api/status` `storage.kept_bookmarks` is `{"count", "bytes"}`: kept
+bookmarks and the recordings they hold.
+
+An older AmberSight (before 0.11.0) run on the same database ignores the bookmarks table: its
+cleanup deletes kept video as usual.
+
+| Who | May |
+|---|---|
+| Everyone signed in, device tokens (`viewer` scope) | Read the bookmarks of the cameras they may see, and the all-cameras ones (also accounts limited to some cameras: they read those notes) |
+| Operators with the `events` right | Add; change or delete their own (once the account is deleted, only admins: a new account of the same name gets none) |
+| Admins | Add; change or delete any |
+
+An account limited to some cameras bookmarks one of its cameras at a time (**403** for
+`camera: null`), and cannot change all-cameras bookmarks. A bookmark of a camera the caller may not
+see is **404**. Device tokens never write (**403**; `can_add` and `can_edit` are `false` for them).
+Adding, deleting and every change (note, camera, keep; an admin's change of someone else's
+bookmark names whose it was) are in the audit log. A server keeps at most 20,000 bookmarks: past
+that `POST` answers **507**. At most 200 of them may be kept (`keep: true`; **507** past that,
+for `POST` and for a `PUT` that turns keep on), and keeping an all-cameras bookmark is for admins:
+an operator gets **403** and keeps one camera's video instead.
+
+`GET /api/bookmarks?from=&to=&camera=&q=&limit=`
+
+| Param | Meaning |
+|---|---|
+| `from`, `to` | Epoch ms; moments in that range (both optional) |
+| `camera` | A camera's name: its bookmarks **and** the all-cameras ones |
+| `q` | Text in the note, any case (at most 200 characters) |
+| `limit` | Default 200, at most 1000 |
+
+```json
+{
+  "bookmarks": [
+    {"id": 7, "camera": "Front Door", "camera_slug": "front_door", "at": 1762166400000,
+     "note": "Courier left the box by the step", "user": "ann",
+     "created": 1762166455000, "updated": 1762166455000, "keep": true, "can_edit": true}
+  ],
+  "can_add": true,
+  "keep_window_ms": 120000
+}
+```
+
+Newest moment first. `camera` is `null` for an all-cameras bookmark. `can_edit`: this caller may
+change or delete it. The note is plain text as typed (up to 500 characters): escape it where you
+show it.
+
+`POST /api/bookmarks {"at": 1762166400000, "note": "...", "camera": "Front Door" | null, "keep": false}`
+answers **201** with the bookmark. `at` is epoch ms, not in the future (a minute of slack);
+leaving `camera` out means all cameras. **400** for an empty or too long note, **404** for a camera
+that is not there, **413** for a body over 8 KB.
+
+`PUT /api/bookmarks/:id {"note"?: "...", "keep"?: true, "camera"?: "Front Door" | null}` changes
+what is sent and answers the bookmark. `DELETE /api/bookmarks/:id` answers `{"id": 7, "deleted": true}`.
 
 ### AI review: `GET /api/events/:id/ai`
 
@@ -2906,6 +3044,37 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.11.0**
+
+- Display mode: `/display` is a full-screen page for a wall TV, a tablet or a spare monitor. New
+  display sign-in, `POST /api/display/start`, `/wait`, `/lookup`, `/approve`, `/renew`, and
+  `GET /api/display/sessions`, `POST /api/display/sessions/:id/sign-out`; see
+  [Display sign-in](#display-sign-in-wall-tv-tablet-apidisplay). `GET /api/whoami` has
+  `display`. Device tokens may use none of them. `GET /api/cameras` has `ai_active`: the AI
+  checks this camera now (AI on, a detector, and on for the camera under the active profile).
+- Timeline bookmarks: `GET`, `POST /api/bookmarks`, `PUT`, `DELETE /api/bookmarks/:id`. A moment
+  with a note on one camera or all of this server's cameras; `keep: true` holds the recordings 2
+  minutes either side back from automatic cleanup (a full drive deletes them last, with a system
+  alert); at most 200 kept bookmarks, and only admins keep all-cameras ones. `GET /api/status` `storage.kept_bookmarks`. Operators with the `events` right add bookmarks and change or delete
+  their own; admins any; device tokens read only. See
+  [Timeline bookmarks](#timeline-bookmarks-apibookmarks).
+- Filling gaps from a Reolink camera's SD card: camera setting `fill_from_card` (admin, off by
+  default). New admin `GET /api/cameras/:id/card-fill` → `{offered, why?, card_mb?, stream?}`;
+  `GET /api/cameras` (admin) has `card_fill_status`; `GET /api/recordings` has `card_spans`
+  (stretches that came from the card); `GET /api/health` cameras have `card_fill`.
+- Battery cameras: camera setting `uid` (admin; hidden from other roles like `username`). A `uid`
+  in a `baichuan://…?uid=` address is used when the setting is empty, and `GET /api/cameras`
+  (admin) shows the one in use. A battery camera's motion message now starts an event whatever
+  `trigger` says.
+- `GET /api/status` has `checking_recordings`: true while the start-up check of the recordings
+  runs (playback may be slow until it is done).
+- `POST /api/discover/autologin`: a camera whose ONVIF refuses the login is tried by its
+  Dahua-style video stream when it answers like a Dahua-style camera; such a camera comes back
+  signed in with stream addresses, no `onvif_port`, and a `note`.
+- Updating: `ambersight update` asks first on a terminal (`--yes` skips it). When an update
+  changes the database, a copy is saved in the data folder's `backups/pre-upgrade-v<old>-<time>/`
+  first (if there is room; the two newest are kept). The database is now version 30.
+
 **New in 0.10.3**
 
 - `GET /api/health`: a missing sub stream and a recording re-encoded on the processor by the
@@ -3016,6 +3185,11 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
   `copy_events_only_confirmed` (the old name `copy_events_only_alerts` is still read);
   `copy_events_status` in `GET /api/cameras` (admins); new admin `POST /api/event-copy/test`; health
   problem key `copy:<camera>`. See section 6.
+- Gaps filled from the camera's card: camera setting `fill_from_card` (admin only, Reolink cameras
+  with a card); `card_fill_status` in `GET /api/cameras` (admins); admin `GET /api/cameras/:id/card-fill`
+  -> `{offered, why?, card_mb?, stream?}`; `GET /api/recordings` adds `card_spans` (the parts of
+  `spans` that came from the card); `GET /api/health` cameras carry `card_fill`. Recording files
+  from the card are named `<camera>-card-<ms>-seg…`.
 - Operator accounts: a third role between viewer and admin. `GET /api/whoami` adds `role` and `perms`
   (`admin` stays `false` for operators); `GET /api/me/account` adds `role`. Operators may use PTZ,
   talk and manual clips, arm and profiles, notification pauses, keep and review events, and a

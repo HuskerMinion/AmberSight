@@ -17,6 +17,7 @@ import { mountServers } from './servers.js';
 import { mountPushCard } from './push.js';
 import { mountHttps } from './https_settings.js';
 import { mountShare } from './share_settings.js';
+import { mountDisplays } from './display_admin.js';
 import { lead, more, how, notice, seg, tabAttrs, MOTION_PRESETS, tablistKeys } from './sp_kit.js';
 
 /* ---------------------------------------------------------------- small form kit */
@@ -399,8 +400,8 @@ const SECTIONS = [
     adminSub('sounds', 'Sounds', false, 'sound'), adminSub('search', 'Smart search', false, 'smart')] },
   { id: 'schedules', group: 'Optional', label: 'Schedules & presence', desc: 'Profiles that change how cameras behave, the weekly schedule, and arming by phones at home or away.', subs: [
     adminSub('profiles', 'Profiles & schedule', true), adminSub('presence', 'Presence')] },
-  { id: 'users', group: 'Admin', label: 'Users & security', desc: 'Accounts, which cameras they can see, and HTTPS.', subs: [
-    adminSub('users', 'Users', true), { id: 'https', label: 'HTTPS', render: mountHttps }] },
+  { id: 'users', group: 'Admin', label: 'Users & security', desc: 'Accounts, which cameras they can see, HTTPS, and displays (wall TVs, tablets).', subs: [
+    adminSub('users', 'Users', true), { id: 'https', label: 'HTTPS', render: mountHttps }, { id: 'displays', label: 'Displays', render: (el) => mountDisplays(el) }] },
   { id: 'connections', group: 'Admin', label: 'Connections', desc: 'Advanced: share streams, link servers, an external detector and the camera watchdog.', subs: [
     { id: 'share', label: 'Share streams', render: (el) => mountShare(el) },
     { id: 'servers', label: 'Servers', render: (el) => mountServers(el) },
@@ -447,7 +448,7 @@ const HELP_TOPICS = {
   'detection/objects': 'admin-ai', 'smart/review': 'admin-aireview', 'smart/faces': 'admin-faces', 'smart/plates': 'admin-lpr', 'connections/detector': 'settings-odt',
   'detection/alerts': 'settings-alerts', 'detection/limits': 'settings-alerts', 'detection/summary': 'settings-digest', 'detection/rules': 'admin-alertrules',
   'schedules/profiles': 'admin-profiles', 'schedules/presence': 'admin-presence', 'connections/watchdog': 'settings-watchdog', 'connections/servers': 'settings-servers', 'connections/share': 'settings-share',
-  'users/users': 'admin-users', 'users/https': 'settings-https', 'system/status': 'admin-status', 'system/logs': 'admin-logs', 'system/audit': 'admin-audit',
+  'users/users': 'admin-users', 'users/https': 'settings-https', 'users/displays': 'display-mode', 'system/status': 'admin-status', 'system/logs': 'admin-logs', 'system/audit': 'admin-audit',
 };
 const helpTopic = (sec, sub) => HELP_TOPICS[sec.id + '/' + sub.id] || 'settings';
 

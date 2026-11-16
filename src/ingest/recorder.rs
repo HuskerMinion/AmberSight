@@ -1113,9 +1113,9 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
         // The persistent session is created and kept connected by the event
         // poller (engine::camera_events); here we only ask it for frames.
         let (_host, uid) = super::baichuan::parse_url(&src.url).ok_or_else(|| anyhow!("bad baichuan URL"))?;
-        let uid = uid.ok_or_else(|| anyhow!("battery camera URL has no uid"))?;
+        let uid = uid.ok_or_else(|| anyhow!("a battery Argus needs its UID (Reolink app > Device info); set it in the camera's settings"))?;
         let client = super::baichuan::registry::get(&uid)
-            .ok_or_else(|| anyhow!("battery camera session is not up yet"))?;
+            .ok_or_else(|| anyhow!("battery camera session is not up yet (check its UID, user name and password)"))?;
         // Signing in to a sleeping camera takes seconds: wait off this runtime.
         let h = tokio::task::spawn_blocking(move || client.start_preview())
             .await

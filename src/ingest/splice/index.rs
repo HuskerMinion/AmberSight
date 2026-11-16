@@ -23,13 +23,14 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
     c.pragma_update(None, "synchronous", "NORMAL")?;
     let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if v != VERSION {
-        c.execute_batch("DROP TABLE IF EXISTS layouts; DROP TABLE IF EXISTS inits;")?;
+        c.execute_batch("DROP TABLE IF EXISTS layouts; DROP TABLE IF EXISTS inits; DROP TABLE IF EXISTS meta;")?;
     }
     c.execute_batch(
         "CREATE TABLE IF NOT EXISTS inits (id INTEGER PRIMARY KEY, bytes BLOB NOT NULL UNIQUE);
          CREATE TABLE IF NOT EXISTS layouts (
              path TEXT PRIMARY KEY, len INTEGER NOT NULL, mtime INTEGER NOT NULL,
-             init INTEGER NOT NULL, data BLOB NOT NULL) WITHOUT ROWID;",
+             init INTEGER NOT NULL, data BLOB NOT NULL) WITHOUT ROWID;
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;",
     )?;
     c.pragma_update(None, "user_version", VERSION)?;
     Ok(c)
@@ -57,13 +58,21 @@ pub fn open_index(path: &Path) {
     };
     if DB.set(Mutex::new(conn)).is_ok() {
         // Entries of files removed some way we did not see (by hand, a
-        // drive cleaned up): dropped a while after start, then daily.
+        // drive cleaned up): dropped once a week. Each sweep looks at every
+        // file, which on a big spinning drive with a cold cache takes hours of
+        // random reads, so it is not repeated at every start.
         std::thread::Builder::new()
             .name("layout-sweep".into())
-            .spawn(|| loop {
+            .spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(600));
-                sweep();
-                std::thread::sleep(std::time::Duration::from_secs(24 * 3600 - 600));
+                loop {
+                    let now = chrono::Utc::now().timestamp();
+                    if sweep_due(meta_get(SWEPT_AT), now) {
+                        sweep();
+                        meta_set(SWEPT_AT, chrono::Utc::now().timestamp());
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                }
             })
             .ok();
     }
@@ -111,6 +120,42 @@ pub(super) fn has(path: &Path, stamp: (u64, Option<std::time::SystemTime>)) -> b
         .ok()
         .flatten()
         .is_some_and(|(len, m)| len as u64 == stamp.0 && m == mt)
+}
+
+/// When the last sweep for removed files finished (epoch seconds).
+const SWEPT_AT: &str = "swept_at";
+/// Every recording up to this segment id (ambersight.db) has been checked.
+const CHECKED_THROUGH: &str = "checked_through";
+const SWEEP_EVERY_SECS: i64 = 7 * 24 * 3600;
+
+fn sweep_due(last: Option<i64>, now: i64) -> bool {
+    last.is_none_or(|t| now - t >= SWEEP_EVERY_SECS || t > now)
+}
+
+fn meta_get(key: &str) -> Option<i64> {
+    DB.get()?.lock().unwrap().query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional().ok().flatten()
+}
+
+fn meta_set(key: &str, value: i64) {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().unwrap().execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![key, value]);
+    }
+}
+
+/// The recordings (segment ids) a finished pass of the start-up layout
+/// check covered; `None` before the first finished pass (or after the
+/// index was made anew).
+pub fn checked_through() -> Option<i64> {
+    meta_get(CHECKED_THROUGH)
+}
+
+/// How many recordings the index holds.
+pub fn layout_count() -> i64 {
+    DB.get().and_then(|db| db.lock().unwrap().query_row("SELECT COUNT(*) FROM layouts", [], |r| r.get(0)).ok()).unwrap_or(0)
+}
+
+pub fn set_checked_through(id: i64) {
+    meta_set(CHECKED_THROUGH, id);
 }
 
 /// Whether there is an index to fill (not in tests or command-line tools).
@@ -325,6 +370,16 @@ fn decode(b: &[u8], init: Vec<u8>) -> Option<ParsedSegment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweeps_are_weekly() {
+        let now = 1_800_000_000;
+        assert!(sweep_due(None, now), "never swept: sweep");
+        assert!(!sweep_due(Some(now - 3600), now));
+        assert!(!sweep_due(Some(now - SWEEP_EVERY_SECS + 1), now));
+        assert!(sweep_due(Some(now - SWEEP_EVERY_SECS), now));
+        assert!(sweep_due(Some(now + 86_400), now), "a clock set back does not stop sweeps for good");
+    }
 
     #[test]
     fn layouts_survive_encoding() {

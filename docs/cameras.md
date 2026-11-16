@@ -45,17 +45,16 @@ the query string (some do; those entries say so, and need **Use full addresses**
 |---|---|---|---|
 | Reolink (wired, Wi-Fi) | `rtsp://192.168.1.50:554/Preview_01_main` | `.../Preview_01_sub` | Tested (see below) |
 | Reolink battery (Argus 2, Argus 3 Pro) | `baichuan://192.168.1.50` | (one stream) | Tested |
-| Foscam | `rtsp://192.168.1.50:554/cam/realmonitor?channel=1&subtype=0` | `...&subtype=1` | Tested (model not recorded) |
+| Amcrest | `rtsp://192.168.1.50:554/cam/realmonitor?channel=1&subtype=0` | `...&subtype=1` | Tested (IP8M-2496E-V2) |
 | Kuna | from the camera's settings | | Tested (model not recorded) |
 | Wyze (RTSP firmware) | `rtsp://192.168.1.50/live` | | Tested (model not recorded) |
 | Hikvision | `rtsp://192.168.1.50:554/Streaming/Channels/101` | `.../102` | Not tested by us |
-| Dahua | `rtsp://192.168.1.50:554/cam/realmonitor?channel=1&subtype=0` | `...&subtype=1` | Not tested by us |
-| Amcrest | same as Dahua | same as Dahua | Not tested by us |
+| Dahua, and brands that sell Dahua cameras (Lorex, Empiretech and others) | `rtsp://192.168.1.50:554/cam/realmonitor?channel=1&subtype=0` | `...&subtype=1` | Not tested by us |
 | Axis | `rtsp://192.168.1.50/axis-media/media.amp` | stream profile or `?resolution=` | Not tested by us |
 | Tapo / TP-Link | `rtsp://192.168.1.50:554/stream1` | `.../stream2` | Not tested by us |
 | Uniview | `rtsp://192.168.1.50:554/media/video1` | `.../media/video2` | Not tested by us |
 | Annke | see entry | | Not tested by us |
-| Foscam (older models) | `rtsp://192.168.1.50:88/videoMain` | `.../videoSub` | Not tested by us |
+| Foscam | `rtsp://192.168.1.50:88/videoMain` | `.../videoSub` | Not tested by us |
 | Ubiquiti UniFi Protect | copied from Protect | | Not tested by us |
 | Eufy | copied from the Eufy app | | Not tested by us |
 
@@ -94,13 +93,27 @@ doorbell and the Reolink Home Hub with cameras on it. Firmware not recorded.
 **Tested:** Argus 2, firmware 0112_262_237_24 and 0326_713_572_47. Argus 3 Pro, firmware not
 recorded.
 
-- **Address:** `baichuan://192.168.1.50` with the camera's UID in the **UID** field and **On demand**
-  on. These cameras don't speak RTSP when no hub is used; AmberSight talks Reolink's own protocol
-  to them. There is no ffmpeg fallback for these.
+- **In the camera form:** pick **Reolink battery (Argus, no hub)** under Brand (Settings > Cameras >
+  the camera > Stream). Type the camera's address and its **UID** (Reolink app > Device info: 16
+  letters and digits). AmberSight writes the address as `baichuan://192.168.1.50`, keeps the UID in
+  its own setting, and turns on **Battery camera** with an idle time of 30 seconds and motion-only
+  recording (on a camera added before: **Use battery settings**). The camera's motion message
+  always starts an event, whatever the camera's trigger setting. A `baichuan://192.168.1.50?uid=<UID>`
+  address pasted into the address field works too (the UID goes into the UID field). In
+  `config.toml` the UID is the `uid` setting (it wins) or the `?uid=` in the address.
+- **Why not RTSP:** these cameras don't speak RTSP when no hub is used; AmberSight talks Reolink's
+  own protocol to them. There is no ffmpeg fallback for these. If the camera refuses RTSP and
+  nothing else works, this is the type to try.
 - **Motion:** the camera announces motion to `pushx.reolink.com`. Pointing that name at AmberSight
   on your network (see "Battery Reolink cameras without a hub" in the
   [install guide](install.md#battery-reolink-cameras-without-a-hub-argus)) lets AmberSight wake it
-  and record.
+  and record. **Push notifications must be on** for the camera in the Reolink app, or it sends
+  nothing. If push won't turn on, turn it on before the DNS entry is in place, or restart the camera
+  after turning it on.
+  - While the camera is awake it sends no motion messages; AmberSight uses the picture's motion
+    then. Anything asking for its picture (a viewer, `/api/snapshot`, a Home Assistant camera
+    entity) keeps it awake for another idle time; the log line `waking up for ...` says what woke
+    it.
 - **What we saw:**
   - Firmware 0326 announced motion for every clip it saved to its card. Firmware 0112 announced
     about half of them.
@@ -108,16 +121,6 @@ recorded.
     camera chose.
   - Keeping a session open keeps the camera awake and drains its battery. AmberSight signs out
     shortly after the picture is no longer wanted. An idle timeout of 30 seconds suits these cameras.
-- **Sources:** our tests.
-
-### Foscam
-
-**Tested:** two Foscam cameras of the same model. Model and firmware not recorded.
-
-- **Paths:** main `/cam/realmonitor?channel=1&subtype=0`, sub `...&subtype=1`, port 554: the same
-  style as Dahua's. Keep the query string: it is part of the address.
-- **Older models** are documented with other paths; see
-  [Foscam (older models)](#foscam-older-models) below.
 - **Sources:** our tests.
 
 ### Kuna
@@ -184,11 +187,19 @@ helps us correct this page.
 
 ### Dahua
 
+Brands that sell Dahua cameras under their own name (Lorex, Empiretech and others) are reported to
+use the same paths and the same ONVIF setup. We have not run any of them ourselves; treat what
+follows as likely, not checked.
+
 - **Paths:** main `/cam/realmonitor?channel=1&subtype=0`, sub `subtype=1` (`subtype=2` is a third
   stream on some models), port 554.
 - **Turning ONVIF on and making a user:** reportedly System > Safety > System Service (ONVIF), with
   ONVIF users under the account settings. On some firmware the ONVIF user is separate from the
   admin account.
+- **Find cameras says "ONVIF login refused":** the camera might have ONVIF turned off, or might want
+  an ONVIF user of its own. Find cameras then asks for the stream above with the same login; when
+  that works, the camera is added by its stream address with ONVIF events and PTZ off. You can also
+  add it by hand: Settings > Cameras > Add, brand Dahua, address of the camera, your user and password.
 - **Reported quirks:** Dahua's own page says the password can't contain `#`. On doorbells, a stream
   with the two-way audio track may interfere with the call button (go2rtc suggests leaving the
   backchannel off on the other streams).
@@ -198,11 +209,14 @@ helps us correct this page.
 
 ### Amcrest
 
-- **Paths:** same as Dahua: `/cam/realmonitor?channel=1&subtype=0` and `subtype=1`, port 554.
+**Tested:** two Amcrest IP8M-2496E-V2 cameras: ONVIF sign-in, the stream paths below, and Find
+cameras. Amcrest cameras are a Dahua design.
+
+- **Paths:** `/cam/realmonitor?channel=1&subtype=0` and `subtype=1`, port 554.
   Amcrest's smart-home line is documented with `&authbasic=64` added.
 - **Reported quirks:** on Amcrest doorbells, a stream with two-way audio may break the call button
   (go2rtc).
-- **Sources:**
+- **Sources:** our tests;
   [Amcrest: RTSP](https://support.amcrest.com/hc/en-us/articles/360059019972-Accessing-Amcrest-Products-Using-RTSP),
   [Amcrest smart home: RTSP](https://support.amcrest.com/hc/en-us/articles/360058619531-Accessing-Amcrest-Smart-Home-Products-Using-RTSP),
   [go2rtc RTSP notes](https://github.com/AlexxIT/go2rtc/blob/master/internal/rtsp/README.md).
@@ -244,10 +258,9 @@ helps us correct this page.
 - **Reported quirks:** the C800 sends H.265 only, which some browsers can't play without converting.
 - **Source:** [Frigate](https://docs.frigate.video/configuration/camera_specific).
 
-### Foscam (older models)
+### Foscam
 
-Our two Foscam cameras use the `cam/realmonitor` paths ([tested](#foscam)). Older Foscam models are
-documented differently:
+**Not tested by us.** Foscam documents these paths:
 
 - **Paths:** main `/videoMain`, sub `/videoSub`. On most of these models RTSP uses the camera's
   HTTP port (88 by default); Foscam lists a few models (C1, C1 Lite, FI9800P) on port 554.

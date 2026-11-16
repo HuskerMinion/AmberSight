@@ -184,9 +184,23 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   grids and slow links. Corner labels (name, site, date, time) and AI detection
   chips on each tile. Layouts, groups, paging, full screen, a phone layout, and
   a Data saver mode that plays the sub stream.
+- **Display mode:** a full-screen page (`/display`) for a wall TV, an old tablet
+  or a spare monitor that runs for weeks on its own: a grid of chosen cameras,
+  and the camera with an alert goes big for a while (two share the screen).
+  Clock, armed state, dimming at night, burn-in shift. It signs in with a code
+  an admin approves, as a viewer that can only watch.
 - **Streams that fit the device:** apps get the best quality their device can
   decode: streams too big or in a codec the device can't play are converted on
   the graphics card (or in software when there is none).
+- **Fill gaps from the camera's card:** when a Reolink camera with a memory card drops off
+  (Wi-Fi, a router restart, AmberSight restarting) and comes back, the missing part is
+  copied from its card and shows on the timeline as recorded, marked as from the card.
+  Per camera, off by default.
+- **Battery Reolink cameras without a hub (Argus):** add them with the brand "Reolink battery
+  (Argus, no hub)" and the camera's UID. They sleep until motion: the camera's motion message
+  (a local DNS entry for `pushx.reolink.com`) wakes them and starts recording, and AmberSight
+  fetches the first seconds of each event from the camera's card. See the
+  [install guide](docs/install.md#battery-reolink-cameras-without-a-hub-argus).
 - **Recording:** continuous segments per camera, or a sub stream all the time
   with the main stream only around events. Motion clips with pre-roll and
   post-roll. By default recordings use what the disk can spare and keep 10% of
@@ -196,7 +210,9 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   events AI confirmed) as an .mp4 to a second folder, such as a OneDrive or Google Drive
   folder, shortly after the event: off-site copies from the same stream.
 - **Timeline:** all cameras in sync, alert markers by kind, fast and reverse
-  playback, and export of a time range.
+  playback, and export of a time range. Bookmarks mark a moment with a note
+  (one camera or all of this server's) and can keep the video around it from
+  cleanup; a list searches them.
 - **Events:** a list beside the player, filters, false alarms, protect (kept
   from cleanup), and export. Events are stored in a SQLite database.
 - **AI:** built-in YOLOX object detection on CPU or GPU (DirectML on Windows,
@@ -220,8 +236,9 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
 - **Time-lapse:** each day of a camera in a short video.
 - **Off-site backup:** to a folder or S3, encrypted.
 - **Find cameras:** ONVIF discovery on this subnet and any other subnets you
-  list, sign-in with your usual camera login, and an optional hourly check
-  that tells you when a new camera appears.
+  list, sign-in with your usual camera login (a Dahua-style camera that
+  refuses ONVIF is added by its video stream instead), and an optional
+  hourly check that tells you when a new camera appears.
 - **Adding cameras by address:** the camera form asks for the address, port,
   protocol, user name and password once, then the main and sub stream paths. A
   brand list fills the usual paths, Find via ONVIF asks the camera, and a pasted
@@ -245,7 +262,10 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
 - **Updates:** signed self-update. AmberSight checks for new releases every
   12 hours (it asks api.github.com and sends only `AmberSight/<version>`;
   `[update] check = false` stops it); an admin installs one with a click (or
-  `ambersight update`).
+  `ambersight update`). It says first what an update does (a minute without
+  recording, slow playback for a few minutes after, a database copy saved before
+  a database change) and waits for a confirm; a small notice shows while a fresh
+  start is still checking its recordings.
 - **Interface:** keyboard shortcuts, Ctrl+K command palette, and health and
   performance charts (CPU, AI, network, disk).
 - **Command line:** `ambersight --help` lists the commands (`init`, `run`,

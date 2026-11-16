@@ -284,3 +284,7 @@ body[data-tab="settings"] #dock { display: none; }
 
 /* A disabled account: its row is dimmed, its buttons stay usable. */
 .us-off .us-name b, .us-off .asys-cams { opacity: .55; }
+/* Settings > Users & security > Displays (display_admin.js). */
+.dsa-code input { font: 600 18px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; width: 12ch; }
+.dsa-card { border: 1px solid var(--line2); border-radius: var(--r2); background: var(--surface2); padding: var(--s3) var(--s4); margin: var(--s3) 0; max-width: 520px; }
+.dsa-who { margin-bottom: var(--s1); }

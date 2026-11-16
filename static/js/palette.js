@@ -35,6 +35,7 @@ const SETTINGS = [
   ['schedules/presence', 'Presence', 'Schedules & presence', 'phone at home away geofence arrive leave'],
   ['users/users', 'Users', 'Users & security', 'password add user accounts sign in viewer admin family pair code invite'],
   ['users/https', 'HTTPS', 'Users & security', 'secure certificate tls ssl remote access tailscale padlock'],
+  ['users/displays', 'Displays', 'Users & security', 'wall tv tablet kiosk display mode pair code monitor'],
   ['connections/share', 'Share streams', 'Connections', 'rtsp restream home assistant vlc frigate scrypted'],
   ['connections/servers', 'Servers', 'Connections', 'other site link servers second location cabin'],
   ['connections/detector', 'External detector', 'Connections', 'custom detector hook codeproject'],
@@ -59,6 +60,7 @@ function build() {
   add('go:timelapse', 'Go to', 'timeline', 'Go to Time-lapse', 'A day in a minute', () => goTab('timelapse'), [], false, 'timelapse day fast summary');
   add('go:settings', 'Go to', 'gear', 'Go to Settings', '', () => goTab('settings'), ['G', 'S'], true);
   for (const [route, name, sec, kw] of SETTINGS) add('set:' + route, 'Settings', 'gear', 'Settings: ' + name, sec, link('#settings/' + route), [], true, kw);
+  add('go:display', 'Go to', 'expand', 'Display mode', 'Full-screen cameras for a wall TV or tablet', () => { location.href = '/display'; }, [], false, 'wall tv tablet kiosk monitor always on dashboard');
   add('go:help', 'Go to', 'help', 'Go to Help', 'Guides and answers', () => goTab('help'), ['G', 'H'], false, 'how do i guide manual support');
 
   for (const c of state.cams || []) {
@@ -75,6 +77,7 @@ function build() {
     try { await api('/api/profile', { json: { name: p, minutes: null } }); toast('Profile: ' + p); } catch (e) { toast(e.message, { kind: 'err' }); }
   }, [], !may('arm'));
   add('act:timeline', 'Actions', 'timeline', 'Timeline on / off', 'Live timeline mode', async () => { await goTab('live'); (await imp.tl()).toggle(); }, ['T']);
+  add('act:bookmarks', 'Actions', 'timeline', 'Bookmarks', 'Moments marked with a note on the timeline', async () => (await import('./bookmarks.js')).openList(), [], false, 'bookmark bookmarks note notes mark moment flag keep');
   add('act:view', 'Actions', 'v-grid', 'Change layout', 'Grid, Fit, Focus, Focus 2', async () => { await goTab('live'); (await imp.live()).cycleViewStyle(); }, ['V'], false, 'view style tiles');
   for (const [m, label] of [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']]) add('act:theme:' + m, 'Actions', m === 'light' ? 'sun' : m === 'dark' ? 'moon' : 'auto', 'Theme: ' + label, m === 'auto' ? 'Follow this device' : '', () => setTheme(m), [], false, 'dark mode light mode appearance');
   add('act:keys', 'Actions', 'help', 'Show keyboard shortcuts', '', () => { const b = $('keysBtn'); if (b) b.click(); }, ['?']);

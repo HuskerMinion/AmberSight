@@ -895,6 +895,7 @@ function readForm(d, c, isNew) {
   if (stg !== undefined) body.strangers = stg;
   if (isNew) { body.enabled = true; } else {
     body.enabled = v('enabled') === '1'; // zones / ignore_zones are owned by the zones editor; the server keeps what it has.
+    const cf = d.querySelector('[data-cardfill]'); if (cf) body.fill_from_card = cf.checked;
     body.also_trigger = [...d.querySelectorAll('[data-trig]:checked')].map(x => x.dataset.trig);
     const wd = readWatchdog(d);
     if (wd !== undefined && v('src') === 'net') body.watchdog = wd;
@@ -909,6 +910,11 @@ function readForm(d, c, isNew) {
   // (or at `motion_enabled` if the API ever reports it) and is only written when the user changes it.
   if (v('motion') !== (c.motion_enabled !== false ? '1' : '0')) body.motion = v('motion') === '1';
   body.capture = null;
+  // A battery Argus keeps its UID in its own setting; any other kind of camera has none.
+  const abox = d.querySelector('[data-addr]');
+  if (abox && v('src') === 'net' && abox.dataset.mode === 'battery') {
+    body.uid = v('uid').toUpperCase();
+  } else if (c.uid) body.uid = null;
   if (v('src') === 'helper') {
     // Another computer's screen arrives as a pushed stream with its own key.
     const key = (/^push:\/\/([^/?#]+)/i.exec(c.url || '') || [])[1] || newKey();
@@ -1055,6 +1061,25 @@ function copyHtml(c, multi) {
       field('Only events AI confirmed', onoff('copy_events_only_confirmed', !!c.copy_events_only_confirmed), 'Only events with a person, vehicle or other object AI confirmed, a sound, or the camera\'s own detection (with AI off: every event). Notification settings never leave a copy out. Off: every event.') +
     '</div>';
 }
+// ---------- fill holes in the recording from the camera's own card ----------
+function cardFillHtml(c) {
+  const st = c.card_fill_status;
+  return swHtml('data-cardfill', !!c.fill_from_card, 'Fill gaps from the camera\'s card',
+    'When the camera drops off (Wi-Fi, a router restart, AmberSight restarting) and is back, the missing part is copied from its memory card and appears on the timeline marked as from the card. Reolink cameras with a card, recording continuously. Holes up to 2 hours.') +
+    '<div class="hint cs-cfst" data-cfst aria-live="polite">' + (st && st.text ? esc(st.text) : '') + '</div>';
+}
+function wireCardFill(d, c) {
+  const cb = d.querySelector('[data-cardfill]'), st = d.querySelector('[data-cfst]');
+  if (!cb || c.id == null) return;
+  api('/api/cameras/' + c.id + '/card-fill').then(r => {
+    if (r.offered) {
+      if (!c.fill_from_card) st.textContent = 'Card found (' + Math.round(r.card_mb / 1024) + ' GB). Holes are filled from its ' + r.stream + ' stream.';
+    } else {
+      cb.disabled = !cb.checked; // an old setting can still be turned off
+      st.textContent = 'Not offered: ' + r.why;
+    }
+  }).catch(() => {});
+}
 function wireCopy(d) {
   const inp = d.querySelector('[data-k="copy_events_to"]'), opts = d.querySelector('[data-cpopts]'), st = d.querySelector('[data-cpst]'), btn = d.querySelector('[data-cptest]');
   if (!inp || !opts || !st || !btn) return;
@@ -1099,6 +1124,7 @@ function sectionsOf(c, isNew, multi) {
       field('Record', onoff('record', c.record !== false)) +
       field('Record mode', sel('record_mode', [['0', 'continuous'], ['2', 'continuous: sub stream, main stream around events'], ['1', 'motion only']], c.record_motion_only ? '1' : (c.record_sub ? '2' : '0')),
         'The middle choice keeps the full picture only around events and the sub stream the rest of the time, using far less space. It needs a sub stream URL; without one the camera records continuously.') +
+      (isNew || multi || OP ? '' : cardFillHtml(c)) +
       copyHtml(c, multi),
       ovNum('pre_roll', 'Pre-roll (s)', c.pre_roll, m.pre_roll != null ? m.pre_roll + ' s' : '', 'type="number" min="0"', 'Video kept from before an event starts.') +
       ovNum('post_roll', 'Post-roll (s)', c.post_roll, m.post_roll != null ? m.post_roll + ' s' : '', 'type="number" min="0"', 'Video kept after it ends.') +
@@ -1422,6 +1448,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
   wireAlerts(d);
   wireTimeRanges(d);
   wireCopy(d);
+  wireCardFill(d, c);
   wireArmStrip(d, c, cleanups);
   const stopSound = wireSound(d, c);
   if (stopSound) cleanups.push(stopSound);

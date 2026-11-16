@@ -1,0 +1,509 @@
+//! A small reader for ordinary MP4 files (a camera's own SD-card recordings):
+//! where each video and audio sample is, when it is shown and whether it is a
+//! keyframe, from the `moov` box alone. The sample bytes are then fetched
+//! with byte ranges, so a short stretch of a long file costs only that
+//! stretch. H.264/H.265 samples in MP4 are already length-prefixed and AAC is
+//! raw, which is exactly what the recorder writes, so nothing is converted.
+
+use super::fmp4::TrackKind;
+use anyhow::{anyhow, bail, Result};
+
+/// Where one sample is and when.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SampleRef {
+    pub offset: u64,
+    pub size: u32,
+    /// Decode time in the track's timescale.
+    pub dts: u64,
+    /// Shown this long after it is decoded (B-frames), in the timescale.
+    pub cts_offset: i32,
+    pub sync: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackIndex {
+    pub kind: TrackKind,
+    pub timescale: u32,
+    /// The whole sample entry box (`avc1`, `hvc1`, `mp4a`...) as in the file.
+    pub sample_entry: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub samples: Vec<SampleRef>,
+}
+
+impl Mp4Index {
+    /// Every sample lies inside a file of `file_size` bytes and is of a
+    /// sensible size: a damaged or made-up index never asks for more.
+    pub fn check_within(&self, file_size: u64) -> Result<()> {
+        for t in self.video.iter().chain(self.audio.iter()) {
+            for s in &t.samples {
+                if s.size > MAX_SAMPLE_BYTES || s.offset.checked_add(s.size as u64).is_none_or(|e| e > file_size) {
+                    bail!("the recording's index points outside the file");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TrackIndex {
+    /// Seconds from the start of the file at which sample `i` is decoded.
+    #[cfg(test)]
+    pub fn secs(&self, i: usize) -> f64 {
+        self.samples[i].dts as f64 / self.timescale.max(1) as f64
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Mp4Index {
+    pub video: Option<TrackIndex>,
+    pub audio: Option<TrackIndex>,
+}
+
+/// The largest index (`moov` box) read: a camera's two-minute recording has
+/// one of well under a megabyte.
+pub const MAX_MOOV_BYTES: u64 = 16 << 20;
+/// The largest single sample taken: a picture bigger than this is damage.
+pub const MAX_SAMPLE_BYTES: u32 = 16 << 20;
+
+/// What the first bytes of a file say about where its `moov` is.
+#[derive(Debug, PartialEq)]
+pub enum MoovAt {
+    /// The box starts at `offset` and is `size` bytes long.
+    Found { offset: u64, size: u64 },
+    /// Boxes seen so far end before it; more bytes are needed from here.
+    NeedMore(u64),
+}
+
+fn be32(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+fn be64(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(b.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// A box header at `at`: (type, header length, total length).
+fn box_at(b: &[u8], at: usize) -> Option<([u8; 4], u64, u64)> {
+    let size = be32(b, at)? as u64;
+    let kind: [u8; 4] = b.get(at + 4..at + 8)?.try_into().ok()?;
+    match size {
+        0 => Some((kind, 8, (b.len() - at) as u64)),
+        1 => Some((kind, 16, be64(b, at + 8)?)),
+        s if s >= 8 => Some((kind, 8, s)),
+        _ => None,
+    }
+}
+
+/// Find the `moov` box among the top-level boxes in `head`, the first bytes
+/// of a file (the camera writes it before the media, with spare room after).
+pub fn find_moov(head: &[u8]) -> Result<MoovAt> {
+    let mut at = 0u64;
+    let mut seen = 0;
+    while (at as usize) < head.len() {
+        let Some((kind, _hdr, len)) = box_at(head, at as usize) else {
+            return Ok(MoovAt::NeedMore(at));
+        };
+        if &kind == b"moov" {
+            if len < 8 || len > MAX_MOOV_BYTES {
+                bail!("the recording's index is damaged or too large ({len} bytes)");
+            }
+            return Ok(MoovAt::Found { offset: at, size: len });
+        }
+        if &kind == b"mdat" {
+            bail!("the recording has its index after the video (a file still being written, or not made for streaming)");
+        }
+        if len < 8 {
+            bail!("damaged recording header");
+        }
+        at = at.checked_add(len).ok_or_else(|| anyhow!("damaged recording header"))?;
+        if at > MAX_MOOV_BYTES {
+            bail!("no index found at the start of the recording");
+        }
+        seen += 1;
+        if seen > 64 {
+            bail!("no index found at the start of the recording");
+        }
+    }
+    Ok(MoovAt::NeedMore(at))
+}
+
+/// Child boxes of `b[from..to]`: (type, payload start, payload end).
+fn children(b: &[u8], from: usize, to: usize) -> Vec<([u8; 4], usize, usize)> {
+    let mut out = Vec::new();
+    let mut at = from;
+    while at + 8 <= to {
+        let Some((kind, hdr, len)) = box_at(&b[..to], at) else { break };
+        let end = at.saturating_add(len as usize);
+        if len < hdr || end > to {
+            break;
+        }
+        out.push((kind, at + hdr as usize, end));
+        at = end;
+    }
+    out
+}
+
+fn find(b: &[u8], from: usize, to: usize, kind: &[u8; 4]) -> Option<(usize, usize)> {
+    children(b, from, to).into_iter().find(|c| &c.0 == kind).map(|c| (c.1, c.2))
+}
+
+/// Read the sample tables of a complete `moov` box (header included).
+pub fn parse_moov(moov: &[u8]) -> Result<Mp4Index> {
+    let (_, hdr, len) = box_at(moov, 0).ok_or_else(|| anyhow!("empty header"))?;
+    let end = (len as usize).min(moov.len());
+    let mut out = Mp4Index::default();
+    for (kind, s, e) in children(moov, hdr as usize, end) {
+        if &kind != b"trak" {
+            continue;
+        }
+        let Some(t) = parse_trak(moov, s, e)? else { continue };
+        let slot = if t.kind == TrackKind::Video { &mut out.video } else { &mut out.audio };
+        if slot.is_none() {
+            *slot = Some(t);
+        }
+    }
+    if out.video.as_ref().is_none_or(|v| v.samples.is_empty()) {
+        bail!("no video in the recording");
+    }
+    Ok(out)
+}
+
+fn parse_trak(b: &[u8], from: usize, to: usize) -> Result<Option<TrackIndex>> {
+    let Some((tk_s, tk_e)) = find(b, from, to, b"tkhd") else { return Ok(None) };
+    let Some((md_s, md_e)) = find(b, from, to, b"mdia") else { return Ok(None) };
+    let Some((hd_s, _)) = find(b, md_s, md_e, b"hdlr") else { return Ok(None) };
+    let kind = match b.get(hd_s + 8..hd_s + 12) {
+        Some(b"vide") => TrackKind::Video,
+        Some(b"soun") => TrackKind::Audio,
+        _ => return Ok(None),
+    };
+    // tkhd: display size is the last two 16.16 numbers.
+    let (width, height) = if tk_e >= tk_s + 8 { (be32(b, tk_e - 8).unwrap_or(0) >> 16, be32(b, tk_e - 4).unwrap_or(0) >> 16) } else { (0, 0) };
+    let (mh_s, _) = find(b, md_s, md_e, b"mdhd").ok_or_else(|| anyhow!("no media header"))?;
+    let timescale = if b.get(mh_s) == Some(&1) { be32(b, mh_s + 20) } else { be32(b, mh_s + 12) }.filter(|&t| t > 0).ok_or_else(|| anyhow!("no time scale"))?;
+    let (mi_s, mi_e) = find(b, md_s, md_e, b"minf").ok_or_else(|| anyhow!("no media info"))?;
+    let (st_s, st_e) = find(b, mi_s, mi_e, b"stbl").ok_or_else(|| anyhow!("no sample table"))?;
+    let boxes = children(b, st_s, st_e);
+    let get = |k: &[u8; 4]| boxes.iter().find(|c| &c.0 == k).map(|c| (c.1, c.2));
+
+    // stsd: the first entry, whole.
+    let (sd_s, sd_e) = get(b"stsd").ok_or_else(|| anyhow!("no sample description"))?;
+    let entries = sd_s + 8;
+    let (ek, _, elen) = box_at(b, entries).ok_or_else(|| anyhow!("no sample entry"))?;
+    let entry_end = usize::try_from(elen).ok().and_then(|l| entries.checked_add(l)).filter(|&e| e <= sd_e).ok_or_else(|| anyhow!("damaged sample description"))?;
+    let sample_entry = b.get(entries..entry_end).ok_or_else(|| anyhow!("damaged sample description"))?.to_vec();
+    if kind == TrackKind::Video && !matches!(&ek, b"avc1" | b"avc3" | b"hvc1" | b"hev1") {
+        bail!("video of a kind AmberSight does not copy ({})", String::from_utf8_lossy(&ek));
+    }
+    if kind == TrackKind::Audio && &ek != b"mp4a" {
+        return Ok(None); // G.711 and the like: left out
+    }
+
+    // stts: (count, delta) runs.
+    let (s, e) = get(b"stts").ok_or_else(|| anyhow!("no sample times"))?;
+    let n = be32(b, s + 4).unwrap_or(0) as usize;
+    let mut deltas = Vec::new();
+    for i in 0..n.min((e - s) / 8) {
+        deltas.push((be32(b, s + 8 + i * 8).unwrap_or(0) as u64, be32(b, s + 12 + i * 8).unwrap_or(0) as u64));
+    }
+    // stsz
+    let (s, e) = get(b"stsz").ok_or_else(|| anyhow!("no sample sizes"))?;
+    let fixed = be32(b, s + 4).unwrap_or(0);
+    let count = be32(b, s + 8).unwrap_or(0) as usize;
+    if count > 5_000_000 {
+        bail!("implausible sample count");
+    }
+    if fixed == 0 && s + 12 + count * 4 > e {
+        bail!("damaged sample sizes");
+    }
+    let size = |i: usize| if fixed != 0 { fixed } else { be32(b, s + 12 + i * 4).unwrap_or(0) };
+    // stsc: (first chunk, samples per chunk)
+    let (s, e) = get(b"stsc").ok_or_else(|| anyhow!("no chunk map"))?;
+    let n = be32(b, s + 4).unwrap_or(0) as usize;
+    let mut runs = Vec::new();
+    for i in 0..n.min((e - s) / 12) {
+        runs.push((be32(b, s + 8 + i * 12).unwrap_or(1) as usize, be32(b, s + 12 + i * 12).unwrap_or(0) as usize));
+    }
+    // chunk offsets
+    let offsets: Vec<u64> = if let Some((s, e)) = get(b"stco") {
+        let n = (be32(b, s + 4).unwrap_or(0) as usize).min((e - s) / 4);
+        (0..n).map(|i| be32(b, s + 8 + i * 4).unwrap_or(0) as u64).collect()
+    } else if let Some((s, e)) = get(b"co64") {
+        let n = (be32(b, s + 4).unwrap_or(0) as usize).min((e - s) / 8);
+        (0..n).map(|i| be64(b, s + 8 + i * 8).unwrap_or(0)).collect()
+    } else {
+        bail!("no chunk offsets");
+    };
+    // stss: sync samples (1-based); absent = all.
+    let sync: Option<Vec<u32>> = get(b"stss").map(|(s, e)| {
+        let n = (be32(b, s + 4).unwrap_or(0) as usize).min((e - s) / 4);
+        (0..n).map(|i| be32(b, s + 8 + i * 4).unwrap_or(0)).collect()
+    });
+    // ctts: (count, offset); version 1 offsets are signed, version 0 are
+    // unsigned but read the same way for any sane value.
+    let ctts: Vec<(u64, i32)> = get(b"ctts")
+        .map(|(s, e)| {
+            let n = (be32(b, s + 4).unwrap_or(0) as usize).min((e - s) / 8);
+            (0..n).map(|i| (be32(b, s + 8 + i * 8).unwrap_or(0) as u64, be32(b, s + 12 + i * 8).unwrap_or(0) as i32)).collect()
+        })
+        .unwrap_or_default();
+
+    // Walk chunks to place each sample, the chunk map's runs in step (a run
+    // holds from its first chunk until the next run's), stopping once every
+    // sample is placed.
+    let mut samples = Vec::with_capacity(count);
+    let mut idx = 0usize;
+    let mut run = 0usize;
+    for (ci, &chunk_off) in offsets.iter().enumerate() {
+        if idx >= count {
+            break;
+        }
+        let chunk = ci + 1;
+        while run + 1 < runs.len() && runs[run + 1].0 <= chunk {
+            run += 1;
+        }
+        let per = runs.get(run).filter(|r| r.0 <= chunk).map_or(0, |r| r.1);
+        let mut off = chunk_off;
+        for _ in 0..per {
+            if idx >= count {
+                break;
+            }
+            let sz = size(idx);
+            samples.push(SampleRef { offset: off, size: sz, dts: 0, cts_offset: 0, sync: false });
+            off = off.checked_add(sz as u64).ok_or_else(|| anyhow!("damaged chunk offsets"))?;
+            idx += 1;
+        }
+    }
+    if samples.len() < count {
+        bail!("the sample tables disagree ({} of {count} samples placed)", samples.len());
+    }
+    // Times.
+    let mut t = 0u64;
+    let mut i = 0usize;
+    'outer: for (n, d) in &deltas {
+        for _ in 0..*n {
+            if i >= samples.len() {
+                break 'outer;
+            }
+            samples[i].dts = t;
+            t = t.saturating_add(*d);
+            i += 1;
+        }
+    }
+    if i < samples.len() {
+        bail!("the sample times are short");
+    }
+    let mut i = 0usize;
+    'o2: for (n, o) in &ctts {
+        for _ in 0..*n {
+            if i >= samples.len() {
+                break 'o2;
+            }
+            samples[i].cts_offset = *o;
+            i += 1;
+        }
+    }
+    match &sync {
+        None => samples.iter_mut().for_each(|s| s.sync = true),
+        Some(list) => {
+            for &n in list {
+                if let Some(s) = (n as usize).checked_sub(1).and_then(|k| samples.get_mut(k)) {
+                    s.sync = true;
+                }
+            }
+        }
+    }
+    Ok(Some(TrackIndex { kind, timescale, sample_entry, width, height, samples }))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    fn bx(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut v = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(payload);
+        v
+    }
+    fn full(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut p = vec![0, 0, 0, 0];
+        p.extend_from_slice(body);
+        bx(kind, &p)
+    }
+    fn u32s(v: &[u32]) -> Vec<u8> {
+        v.iter().flat_map(|x| x.to_be_bytes()).collect()
+    }
+
+    /// One track: `sizes` per sample, chunks of `per_chunk` samples laid out
+    /// from `first_offset`, constant `delta`, keyframes at `sync` (1-based).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn trak(handler: &[u8; 4], entry: &[u8; 4], timescale: u32, sizes: &[u32], per_chunk: u32, first_offset: u32, delta: u32, sync: Option<&[u32]>, ctts: Option<&[(u32, u32)]>) -> Vec<u8> {
+        let mut tkhd = vec![0u8; 80];
+        tkhd[76..80].copy_from_slice(&(360u32 << 16).to_be_bytes());
+        tkhd[72..76].copy_from_slice(&(640u32 << 16).to_be_bytes());
+        let tkhd = full(b"tkhd", &tkhd);
+        let mut hd = vec![0u8; 4];
+        hd.extend_from_slice(handler);
+        hd.extend_from_slice(&[0; 12]);
+        let hdlr = full(b"hdlr", &hd);
+        let mut mh = u32s(&[0, 0, timescale, 0]);
+        mh.extend_from_slice(&[0; 4]);
+        let mdhd = full(b"mdhd", &mh);
+        let entry_box = bx(entry, &[0; 20]);
+        let stsd = full(b"stsd", &[u32s(&[1]), entry_box].concat());
+        let n = sizes.len() as u32;
+        let stts = full(b"stts", &u32s(&[1, n, delta]));
+        let mut stsz = u32s(&[0, n]);
+        stsz.extend(u32s(sizes));
+        let stsz = full(b"stsz", &stsz);
+        let stsc = full(b"stsc", &u32s(&[1, 1, per_chunk, 1]));
+        let mut offs = Vec::new();
+        let mut off = first_offset;
+        for ch in sizes.chunks(per_chunk as usize) {
+            offs.push(off);
+            off += ch.iter().sum::<u32>();
+        }
+        let stco = full(b"stco", &[u32s(&[offs.len() as u32]), u32s(&offs)].concat());
+        let mut stbl = [stsd, stts, stsz, stsc, stco].concat();
+        if let Some(s) = sync {
+            stbl.extend(full(b"stss", &[u32s(&[s.len() as u32]), u32s(s)].concat()));
+        }
+        if let Some(c) = ctts {
+            let flat: Vec<u32> = c.iter().flat_map(|&(a, b)| [a, b]).collect();
+            stbl.extend(full(b"ctts", &[u32s(&[c.len() as u32]), u32s(&flat)].concat()));
+        }
+        let minf = bx(b"minf", &bx(b"stbl", &stbl));
+        let mdia = bx(b"mdia", &[mdhd, hdlr, minf].concat());
+        bx(b"trak", &[tkhd, mdia].concat())
+    }
+
+    #[test]
+    fn reads_samples_chunks_times_and_keyframes() {
+        // Video: 5 samples in chunks of 2 (offsets 100, 100+10+20, 100+60...), 3000 ticks apart at 90 kHz.
+        let v = trak(b"vide", b"avc1", 90_000, &[10, 20, 30, 40, 50], 2, 100, 3000, Some(&[1, 4]), Some(&[(2, 6000), (3, 0)]));
+        let a = trak(b"soun", b"mp4a", 16_000, &[7, 8], 2, 1000, 1024, None, None);
+        let moov = bx(b"moov", &[v, a].concat());
+        let idx = parse_moov(&moov).unwrap();
+        let v = idx.video.unwrap();
+        assert_eq!((v.width, v.height, v.timescale), (640, 360, 90_000));
+        assert_eq!(v.samples.len(), 5);
+        assert_eq!(v.samples.iter().map(|s| s.offset).collect::<Vec<_>>(), vec![100, 110, 130, 160, 200]);
+        assert_eq!(v.samples.iter().map(|s| s.dts).collect::<Vec<_>>(), vec![0, 3000, 6000, 9000, 12000]);
+        assert_eq!(v.samples.iter().map(|s| s.sync).collect::<Vec<_>>(), vec![true, false, false, true, false]);
+        assert_eq!(v.samples.iter().map(|s| s.cts_offset).collect::<Vec<_>>(), vec![6000, 6000, 0, 0, 0]);
+        assert_eq!(&v.sample_entry[4..8], b"avc1");
+        let a = idx.audio.unwrap();
+        assert_eq!((a.timescale, a.samples.len()), (16_000, 2));
+        assert!(a.samples.iter().all(|s| s.sync), "no sync table: every sample is one");
+        assert_eq!(a.samples[1].offset, 1007);
+    }
+
+    #[test]
+    fn finds_moov_after_other_boxes_or_asks_for_more() {
+        let ftyp = bx(b"ftyp", &[0; 16]);
+        let moov = bx(b"moov", &[0; 40]);
+        let file = [ftyp.clone(), moov.clone(), bx(b"skip", &[0; 100]), bx(b"mdat", &[0; 10])].concat();
+        assert_eq!(find_moov(&file[..64]).unwrap(), MoovAt::Found { offset: 24, size: 48 });
+        // Only the moov's header is in hand: enough to know where it is.
+        assert_eq!(find_moov(&file[..32]).unwrap(), MoovAt::Found { offset: 24, size: 48 });
+        assert_eq!(find_moov(&file[..20]).unwrap(), MoovAt::NeedMore(24));
+        // Media first: the index is at the end; refused.
+        let late = [ftyp, bx(b"mdat", &[0; 10]), moov].concat();
+        assert!(find_moov(&late).is_err());
+    }
+
+    /// A video track with the given chunk map runs and 64-bit chunk offsets,
+    /// `count` samples of 10 bytes.
+    fn crafted_trak(count: u32, runs: &[(u32, u32)], offsets: &[u64]) -> Vec<u8> {
+        let mut tkhd = vec![0u8; 80];
+        tkhd[76..80].copy_from_slice(&(360u32 << 16).to_be_bytes());
+        let tkhd = full(b"tkhd", &tkhd);
+        let mut hd = vec![0u8; 4];
+        hd.extend_from_slice(b"vide");
+        hd.extend_from_slice(&[0; 12]);
+        let hdlr = full(b"hdlr", &hd);
+        let mut mh = u32s(&[0, 0, 90_000, 0]);
+        mh.extend_from_slice(&[0; 4]);
+        let mdhd = full(b"mdhd", &mh);
+        let stsd = full(b"stsd", &[u32s(&[1]), bx(b"avc1", &[0; 20])].concat());
+        let stts = full(b"stts", &u32s(&[1, count, 3000]));
+        let stsz = full(b"stsz", &u32s(&[10, count]));
+        let flat: Vec<u32> = runs.iter().flat_map(|&(a, b)| [a, b, 1]).collect();
+        let stsc = full(b"stsc", &[u32s(&[runs.len() as u32]), u32s(&flat)].concat());
+        let mut co = u32s(&[offsets.len() as u32]);
+        co.extend(offsets.iter().flat_map(|o| o.to_be_bytes()));
+        let co64 = full(b"co64", &co);
+        let stbl = [stsd, stts, stsz, stsc, co64].concat();
+        let minf = bx(b"minf", &bx(b"stbl", &stbl));
+        let mdia = bx(b"mdia", &[mdhd, hdlr, minf].concat());
+        bx(b"trak", &[tkhd, mdia].concat())
+    }
+
+    #[test]
+    fn a_huge_made_up_chunk_map_is_read_quickly() {
+        // 1M chunks and 300k runs for one sample: walking every run for every
+        // chunk would take hours; the runs are walked in step and the walk stops
+        // once the sample is placed.
+        let runs: Vec<(u32, u32)> = (0..300_000u32).map(|i| (i * 3 + 1, 1)).collect();
+        let offsets: Vec<u64> = (0..1_000_000u64).map(|i| 1000 + i * 10).collect();
+        let moov = bx(b"moov", &crafted_trak(1, &runs, &offsets));
+        let t = std::time::Instant::now();
+        let idx = parse_moov(&moov).unwrap();
+        assert_eq!(idx.video.unwrap().samples.len(), 1);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn chunk_offsets_past_the_end_are_refused_without_overflow() {
+        // A chunk at the very top of the 64-bit range: the next sample's place wraps.
+        let moov = bx(b"moov", &crafted_trak(2, &[(1, 2)], &[u64::MAX - 5]));
+        assert!(parse_moov(&moov).is_err(), "wrapping offsets are damage");
+        // In range for the numbers, but past the end of the file.
+        let moov = bx(b"moov", &crafted_trak(2, &[(1, 2)], &[1_000_000]));
+        let idx = parse_moov(&moov).unwrap();
+        assert!(idx.check_within(500_000).is_err());
+        assert!(idx.check_within(1_000_020).is_ok());
+        assert!(idx.check_within(1_000_019).is_err());
+    }
+
+    #[test]
+    fn made_up_box_sizes_neither_wrap_nor_panic() {
+        // A 64-bit box size that wraps the position.
+        let mut big = bx(b"ftyp", &[0; 8]);
+        big.extend_from_slice(&[0, 0, 0, 1]);
+        big.extend_from_slice(b"free");
+        big.extend_from_slice(&(u64::MAX - 4).to_be_bytes());
+        big.extend_from_slice(&[0; 32]);
+        assert!(find_moov(&big).is_err());
+        // One that does not wrap but puts the index far past where a camera writes it.
+        assert!(find_moov(&big[16..]).is_err());
+        // A moov said to be larger than any real index.
+        let mut huge = vec![0, 0, 0, 1];
+        huge.extend_from_slice(b"moov");
+        huge.extend_from_slice(&(u64::MAX).to_be_bytes());
+        assert!(find_moov(&huge).is_err());
+        let mut huge = vec![0, 0, 0, 1];
+        huge.extend_from_slice(b"moov");
+        huge.extend_from_slice(&(MAX_MOOV_BYTES + 1).to_be_bytes());
+        assert!(find_moov(&huge).is_err());
+        // A sample entry whose size runs far past its box.
+        let mut v = trak(b"vide", b"avc1", 90_000, &[10], 1, 100, 3000, None, None);
+        let at = v.windows(4).position(|w| w == b"avc1").unwrap() - 4;
+        v[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(parse_moov(&bx(b"moov", &v)).is_err());
+    }
+
+    #[test]
+    fn a_video_of_another_kind_or_no_video_is_refused() {
+        let v = trak(b"vide", b"mp4v", 90_000, &[10], 1, 100, 3000, None, None);
+        assert!(parse_moov(&bx(b"moov", &v)).is_err());
+        let a = trak(b"soun", b"mp4a", 16_000, &[7], 1, 100, 1024, None, None);
+        assert!(parse_moov(&bx(b"moov", &a)).is_err());
+        // G.711 audio is left out, the video kept.
+        let v = trak(b"vide", b"hvc1", 90_000, &[10], 1, 100, 3000, None, None);
+        let g = trak(b"soun", b"alaw", 8_000, &[7], 1, 120, 160, None, None);
+        let idx = parse_moov(&bx(b"moov", &[v, g].concat())).unwrap();
+        assert!(idx.audio.is_none() && idx.video.is_some());
+    }
+}

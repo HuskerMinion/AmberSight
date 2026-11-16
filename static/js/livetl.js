@@ -8,7 +8,7 @@
 // Each tile owns two <video> elements: the next window is loaded into the hidden one
 // before the current one ends, so playback continues without a gap.
 
-import { playVideo, $, state, api, bus, enc, esc, ic, camFromId, toast, fmtWall, pad2, SPEEDS, REVERSE_SPEEDS, MAX_RATE, speedLabel, speedOptions, safeRate, lowQ, dataSaver, bigQ, overlayOpen, backLayer, overlaysChanged } from './core.js';
+import { playVideo, $, state, api, bus, enc, esc, ic, can, camFromId, toast, fmtWall, pad2, SPEEDS, REVERSE_SPEEDS, MAX_RATE, speedLabel, speedOptions, safeRate, lowQ, dataSaver, bigQ, overlayOpen, backLayer, overlaysChanged } from './core.js';
 import { isActive } from './nav.js';
 import * as Live from './live.js';
 import { tvOn, tvOne, enterTv, exitTv, setOneQuiet, setEscFirst } from './fullscreen.js';
@@ -16,6 +16,7 @@ import { showPreview, showPreviewFrame, hidePreview } from './preview.js';
 import { exportDialog } from './export.js';
 import { createZoom } from './zoom.js';
 import { openCalendar, closeCalendar } from './calendar.js';
+import * as Bm from './bookmarks.js';
 
 const WIN = 5 * 60000;           // playback window per request
 const FIRST_WIN = 60000;         // the first window after a click: fewer recordings to open, so it starts sooner
@@ -35,7 +36,7 @@ const S = {
   boxes: (() => { try { return localStorage.getItem('ambs.tlBoxes') === '1'; } catch (e) { return false; } })(),
   fromFull: null, seq: 0, fetchTimer: 0, stepBusy: false, groups: [], noteTimer: 0, lastSec: -1, headVisible: true,
 };
-const D = { range: null, spans: {}, ev: [], sig: [] };
+const D = { range: null, spans: {}, card: {}, ev: [], sig: [] };
 const SIG_MAX = 8;                // signal lanes shown at most
 const SIG_LANE = 14;              // px per lane
 const LIVE_EDGE_MS = 1500;       // this close to now is live
@@ -155,8 +156,8 @@ async function loadData() {
   const rec = api('/api/recordings?from=' + a + '&to=' + b).then(rec => {
     if (!fresh()) return;
     D.range = [a, b];
-    D.spans = {};
-    for (const r of (rec.cameras || [])) D.spans[r.camera] = r.spans || [];
+    D.spans = {}; D.card = {};
+    for (const r of (rec.cameras || [])) { D.spans[r.camera] = r.spans || []; D.card[r.camera] = r.card_spans || []; }
     draw();
   });
   // The shown cameras' alert marks (compact: a zoomed-out view of busy
@@ -178,7 +179,9 @@ async function loadData() {
     D.sig = (sig.signals || []).filter(x => x.on || x.spans.length).slice(0, SIG_MAX);
     draw();
   });
-  await Promise.allSettled([rec, ev, sig]);
+  // Bookmarks (flags on the strip).
+  const bm = Bm.load(a, b).then(() => { if (fresh()) draw(); });
+  await Promise.allSettled([rec, ev, sig, bm]);
   if (seq === S.seq) { S.loadingSince = 0; setLoading(false); }
 }
 function setLoading(on) { const a = $('tlArea'); if (a) a.classList.toggle('loading', !!on); }
@@ -1381,6 +1384,12 @@ function spansHtml(W) {
     else { S.covSegs.push(g); html += '<i class="part" data-p="' + (S.covSegs.length - 1) + '" style="left:' + x0.toFixed(1) + 'px;width:' + w.toFixed(1) + 'px"></i>'; }
   }
   S.covM = M;
+  // Stretches copied from a camera's own card: a thin amber line under the bar.
+  for (const n of cams) for (const s of (D.card[n] || [])) {
+    if (s[1] < from || s[0] > to) continue;
+    const x0 = (Math.max(s[0], from) - from) * ppm, x1 = (Math.min(s[1], to) - from) * ppm;
+    html += '<i class="card" title="' + esc(n) + ': from the camera\'s card" style="left:' + x0.toFixed(1) + 'px;width:' + Math.max(3, x1 - x0).toFixed(1) + 'px"></i>';
+  }
   // (The recording-now end stays visible when zoomed out: at least 8 px,
   // ending at now.)
   let cur = null;
@@ -1472,6 +1481,7 @@ function drawNow() {
       kIcon(g.kind) + (fits ? '<span>' + esc(word) + '</span>' : '') + (g.n > 1 ? '<b>' + (g.n > 99 ? '99+' : g.n) + '</b>' : '') +
       '<u style="width:' + dur.toFixed(1) + 'px"></u></button>';
   }).join('');
+  $('tlBms').innerHTML = Bm.marksHtml(from, to, W, new Set(shownNames()));
   const nowX = (Date.now() - from) * ppm;
   const nl = $('tlNow');
   nl.hidden = nowX < 0 || nowX > W;
@@ -1600,7 +1610,7 @@ function initPointer() {
     if (force || now - lastSync > 150) { lastSync = now; syncAll(); }
   };
   area.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('.tlm, .tlrh, .tlexp') || e.button > 0) return;
+    if (e.target.closest('.tlm, .tlbm, .tlrh, .tlexp') || e.button > 0) return;
     try { area.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
     ptrs.set(e.pointerId, { x: e.clientX });
     if (ptrs.size === 2) { if (S.scrubbing) { S.scrubbing = false; } startPinch(); return; }
@@ -1616,7 +1626,7 @@ function initPointer() {
     if (!ptrs.size && e.pointerType === 'mouse') {
       const onRuler = e.clientY - area.getBoundingClientRect().top < RULER;
       area.classList.toggle('ruler', onRuler);
-      if (e.target.closest('.tlm, .tlrh, .tlexp')) hidePreview(); else previewAt(e.clientX);
+      if (e.target.closest('.tlm, .tlbm, .tlrh, .tlexp')) hidePreview(); else previewAt(e.clientX);
       return;
     }
     if (!ptrs.has(e.pointerId)) return;
@@ -1978,6 +1988,7 @@ function buildDock() {
       '<label class="tlspdsel" title="Playback speed  [ slower  ] faster  J reverse / slower  L faster"><span class="sr">Speed</span><select id="tlSpeed" aria-label="Playback speed">' + speedOptions(S.speed || 1, 0, PIC_OK ? FAST_REVERSE.concat(REVERSE_SPEEDS) : true) + '</select></label>' +
       '<div class="tlclk"><span id="tlClock"></span><span id="tlNote" class="tlnote" aria-live="polite"></span></div>' +
       '<div class="tlgrp tlright">' +
+        '<button class="btn icon" id="tlBm" title="Bookmark this moment, with a note  B" aria-label="Bookmark this moment">' + Bm.bookmarkAddIcon() + '</button>' +
         '<button class="btn icon' + (S.boxes ? ' on' : '') + '" id="tlBoxes" aria-pressed="' + S.boxes + '" title="Show what the AI detected: a box around each object, colored like the alert icons" aria-label="Show AI detections">' + ic('zone') + '</button>' +
         '<button class="btn" id="tlBack" hidden title="Back to all cameras  Esc" aria-label="Back to all cameras">' + ic('left') + '<span>All cameras</span></button>' +
         '<button class="btn" id="tlLive" title="Jump to now and keep playing live on the timeline  End" aria-label="Jump to live">' + ic('live') + '<span>Live</span></button>' +
@@ -2000,13 +2011,14 @@ function buildDock() {
           KIND_ORDER.map(k => '<button class="btn icon tlkind k-' + k + '" data-k="' + k + '" aria-pressed="false" title="Show only ' +
             (k === 'other' ? 'unrecognized' : KINDS[k].label.toLowerCase()) + ' alerts (click again to show all)" aria-label="' + KINDS[k].label + ' alerts">' + kIcon(k) + '</button>').join('') +
         '</div>' +
+        '<button class="btn" id="tlBmList" title="Bookmarks: search, play, edit" aria-label="Bookmarks">' + Bm.bookmarkListIcon() + '<span>Bookmarks</span></button>' +
         '<button class="btn tlmk" id="tlIn" title="Mark range start at the playhead  I" aria-label="Mark range start">In</button>' +
         '<button class="btn tlmk" id="tlOut" title="Mark range end at the playhead  O  (or Shift + drag on the strip)" aria-label="Mark range end">Out</button>' +
         '<button class="btn icon tlmk" id="tlClr" title="Clear the range  Esc" aria-label="Clear the range" hidden>' + ic('x') + '</button>' +
       '</div>' +
     '</div>' +
     '<div class="tlarea" id="tlArea" tabindex="0" aria-label="Timeline: click to play from there, drag to scrub, drag the time ruler to move, scroll or pinch to zoom, Shift and drag to select a range">' +
-      '<div class="tlticks" id="tlTicks"></div><div class="tlspans" id="tlSpans"></div><div class="tlmarks" id="tlMarks"></div><div id="tlSigs"></div>' +
+      '<div class="tlticks" id="tlTicks"></div><div class="tlspans" id="tlSpans"></div><div class="tlmarks" id="tlMarks"></div><div class="tlbms" id="tlBms"></div><div id="tlSigs"></div>' +
       '<div class="tlrange" id="tlRange" hidden><span class="tlrh" data-w="a" title="Drag to move the start"></span><span class="tlrh" data-w="b" title="Drag to move the end"></span></div>' +
       '<button class="tlexp" id="tlExport" hidden title="Save this range as MP4  E">Export</button>' +
       '<div class="tlnow" id="tlNow" hidden><span>Live</span></div>' +
@@ -2029,6 +2041,19 @@ function buildDock() {
   $('tlZoomIn').onclick = () => zoomAt(S.playhead, 0.5);
   for (const b of $('tlChips').children) b.onclick = () => viewWidth(+b.dataset.ms);
   $('tlIn').onclick = markIn;
+  $('tlBm').hidden = !can('events');
+  $('tlBm').onclick = () => Bm.addAtPlayhead($('tlBm'));
+  $('tlBmList').onclick = () => Bm.openList();
+  Bm.initMarks($('tlBms'));
+  Bm.attach({
+    playhead: () => S.playhead,
+    shown: () => (S.solo !== null ? [(camFromId(S.solo) || {}).name].filter(Boolean) : coverCams()),
+    solo: () => (S.solo !== null ? (camFromId(S.solo) || {}).name || null : null),
+    seek: (ms) => seek(ms, false),
+    note,
+    redraw: draw,
+    pause: () => { if (S.playing) setPlaying(false); },
+  });
   $('tlOut').onclick = markOut;
   $('tlClr').onclick = () => clearRange();
   // Typing a date: the browser reports a change at every digit, so go there only on Enter or
@@ -2205,6 +2230,7 @@ export async function enter(opts) {
   opts = opts || {};
   if (S.on) return;
   if (!S.inited) { S.inited = true; buildDock(); }
+  $('tlBm').hidden = !can('events');
   S.on = true;
   $('tlDock').hidden = false;
   trackDockHeight();
@@ -2264,7 +2290,7 @@ export function exit() {
   leaveLive();
   players.forEach(stopLive);
   clearInterval(tickTimer); clearInterval(pollTimer); clearTimeout(S.fetchTimer);
-  hideTip(); hideCovTip(); closePop(); clearRange(); setLoading(false);
+  hideTip(); hideCovTip(); closePop(); Bm.closePop(); clearRange(); setLoading(false);
   $('tlDock').hidden = true;
   trackDockHeight();
   $('tlToggle').classList.remove('on');
@@ -2317,6 +2343,13 @@ export async function openAt(id, ms) {
   if (S.on) { setSolo(id); seek(ms - LEAD, true); return; }
   await enter({ solo: id, at: ms - LEAD });
 }
+// A bookmark's moment: one camera alone (`id`), or every camera now shown (null).
+export async function openMoment(ms, id) {
+  if (id !== null && id !== undefined) { await openAt(id, ms); return; }
+  if (S.speed !== 1 && S.on) setSpeed(1);
+  if (S.on) { if (S.solo !== null) setSolo(null); seek(ms - LEAD, true); return; }
+  await enter({ at: ms - LEAD });
+}
 // (From full screen of one camera: that camera's timeline.)
 export const toggle = () => (S.on ? leave() : enter(tvOn() && tvOne() !== null ? { solo: tvOne() } : undefined));
 export const isOn = () => S.on;
@@ -2325,7 +2358,7 @@ export const isOn = () => S.on;
 // listener in initLiveTimeline). One keypress does one of those.
 const escDone = new WeakSet();
 function clearTransient(ev) {
-  const did = closePop() || clearRange();
+  const did = closePop() || Bm.closePop() || clearRange();
   if (did && ev) escDone.add(ev);
   return did;
 }
@@ -2367,6 +2400,9 @@ export function timelineKey(ev) {
   if (lk === 'i') { markIn(); return true; }
   if (lk === 'o') { markOut(); return true; }
   if (lk === 'e') { exportRange(); return true; }
+  // (B is motion outlines on Live; on the timeline it bookmarks the moment, above the playhead.)
+  // (Accounts that cannot add bookmarks: B keeps its Live meaning.)
+  if (lk === 'b' && !ev.shiftKey && can('events')) { Bm.addAtPlayhead(!$('tlHead').hidden ? $('tlHead') : $('tlBm')); return true; }
   if (lk === 't') { leave(); return true; }
   if (k === 'End') { jumpLive(); return true; }
   if (k === 'ArrowLeft' || k === 'ArrowRight') {

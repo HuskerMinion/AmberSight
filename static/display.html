@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en" data-display="1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AmberSight display">
+<title>AmberSight display</title>
+<link rel="icon" href="/static/icons/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="stylesheet" href="/static/css/display.css">
+<link rel="modulepreload" href="/static/js/display.js">
+<link rel="modulepreload" href="/static/js/player.js">
+<link rel="modulepreload" href="/static/js/core.js">
+<script src="/static/js/prepaint.js"></script>
+</head>
+<body class="dsp">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <mask id="logoCut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#fff"/><path d="M14 32s7.5-10 18-10 18 10 18 10-7.5 10-18 10-18-10-18-10z" fill="#000"/></mask>
+  <symbol id="i-logo" viewBox="6 6 52 52"><g fill="currentColor" stroke="none"><g mask="url(#logoCut)"><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="0.55" transform="rotate(0 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="1" transform="rotate(60 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="0.55" transform="rotate(120 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="1" transform="rotate(180 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="0.55" transform="rotate(240 32 32)"/><path d="M32 32 32 6A26 26 0 0 1 54.5 19Z" fill-opacity="1" transform="rotate(300 32 32)"/></g><circle cx="32" cy="32" r="5.5"/></g></symbol>
+</defs></svg>
+<main id="dsp" aria-label="AmberSight display">
+  <div id="dspGrid" class="dsp-grid" aria-label="Cameras"></div>
+  <div id="dspBig" class="dsp-big" hidden></div>
+  <div id="dspOvl" class="dsp-ovl" aria-live="off">
+    <div class="dsp-tr"><span id="dspArmed" class="dsp-chip" hidden></span><span id="dspClock" class="dsp-clock" hidden><b></b><small></small></span></div>
+    <div class="dsp-tl"><span id="dspConn" class="dsp-chip warn" hidden>Reconnecting…</span></div>
+  </div>
+  <div id="dspDim" class="dsp-dim" hidden></div>
+  <div id="dspCtl" class="dsp-ctl" hidden>
+    <button type="button" class="btn" id="dspFull" title="Full screen"><svg class="ic"><use href="#i-expand"/></svg><span>Full screen</span></button>
+    <button type="button" class="btn" id="dspSet" title="Display settings"><svg class="ic"><use href="#i-gear"/></svg><span>Settings</span></button>
+  </div>
+  <div id="dspMsg" class="dsp-msg" hidden></div>
+</main>
+<noscript><p style="padding:20px">AmberSight needs JavaScript.</p></noscript>
+<script type="module" src="/static/js/display.js"></script>
+</body>
+</html>

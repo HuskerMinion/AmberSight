@@ -1843,14 +1843,13 @@ mod tests {
 
     #[test]
     fn probe_finds_a_listening_onvif_port() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for conn in l.incoming() {
                 let Ok(mut s) = conn else { break };
-                let mut b = [0u8; 4096];
-                let _ = s.read(&mut b);
+                let _ = crate::test_ports::read_http_request(&mut s);
                 let body = "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><tds:GetSystemDateAndTimeResponse xmlns:tds=\"x\"><tds:SystemDateAndTime/></tds:GetSystemDateAndTimeResponse></s:Body></s:Envelope>";
                 let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/soap+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
             }
@@ -1861,15 +1860,14 @@ mod tests {
 
     /// A local port that answers every request with this.
     fn answering(status: &str, body: &str, extra: &str) -> u16 {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         let reply = format!("HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         std::thread::spawn(move || {
             for conn in l.incoming() {
                 let Ok(mut s) = conn else { break };
-                let mut b = [0u8; 4096];
-                let _ = s.read(&mut b);
+                let _ = crate::test_ports::read_http_request(&mut s);
                 let _ = s.write_all(reply.as_bytes());
             }
         });

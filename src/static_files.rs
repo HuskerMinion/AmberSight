@@ -78,6 +78,16 @@ fn with_preloads(html: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The display-mode page: the build's name only (it loads a few modules).
+fn with_build(html: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(html);
+    let meta = format!("<meta name=\"ambersight-ui\" content=\"{}\">\n", ui_build());
+    match text.find("</head>") {
+        Some(i) => format!("{}{}{}", &text[..i], meta, &text[i..]).into_bytes(),
+        None => html.to_vec(),
+    }
+}
+
 /// Compressed copies, made once per file version (key: path and ETag).
 fn gzipped(key: String, data: &[u8]) -> std::sync::Arc<Vec<u8>> {
     use std::collections::HashMap;
@@ -117,7 +127,7 @@ fn serve(path: &str, req_headers: &HeaderMap) -> Response {
     // (The page itself also names the build and lists every script, so its
     // tag changes with any file.)
     let mut base = hex(&file.metadata.sha256_hash()[..12]);
-    if path == "index.html" {
+    if path == "index.html" || path == "display.html" {
         base = format!("{base}-{}", ui_build());
     }
     let etag = if gz { format!("\"{base}-gz\"") } else { format!("\"{base}\"") };
@@ -136,7 +146,11 @@ fn serve(path: &str, req_headers: &HeaderMap) -> Response {
             .body(Body::empty())
             .unwrap();
     }
-    let data: Vec<u8> = if path == "index.html" { with_preloads(&file.data) } else { file.data.into_owned() };
+    let data: Vec<u8> = match path {
+        "index.html" => with_preloads(&file.data),
+        "display.html" => with_build(&file.data),
+        _ => file.data.into_owned(),
+    };
     let r = Response::builder()
         .header(header::CONTENT_TYPE, content_type(path))
         .header(header::ETAG, etag)
@@ -152,6 +166,11 @@ fn serve(path: &str, req_headers: &HeaderMap) -> Response {
 /// `/`, `/ambs.htm`, `/index.html`
 pub async fn index(headers: HeaderMap) -> Response {
     serve("index.html", &headers)
+}
+
+/// `/display` - display mode (wall TV, tablet; see static/js/display.js).
+pub async fn display(headers: HeaderMap) -> Response {
+    serve("display.html", &headers)
 }
 
 /// `/favicon.ico` - browsers ask for it at the root.
@@ -190,5 +209,9 @@ mod tests {
         let r = serve("index.html", &HeaderMap::new());
         let etag = r.headers().get(header::ETAG).unwrap().to_str().unwrap().to_string();
         assert!(etag.ends_with(&format!("-{id}\"")), "{etag}");
+        let page = String::from_utf8(with_build(&Assets::get("display.html").unwrap().data)).unwrap();
+        assert!(page.contains(&format!("<meta name=\"ambersight-ui\" content=\"{id}\">")));
+        let r = serve("display.html", &HeaderMap::new());
+        assert!(r.headers().get(header::ETAG).unwrap().to_str().unwrap().ends_with(&format!("-{id}\"")));
     }
 }

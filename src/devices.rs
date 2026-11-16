@@ -101,6 +101,11 @@ fn cookie_value(headers: &HeaderMap) -> Option<String> {
         .map(|v| v.to_string())
 }
 
+/// The hash (as sessions keep it) of the device cookie the request carries.
+pub fn browser_of(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers).map(|c| browser_hash(&c))
+}
+
 /// The `Set-Cookie` value that keeps this browser's device cookie.
 pub fn set_cookie(value: &str, secure: bool) -> String {
     format!("{DEVICE_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={DEVICE_COOKIE_SECS}{}", if secure { "; Secure" } else { "" })
@@ -114,6 +119,8 @@ pub enum How {
     RecoveryCode(usize),
     QrCode,
     LinkedServer,
+    /// A display code an admin (named) approved.
+    DisplayCode(String),
 }
 
 impl How {
@@ -124,6 +131,7 @@ impl How {
             How::RecoveryCode(n) => format!("a recovery code ({n} left)"),
             How::QrCode => "a sign-in QR code".to_string(),
             How::LinkedServer => "a link from another AmberSight server".to_string(),
+            How::DisplayCode(admin) => format!("a display code {admin} approved"),
         }
     }
 }
@@ -156,18 +164,29 @@ pub struct Started {
 /// Remembers the browser, and tells admins if it is a new one. A sign-in with
 /// a recovery code is told in the same message, not in two.
 pub fn complete_sign_in(engine: &Arc<Engine>, ctx: &SignInCtx, id: Identity, generation: u64, how: How) -> Option<Started> {
+    sign_in_as(engine, ctx, id, generation, how, ctx.label.clone(), crate::auth::new_session_if_current)
+}
+
+/// A display (wall TV, tablet) an admin paired: a display session (see
+/// auth::new_display_session_if_current) named `name` in the list of devices.
+pub fn complete_display_sign_in(engine: &Arc<Engine>, ctx: &SignInCtx, id: Identity, generation: u64, name: &str, approver: &str) -> Option<Started> {
+    let label = format!("{}{name} ({})", crate::auth::DISPLAY_LABEL, ctx.label);
+    sign_in_as(engine, ctx, id, generation, How::DisplayCode(approver.to_string()), label, crate::auth::new_display_session_if_current)
+}
+
+fn sign_in_as(engine: &Arc<Engine>, ctx: &SignInCtx, id: Identity, generation: u64, how: How, label: String, make: fn(Identity, u64, SessionMeta) -> Option<String>) -> Option<Started> {
     let user = id.user.clone();
     // (Asked before the session exists: it would count itself.)
     let used_before = crate::auth::has_sessions(&user) || engine.db.signed_in_before(&user).unwrap_or(true);
     let cookie = ctx.cookie.clone().unwrap_or_else(random_cookie);
     let hash = browser_hash(&cookie);
-    let meta = SessionMeta::new(ctx.ip, ctx.label.clone(), hash.clone());
-    let token = crate::auth::new_session_if_current(id, generation, meta)?;
+    let meta = SessionMeta::new(ctx.ip, label.clone(), hash.clone());
+    let token = make(id, generation, meta)?;
     let covered = ctx.session_user.as_deref() == Some(user.as_str());
-    let new = remember(engine, &user, &hash, &ctx.label, used_before, covered);
+    let new = remember(engine, &user, &hash, &label, used_before, covered);
     if new {
-        let _ = engine.db.insert_audit(&user, &ctx.ip.to_string(), "sign-in from a new device", &ctx.label, 200);
-        announce(engine, &user, &ctx.label, ctx.ip, &how.words(), TO_DO);
+        let _ = engine.db.insert_audit(&user, &ctx.ip.to_string(), "sign-in from a new device", &label, 200);
+        announce(engine, &user, &label, ctx.ip, &how.words(), TO_DO);
     } else if let How::RecoveryCode(n) = how {
         crate::account_http::tell_admins(engine, format!("{user} signed in with a recovery code"), format!("{user} signed in with a recovery code from {}; {n} left. If that was not them, someone has the password and those codes: disable the account in Users.", ctx.ip));
     }

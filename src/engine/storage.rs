@@ -86,6 +86,8 @@ impl Engine {
             "segments": segments,
             // Bytes of recordings in the index (finished files).
             "indexed_bytes": self.db.total_segment_bytes().unwrap_or(0),
+            // Kept bookmarks and what they hold back from cleanup.
+            "kept_bookmarks": self.db.bookmark_kept_summary().map(|(n, b)| serde_json::json!({ "count": n, "bytes": b })).unwrap_or(serde_json::Value::Null),
             // Extra recording folders with their indexed usage.
             "folders": self.config.lock().unwrap().storage.folders.iter().map(|f| serde_json::json!({
                 "name": f.name,
@@ -333,8 +335,8 @@ impl Engine {
 
     /// Days since the oldest recording of a folder ("" = data folder).
     pub fn folder_days_kept(&self, name: &str) -> Option<f64> {
-        let s = self.db.oldest_segments_in(name, 1).ok()?.into_iter().next()?;
-        Some(((Utc::now().timestamp_millis() - s.start_ms).max(0)) as f64 / 86_400_000.0)
+        let start_ms = self.db.oldest_segment_start_in(name).ok()??;
+        Some(((Utc::now().timestamp_millis() - start_ms).max(0)) as f64 / 86_400_000.0)
     }
 
     /// The status of each folder in `storage_caps` order, with whether its
@@ -522,6 +524,12 @@ pub(super) fn retention_loop(engine: Arc<Engine>) {
         }
         // Hourly: AI review frames of events that are gone, and faces nobody
         // named after 60 days.
+        // Daily: the longest recording's length, which only grows between these.
+        if passes % 1440 == 720 {
+            if let Err(e) = engine.db.recompute_longest_segment() {
+                warn!("could not recompute the longest recording: {e:#}");
+            }
+        }
         if passes % 60 == 0 {
             sweep_ai_frames(&engine);
             let _ = engine.db.prune_faces(Utc::now().timestamp_millis() - super::faces::KEEP_UNNAMED_MS);
@@ -562,20 +570,36 @@ impl Drop for ClearOnDrop {
 }
 
 static SWEEPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+/// A small site's sweep comes every few hours; a big one (a walk takes many minutes on a
+/// spinning drive) once a day.
+const SWEEP_EVERY_SMALL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+const SWEEP_EVERY_BIG: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// From this many recordings on a site is big.
+const BIG_SITE_FILES: i64 = 100_000;
 const SWEEP_FIRST_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// Time between sweeps for a site whose last full walks looked at `files` recordings.
+fn sweep_every(files: i64) -> std::time::Duration {
+    if files >= BIG_SITE_FILES {
+        SWEEP_EVERY_BIG
+    } else {
+        SWEEP_EVERY_SMALL
+    }
+}
+
 /// Whether a folder sweep should start now (and none is running); marks it running.
-fn sweep_due() -> bool {
+/// Never while the start-up indexing runs (both would list the same folders).
+/// `every` gives the time to the next one (asked only when one starts).
+fn sweep_due(importing: bool, every: impl FnOnce() -> std::time::Duration) -> bool {
     // When the next one is due (the first: 30 minutes after start).
     static NEXT_SWEEP: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     let mut next = NEXT_SWEEP.lock().unwrap();
     let now = std::time::Instant::now();
     let due_at = *next.get_or_insert(now + SWEEP_FIRST_AFTER);
-    if now < due_at || SWEEPING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if now < due_at || importing || SWEEPING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
-    *next = Some(now + SWEEP_EVERY);
+    *next = Some(now + every());
     true
 }
 
@@ -622,21 +646,29 @@ fn folder_sweep(engine: &Arc<Engine>, cutoff: i64, paced: bool) {
         })
         .collect();
     let since_ms = (Utc::now().timestamp() - 2 * 86400) * 1000;
-    match engine.db.import_recent_camera_dirs(&dirs, seg, since_ms) {
-        Ok(n) if n > 0 => tracing::info!("folder sweep: added {n} recording(s) missing from the database"),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("folder sweep: could not add missing recordings: {e:#}"),
-    }
-    pace.folder();
     let mut roots = vec![dir.clone()];
     roots.extend(engine.config.lock().unwrap().storage.folders.iter().map(|f| f.path.clone()));
+    // Each camera folder is listed once, for both the missing recordings and the cleanup.
+    let mut added = 0;
     for root in &roots {
         if let Ok(entries) = std::fs::read_dir(root.join("cameras")) {
             for cam in entries.flatten() {
-                prune_dir(&cam.path().join("segments"), cutoff, &mut pace);
+                let slug = cam.file_name().to_string_lossy().into_owned();
+                let seg_dir = cam.path().join("segments");
+                let Some(listing) = crate::db::list_dir_files(&seg_dir, &mut || pace.file()) else { continue };
+                if let Some((_, folder, _)) = dirs.iter().find(|(s, _, r)| *s == slug && r == root) {
+                    match engine.db.import_recent_listed(folder, root, &slug, seg, since_ms, &listing) {
+                        Ok(n) => added += n,
+                        Err(e) => tracing::warn!("folder sweep: could not add missing recordings: {e:#}"),
+                    }
+                }
+                prune_listed(&engine.db, root, &listing, cutoff);
                 pace.folder();
             }
         }
+    }
+    if added > 0 {
+        tracing::info!("folder sweep: added {added} recording(s) missing from the database");
     }
     // Orphaned clips/thumbnails (no event row) past the age.
     let protected: HashSet<String> = match engine.db.protected_ids() {
@@ -678,7 +710,8 @@ fn retention_waits_for_import(age: Option<std::time::Duration>) -> bool {
 
 /// One sweep: age-based retention, then the size caps (fixed or automatic),
 /// then the drive reserve. Protected events (and
-/// their clip/thumbnail) are never deleted by either.
+/// their clip/thumbnail) are never deleted by either, nor the recordings a
+/// kept bookmark holds (crate::db::KEEP_WINDOW_MS around its moment).
 pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
     // The start-up indexing of existing recordings is still adding them.
     // For a while retention waits (caps would see too little). Past
@@ -713,8 +746,9 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
     // Recordings past the retention age: indexed ones via the database,
     // anything on disk the index missed via the folder.
     loop {
+        // (Never those a kept bookmark holds: crate::db::KEEP_WINDOW_MS.)
         let old: Vec<_> = db
-            .oldest_segments(500)?
+            .oldest_unkept_segments(500)?
             .into_iter()
             .filter(|(_, s)| s.end_ms < cutoff * 1000)
             .collect();
@@ -730,13 +764,13 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
         }
     }
     // Folder sweeps (files the index missed, orphan clips and pictures) list
-    // hundreds of thousands of files on the recording disks: every 6 hours
-    // (first one 30 minutes after start), on their own thread, paced so the
+    // hundreds of thousands of files on the recording disks: every 6 hours, on a
+    // big site once a day (first one 30 minutes after start), on their own thread, paced so the
     // disk the cameras record to is never busy for long. (Recordings in the
     // index go above, every pass.)
     if cfg!(test) {
         folder_sweep(engine, cutoff, false);
-    } else if sweep_due() {
+    } else if sweep_due(db.importing(), || sweep_every(db.walked_files())) {
         let engine = engine.clone();
         let spawned = std::thread::Builder::new().name("folder-sweep".into()).spawn(move || {
             let _running = ClearOnDrop(&SWEEPING);
@@ -928,6 +962,10 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
     }
     let archive_drive = archive.and_then(|a| volume_key(&a.1));
     let short_of = |p: &std::path::Path| -> Option<u64> {
+        #[cfg(test)]
+        if let Some(n) = TEST_NEED.with(|c| c.get()) {
+            return Some(n);
+        }
         let (free, total) = (fs4::available_space(p).ok()?, fs4::total_space(p).ok()?);
         Some(reserve_bytes(total).saturating_sub(free))
     };
@@ -941,23 +979,49 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
         let to_archive = archive.filter(|a| archive_drive.as_deref().is_some_and(|ad| ad != key) && short_of(&a.1) == Some(0));
         let mut cands: Vec<PurgeCandidate> = Vec::new();
         let mut home: std::collections::HashMap<std::path::PathBuf, usize> = Default::default();
+        // Whether every list below came back whole (shorter than its limit):
+        // only then is nothing but kept bookmark video left.
+        let mut whole = true;
         for &i in &members {
             let (name, root, _) = &roots[i];
-            for (s, kept) in engine.db.segments_to_purge(name, kept_from, 5000)? {
+            let rows = engine.db.segments_to_purge(name, kept_from, GUARD_ROWS)?;
+            whole &= rows.len() < GUARD_ROWS;
+            for (s, kept) in rows {
                 home.insert(root.join(&s.path), i);
                 cands.push(PurgeCandidate { time: s.start_ms / 1000, size: s.bytes.max(0) as u64, kind: PurgeKind::Segment { path: root.join(&s.path), newest: false }, kept });
             }
         }
         let data_here = members.contains(&0);
         if data_here {
-            for ev in engine.db.oldest_unprotected_events(5000)? {
+            let evs = engine.db.oldest_unprotected_events(GUARD_ROWS)?;
+            whole &= evs.len() < GUARD_ROWS;
+            for ev in evs {
                 let size = event_files_size(dir, &ev.id);
                 let kept = ev.start * 1000 >= kept_from;
                 cands.push(PurgeCandidate { time: ev.start, size, kind: PurgeKind::Event { id: ev.id, protect: false }, kept });
             }
         }
-        let picked = select_purge(cands, need);
-        let freed: u64 = picked.iter().map(|c| c.size).sum();
+        let mut picked = select_purge(cands, need);
+        let mut freed: u64 = picked.iter().map(|c| c.size).sum();
+        // Recording never stops: when nothing else is left, the video kept
+        // bookmarks hold goes too, oldest first (only here: age and the size
+        // caps never touch it), and the admins are told. Not while ordinary
+        // video may be left past what the lists held: the next pass (a minute
+        // later) takes that first.
+        let mut kept_paths: HashSet<std::path::PathBuf> = HashSet::new();
+        if freed < need && whole {
+            for s in engine.db.bookmark_kept_segments()? {
+                if freed >= need {
+                    break;
+                }
+                let Some(&i) = members.iter().find(|&&i| roots[i].0 == s.folder) else { continue };
+                let path = roots[i].1.join(&s.path);
+                home.insert(path.clone(), i);
+                freed += s.bytes.max(0) as u64;
+                kept_paths.insert(path.clone());
+                picked.push(PurgeCandidate { time: s.start_ms / 1000, size: s.bytes.max(0) as u64, kind: PurgeKind::Segment { path, newest: false }, kept: true });
+            }
+        }
         if freed < need {
             short.extend(members.iter().map(|&i| roots[i].0.clone()));
         }
@@ -972,6 +1036,8 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
             reserve_bytes(fs4::total_space(&roots[members[0]].1).unwrap_or(0)) as f64 / 1e9
         );
         let mut purged = Vec::new();
+        // Kept bookmark video: (deleted, moved to the archive).
+        let (mut kept_deleted, mut kept_moved) = (0usize, 0usize);
         for c in picked {
             match c.kind {
                 PurgeKind::Segment { path, .. } => {
@@ -979,8 +1045,16 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
                     let (_, root, is_archive) = &roots[i];
                     let rel = crate::db::relative_path(root, &path);
                     let dest = if *is_archive { None } else { to_archive };
-                    if let Err(e) = retire_segment(engine, &rel, &path, dest) {
-                        retire_failed(&e);
+                    match retire_segment(engine, &rel, &path, dest) {
+                        Err(e) => retire_failed(&e),
+                        Ok(()) if kept_paths.contains(&path) => {
+                            if dest.is_some() {
+                                kept_moved += 1;
+                            } else {
+                                kept_deleted += 1;
+                            }
+                        }
+                        Ok(()) => {}
                     }
                 }
                 PurgeKind::Event { id, .. } => {
@@ -990,8 +1064,49 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
             }
         }
         engine.db.delete_events(&purged)?;
+        // (Told once it is done, saying what really happened to them.)
+        if kept_deleted + kept_moved > 0 {
+            warn!("storage: the drive with {} is full: of the recordings kept by bookmarks, {kept_deleted} were deleted and {kept_moved} moved to the archive to keep recording", roots[members[0]].1.display());
+            kept_video_gone(engine, kept_deleted, kept_moved);
+        }
     }
     Ok(())
+}
+
+/// Rows each list of the drive reserve holds at a time.
+const GUARD_ROWS: usize = 5000;
+
+/// Admins hear (at most every 6 hours) that kept bookmark video had to leave
+/// the full drive: `deleted` files deleted, `moved` moved to the archive folder.
+fn kept_video_gone(engine: &Arc<Engine>, deleted: usize, moved: usize) {
+    #[cfg(test)]
+    KEPT_GONE_TOLD.with(|c| c.set(c.get() + deleted + moved));
+    let title = if moved == 0 {
+        "Kept bookmark video was deleted to keep recording: drive full"
+    } else if deleted == 0 {
+        "Kept bookmark video was moved to the archive to keep recording: drive full"
+    } else {
+        "Kept bookmark video was removed from the main folder to keep recording: drive full"
+    };
+    let what = match (deleted, moved) {
+        (d, 0) => format!("{d} recording file(s) that kept bookmarks held were deleted"),
+        (0, m) => format!("{m} recording file(s) that kept bookmarks held were moved to the archive folder"),
+        (d, m) => format!("of the recording files kept bookmarks held, {d} were deleted and {m} moved to the archive folder"),
+    };
+    crate::account_http::tell_admins_once(
+        engine,
+        "bookmark-video-deleted",
+        6 * 3600,
+        title.to_string(),
+        format!("The drive with the recordings was full and nothing else was left to remove, so {what} to keep recording. Free space on the drive, or set a smaller size for recordings in Settings, Recording."),
+    );
+}
+
+#[cfg(test)]
+thread_local! {
+    static KEPT_GONE_TOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tests: how far every drive is short of its reserve, on this thread.
+    static TEST_NEED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Move a recording to the archive folder (same relative path), or delete it
@@ -1119,21 +1234,21 @@ fn dir_bytes(dir: &std::path::Path) -> u64 {
     total
 }
 
-/// Delete files in `dir` last modified before `cutoff` (epoch seconds).
-fn prune_dir(dir: &std::path::Path, cutoff: i64, pace: &mut Pace) {
-    if let Ok(files) = std::fs::read_dir(dir) {
-        for f in files.flatten() {
-            pace.file();
-            let modified = f
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).timestamp())
-                .unwrap_or(0);
-            if modified < cutoff {
-                let _ = std::fs::remove_file(f.path());
-                crate::ingest::splice::forget(&f.path());
+/// Delete the listed files last modified before `cutoff` (epoch seconds).
+/// A recording a kept bookmark holds (crate::db::KEEP_WINDOW_MS) stays: asked
+/// for each old file just before it would go (the walk is slow; a bookmark may
+/// be kept meanwhile). `root`: the folder the index's paths hang from.
+fn prune_listed(db: &crate::db::Db, root: &std::path::Path, files: &[crate::db::ListedFile], cutoff: i64) {
+    for f in files {
+        // (No time known: 0, so it is looked at as an old one, as before.)
+        let modified = f.mtime_ms.map(|ms| ms.div_euclid(1000)).unwrap_or(0);
+        if modified < cutoff {
+            // (Unreadable: kept, to be safe; the next sweep looks again.)
+            if db.segment_kept(&crate::db::relative_path(root, &f.path)).unwrap_or(true) {
+                continue;
             }
+            let _ = std::fs::remove_file(&f.path);
+            crate::ingest::splice::forget(&f.path);
         }
     }
 }
@@ -1141,6 +1256,14 @@ fn prune_dir(dir: &std::path::Path, cutoff: i64, pace: &mut Pace) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_sites_sweep_once_a_day_small_ones_every_few_hours() {
+        assert_eq!(sweep_every(0), SWEEP_EVERY_SMALL);
+        assert_eq!(sweep_every(BIG_SITE_FILES - 1), SWEEP_EVERY_SMALL);
+        assert_eq!(sweep_every(BIG_SITE_FILES), SWEEP_EVERY_BIG);
+        assert!(SWEEP_FIRST_AFTER >= std::time::Duration::from_secs(30 * 60));
+    }
 
     #[test]
     fn reserve_is_two_percent_at_least_one_gb() {
@@ -1376,6 +1499,116 @@ mod import_wait_tests {
         assert!(!file.exists(), "the known old recording was removed");
         assert!(other.exists(), "a file the index does not know is left alone");
         assert!(e.db.oldest_segments(10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_skips_the_recordings_a_kept_bookmark_holds() {
+        let mut e = Engine::for_test(toml::from_str("[storage]\nretention_days = 1").unwrap());
+        let dir = std::env::temp_dir().join(format!("ambersight-bm-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cameras/cam/segments")).unwrap();
+        Arc::get_mut(&mut e).unwrap().data_dir = dir.clone();
+        // Ten one-minute recordings three days old (past the 1-day retention).
+        let t0 = (Utc::now().timestamp() - 3 * 86400) * 1000;
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86400);
+        let file = |i: i64| dir.join(format!("cameras/cam/segments/{i}.mp4"));
+        for i in 0..10 {
+            std::fs::write(file(i), vec![0u8; 100]).unwrap();
+            std::fs::File::options().write(true).open(file(i)).unwrap().set_modified(old).unwrap();
+            let row = crate::db::SegmentRow { path: format!("cameras/cam/segments/{i}.mp4"), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 100, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        // A file the index does not know, inside the window too: the folder sweep keeps it
+        // only if the index has it (it is not a kept recording).
+        std::fs::write(dir.join("cameras/cam/segments/stray.mp4"), b"x").unwrap();
+        std::fs::File::options().write(true).open(dir.join("cameras/cam/segments/stray.mp4")).unwrap().set_modified(old).unwrap();
+        // Kept at 5:30: 3:30 to 7:30 stays (files 3..=7); another camera's bookmark and an unkept one hold nothing.
+        let bm = |camera: Option<&str>, at: i64, keep: bool| crate::db::Bookmark { id: 0, camera: camera.map(str::to_string), at_ms: at, note: "n".into(), user: "ann".into(), owner: Some("ann".into()), created_ms: 0, updated_ms: 0, keep };
+        let id = e.db.bookmark_add(&bm(Some("cam"), t0 + 330_000, true)).unwrap();
+        e.db.bookmark_add(&bm(Some("other"), t0 + 30_000, true)).unwrap();
+        e.db.bookmark_add(&bm(Some("cam"), t0 + 30_000, false)).unwrap();
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        retention_pass(&e).unwrap();
+        let left: Vec<i64> = (0..10).filter(|&i| file(i).exists()).collect();
+        assert_eq!(left, [3, 4, 5, 6, 7]);
+        assert_eq!(e.db.oldest_segments(100).unwrap().len(), 5, "their index rows stay too");
+        assert!(!dir.join("cameras/cam/segments/stray.mp4").exists());
+        // Unticking keep releases them (the drive reserve, below, is the one exception).
+        let mut b = e.db.bookmark_get(id).unwrap().unwrap();
+        b.keep = false;
+        e.db.bookmark_update(&b).unwrap();
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        assert_eq!((0..10).filter(|&i| file(i).exists()).count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_drive_deletes_kept_bookmark_video_last_and_says_so() {
+        let mut e = Engine::for_test(toml::from_str("").unwrap());
+        let dir = std::env::temp_dir().join(format!("ambersight-bm-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cameras/cam/segments")).unwrap();
+        Arc::get_mut(&mut e).unwrap().data_dir = dir.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let file = |i: i64| dir.join(format!("cameras/cam/segments/{i}.mp4"));
+        for i in 0..10 {
+            std::fs::write(file(i), vec![0u8; 100]).unwrap();
+            let row = crate::db::SegmentRow { path: format!("cameras/cam/segments/{i}.mp4"), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 100, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        // Kept at 1:30: files 0..=3.
+        e.db.bookmark_add(&crate::db::Bookmark { id: 0, camera: Some("cam".into()), at_ms: t0 + 90_000, note: "n".into(), user: "ann".into(), owner: Some("ann".into()), created_ms: 0, updated_ms: 0, keep: true }).unwrap();
+        KEPT_GONE_TOLD.with(|c| c.set(0));
+        // Short by a little: unkept video goes first, kept stays, nothing said.
+        let short = |bytes: u64| TEST_NEED.with(|r| r.set(Some(bytes)));
+        short(250);
+        retention_pass(&e).unwrap();
+        assert_eq!((0..10).filter(|&i| file(i).exists()).collect::<Vec<_>>(), [0, 1, 2, 3, 7, 8, 9]);
+        assert_eq!(KEPT_GONE_TOLD.with(|c| c.get()), 0);
+        // Nothing else left: kept video goes too, oldest first, and the admins are told.
+        short(100 * 3 + 150);
+        retention_pass(&e).unwrap();
+        TEST_NEED.with(|r| r.set(None));
+        assert_eq!((0..10).filter(|&i| file(i).exists()).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(KEPT_GONE_TOLD.with(|c| c.get()), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ordinary_video_past_one_list_goes_before_kept_video() {
+        let mut e = Engine::for_test(toml::from_str("").unwrap());
+        let dir = std::env::temp_dir().join(format!("ambersight-bm-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cameras/cam/segments")).unwrap();
+        Arc::get_mut(&mut e).unwrap().data_dir = dir.clone();
+        let t0 = (Utc::now().timestamp() - 86400) * 1000;
+        // Kept video first (oldest), then more ordinary recordings than one list holds.
+        let n = GUARD_ROWS as i64 + 100;
+        let file = |i: i64| dir.join(format!("cameras/cam/segments/{i}.mp4"));
+        for i in 0..(4 + n) {
+            std::fs::write(file(i), b"x").unwrap();
+            let row = crate::db::SegmentRow { path: format!("cameras/cam/segments/{i}.mp4"), start_ms: t0 + i * 5000, end_ms: t0 + (i + 1) * 5000, bytes: 10, video_frames: 1, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        // Kept so that its 2 minutes after reach into the first two recordings only.
+        e.db.bookmark_add(&crate::db::Bookmark { id: 0, camera: Some("cam".into()), at_ms: t0 - 120_000 + 10_000, note: "n".into(), user: "ann".into(), owner: None, created_ms: 0, updated_ms: 0, keep: true }).unwrap();
+        let kept: Vec<i64> = (0..(4 + n)).filter(|i| e.db.segment_kept(&format!("cameras/cam/segments/{i}.mp4")).unwrap()).collect();
+        assert_eq!(kept, [0, 1]);
+        KEPT_GONE_TOLD.with(|c| c.set(0));
+        // Short by more than everything: the first pass takes one list of ordinary video only.
+        TEST_NEED.with(|r| r.set(Some(u64::MAX / 4)));
+        retention_pass(&e).unwrap();
+        assert!(file(0).exists() && file(1).exists(), "kept video stays while ordinary video is left");
+        assert_eq!(KEPT_GONE_TOLD.with(|c| c.get()), 0);
+        assert!((2..(4 + n)).filter(|&i| file(i).exists()).count() > 0, "more than one list of ordinary video");
+        // The next pass: the rest of the ordinary video, then the kept video, and a word to the admins.
+        retention_pass(&e).unwrap();
+        TEST_NEED.with(|r| r.set(None));
+        assert_eq!((0..(4 + n)).filter(|&i| file(i).exists()).count(), 0);
+        assert_eq!(KEPT_GONE_TOLD.with(|c| c.get()), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
