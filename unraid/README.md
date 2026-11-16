@@ -32,8 +32,13 @@ Unraid yet: please report what works and what doesn't in
 | Config | `/mnt/user/appdata/ambersight/config` | `config.toml` |
 | Data | `/mnt/user/appdata/ambersight/data` | database, AI models, backups, and recordings unless you add a recordings folder |
 | Recordings | empty | optional share for recordings, e.g. `/mnt/user/cameras` |
-| Video device | empty | `/dev/dri` for Intel or AMD hardware video decode |
 | PUID / PGID | 99 / 100 | Unraid's `nobody:users` |
+
+**Hardware video decode.** For an Intel or AMD graphics device, add
+`--device=/dev/dri` to Extra Parameters (Advanced View). For an NVIDIA card,
+use the `:cuda` tag with the Nvidia Driver plugin and `--runtime=nvidia` (or
+`--gpus all`) in Extra Parameters. The template has no Video device field:
+Unraid passes an empty one as `--device=''` and the container won't start.
 
 **Keep the database off FUSE.** The database is SQLite, which runs best
 without Unraid's `/mnt/user` FUSE layer. On Unraid 6.12 or later, set the
