@@ -367,7 +367,7 @@ function statusPage(el) {
       'AmberSight downloads it, checks its signature, and keeps this version in the <b>previous</b> folder next to the program.</div>' +
       '<ul class="upd-warn"><li>' + restart + '</li>' +
       '<li>Right after the restart, playback and the timeline can be slow for a few minutes while it checks its recordings.</li>' +
-      '<li>If the update changes the database, a copy of it is saved first, if there is room, in the <b>backups</b> folder of the data folder (pre-upgrade-...). Going back to the older version afterwards is not recommended: it runs, but warns, and ignores the newer parts.</li></ul>' +
+      '<li>If the update changes the database, a copy of it is saved first, if there is room, in the <b>backups</b> folder of the data folder (pre-upgrade-...). On a big database on a spinning drive that copy can add a minute or more to the restart. Going back to the older version afterwards is not recommended: it runs, but warns, and ignores the newer parts.</li></ul>' +
       '<div class="row"><button class="primary" data-yes>Update now</button><button class="btn" data-no>Cancel</button></div>', true);
     const dlg = updDlg;
     const close = () => { updDlg = null; dlg.__close(); };
@@ -754,4 +754,4 @@ function whyNotHtml(why) {
     '<pre class="upd-cmd">' + esc(m[4]) + '</pre>' +
     PKG_NOTE + '</div>';
 }
-const PKG_NOTE = '<div class="muted">The package manager cannot warn first: AmberSight stops while it updates (about a minute with no recording or live view), playback can be slow for a few minutes after the restart, and a database change is copied to the backups folder first if there is room. Going back to an older version afterwards is not recommended.</div>';
+const PKG_NOTE = '<div class="muted">The package manager cannot warn first: AmberSight stops while it updates (about a minute with no recording or live view), playback can be slow for a few minutes after the restart, and a database change is copied to the backups folder first if there is room (on a big database on a spinning drive that can add a minute or more). Going back to an older version afterwards is not recommended.</div>';

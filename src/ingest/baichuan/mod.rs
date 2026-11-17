@@ -26,6 +26,7 @@ pub mod avcc;
 pub mod client;
 pub mod pushx;
 pub mod registry;
+pub mod cardlist;
 
 /// Scheme for a battery Argus camera: `baichuan://<host>?uid=<UID>`.
 pub const SCHEME: &str = "baichuan://";

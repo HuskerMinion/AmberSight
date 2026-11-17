@@ -5,7 +5,9 @@
 import { renderVerdict, aiFrames } from './ai_review.js';
 import { $, state, api, esc, fmtTime, stillWaiting, openDlg, msgDlg, toast, lowQ, enc, topDlgOpen, overlayOpen, backLayer, overlaysChanged, afterOverlayClose, returnOnBack, viewOnlyNote, downloadUrl, speedOptions, applySpeed, safeRate, MAX_RATE, can } from './core.js';
 import { isActive, showTab } from './nav.js';
-import { openFullCam, closeFull } from './live.js';
+import { openFullCam, closeFull, addOverlayText, paintOverlayText } from './live.js';
+import { watchMasks, maskRevQ } from './masks.js';
+import { burnTextSwitch, wireBurnText, burnTextQuery } from './export.js';
 
 // New-event pop-ups are off unless the user turns them on (account menu).
 const POPUP_KEY = 'ambs.alertPopups';
@@ -305,7 +307,7 @@ function tileFor(e) {
     tt.innerHTML = '<svg class="ic"><use href="#i-' + CLASS_ICON[cl[0]] + '"/></svg><span class="tt">' + esc(typeText(e)) + '</span>';
   }
   decorate(el, e);
-  el.querySelector('.ttime').innerHTML = fmtClock(e.start) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · not real' : '') + (e.clip ? '' : ' · no clip');
+  el.querySelector('.ttime').innerHTML = fmtClock(e.start) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · not real' : '') + (e.from_card ? ' · <span class="fromcard" title="Imported later from the camera\'s own card">from card</span>' : '') + (e.clip ? '' : ' · no clip');
   return el;
 }
 function rowFor(e) {
@@ -332,13 +334,13 @@ function rowFor(e) {
   const ck = checks.has(e.id);
   el.classList.toggle('ck', ck);
   el.querySelector('input').checked = ck;
-  el.querySelector('.t2').innerHTML = fmtClock(e.start) + ' · ' + fmtDur(Math.max(0, e.end - e.start)) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · not a real alert' : '') + (e.clip ? '' : ' · no clip');
+  el.querySelector('.t2').innerHTML = fmtClock(e.start) + ' · ' + fmtDur(Math.max(0, e.end - e.start)) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · not a real alert' : '') + (e.from_card ? ' · <span class="fromcard" title="Imported later from the camera\'s own card">from card</span>' : '') + (e.clip ? '' : ' · no clip');
   return el;
 }
 function render() {
   const rows = $('eventRows'), scr = $('evList');
   if (!rows) return;
-  const sig = items.map(e => e.id + (e.protect ? 'p' : '') + (e.review ? e.review[0] : '') + (e.clip ? 'c' : '') + e.end + classesOf(e).join('+')).join() + '|' + selId + '|' + [...checks].join() + '|' + reviewed.size + '|' + rawMore + loading + V + aiOff;
+  const sig = items.map(e => e.id + (e.protect ? 'p' : '') + (e.review ? e.review[0] : '') + (e.clip ? 'c' : '') + (e.from_card ? 'k' : '') + e.end + classesOf(e).join('+')).join() + '|' + selId + '|' + [...checks].join() + '|' + reviewed.size + '|' + rawMore + loading + V + aiOff;
   if (sig === lastRender) return;
   lastRender = sig;
   // Remember where the viewer is, so rows added on top do not push the list around.
@@ -388,7 +390,7 @@ function render() {
 }
 
 // ---------- selection and the player ----------
-let readTimer = 0, curVideo = null;
+let readTimer = 0, curVideo = null, curMasks = null;
 function markReviewed(id) { if (!reviewed.has(id)) { reviewed.add(id); saveReviewed(); lastRender = ''; render(); } }
 
 // A link to one event (#events?ev=<id>): the id the address brought in, until it has been opened.
@@ -552,6 +554,7 @@ function paintPlayer(e) {
   const box = $('evPlayer');
   if (shareFile && (!e || shareFile.id !== e.id)) shareFile = null;   // frees the fetched clip
   if (curVideo) { try { curVideo.pause(); curVideo.removeAttribute('src'); curVideo.load(); } catch (x) { /* gone */ } curVideo = null; }
+  if (curMasks) { curMasks.stop(); curMasks = null; }
   if (!e) { box.innerHTML = '<p class="empty evnone">Select an event to see it here.</p>'; return; }
   const cl = classesOf(e);
   const objs = (e.objects && e.objects.length) ? e.objects.join(', ') : 'motion';
@@ -569,7 +572,18 @@ function paintPlayer(e) {
   if (v) {
     curVideo = v;
     v.defaultPlaybackRate = safeRate(state.speed);
-    v.src = '/api/clips/' + enc(e.id) + lowQ(true);
+    // draws=masks: the camera's privacy masks are drawn over the clip here.
+    const cam = camOf(e);
+    curMasks = watchMasks(box.querySelector('.evp-vid'), () => camOf(e) || cam);
+    v.src = '/api/clips/' + enc(e.id) + '?draws=masks' + lowQ(false);
+    // The camera's text on the picture, with the time of the moment playing.
+    let t0 = null;
+    const ot = addOverlayText(box.querySelector('.evp-vid'), cam, { at: () => (t0 == null ? null : t0 + v.currentTime * 1000) });
+    if (ot) {
+      clipStartMs(e, cam).then(ms => { t0 = ms; paintOverlayText(ot); });
+      v.addEventListener('timeupdate', () => paintOverlayText(ot));
+      v.addEventListener('seeked', () => paintOverlayText(ot));
+    }
     v.addEventListener('loadedmetadata', () => { try { v.playbackRate = safeRate(state.speed); } catch (x) { /* unsupported */ } });
     const sp = box.querySelector('.evp-speed select');
     sp.onchange = () => { state.speed = parseFloat(sp.value || '1'); applySpeed(); };
@@ -588,12 +602,28 @@ function paintPlayer(e) {
   if (state.isAdmin) showFaces(e, box.querySelector('[data-evfaces]'));
   if ((e.objects || []).some(o => /plate/i.test(o))) showPlates(e, box.querySelector('[data-evplates]'));
 }
+// The camera of an event (this server's).
+function camOf(e) { return state.cams.find(c => c.id === e.camera_id && !c.remote) || state.cams.find(c => c.name === e.camera && !c.remote) || null; }
+// When an event's clip starts (ms): the server's x-clip-start-ms on a one-byte
+// probe, else the event's start less the camera's pre-roll (clips start with
+// it, at the keyframe before).
+async function clipStartMs(e, cam) {
+  try {
+    const r = await fetch('/api/clips/' + enc(e.id) + '?draws=masks&quiet=1', { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' });
+    const h = parseInt(r.headers.get('x-clip-start-ms'), 10);
+    try { if (r.body) r.body.cancel(); } catch (x) { /* ignore */ }
+    if (h > 0) return h;
+  } catch (x) { /* estimate below */ }
+  const pre = cam && cam.pre_roll != null ? cam.pre_roll : 5;
+  return (e.start - pre) * 1000;
+}
 function paintActions(e) {
   const a = $('evPlayer').querySelector('.evp-acts');
   if (!a || selId !== e.id) return;
   const fa = e.review === 'false_alarm', ok = isOk(e);
   const cam = can('pause') ? state.cams.find(c => c.id === e.camera_id && !c.remote) : null;
-  a.innerHTML = (e.clip ? '<a class="btn" data-a="save" href="/api/clips/' + enc(e.id) + '?download=1" download title="Download this clip">' + ico('dl') + '<span>Save</span></a>' +
+  const saveHref = () => '/api/clips/' + enc(e.id) + '?download=1' + burnTextQuery();
+  a.innerHTML = (e.clip ? '<a class="btn" data-a="save" href="' + saveHref() + '" download title="Download this clip (its privacy masks are burned in)">' + ico('dl') + '<span>Save</span></a>' +
       '<button type="button" class="btn" data-a="share" title="Share this clip">' + ico('share') + '<span>Share</span></button>' : '') +
     // (Keeping and "not a real alert" change the event for everyone: admins and operators allowed to, as in the bulk bar.)
     (!can('events') ? '' : '<button type="button" class="btn' + (e.protect ? ' on' : '') + '" data-a="p" aria-pressed="' + !!e.protect + '" title="' + (e.protect ? 'Kept: it will not be deleted. Click to let it expire normally (P)' : 'Keep this clip forever, even when old recordings are cleared (P)') + '">' + ico('lock') + '<span>' + (e.protect ? 'Kept' : 'Keep forever') + '</span></button>') +
@@ -602,6 +632,11 @@ function paintActions(e) {
     (!cam ? '' : '<button type="button" class="btn' + (cam.alerts_paused ? ' on' : '') + '" data-a="np" aria-pressed="' + !!cam.alerts_paused + '" title="' + (cam.alerts_paused ? 'Notifications from this camera are paused; it is still recording. Click to resume.' : 'Stop notifications from this camera for an hour. It keeps recording and detecting.') + '">' + ico('belloff') + '<span>' + (cam.alerts_paused ? 'Resume notifications' : 'Pause notifications 1 h') + '</span></button>') +
     (smartOn && classesOf(e).some(c => c === 'person' || c === 'vehicle') ? '<button type="button" class="btn" data-a="fw" title="Find this person or vehicle on other cameras around this time">' + ico('person') + '<span>Follow</span></button>' : '') +
     '<button type="button" class="btn" data-a="tl" title="Play the recording around this event (Enter)">' + ico('timeline') + '<span>Open on timeline</span></button>';
+  // The download's option, under the buttons.
+  if (e.clip) {
+    a.insertAdjacentHTML('beforeend', '<div class="evp-burn">' + burnTextSwitch(true) + '</div>');
+    wireBurnText(a, () => { const sv = a.querySelector('[data-a=save]'); if (sv) sv.href = saveHref(); if (shareFile && shareFile.id === e.id) shareFile = null; });
+  }
   const sh = a.querySelector('[data-a=share]');
   if (sh) { sh.onclick = () => shareClip(e, sh); if (shareFile && shareFile.id === e.id) shareLabel(sh, 'Share now'); }
   const fw = a.querySelector('[data-a=fw]');
@@ -634,7 +669,8 @@ async function shareClip(e, btn) {
     if (!file) {
       shareLabel(btn, 'Preparing…', true);
       try {
-        const r = await fetch('/api/clips/' + enc(e.id), { credentials: 'same-origin' });
+        // (As a download: the file leaves AmberSight, so its privacy masks are burned in.)
+        const r = await fetch('/api/clips/' + enc(e.id) + '?download=1' + burnTextQuery(), { credentials: 'same-origin' });
         if (r.ok) {
           const blob = await r.blob();
           const name = (e.camera + ' ' + new Date(e.start * 1000).toISOString().slice(0, 16)).replace(/[^\w -]+/g, '-') + '.mp4';
@@ -828,8 +864,10 @@ function wireHover(el, e) {
       const im = el.querySelector('.evt');
       if (ns.length < 2 || !im || !el.matches(':hover')) return;
       orig = im.getAttribute('src'); let i = 0;
+      // (With the masks' revision: a frame kept by the browser from before a mask change is not shown.)
+      const rev = maskRevQ(state.cams.find(x => x.name === e.camera), '?');
       // (Stops by itself when the row is gone or out of sight without a mouseleave.)
-      const show = () => { if (!el.isConnected || !el.matches(':hover') || !isActive('events')) { stop(); return; } im.src = '/api/events/' + enc(e.id) + '/ai/' + ns[i++ % ns.length]; };
+      const show = () => { if (!el.isConnected || !el.matches(':hover') || !isActive('events')) { stop(); return; } im.src = '/api/events/' + enc(e.id) + '/ai/' + ns[i++ % ns.length] + rev; };
       show(); iv = setInterval(show, 600);
     }, 300);
   });
@@ -970,7 +1008,7 @@ async function runSmart() {
       const bx = x.box;
       // How close to the best match (the first is 100%).
       const rel = Math.max(0, Math.round(100 - (best - x.score) * 1000));
-      return '<button class="smq-card" data-i="' + i + '" title="Open ' + esc(x.camera) + ' at this moment"><span class="smq-pic"><img loading="lazy" src="/api/smart/pic/' + x.pic + '" alt="">' +
+      return '<button class="smq-card" data-i="' + i + '" title="Open ' + esc(x.camera) + ' at this moment"><span class="smq-pic"><img loading="lazy" src="/api/smart/pic/' + x.pic + maskRevQ(state.cams.find(c => c.name === x.camera), '?') + '" alt="">' +
         (bx ? '<span class="smq-box" style="left:' + (bx[0] * 100) + '%;top:' + (bx[1] * 100) + '%;width:' + (bx[2] * 100) + '%;height:' + (bx[3] * 100) + '%"></span>' : '') + '</span>' +
         '<span class="smq-meta"><b>' + esc(x.camera) + '</b><small>' + esc(fmtAt(x.at_ms)) + ' · ' + rel + '%</small></span></button>';
     }).join('') + '</div>';

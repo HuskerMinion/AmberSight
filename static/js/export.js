@@ -1,6 +1,30 @@
 // export.js - the export dialog (download a time range as MP4), used by the live timeline.
 import { state, enc, esc, fmtWall, toLocalInput, openDlg, msgDlg, downloadUrl } from './core.js';
 
+// "Burn the text into this clip": a switch for every place clips are
+// downloaded. A downloaded clip always has the camera's privacy masks burned
+// in (the file leaves AmberSight) and the time as a subtitle track; burning
+// the text in as well re-encodes the clip, so it is off unless asked for.
+// Remembered per browser (the same choice for every download).
+const BURN_KEY = 'ambs.burnText';
+export function burnText() { try { return localStorage.getItem(BURN_KEY) === '1'; } catch (e) { return false; } }
+function setBurnText(on) { try { if (on) localStorage.setItem(BURN_KEY, '1'); else localStorage.removeItem(BURN_KEY); } catch (e) { /* not kept */ } }
+export function burnTextSwitch(short) {
+  return '<label class="sw' + (short ? ' sw-burn' : '') + '"><input type="checkbox" role="switch" data-burntext' + (burnText() ? ' checked' : '') + '><span class="sw-track" aria-hidden="true"></span>' +
+    '<span class="sw-text"><b>Burn the text into this clip</b>' + (short ? '' : '<small>The camera\'s text on the picture (or its name and the time) becomes part of the video. Takes longer: the clip is re-encoded. Without it the time comes as subtitles a player can show.</small>') + '</span></label>';
+}
+// Wires the switches in `root` (saved when flipped); onChange() after each flip.
+export function wireBurnText(root, onChange) {
+  root.querySelectorAll('[data-burntext]').forEach(i => { i.onchange = () => { setBurnText(i.checked); if (onChange) onChange(); }; });
+}
+// '&burn_text=1' (or '?burn_text=1' with first) when the text is to be burned in.
+export const burnTextQuery = (first) => (burnText() ? (first ? '?' : '&') + 'burn_text=1' : '');
+// Downloads of these cameras have their privacy masks burned in: a line saying so (or nothing).
+export function maskedNote(names) {
+  const masked = state.cams.filter(c => names.includes(c.name) && (c.privacy_masks || []).length);
+  return masked.length ? '<div class="hint">Privacy masks are burned into the download' + (names.length > 1 ? ' (' + masked.map(c => esc(c.name)).join(', ') + ')' : '') + '.</div>' : '';
+}
+
 // opts = { cams: [names shown], camera, from, to } (ms) for the marked range.
 // The server saves one camera per MP4, so with several cameras the list also
 // offers "all", which downloads one file per camera.
@@ -19,13 +43,15 @@ export function exportDialog(opts) {
     '<label>Start <input id="exFrom" type="datetime-local" step="1" value="' + toLocalInput(from) + '"></label>' +
     '<label>End <input id="exTo" type="datetime-local" step="1" value="' + toLocalInput(to) + '"></label>' +
     '<div class="hint">' + (opts.from != null ? 'The range you marked on the timeline. ' : 'Defaults to 30 s either side of the playhead. ') + 'The saved MP4 starts at the nearest earlier keyframe.</div>' +
+    burnTextSwitch(false) + maskedNote(cams) +
     '<button class="primary" data-go="1">Download MP4</button>');
+  wireBurnText(d);
   d.querySelector('[data-go]').onclick = async () => {
     const cam = d.querySelector('#exCam').value;
     const a = new Date(d.querySelector('#exFrom').value).getTime();
     const b = new Date(d.querySelector('#exTo').value).getTime();
     if (!(a > 0) || !(b > a)) { msgDlg('End must be after start'); return; }
-    const url = (n) => '/api/playback?camera=' + enc(n) + '&from=' + a + '&to=' + b + '&download=1';
+    const url = (n) => '/api/playback?camera=' + enc(n) + '&from=' + a + '&to=' + b + '&download=1' + burnTextQuery();
     const one = (n) => downloadUrl(url(n), n + '-' + fmtWall(a).replace(/[: ]/g, '-') + '.mp4');
     // Ask first (nothing is made): a camera whose recordings can only be
     // exported as saved event clips says so instead of a failed download.

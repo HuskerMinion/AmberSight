@@ -121,6 +121,15 @@ recorded.
     camera chose.
   - Keeping a session open keeps the camera awake and drains its battery. AmberSight signs out
     shortly after the picture is no longer wanted. An idle timeout of 30 seconds suits these cameras.
+  - The card search these cameras' apps use (Baichuan messages 14/15 and 272) answered 400 on both
+    firmware versions. Asking for a recording download from a moment on does work, and the first
+    bytes name the recording's start and end, so AmberSight lists the card that way. Firmware 0112
+    writes those times in UTC, firmware 0326 in the camera's local time; AmberSight works out which.
+    A download window may not cross the camera's local midnight (the camera answers 400).
+- **Missed events from the card:** recordings on the card that AmberSight has no event for are
+  imported later as events marked "from card", without a notification once they are older than 5
+  minutes (see the [install guide](install.md#battery-reolink-cameras-without-a-hub-argus)).
+  **Untested** on a real camera: the listing and import are built from what the probes above showed.
 - **Sources:** our tests.
 
 ### Kuna

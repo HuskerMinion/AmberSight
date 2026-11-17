@@ -6,6 +6,7 @@
 // Opened from the camera panel's Motion section and from the Live dock.
 
 import { topDlgOpen, state, api, esc, toast, camFromId, refreshCameras, msgDlg, backLayer, overlaysChanged, can } from './core.js';
+import { noFfmpegReader } from './masks.js';
 
 const MIN = 0.01;
 const MIN_AREA = 0.0005;    // smallest polygon area (fraction of the frame)           // smallest side of a zone (fraction of the frame)
@@ -68,6 +69,16 @@ export async function openZoneEditor(id, opts) {
   let zones = Q ? (c0.alert_ignore_polys || []).map(P('ignore')) : [].concat((c0.zones || []).map(R('detect')), (c0.ignore_zones || []).map(R('ignore')),
     (c0.zone_polys || []).map(P('detect')), (c0.ignore_polys || []).map(P('ignore')), (masksToo ? c0.privacy_masks || [] : []).map(R('mask')), (c0.named_zones || []).map(NZ));
   const hadMasks = (c0.privacy_masks || []).length > 0;
+  // How far the camera's masks reach (one setting for all its masks): 'screen'
+  // = drawn over its video in the apps and burned into the pictures and
+  // downloads AmberSight makes; 'recording' = the video is re-encoded with them.
+  // (A camera that had masks before the choice existed keeps 'recording'.)
+  // Pushed and battery cameras have no re-encoding reader: 'screen' only.
+  // (The server's rule: the address alone; a uid setting does not decide it.)
+  const noReencode = noFfmpegReader(c0.url);
+  let maskMode = c0.mask_mode === 'recording' || c0.mask_mode === 'screen' ? c0.mask_mode : (hadMasks ? 'recording' : 'screen');
+  if (noReencode) maskMode = 'screen';
+  const savedMode = maskMode;
   const key = () => JSON.stringify(zones);
   let saved = key();
   let sel = -1, hover = -1, type = Q ? 'ignore' : 'detect', tool = 'rect', selV = -1, poly = null;
@@ -88,7 +99,7 @@ export async function openZoneEditor(id, opts) {
         '<div class="ze-seg" role="group" aria-label="New zone type"' + (Q ? ' hidden' : '') + '>' +
           '<button type="button" data-type="detect" aria-pressed="true" title="Motion counts only inside detect zones (if there are any)">Detect zone</button>' +
           '<button type="button" data-type="ignore" aria-pressed="false" title="Motion inside an ignore zone never counts">Ignore zone</button>' +
-          (masksToo ? '<button type="button" data-type="mask" aria-pressed="false" title="Blacked out in recordings, live view and snapshots">Privacy mask</button>' : '') +
+          (masksToo ? '<button type="button" data-type="mask" aria-pressed="false" title="An area blacked out on screen and in pictures (and, if you choose, in recordings)">Privacy mask</button>' : '') +
           '<button type="button" data-type="area" aria-pressed="false" title="A named area: alerts when someone stays inside too long (loitering). Needs AI.">Alert area</button>' +
           '<button type="button" data-type="line" aria-pressed="false" title="A named line with a direction arrow: alerts when someone crosses it. Needs AI.">Alert line</button></div>' +
         '<div class="ze-seg" role="group" aria-label="Shape tool">' +
@@ -96,12 +107,18 @@ export async function openZoneEditor(id, opts) {
           '<button type="button" data-tool="poly" aria-pressed="false" title="Click to add points; double-click, Enter or the first point closes the shape">Polygon</button></div>' +
         '<div class="ze-hist"><button type="button" class="btn" data-undo title="Undo (Ctrl+Z)">Undo</button><button type="button" class="btn" data-redo title="Redo (Ctrl+Shift+Z)">Redo</button></div>' +
         '<span class="ze-sp"></span>' +
-        '<button type="button" class="btn" data-zcancel>Cancel</button>' +
-        '<button type="button" class="primary" data-zsave>' + (Q ? 'Save areas' : 'Save zones') + '</button>' +
+        '<span class="ze-acts"><button type="button" class="btn" data-zcancel>Cancel</button>' +
+        '<button type="button" class="primary" data-zsave>' + (Q ? 'Save areas' : 'Save zones') + '</button></span>' +
       '</div>' +
       '<div class="ze-confirm" data-confirm hidden><span>Discard your changes to the zones?</span><button type="button" class="btn" data-keep>Keep editing</button><button type="button" class="btn danger" data-discard>Discard</button></div>' +
       '<div class="ze-err" data-err hidden></div>' +
-      '<div class="ze-note" data-masknote hidden>Masks are blacked out in recordings, live view and snapshots. The camera\'s video is re-encoded to do this, which uses more CPU.</div>' +
+      (masksToo && !Q ? '<div class="ze-note ze-ml" data-masklvl hidden>' +
+        '<div class="ze-mlrow"><span class="ze-mlk">Privacy masks</span><div class="ze-seg" role="group" aria-label="How far the privacy masks reach">' +
+          '<button type="button" data-ml="screen" aria-pressed="false">Hide on screen and in pictures</button>' +
+          '<button type="button" data-ml="recording" aria-pressed="false"' + (noReencode ? ' disabled title="Not for pushed or battery cameras: AmberSight has no way to re-encode their video"' : '') + '>Hide in recordings too</button></div></div>' +
+        '<p data-mlhint></p>' +
+        '<p class="muted">' + (noReencode ? 'Hide in recordings too is not available for pushed or battery cameras. ' : '') + 'Best of all, if the camera has its own privacy mask (Reolink, Dahua/Amcrest and Hikvision cameras do), use it: the area never leaves the camera, and it costs nothing here.</p>' +
+      '</div>' : '') +
       '<div class="ze-main">' +
         '<div class="ze-stage" data-stage><canvas data-cv aria-label="Camera picture: drag to draw a zone; click a zone to select it"></canvas><div class="ze-nopic" data-nopic hidden>No picture right now. You can still draw zones.</div>' +
           '<div class="ze-polybar" data-polybar hidden><span data-pcount></span><button type="button" class="btn" data-pclose>Close</button><button type="button" class="btn" data-pback>Undo point</button><button type="button" class="btn" data-pcancel>Cancel</button></div></div>' +
@@ -115,7 +132,7 @@ export async function openZoneEditor(id, opts) {
   behind.forEach(e => e.setAttribute('inert', ''));
   const $q = (s) => root.querySelector(s);
   const win = $q('.ze-win'), cv = $q('[data-cv]'), stage = $q('[data-stage]'), list = $q('[data-list]');
-  const noteEl = $q('[data-masknote]'), polybar = $q('[data-polybar]');
+  const mlEl = $q('[data-masklvl]'), polybar = $q('[data-polybar]');
   const saveBtn = $q('[data-zsave]'), undoBtn = $q('[data-undo]'), redoBtn = $q('[data-redo]');
   const ctx = cv.getContext('2d');
   let cw = 0, ch = 0, dpr = 1;
@@ -132,7 +149,7 @@ export async function openZoneEditor(id, opts) {
   const hatch = ctx.createPattern(pat, 'repeat');
 
   // ---------- model ----------
-  const dirty = () => key() !== saved;
+  const dirty = () => key() !== saved || maskMode !== savedMode;
   function record(label) {
     const k = key();
     if (k === hist[hi]) return;
@@ -182,7 +199,13 @@ export async function openZoneEditor(id, opts) {
         ? 'Click on the picture to add points of a ' + what + ' polygon; double-click, Enter or the first point closes it. Esc cancels, Backspace removes the last point.'
         : 'Drag on the picture to draw a ' + what + '.';
     if (Q) $q('[data-hintdraw]').textContent = (effTool() === 'poly' ? 'Click on the picture to add the corners of an area; double-click, Enter or the first point closes it.' : 'Drag on the picture to draw an area.') + ' Things here are still detected, recorded and searchable. They just don\'t send a notification.';
-    noteEl.hidden = !(!hadMasks && zones.some(z => z.t === 'mask'));
+    if (mlEl) {
+      mlEl.hidden = !zones.some(z => z.t === 'mask');
+      mlEl.querySelectorAll('[data-ml]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.ml === maskMode)));
+      mlEl.querySelector('[data-mlhint]').textContent = maskMode === 'recording'
+        ? 'Black everywhere, in the files on disk too: the only level that protects the recordings. The video is re-encoded (about one processor core per 4K camera, or the graphics card). Gaps are not filled from the camera\'s SD card.'
+        : 'Black in Live, playback, snapshots, event pictures, downloads, motion and AI. The recordings on disk and shared streams still contain the area. Viewers see it blacked out in AmberSight\'s apps, but the video itself isn\'t changed: to keep it from anyone who can watch this camera, use Hide in recordings too or the camera\'s own privacy mask.';
+    }
     polybar.hidden = !poly;
     if (poly) {
       const min = poly.t === 'line' ? 2 : 3;
@@ -712,7 +735,10 @@ export async function openZoneEditor(id, opts) {
     // (A rectangle drawn for a quiet area is saved as a four-corner polygon.)
     const quiet = () => polys('ignore').concat(rects('ignore').map(r => ({ points: [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]].map(q => [r4(q[0]), r4(q[1])]) })));
     const body = Q ? { alert_ignore_polys: quiet() } : { zones: rects('detect'), ignore_zones: rects('ignore'), zone_polys: polys('detect'), ignore_polys: polys('ignore'), named_zones: named };
-    if (!Q && masksToo) body.privacy_masks = rects('mask');
+    if (!Q && masksToo) {
+      body.privacy_masks = rects('mask');
+      if (body.privacy_masks.length) body.mask_mode = maskMode;
+    }
     saving = true; saveBtn.textContent = 'Saving...'; status();
     try {
       await api('/api/cameras/' + id, { method: 'PUT', json: body });
@@ -736,6 +762,7 @@ export async function openZoneEditor(id, opts) {
   }
   function unask() { confirming = false; $q('[data-confirm]').hidden = true; }
   saveBtn.onclick = save;
+  if (mlEl) mlEl.querySelectorAll('[data-ml]').forEach(b => { b.onclick = () => { if (b.disabled) return; maskMode = b.dataset.ml; updateUi(); status(); }; });
   $q('[data-zcancel]').onclick = ask;
   $q('[data-keep]').onclick = () => { unask(); win.focus(); };
   $q('[data-discard]').onclick = () => close();

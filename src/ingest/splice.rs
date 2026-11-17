@@ -80,19 +80,48 @@ fn sidx(track_id: u32, timescale: u32, frags: &[(u64, u64, u64, bool)], first_ct
     b
 }
 
-/// Index of each segment's codec header among the distinct ones seen.
+/// Index of each segment's codec header among the distinct ones seen
+/// (compared as [`header_key`]).
 fn header_ids(parsed: &[Option<std::sync::Arc<ParsedSegment>>]) -> Vec<usize> {
-    let mut seen: Vec<&[u8]> = Vec::new();
+    let mut seen: Vec<std::borrow::Cow<'_, [u8]>> = Vec::new();
     parsed
         .iter()
         .map(|p| match p {
-            Some(p) => seen.iter().position(|h| *h == p.init.as_slice()).unwrap_or_else(|| {
-                seen.push(&p.init);
-                seen.len() - 1
-            }),
+            Some(p) => {
+                let key = header_key(&p.init);
+                seen.iter().position(|h| *h == key).unwrap_or_else(|| {
+                    seen.push(key);
+                    seen.len() - 1
+                })
+            }
             None => usize::MAX,
         })
         .collect()
+}
+
+/// A recording's header as compared with another's to tell whether their
+/// fragments can follow each other in one clip: the movie header's times,
+/// timescale and duration left out. They say nothing about how the
+/// fragments play, and ffmpeg 9's segment muxer writes the first file of a
+/// run with movie timescale 1000 and the later ones with the video track's,
+/// so a clip across its files would otherwise stop at the first one.
+fn header_key(init: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let span = (|| -> Result<Option<(usize, usize)>> {
+        let Some((ms, me)) = find(init, 0, init.len(), b"moov")? else { return Ok(None) };
+        let Some((hs, he)) = find(init, ms + 8, me, b"mvhd")? else { return Ok(None) };
+        // version(1) flags(3), then creation and modification time, timescale(4),
+        // duration: the times and duration 4 bytes each in version 0, 8 in version 1.
+        let len = if init.get(hs + 8) == Some(&1) { 28 } else { 16 };
+        Ok((hs + 12 + len <= he).then_some((hs + 12, hs + 12 + len)))
+    })();
+    match span {
+        Ok(Some((a, b))) => {
+            let mut k = init.to_vec();
+            k[a..b].fill(0);
+            std::borrow::Cow::Owned(k)
+        }
+        _ => std::borrow::Cow::Borrowed(init),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -163,7 +192,7 @@ struct ParsedSegment {
 
 mod export;
 mod index;
-pub use index::{checked_through, forget, layout_count, moved, open_index, remember, set_checked_through};
+pub use index::{checked_through, forget, layout_count, moved, open_index, remember, set_checked_through, upgrade_chunk, upgrade_done, upgrade_plan, UpgradePlan};
 
 fn be32(b: &[u8], at: usize) -> Result<u32> {
     Ok(u32::from_be_bytes(b.get(at..at + 4).context("truncated box")?.try_into().unwrap()))
@@ -212,7 +241,21 @@ fn parse_moov(moov: &[u8]) -> Result<Vec<TrackMeta>> {
     Ok(tracks)
 }
 
-fn parse_moof(moof: &[u8]) -> Result<(usize, Vec<TrafInfo>)> {
+/// Per track: the sample duration and flags its fragments use where they
+/// give none of their own (`moov/mvex/trex`): (track id, duration, flags).
+fn trex_defaults(moov: &[u8]) -> Vec<(u32, u32, u32)> {
+    let Ok(Some((xs, xe))) = find(moov, 8, moov.len(), b"mvex") else { return Vec::new() };
+    let Ok(boxes) = children(moov, xs + 8, xe) else { return Vec::new() };
+    boxes
+        .into_iter()
+        .filter(|(k, _, _)| k == b"trex")
+        // trex: header(8) version/flags(4) track_id(4) desc index(4) duration(4) size(4) flags(4).
+        .filter_map(|(_, s, _)| Some((be32(moov, s + 12).ok()?, be32(moov, s + 20).ok()?, be32(moov, s + 28).ok()?)))
+        .collect()
+}
+
+/// `trex`: the tracks' default sample durations and flags ([`trex_defaults`]).
+fn parse_moof(moof: &[u8], trex: &[(u32, u32, u32)]) -> Result<(usize, Vec<TrafInfo>)> {
     let (ms, _) = find(moof, 8, moof.len(), b"mfhd")?.context("moof without mfhd")?;
     let seq_pos = ms + 12;
     let mut trafs = Vec::new();
@@ -233,12 +276,27 @@ fn parse_moof(moof: &[u8]) -> Result<(usize, Vec<TrafInfo>)> {
         // default duration(4), default size(4), default flags(4).
         let mut q = hs + 16;
         let explicit_base = tfhd_flags & 0x1 != 0;
-        for (bit, n) in [(0x1u32, 8usize), (0x2, 4), (0x8, 4)] {
+        for (bit, n) in [(0x1u32, 8usize), (0x2, 4)] {
             if tfhd_flags & bit != 0 {
                 q += n;
             }
         }
+        // Samples that give no duration or flags of their own take the
+        // fragment's defaults, else the track's (ffmpeg writes video of a
+        // steady frame rate that way: one duration in the tfhd, none per
+        // sample).
+        let (trex_dur, trex_flags) = trex.iter().find(|t| t.0 == track_id).map_or((0, 0), |t| (t.1, t.2));
+        let default_dur = if tfhd_flags & 0x8 != 0 {
+            q += 4;
+            be32(moof, q - 4)?
+        } else {
+            trex_dur
+        };
         let default_size = if tfhd_flags & 0x10 != 0 { Some(be32(moof, q)?) } else { None };
+        if tfhd_flags & 0x10 != 0 {
+            q += 4;
+        }
+        let default_flags = if tfhd_flags & 0x20 != 0 { be32(moof, q)? } else { trex_flags };
         let (rs, _) = find(moof, s + 8, e, b"trun")?.context("traf without trun")?;
         let flags = be32(moof, rs + 8)? & 0x00ff_ffff;
         let count = be32(moof, rs + 12)? as usize;
@@ -259,6 +317,9 @@ fn parse_moof(moof: &[u8]) -> Result<(usize, Vec<TrafInfo>)> {
         let mut first_cto = 0i32;
         let mut even = true;
         let mut d0 = None;
+        if flags & 0x100 == 0 {
+            duration = u64::from(default_dur) * count as u64;
+        }
         for k in 0..count {
             if flags & 0x100 != 0 {
                 let d = be32(moof, p)?;
@@ -287,7 +348,7 @@ fn parse_moof(moof: &[u8]) -> Result<(usize, Vec<TrafInfo>)> {
                 p += 4;
             }
         }
-        let f0 = first_flags.or(sample0_flags).unwrap_or(0);
+        let f0 = first_flags.or(sample0_flags).unwrap_or(default_flags);
         let first_is_sync = f0 & 0x0001_0000 == 0; // is_non_sync_sample bit clear
         // Only the layout our recorder writes (offsets relative to the moof).
         let first_sample = match (explicit_base, data_offset, size0) {
@@ -435,6 +496,116 @@ fn parse_segment_file(path: &Path) -> Result<ParsedSegment> {
     parse_segment_file_upto(path, None)
 }
 
+/// A recording a clip passes over. An ffmpeg recorder stopped mid-file leaves one with nothing
+/// in it but its first box (28 bytes): that is no news, so only a file with more is warned of.
+/// Each file is warned of once per run (a player asks for the same window again and again).
+fn skip_note(what: &str, path: &Path, e: &anyhow::Error) {
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    let first = {
+        let mut w = WARNED.get_or_init(Default::default).lock().unwrap();
+        if w.len() >= 10_000 {
+            w.clear();
+        }
+        w.insert(path.to_path_buf())
+    };
+    if !first || std::fs::metadata(path).is_ok_and(|m| m.len() < 1024) {
+        tracing::debug!("{what}: skipping {}: {e:#}", path.display());
+    } else {
+        tracing::warn!("{what}: skipping {}: {e:#}", path.display());
+    }
+}
+
+/// Whether a recording can be played straight from the file: a fragmented MP4 (a fragment
+/// comes before any media data). A plain MP4 (from an older ffmpeg recorder: its media data in
+/// one box, the moov box with the sample tables before or after it) cannot; nor can a file
+/// that is not there or has no fragment yet. A few short reads at the head of the file, once
+/// per file: the answer is kept for as long as the file's size and time stay the same, and for
+/// a file untouched for [`SETTLED_AFTER`] (closed: a recording is not written again) without
+/// looking at the file again at all.
+pub fn plays_from_file(path: &Path) -> bool {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Mutex, OnceLock};
+    type Stamp = (u64, Option<std::time::SystemTime>);
+    use std::sync::Arc;
+    // (Rarely full: only files a day listing could not settle otherwise come here.)
+    const KEEP: usize = 20_000;
+    // (None: settled, the answer holds without a look. One copy of each path,
+    // shared by the map and the queue.)
+    type Looks = (HashMap<Arc<Path>, (Option<Stamp>, bool)>, VecDeque<Arc<Path>>);
+    static CACHE: OnceLock<Mutex<Looks>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((None, v)) = cache.lock().unwrap().0.get(path) {
+        return *v;
+    }
+    #[cfg(test)]
+    LOOKS.with(|n| n.set(n.get() + 1));
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    let stamp: Stamp = (meta.len(), meta.modified().ok());
+    if let Some((Some(s), v)) = cache.lock().unwrap().0.get(path) {
+        if *s == stamp {
+            return *v;
+        }
+    }
+    let v = first_media_box_is_moof(path, meta.len());
+    let settled = stamp.1.and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= SETTLED_AFTER);
+    let mut c = cache.lock().unwrap();
+    let entry = (if settled { None } else { Some(stamp) }, v);
+    if let Some(e) = c.0.get_mut(path) {
+        *e = entry;
+    } else {
+        let key: Arc<Path> = Arc::from(path);
+        c.0.insert(key.clone(), entry);
+        c.1.push_back(key);
+    }
+    while c.1.len() > KEEP {
+        let Some(old) = c.1.pop_front() else { break };
+        c.0.remove(&*old);
+    }
+    v
+}
+
+/// A recording untouched this long is closed: [`plays_from_file`] keeps its answer for good.
+const SETTLED_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+#[cfg(test)]
+thread_local! {
+    /// Files [`plays_from_file`] looked at (a stat, then a few reads when not known) on this thread.
+    pub static LOOKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Walk the top-level boxes until a moof (true) or an mdat (false).
+fn first_media_box_is_moof(path: &Path, len: u64) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let mut pos = 0u64;
+    // (ftyp, moov, a free box or two: a fragment comes within the first few boxes.)
+    for _ in 0..64 {
+        if pos + 8 > len || f.seek(SeekFrom::Start(pos)).is_err() {
+            return false;
+        }
+        let mut h = [0u8; 16];
+        let Ok(n) = f.read(&mut h) else { return false };
+        if n < 8 {
+            return false;
+        }
+        match &h[4..8] {
+            b"moof" => return true,
+            b"mdat" => return false,
+            _ => {}
+        }
+        let size = match u32::from_be_bytes(h[0..4].try_into().unwrap()) as u64 {
+            1 if n >= 16 => u64::from_be_bytes(h[8..16].try_into().unwrap()),
+            s => s,
+        };
+        // (0: the box runs to the end of the file; nothing comes after it.)
+        if size < 8 {
+            return false;
+        }
+        pos = pos.saturating_add(size);
+    }
+    false
+}
+
 /// Put a recording's layout in the saved index if it is not there yet
 /// (true if it was added). Does not fill the memory cache.
 pub fn index_recording(path: &Path) -> Result<bool> {
@@ -457,6 +628,7 @@ fn parse_segment_file_upto(path: &Path, max_frags: Option<usize>) -> Result<Pars
     let file_len = f.metadata()?.len();
     let mut init = Vec::new();
     let mut tracks = Vec::new();
+    let mut trex = Vec::new();
     let mut fragments = Vec::new();
     let mut pos = 0u64;
     let mut hdr = [0u8; 8];
@@ -481,6 +653,7 @@ fn parse_segment_file_upto(path: &Path, max_frags: Option<usize>) -> Result<Pars
                 f.read_exact(&mut b)?;
                 if &kind == b"moov" {
                     tracks = parse_moov(&b)?;
+                    trex = trex_defaults(&b);
                 }
                 init.extend_from_slice(&b);
             }
@@ -499,7 +672,7 @@ fn parse_segment_file_upto(path: &Path, max_frags: Option<usize>) -> Result<Pars
                 if &hdr[4..8] != b"mdat" || mdat_len < 8 || mdat_pos + mdat_len > file_len {
                     break;
                 }
-                let (seq_pos, trafs) = parse_moof(&moof)?;
+                let (seq_pos, trafs) = parse_moof(&moof, &trex)?;
                 fragments.push(FragmentInfo { offset: pos, len: size + mdat_len, seq_pos, trafs }.checked());
                 pos = mdat_pos + mdat_len;
                 if max_frags.is_some_and(|m| fragments.len() >= m) {
@@ -766,7 +939,7 @@ impl VirtualClip {
             let p = match parse_segment(&s.path) {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!("clip: skipping {}: {e:#}", s.path.display());
+                    skip_note("clip", &s.path, &e);
                     parsed.push(None);
                     continue;
                 }
@@ -831,7 +1004,7 @@ impl VirtualClip {
             if c.start_ms >= to_ms as f64 {
                 break;
             }
-            if parsed[c.seg].as_ref().unwrap().init != header.init {
+            if hid[c.seg] != hid[base_seg] {
                 break; // different codec header: cannot continue in one file
             }
             let mut patches = Vec::with_capacity(1 + c.frag.trafs.len());
@@ -988,13 +1161,14 @@ impl VirtualClip {
             let p = match p {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!("trick clip: skipping {}: {e:#}", s.path.display());
+                    skip_note("trick clip", &s.path, &e);
                     continue;
                 }
             };
             last_used[s.low as usize] = Some(s.start_ms as f64);
             let Some(video) = p.tracks.iter().find(|t| t.video).cloned() else { continue };
-            let header = headers.iter().position(|(h, _)| *h == p.init).unwrap_or_else(|| {
+            let key = header_key(&p.init);
+            let header = headers.iter().position(|(h, _)| header_key(h) == key).unwrap_or_else(|| {
                 headers.push((p.init.clone(), video.clone()));
                 headers.len() - 1
             });
@@ -1497,6 +1671,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_clip_crosses_files_whose_movie_timescales_differ() {
+        // ffmpeg 9's segment muxer: the first file of a run says movie timescale 1000, the
+        // later ones the video track's. The fragments play the same: one clip spans them.
+        let dir = std::env::temp_dir().join(format!("amber-splice-mvhd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let segs = record(&dir);
+        assert!(segs.len() >= 3);
+        for s in &segs[1..] {
+            let mut b = std::fs::read(&s.path).unwrap();
+            let (ms, me) = find(&b, 0, b.len(), b"moov").unwrap().unwrap();
+            let (hs, _) = find(&b, ms + 8, me, b"mvhd").unwrap().unwrap();
+            let at = hs + 12 + if b[hs + 8] == 1 { 16 } else { 8 };
+            let ts = be32(&b, at).unwrap();
+            b[at..at + 4].copy_from_slice(&(ts + 9000).to_be_bytes());
+            std::fs::write(&s.path, &b).unwrap();
+        }
+        let t0 = segs[0].start_ms;
+        let clip = VirtualClip::plan(&segs, t0 + 2500, t0 + 6200).unwrap().unwrap();
+        assert_eq!((clip.start_ms - t0, clip.end_ms - t0), (2000, 7000));
+        let trick = VirtualClip::plan_trick(&segs, t0, t0 + 9000, 4, 100).unwrap().unwrap();
+        assert!(trick.end_ms - t0 > 6000, "fast playback crosses the files too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An H.264 track whose header has a real SPS (High 5.1, no
     /// bitstream_restriction); frames are slices of type `slice_type(i)`,
     /// shown `cto(i)` after they are decoded.
@@ -1945,7 +2144,7 @@ mod tests {
         assert_eq!(fix.total, 427);
         let mut buf = frag.clone();
         apply_patches(&mut buf, 0, &fix.patches);
-        let (_, trafs) = parse_moof(&buf[..moof_len]).unwrap();
+        let (_, trafs) = parse_moof(&buf[..moof_len], &[]).unwrap();
         assert_eq!(trafs[0].duration, 427);
         assert!(!trafs[0].even);
         assert!(flac_fix_from(&moof, 1, 4000, |_, _| None).is_none(), "another track is left alone");
@@ -2057,5 +2256,63 @@ mod tests {
             let clip = VirtualClip::plan(&segs, 0, 3_600_000).unwrap().unwrap();
             clip.write_file(&path.with_file_name(format!("{name}.served.mp4"))).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod default_duration_tests {
+    use super::*;
+
+    fn be(v: u32) -> Vec<u8> {
+        v.to_be_bytes().to_vec()
+    }
+    fn bx(k: &[u8; 4], b: Vec<u8>) -> Vec<u8> {
+        [be(b.len() as u32 + 8), k.to_vec(), b].concat()
+    }
+    /// A video moof of 20 samples with sizes and no duration per sample:
+    /// `tfhd_flags` (beyond default-base-is-moof) with their `tfhd_fields`,
+    /// and the first sample's own flags when given.
+    fn moof(tfhd_flags: u32, tfhd_fields: Vec<u8>, first_flags: Option<u32>) -> Vec<u8> {
+        let mfhd = bx(b"mfhd", [be(0), be(1)].concat());
+        let tfhd = bx(b"tfhd", [be(0x02_0000 | tfhd_flags), be(1), tfhd_fields].concat());
+        let tfdt = bx(b"tfdt", [be(0x0100_0000), 40_960u64.to_be_bytes().to_vec()].concat());
+        let mut run = [be(0x000201 | if first_flags.is_some() { 0x4 } else { 0 }), be(20), be(200)].concat();
+        if let Some(f) = first_flags {
+            run.extend(be(f));
+        }
+        for _ in 0..20 {
+            run.extend(be(10));
+        }
+        bx(b"moof", [mfhd, bx(b"traf", [tfhd, tfdt, bx(b"trun", run)].concat())].concat())
+    }
+
+    #[test]
+    fn samples_without_durations_take_the_fragment_or_track_default() {
+        // ffmpeg at a steady frame rate: duration (512) and flags (non-sync) in the tfhd.
+        let (_, t) = parse_moof(&moof(0x8 | 0x20, [be(512), be(0x0101_0000)].concat(), Some(0x0200_0000)), &[]).unwrap();
+        assert_eq!((t[0].tfdt, t[0].duration, t[0].first_is_sync, t[0].first_sample), (40_960, 20 * 512, true, Some((200, 10))));
+        // With a default size too (its field comes between duration and flags).
+        let (_, t) = parse_moof(&moof(0x8 | 0x10 | 0x20, [be(512), be(10), be(0x0101_0000)].concat(), Some(0x0200_0000)), &[]).unwrap();
+        assert_eq!((t[0].duration, t[0].first_is_sync), (20 * 512, true));
+        // None in the tfhd: the track's (trex).
+        let trex = [(1u32, 300u32, 0x0101_0000u32)];
+        let (_, t) = parse_moof(&moof(0, vec![], Some(0x0200_0000)), &trex).unwrap();
+        assert_eq!(t[0].duration, 20 * 300);
+        // No flags of the first sample's own: the defaults decide (here: not a keyframe).
+        let (_, t) = parse_moof(&moof(0x20, be(0x0101_0000), None), &[]).unwrap();
+        assert!(!t[0].first_is_sync);
+        let (_, t) = parse_moof(&moof(0, vec![], None), &trex).unwrap();
+        assert!(!t[0].first_is_sync);
+        // Nothing said anywhere: a keyframe, lasting no time (as before).
+        let (_, t) = parse_moof(&moof(0, vec![], None), &[]).unwrap();
+        assert_eq!((t[0].duration, t[0].first_is_sync), (0, true));
+    }
+
+    #[test]
+    fn the_track_defaults_are_read_from_the_header() {
+        let trex = bx(b"trex", [be(0), be(1), be(1), be(512), be(0), be(0x0101_0000)].concat());
+        let moov = bx(b"moov", bx(b"mvex", trex));
+        assert_eq!(trex_defaults(&moov), vec![(1, 512, 0x0101_0000)]);
+        assert!(trex_defaults(&bx(b"moov", vec![])).is_empty());
     }
 }

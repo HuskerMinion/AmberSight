@@ -15,6 +15,14 @@
 //! * A time too close to the walk itself is not kept (the folder could change
 //!   within the clock's step after it was read), and every folder is walked in
 //!   full at least every [`FULL_WALK_EVERY`].
+//! * A camera that records all the time changes its folder every few seconds
+//!   and always has a file open, so the walk never sees its folder settled. Such
+//!   a folder gets no mark at the walk; it is noted as read in full except the
+//!   files left out as possibly open ([`WalkOk::Busy`]). Every later change is
+//!   this run's own (its recorders index what they write, the archive move and
+//!   retention keep the index up as they go), so at a clean stop the folder is
+//!   marked, once each file the walk left out is in the index or gone. One that
+//!   is neither (an earlier run's last file, left by a crash) keeps it unmarked.
 
 use super::*;
 
@@ -55,6 +63,60 @@ pub fn dir_mtime_ns(dir: &Path) -> Option<i64> {
     let t = std::fs::metadata(dir).ok()?.modified().ok()?;
     let d = t.duration_since(UNIX_EPOCH).ok()?;
     i64::try_from(d.as_nanos()).ok()
+}
+
+/// A camera folder the folder sweep reads in full at least this often (what it looks for, stray
+/// files the index never had or could not delete, is rare; recordings the index misses are
+/// found by the start-up walk and the recorders themselves).
+pub const SWEEP_FULL_EVERY: Duration = Duration::from_secs(7 * 86400);
+/// A folder whose time has not moved since a clean full read is left alone this long.
+pub const SWEEP_QUIET_FULL_EVERY: Duration = Duration::from_secs(28 * 86400);
+
+/// What the folder sweep does with one camera folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepPlan {
+    /// Not read this time.
+    Skip,
+    /// Read in full (the index adds what is missing, strays are deleted).
+    Full,
+}
+
+/// Decide what the sweep does with a camera folder. `mark` is (folder time ns, last full read ms,
+/// files) of the last clean full read, `mtime` the folder's time now, `wanted` that something
+/// asks for a read now (a recording that could not be deleted).
+///
+/// * No mark (never read, or the last read found something to fix): read.
+/// * A read less than `full_every` ago: not read, whatever the folder's time says (a camera that
+///   records all the time changes it every few seconds).
+/// * Older: read, unless the folder's time is still the one noted at that read (nothing added,
+///   removed or renamed in it since, which NTFS, ext4 and xfs all show), and that read was
+///   less than `quiet_every` ago.
+pub fn sweep_plan(mark: Option<(i64, i64, i64)>, mtime: Option<i64>, now_ms: i64, wanted: bool, full_every: Duration, quiet_every: Duration) -> SweepPlan {
+    let Some((marked, full_ms, _)) = mark else { return SweepPlan::Full };
+    let age = now_ms - full_ms;
+    if wanted || age < 0 {
+        return SweepPlan::Full;
+    }
+    if age < full_every.as_millis() as i64 {
+        return SweepPlan::Skip;
+    }
+    if mtime == Some(marked) && marked >= 0 && age < quiet_every.as_millis() as i64 {
+        return SweepPlan::Skip;
+    }
+    SweepPlan::Full
+}
+
+/// How this run's start-up walk left a camera folder (see [`Db::refresh_walk_marks`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalkOk {
+    /// Marked at the walk (it had settled and nothing in it may have been open), or skipped on
+    /// a matching mark.
+    Marked,
+    /// Read in full and every recording found added, but not marked: it changed just before
+    /// the walk, or files were left out as possibly still being written (`open`, paths relative
+    /// to the folder root as the index keeps them). Marked at a clean stop once each of those
+    /// is indexed or gone.
+    Busy { files: i64, full_ms: i64, open: Vec<String> },
 }
 
 /// One entry of a recording folder, from the folder listing itself.
@@ -129,11 +191,11 @@ impl Db {
                 if let (Some(m), Some((marked, full_ms, _))) = (mtime, mark) {
                     if m == marked && now_ms - full_ms < opts.full_every.as_millis() as i64 && full_ms <= now_ms {
                         st.skipped += 1;
-                        self.walk_ok.lock().unwrap().insert((folder.clone(), slug.clone()));
+                        self.walk_ok.lock().unwrap().insert((folder.clone(), slug.clone()), WalkOk::Marked);
                         continue;
                     }
                 }
-                let (found, skipped_open, listed) = scan_segment_dir_ex(folder, root, &slug, fallback_secs, false);
+                let (found, open, listed) = scan_segment_dir_ex(folder, root, &slug, fallback_secs, false);
                 // (The walk counts what it listed, not just what looked like a recording.)
                 let files = found.len();
                 st.seen += files;
@@ -144,12 +206,18 @@ impl Db {
                     now_ms - m / 1_000_000 >= opts.margin.as_millis() as i64
                 });
                 // Nor when a file that may still be being written was left out (a crash's last
-                // file, or one an ffmpeg camera is writing): the folder is not fully indexed.
-                if let (true, true, false, Some(m)) = (settled, listed, skipped_open, mtime) {
+                // file, or one a camera is writing): the folder is not fully indexed yet.
+                let key = (folder.clone(), slug.clone());
+                if let (true, true, true, Some(m)) = (settled, listed, open.is_empty(), mtime) {
                     self.set_walk_mark(folder, &slug, m, files as i64, now_ms)?;
-                    self.walk_ok.lock().unwrap().insert((folder.clone(), slug.clone()));
+                    self.walk_ok.lock().unwrap().insert(key, WalkOk::Marked);
                 } else {
                     self.clear_walk_mark(folder, &slug)?;
+                    // A camera recording into it now: marked at a clean stop if what was left
+                    // out is indexed by then (see the module notes).
+                    if listed && mtime.is_some() {
+                        self.walk_ok.lock().unwrap().insert(key, WalkOk::Busy { files: files as i64, full_ms: now_ms, open });
+                    }
                 }
             }
         }
@@ -194,9 +262,46 @@ impl Db {
     }
 
     /// Recordings the last full walks looked at, all folders together (0 when never walked).
-    /// The folder sweep uses it to tell a big site from a small one.
+    #[cfg(test)]
     pub fn walked_files(&self) -> i64 {
         self.lock_ro().query_row("SELECT COALESCE(SUM(files), 0) FROM walk_marks", [], |r| r.get(0)).unwrap_or(0)
+    }
+
+    /// (folder time ns, last full read ms, files) the folder sweep noted for a camera folder.
+    pub fn sweep_mark(&self, folder: &str, camera: &str) -> Result<Option<(i64, i64, i64)>> {
+        Ok(self
+            .lock_ro()
+            .query_row(
+                "SELECT dir_mtime_ns, full_ms, files FROM sweep_marks WHERE folder = ?1 AND camera = ?2",
+                params![folder, camera],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
+    }
+
+    /// Note a clean full read. `mtime_ns` -1: the folder was not settled or not every file was
+    /// in the index, so only the time of the read counts, not the folder's time.
+    pub fn set_sweep_mark(&self, folder: &str, camera: &str, mtime_ns: i64, files: i64, full_ms: i64) -> Result<()> {
+        self.lock().execute(
+            "INSERT OR REPLACE INTO sweep_marks (folder, camera, dir_mtime_ns, files, full_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![folder, camera, mtime_ns, files, full_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_sweep_mark(&self, folder: &str, camera: &str) -> Result<()> {
+        self.lock().execute("DELETE FROM sweep_marks WHERE folder = ?1 AND camera = ?2", params![folder, camera])?;
+        Ok(())
+    }
+
+    /// Recordings in the index for a camera's segments folder (of one storage folder).
+    pub fn indexed_in_folder(&self, folder: &str, slug: &str) -> Result<i64> {
+        let prefix = format!("cameras/{slug}/segments/");
+        Ok(self.lock_ro().query_row(
+            "SELECT COUNT(*) FROM segments WHERE camera = ?1 AND folder = ?2 AND substr(path, 1, length(?3)) = ?3",
+            params![slug, folder, prefix],
+            |r| r.get(0),
+        )?)
     }
 
     /// Forget marks of camera folders that are gone (a camera removed or renamed). Only for
@@ -226,31 +331,60 @@ impl Db {
 
     /// At a clean stop, once every recording is indexed: note each folder's time as it stands,
     /// so the next start can leave it alone. Only folders this run's start-up walk read in full
-    /// (or skipped on a matching mark) are noted: a folder it did not reach, or left a possibly
-    /// open file out of, may hold files the index has not seen. Returns how many were noted.
+    /// (or skipped on a matching mark) are noted: a folder it did not reach may hold files the
+    /// index has not seen. A folder it read while a camera was recording into it
+    /// ([`WalkOk::Busy`]) is noted only when each file the walk left out as possibly open is now
+    /// in the index or gone: one that is neither is an earlier run's (a crash's last file),
+    /// which only a full read adds. Returns how many were noted.
     pub fn refresh_walk_marks(&self, data_dir: &Path, folders: &[(String, PathBuf)]) -> Result<usize> {
         let _ = self.drop_dead_walk_marks(data_dir, folders);
         let ok = self.walk_ok.lock().unwrap().clone();
-        let rows: Vec<(String, String, i64)> = {
+        let marks: std::collections::HashMap<(String, String), i64> = {
             let conn = self.lock_ro();
             let mut st = conn.prepare("SELECT folder, camera, dir_mtime_ns FROM walk_marks")?;
-            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let mut n = 0;
-        for (folder, camera, old) in rows {
-            if !ok.contains(&(folder.clone(), camera.clone())) {
-                continue;
-            }
+        for ((folder, camera), how) in ok {
             let root = if folder.is_empty() { Some(data_dir.to_path_buf()) } else { folders.iter().find(|(f, _)| *f == folder).map(|(_, p)| p.clone()) };
             let Some(root) = root else { continue };
             let Some(now) = dir_mtime_ns(&root.join("cameras").join(&camera).join("segments")) else { continue };
-            if now != old {
-                self.lock().execute("UPDATE walk_marks SET dir_mtime_ns = ?3 WHERE folder = ?1 AND camera = ?2", params![folder, camera, now])?;
-                n += 1;
+            match how {
+                WalkOk::Marked => {
+                    // (A mark gone since, by `drop_dead_walk_marks`: its folder is gone.)
+                    let Some(&old) = marks.get(&(folder.clone(), camera.clone())) else { continue };
+                    if now != old {
+                        self.lock().execute("UPDATE walk_marks SET dir_mtime_ns = ?3 WHERE folder = ?1 AND camera = ?2", params![folder, camera, now])?;
+                        n += 1;
+                    }
+                }
+                WalkOk::Busy { files, full_ms, open } => {
+                    if !self.all_indexed_or_gone(&folder, &root, &open)? {
+                        continue;
+                    }
+                    self.set_walk_mark(&folder, &camera, now, files, full_ms)?;
+                    n += 1;
+                }
             }
         }
         Ok(n)
+    }
+
+    /// Whether each of these recordings (paths relative to `root`) is in the index under this
+    /// folder, or no longer on disk. A file that cannot be looked at counts as there.
+    fn all_indexed_or_gone(&self, folder: &str, root: &Path, paths: &[String]) -> Result<bool> {
+        for p in paths {
+            let indexed: bool = self.lock_ro().query_row("SELECT EXISTS(SELECT 1 FROM segments WHERE path = ?1 AND folder = ?2)", params![p, folder], |r| r.get(0))?;
+            if indexed {
+                continue;
+            }
+            match std::fs::symlink_metadata(root.join(p)) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 
     /// Like `import_recent_camera_dirs` for one camera, from a listing already made (the folder
@@ -484,6 +618,165 @@ mod tests {
         assert_eq!(stored, 60_000);
     }
 
+    /// A recording this run's camera writes now: named like the others, dated now.
+    fn record(seg: &Path, prefix: &str, i: u32) -> String {
+        File::create(seg.join(format!("{prefix}-seg{i:06}.mp4"))).unwrap();
+        let cam = seg.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+        format!("cameras/{cam}/segments/{prefix}-seg{i:06}.mp4")
+    }
+
+    /// What the recorder (or the 15 s scan) adds once it closes a file.
+    fn index(db: &Db, cam: &str, folder: &str, path: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        db.insert_found_segments(&[FoundSegment { camera: cam.into(), path: path.into(), start_ms: now - 10_000, end_ms: now, bytes: 0, folder: folder.into(), kind: "legacy" }]).unwrap();
+    }
+
+    fn indexed(db: &Db, path: &str) -> Option<String> {
+        db.lock_ro().query_row("SELECT folder FROM segments WHERE path = ?1", params![path], |r| r.get(0)).optional().unwrap()
+    }
+
+    #[test]
+    fn a_folder_a_camera_records_into_during_the_walk_is_marked_at_a_clean_stop() {
+        let d = Tmp::new();
+        let db = Db::open_in_memory().unwrap();
+        let seg = make(d.path(), "front", 5, "front");
+        // The camera is recording: a file it is writing as the walk runs (just changed, so not
+        // settled either, with the usual margin).
+        let open = record(&seg, "front", 10);
+        let a = db.import_existing_recordings_with(d.path(), &[], 60, WalkOpts::default()).unwrap();
+        assert_eq!((a.added, a.walked), (5, 1), "the open one is left to the recorder");
+        assert_eq!(db.walk_mark("", "front").unwrap(), None, "no mark while it is being written to");
+        // Recording goes on: the open file is closed and indexed, more come and are indexed.
+        index(&db, "front", "", &open);
+        for i in 11..14 {
+            let p = record(&seg, "front", i);
+            index(&db, "front", "", &p);
+        }
+        // A clean stop marks it; the next start leaves it alone.
+        assert_eq!(db.refresh_walk_marks(d.path(), &[]).unwrap(), 1);
+        let b = db.import_existing_recordings_with(d.path(), &[], 60, WalkOpts::default()).unwrap();
+        assert_eq!((b.walked, b.skipped), (0, 1));
+        // And the mark holds the files the walk counted, and when it read them.
+        let (_, full_ms, files) = db.walk_mark("", "front").unwrap().unwrap();
+        assert_eq!(files, 5, "the five it added (the open one was left to the recorder)");
+        assert!(chrono::Utc::now().timestamp_millis() - full_ms < 60_000);
+    }
+
+    #[test]
+    fn a_busy_folder_is_not_marked_when_the_stop_was_not_clean() {
+        let d = Tmp::new();
+        let db = Db::open_in_memory().unwrap();
+        let seg = make(d.path(), "front", 3, "front");
+        let open = record(&seg, "front", 10);
+        db.import_existing_recordings_with(d.path(), &[], 60, WalkOpts::default()).unwrap();
+        index(&db, "front", "", &open);
+        // A crash: no refresh. The next start reads it in full.
+        let b = db.import_existing_recordings_with(d.path(), &[], 60, quick()).unwrap();
+        assert_eq!((b.walked, b.skipped), (1, 0));
+    }
+
+    #[test]
+    fn a_crash_leftover_still_keeps_a_busy_folder_unmarked() {
+        let d = Tmp::new();
+        let db = Db::open_in_memory().unwrap();
+        let seg = make(d.path(), "front", 3, "front");
+        // The last file of a run that crashed a moment before this start: recent, not indexed,
+        // and no recorder of this run will index it.
+        let leftover = seg.join("front-seg000003.mp4");
+        File::create(&leftover).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(5)).unwrap();
+        let a = db.import_existing_recordings_with(d.path(), &[], 60, WalkOpts::default()).unwrap();
+        assert_eq!(a.added, 3);
+        // This run's camera records and indexes its own files.
+        for i in 10..13 {
+            let p = record(&seg, "front", i);
+            index(&db, "front", "", &p);
+        }
+        assert_eq!(db.refresh_walk_marks(d.path(), &[]).unwrap(), 0, "the leftover is not in the index");
+        // The next start, a while later.
+        File::options().write(true).open(&leftover).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(600)).unwrap();
+        let b =db.import_existing_recordings_with(d.path(), &[], 60, quick()).unwrap();
+        assert_eq!((b.walked, b.skipped), (1, 0));
+        assert_eq!(indexed(&db, "cameras/front/segments/front-seg000003.mp4").as_deref(), Some(""), "a full read adds it");
+    }
+
+    #[test]
+    fn a_crash_leftover_indexed_during_the_run_or_deleted_does_not_keep_it_unmarked() {
+        let d = Tmp::new();
+        let db = Db::open_in_memory().unwrap();
+        let seg = make(d.path(), "front", 3, "front");
+        let seg2 = make(d.path(), "back", 3, "back");
+        let old = std::time::SystemTime::now() - Duration::from_secs(5);
+        File::create(seg.join("front-seg000003.mp4")).unwrap().set_modified(old).unwrap();
+        File::create(seg2.join("back-seg000003.mp4")).unwrap().set_modified(old).unwrap();
+        db.import_existing_recordings_with(d.path(), &[], 60, WalkOpts::default()).unwrap();
+        // The folder sweep (or the 15 s scan) added one; the other was deleted.
+        index(&db, "front", "", "cameras/front/segments/front-seg000003.mp4");
+        std::fs::remove_file(seg2.join("back-seg000003.mp4")).unwrap();
+        assert_eq!(db.refresh_walk_marks(d.path(), &[]).unwrap(), 2);
+        let b = db.import_existing_recordings_with(d.path(), &[], 60, quick()).unwrap();
+        assert_eq!((b.walked, b.skipped), (0, 2));
+    }
+
+    #[test]
+    fn a_left_out_file_indexed_under_another_folder_does_not_count() {
+        let d = Tmp::new();
+        let db = Db::open_in_memory().unwrap();
+        let seg = make(d.path(), "front", 3, "front");
+        let open = record(&seg, "front", 10);
+        db.import_existing_recordings_with(d.path(), &[], 60, WalkOpts::default()).unwrap();
+        index(&db, "front", "elsewhere", &open);
+        assert_eq!(db.refresh_walk_marks(d.path(), &[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn retention_and_archive_moves_during_the_run_leave_both_folders_right() {
+        let d = Tmp::new();
+        let e = Tmp::new();
+        let db = Db::open_in_memory().unwrap();
+        let seg = make(d.path(), "front", 6, "front");
+        make(e.path(), "front", 2, "stored");
+        let folders = vec![("stored".to_string(), e.path().to_path_buf())];
+        let open = record(&seg, "front", 20);
+        let a = db.import_existing_recordings_with(d.path(), &folders, 60, WalkOpts::default()).unwrap();
+        assert_eq!((a.added, a.walked), (8, 2));
+        index(&db, "front", "", &open);
+        // Retention deletes the oldest (the file, then its row, as retention_pass does).
+        std::fs::remove_file(seg.join("front-seg000000.mp4")).unwrap();
+        assert!(db.delete_segment("cameras/front/segments/front-seg000000.mp4").unwrap());
+        // The cap moves the next two to the archive (as retire_segment does: rename, then the row).
+        for i in 1..3 {
+            let rel = format!("cameras/front/segments/front-seg{i:06}.mp4");
+            std::fs::rename(d.path().join(&rel), e.path().join(&rel)).unwrap();
+            assert!(db.set_segment_folder(&rel, "stored").unwrap());
+        }
+        // More recording.
+        let p = record(&seg, "front", 21);
+        index(&db, "front", "", &p);
+        assert_eq!(db.refresh_walk_marks(d.path(), &folders).unwrap(), 2);
+        let b = db.import_existing_recordings_with(d.path(), &folders, 60, WalkOpts::default()).unwrap();
+        assert_eq!((b.walked, b.skipped, b.added), (0, 2, 0));
+        // The index matches the disk: what moved is under the archive, what went is gone.
+        assert_eq!(indexed(&db, "cameras/front/segments/front-seg000000.mp4"), None);
+        assert_eq!(indexed(&db, "cameras/front/segments/front-seg000001.mp4").as_deref(), Some("stored"));
+        assert_eq!(indexed(&db, "cameras/front/segments/front-seg000002.mp4").as_deref(), Some("stored"));
+        // A full read of both finds nothing the index did not have.
+        db.lock().execute("UPDATE walk_marks SET full_ms = full_ms - 8 * 86400000", []).unwrap();
+        let c = db.import_existing_recordings_with(d.path(), &folders, 60, quick()).unwrap();
+        assert_eq!((c.walked, c.added), (2, 0));
+    }
+
+    #[test]
+    fn a_busy_folder_gone_by_the_stop_gets_no_mark() {
+        let d = Tmp::new();
+        let db = Db::open_in_memory().unwrap();
+        let seg = make(d.path(), "front", 3, "front");
+        record(&seg, "front", 10);
+        db.import_existing_recordings_with(d.path(), &[], 60, WalkOpts::default()).unwrap();
+        std::fs::remove_dir_all(d.path().join("cameras").join("front")).unwrap();
+        assert_eq!(db.refresh_walk_marks(d.path(), &[]).unwrap(), 0);
+        assert_eq!(db.walked_files(), 0);
+    }
+
     #[test]
     fn marks_of_folders_that_are_gone_are_dropped() {
         let d = Tmp::new();
@@ -525,6 +818,59 @@ mod tests {
         assert_eq!((l.len(), n), (4, 4));
         assert_eq!(l.iter().filter(|f| f.is_file && f.mtime_ms.is_some()).count(), 3);
         assert!(list_dir_files(&seg.join("nope"), &mut || {}).is_none());
+    }
+
+    const DAY_MS: i64 = 86_400_000;
+    const NOW: i64 = 100 * DAY_MS;
+
+    fn sweep_of(mark: Option<(i64, i64, i64)>, mtime: Option<i64>, wanted: bool) -> SweepPlan {
+        sweep_plan(mark, mtime, NOW, wanted, SWEEP_FULL_EVERY, SWEEP_QUIET_FULL_EVERY)
+    }
+
+    #[test]
+    fn sweep_reads_a_folder_with_no_mark() {
+        assert_eq!(sweep_of(None, Some(5), false), SweepPlan::Full);
+    }
+
+    #[test]
+    fn sweep_leaves_a_folder_read_lately_alone_even_when_its_time_moved() {
+        // Read 6 h ago; the folder's time is not the noted one (a camera records into it).
+        assert_eq!(sweep_of(Some((-1, NOW - 6 * 3_600_000, 9)), Some(777), false), SweepPlan::Skip);
+        assert_eq!(sweep_of(Some((1, NOW - 6 * DAY_MS, 9)), Some(2), false), SweepPlan::Skip);
+    }
+
+    #[test]
+    fn sweep_reads_a_folder_a_week_after_the_last_read() {
+        assert_eq!(sweep_of(Some((-1, NOW - 7 * DAY_MS, 9)), Some(777), false), SweepPlan::Full);
+        // Its time moved since the noted one.
+        assert_eq!(sweep_of(Some((1, NOW - 8 * DAY_MS, 9)), Some(2), false), SweepPlan::Full);
+    }
+
+    #[test]
+    fn sweep_leaves_an_untouched_folder_alone_for_four_weeks() {
+        assert_eq!(sweep_of(Some((5, NOW - 8 * DAY_MS, 9)), Some(5), false), SweepPlan::Skip);
+        assert_eq!(sweep_of(Some((5, NOW - 27 * DAY_MS, 9)), Some(5), false), SweepPlan::Skip);
+        assert_eq!(sweep_of(Some((5, NOW - 28 * DAY_MS, 9)), Some(5), false), SweepPlan::Full);
+        // A note of -1 (not settled, or not all indexed) never matches.
+        assert_eq!(sweep_of(Some((-1, NOW - 8 * DAY_MS, 9)), Some(-1), false), SweepPlan::Full);
+        // Folder time unreadable.
+        assert_eq!(sweep_of(Some((5, NOW - 8 * DAY_MS, 9)), None, false), SweepPlan::Full);
+    }
+
+    #[test]
+    fn sweep_reads_everything_when_asked_or_when_the_clock_went_back() {
+        assert_eq!(sweep_of(Some((5, NOW - 1000, 9)), Some(5), true), SweepPlan::Full);
+        assert_eq!(sweep_of(Some((5, NOW + 1000, 9)), Some(5), false), SweepPlan::Full);
+    }
+
+    #[test]
+    fn sweep_marks_are_kept_and_cleared() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.sweep_mark("", "cam").unwrap(), None);
+        db.set_sweep_mark("", "cam", 5, 7, 99).unwrap();
+        assert_eq!(db.sweep_mark("", "cam").unwrap(), Some((5, 99, 7)));
+        db.clear_sweep_mark("", "cam").unwrap();
+        assert_eq!(db.sweep_mark("", "cam").unwrap(), None);
     }
 
     /// The mark lives in the database, so a new database opened on the same file still has it.

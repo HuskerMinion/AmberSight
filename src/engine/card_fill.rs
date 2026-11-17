@@ -70,6 +70,10 @@ pub struct Target {
     pub audio: bool,
 }
 
+/// Why a camera whose masks go into its recordings gets nothing from its
+/// card (the card's video would come in without them).
+pub const MASKED_CARD: &str = "Off while the privacy masks are set to \"Hide in recordings too\": the card's video has no masks, so it would add unmasked recordings.";
+
 /// The device channel in a Reolink stream path (`Preview_02_main`: 1).
 fn channel_in_path(url: &str) -> Option<u32> {
     let i = url.find("Preview_")? + "Preview_".len();
@@ -96,6 +100,9 @@ pub fn target(cfg: &CameraConfig) -> Result<Target, String> {
     }
     if c.record_motion_only {
         return Err("Needs continuous recording: a motion-only camera is meant to have holes.".into());
+    }
+    if c.mask_in_recording() {
+        return Err(MASKED_CARD.into());
     }
     let Some(host) = crate::onvif::host_from_rtsp_url(&c.url) else { return Err("The camera's address could not be read from its URL.".into()) };
     if c.username.is_empty() {
@@ -250,8 +257,14 @@ fn to_retry(tried: &[Attempt], gap: Gap) -> bool {
 }
 
 fn load_tried(db: &crate::db::Db, slug_name: &str) -> Vec<Attempt> {
+    load_tried_in(db, SCOPE, slug_name)
+}
+
+/// What was tried for a camera, kept in ui_kv `scope` (also used for battery
+/// cameras' catch-up, card_catchup.rs).
+pub(super) fn load_tried_in(db: &crate::db::Db, scope: &str, slug_name: &str) -> Vec<Attempt> {
     let prefix = format!("{slug_name}|");
-    db.ui_scope_prefix(SCOPE, &prefix)
+    db.ui_scope_prefix(scope, &prefix)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(k, v)| k.strip_prefix(&prefix).and_then(|f| f.parse::<i64>().ok()).and_then(|f| decode(f, &v)))
@@ -262,23 +275,31 @@ fn load_tried(db: &crate::db::Db, slug_name: &str) -> Vec<Attempt> {
 const KEEP_TRIED_MS: i64 = cardfill::LOOK_BACK_MS + 3_600_000;
 
 fn save_tried(db: &crate::db::Db, slug_name: &str, a: Attempt, now_ms: i64) {
-    let _ = db.ui_put(SCOPE, &format!("{slug_name}|{}", a.from_ms), &encode(&a));
+    save_tried_in(db, SCOPE, slug_name, a, now_ms)
+}
+
+pub(super) fn save_tried_in(db: &crate::db::Db, scope: &str, slug_name: &str, a: Attempt, now_ms: i64) {
+    let _ = db.ui_put(scope, &format!("{slug_name}|{}", a.from_ms), &encode(&a));
     // Older attempts (any camera's) are of holes no longer looked at.
-    for (k, _) in db.ui_scope(SCOPE).unwrap_or_default() {
+    for (k, _) in db.ui_scope(scope).unwrap_or_default() {
         if k.rsplit('|').next().and_then(|f| f.parse::<i64>().ok()).is_none_or(|f| f < now_ms - KEEP_TRIED_MS) {
-            let _ = db.ui_delete(SCOPE, &k);
+            let _ = db.ui_delete(scope, &k);
         }
     }
 }
 
 /// Put back what was known of a hole before an attempt that did not count.
 fn restore_tried(db: &crate::db::Db, slug_name: &str, from_ms: i64, before: Option<Attempt>) {
+    restore_tried_in(db, SCOPE, slug_name, from_ms, before)
+}
+
+pub(super) fn restore_tried_in(db: &crate::db::Db, scope: &str, slug_name: &str, from_ms: i64, before: Option<Attempt>) {
     match before {
         Some(a) => {
-            let _ = db.ui_put(SCOPE, &format!("{slug_name}|{from_ms}"), &encode(&a));
+            let _ = db.ui_put(scope, &format!("{slug_name}|{from_ms}"), &encode(&a));
         }
         None => {
-            let _ = db.ui_delete(SCOPE, &format!("{slug_name}|{from_ms}"));
+            let _ = db.ui_delete(scope, &format!("{slug_name}|{from_ms}"));
         }
     }
 }
@@ -311,7 +332,12 @@ pub fn rename_camera(old: &str, new: &str) {
 const MODE_SCOPE: &str = "card_fill_mode";
 
 fn read_mode(db: &crate::db::Db, slug_name: &str) -> Option<(bool, i64)> {
-    let v = db.ui_get(MODE_SCOPE, slug_name).ok().flatten()?;
+    read_mode_in(db, MODE_SCOPE, slug_name)
+}
+
+/// A recording mode noted in ui_kv `scope` (see note_mode_in).
+pub(super) fn read_mode_in(db: &crate::db::Db, scope: &str, slug_name: &str) -> Option<(bool, i64)> {
+    let v = db.ui_get(scope, slug_name).ok().flatten()?;
     let (state, at) = v.split_once('|')?;
     Some((state == "on", at.parse().ok()?))
 }
@@ -321,14 +347,20 @@ fn read_mode(db: &crate::db::Db, slug_name: &str) -> Option<(bool, i64)> {
 /// from then on: the holes before were made on purpose (recording off, or
 /// motion only), and filling them would add what was meant not to be kept.
 pub fn note_mode(db: &crate::db::Db, name: &str, continuous: bool, now_ms: i64) {
+    note_mode_in(db, MODE_SCOPE, name, continuous, now_ms)
+}
+
+/// Note in ui_kv `scope` whether a camera is `on` now, and since when it has
+/// been (only a change is written).
+pub(super) fn note_mode_in(db: &crate::db::Db, scope: &str, name: &str, on: bool, now_ms: i64) {
     let s = slug(name);
-    let was = read_mode(db, &s);
-    let v = match (was, continuous) {
+    let was = read_mode_in(db, scope, &s);
+    let v = match (was, on) {
         (Some((true, _)), true) | (Some((false, _)), false) => return,
         (_, true) => format!("on|{now_ms}"),
         (_, false) => format!("off|{now_ms}"),
     };
-    let _ = db.ui_put(MODE_SCOPE, &s, &v);
+    let _ = db.ui_put(scope, &s, &v);
 }
 
 /// Whether the camera was recording continuously all through the hole, as
@@ -350,7 +382,7 @@ fn meant_continuous(engine: &Engine, base: &CameraConfig, gap: Gap) -> bool {
 }
 
 /// The noted recording mode allows filling `gap`: continuous since before it.
-fn mode_allows(mode: Option<(bool, i64)>, gap: Gap) -> bool {
+pub(super) fn mode_allows(mode: Option<(bool, i64)>, gap: Gap) -> bool {
     matches!(mode, Some((true, since)) if since <= gap.from_ms)
 }
 
@@ -365,6 +397,20 @@ fn schedule_keeps_continuous(
     hold: Option<&(String, i64)>,
     local: impl Fn(i64) -> Option<(usize, u32)>,
 ) -> bool {
+    schedule_keeps(auto, base, gap, hold, local, |o| o.record.unwrap_or(base.record) && !o.record_motion_only.unwrap_or(base.record_motion_only))
+}
+
+/// For each minute of `gap`, `keeps` holds for the camera's override under
+/// the profile in effect then (held by hand since `hold`, otherwise the
+/// weekly schedule's).
+pub(super) fn schedule_keeps(
+    auto: &crate::config::AutomationConfig,
+    base: &CameraConfig,
+    gap: Gap,
+    hold: Option<&(String, i64)>,
+    local: impl Fn(i64) -> Option<(usize, u32)>,
+    keeps: impl Fn(&crate::config::CameraOverride) -> bool,
+) -> bool {
     let sun = super::profiles::sun_today(auto);
     let mut t = gap.from_ms;
     loop {
@@ -374,7 +420,7 @@ fn schedule_keeps_continuous(
             _ => super::profiles::scheduled_profile(auto, weekday, minute, sun).0,
         };
         let o = auto.profiles.iter().find(|p| p.name == name).and_then(|p| p.cameras.get(&base.name).cloned()).unwrap_or_default();
-        if !(o.record.unwrap_or(base.record) && !o.record_motion_only.unwrap_or(base.record_motion_only)) {
+        if !keeps(&o) {
             return false;
         }
         if t >= gap.to_ms {
@@ -417,7 +463,7 @@ pub fn begin_stop() {
     STOPPING.store(true, Ordering::SeqCst);
 }
 
-fn stopping() -> bool {
+pub(super) fn stopping() -> bool {
     STOPPING.load(Ordering::SeqCst)
 }
 
@@ -649,6 +695,9 @@ fn fill_one(engine: &Arc<Engine>, h: &Arc<CameraHandle>, cfg: &CameraConfig, tar
     let now_ms = Utc::now().timestamp_millis();
     match result {
         Ok(cardfill::Outcome::Filled(f)) => {
+            // (A rename of the camera waits for what is kept now; one that
+            // came first stopped the camera: `stop`.)
+            let _writing = engine.writing_into(&name);
             if stop() {
                 // Stopped (the server, or the camera turned off) after the work:
                 // nothing is added now; the hole is looked at again later.
@@ -765,14 +814,16 @@ fn pieces_outcome(kept: usize, failed: usize) -> Pieces {
     }
 }
 
-/// Whether a recording file is a piece taken from the camera's card.
+/// Whether a recording file is a piece taken from the camera's card (filled
+/// holes `{camera}-card-{ms}-seg…`; a battery camera's caught-up events
+/// `{camera}-card-{ms}-rec-seg…`).
 pub fn is_card_piece(path: &str) -> bool {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     match name.find("-card-") {
         Some(i) => {
             let rest = &name[i + 6..];
             let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-            digits >= 10 && rest[digits..].starts_with("-seg")
+            digits >= 10 && (rest[digits..].starts_with("-seg") || rest[digits..].starts_with("-rec-seg"))
         }
         None => false,
     }
@@ -826,6 +877,9 @@ mod tests {
         assert!(is_card_piece("cameras/porch/segments/porch-sub-card-1794148581609-seg000003.mp4"));
         assert!(!is_card_piece("cameras/porch/segments/porch-1794148581609-seg000000.mp4"));
         assert!(!is_card_piece("cameras/porch/segments/porch-1794148581609-rec-seg000000.mp4"));
+        // A battery camera's event caught up from its card.
+        assert!(is_card_piece("cameras/porch/segments/porch-card-1794148581609-rec-seg000000.mp4"));
+
         // A camera whose own name has "card" in it is not mistaken.
         assert!(!is_card_piece("cameras/card-reader/segments/card-reader-1794148581609-seg000000.mp4"));
         assert!(is_card_piece("cameras/card-reader/segments/card-reader-card-1794148581609-seg000000.mp4"));
@@ -841,6 +895,19 @@ mod tests {
 
     fn cam(name: &str) -> CameraConfig {
         toml::from_str(&format!("name = \"{name}\"\nurl = \"rtsp://192.0.2.5:554/Preview_01_main\"\nusername = \"u\"\n")).unwrap()
+    }
+
+    #[test]
+    fn masks_in_the_recordings_turn_card_filling_off() {
+        let mut c = cam("Porch");
+        assert!(target(&c).is_ok());
+        c.privacy_masks = vec![crate::config::ZoneRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }];
+        c.mask_mode = Some("screen".into());
+        assert!(target(&c).is_ok(), "screen masks: the recordings are the camera's own stream anyway");
+        c.mask_mode = Some("recording".into());
+        assert_eq!(target(&c), Err(MASKED_CARD.to_string()));
+        c.mask_mode = None;
+        assert_eq!(target(&c), Err(MASKED_CARD.to_string()), "masks from before the level count as in the recordings");
     }
 
     #[test]

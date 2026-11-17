@@ -30,7 +30,7 @@ const infoCache = new Map();
 function liveInfo(id) {
   const hit = infoCache.get(id);
   if (hit && Date.now() - hit.at < 15000) return hit.p;
-  const p = api('/api/live/' + id + '/info').catch(() => null);
+  const p = api('/api/live/' + id + '/info?draws=masks').catch(() => null);
   infoCache.set(id, { at: Date.now(), p });
   return p;
 }

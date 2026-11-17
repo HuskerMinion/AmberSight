@@ -107,7 +107,7 @@ pub(super) fn spawn_camera_events(engine: Arc<Engine>, handle: Arc<CameraHandle>
                 // to it): a signal lane named after the camera.
                 if let EventKind::Other(t) = &ev.kind {
                     if t.contains("DigitalInput") {
-                        eng.set_signal(&format!("{cam} input"), ev.active, "camera input");
+                        eng.set_signal_for(&format!("{cam} input"), ev.active, "camera input", Some(&cam));
                     }
                 }
                 let mut st = h.state.write().unwrap();
@@ -329,11 +329,9 @@ fn spawn_baichuan_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &C
     };
     let (user, pass) = (cfg.username.clone(), cfg.password.clone());
     let name = cfg.name.clone();
-    if cfg.overlay || !cfg.privacy_masks.is_empty() {
-        warn!(
-            "camera '{name}': privacy masks and burned-in text are not applied to battery Argus video \
-             (its recordings and live view show the whole picture)"
-        );
+    // (Masks set to "Hide in recordings too" stop its recording: native.rs.)
+    if cfg.overlay {
+        warn!("camera '{name}': burned-in text is not applied to battery Argus recordings (they are the camera's own stream)");
     }
     // Counted with the camera sessions so shutdown waits for the sign-out.
     engine.live_sessions.fetch_add(1, Ordering::Relaxed);

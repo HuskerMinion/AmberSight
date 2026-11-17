@@ -199,7 +199,9 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
 - **Battery Reolink cameras without a hub (Argus):** add them with the brand "Reolink battery
   (Argus, no hub)" and the camera's UID. They sleep until motion: the camera's motion message
   (a local DNS entry for `pushx.reolink.com`) wakes them and starts recording, and AmberSight
-  fetches the first seconds of each event from the camera's card. See the
+  fetches the first seconds of each event from the camera's card. Events the camera recorded
+  while AmberSight missed its message (push off, Wi-Fi trouble, AmberSight down) are imported
+  from the card later, marked "from card", without a notification. See the
   [install guide](docs/install.md#battery-reolink-cameras-without-a-hub-argus).
 - **Recording:** continuous segments per camera, or a sub stream all the time
   with the main stream only around events. Motion clips with pre-roll and
@@ -224,7 +226,18 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   detection, face recognition, smart search by description (CLIP), and a
   loud-sound trigger.
 - **Zones and masks:** rectangle and polygon detect and ignore zones, and
-  privacy masks.
+  privacy masks at two levels: hidden on screen and in pictures (drawn by the
+  apps and burned into snapshots, event pictures and downloads; the camera's
+  stream is kept as it is, so it costs nothing), or hidden in recordings too
+  (re-encoded, the only level that protects the files on disk, from the moment
+  it is on; older recordings are masked when they leave). Masked downloads and
+  playback for apps that do not draw masks are converted on the server: quick
+  with a graphics encoder, slow on the processor.
+- **Text on the picture:** your own text with the date and time, drawn over
+  live view and playback (with the recording's own time), put into snapshots and
+  event pictures, and a time subtitle track in downloads (not in an event clip
+  sent from its saved file as it is); burning it into the recordings is an
+  option.
 - **Alerts:** push, Telegram, ntfy, Pushover, email, webhooks, Home Assistant,
   MQTT with Home Assistant discovery, and action commands. System alerts for a
   camera offline, recordings not written or a drive nearly full.
@@ -245,9 +258,15 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   `rtsp://` address is split for you. The [camera guide](docs/cameras.md) lists
   paths and known problems by brand. Transport is Auto, TCP or UDP (Auto tries
   UDP when a camera only offers it).
-- **Hardware decoding:** on Linux, motion detection decodes on an Intel or AMD
-  graphics card (VAAPI or Quick Sync) when one passes a test decode at start,
-  and falls back to the processor. Cameras with burned-in text or privacy masks
+- **Hardware decoding:** motion detection decodes on an NVIDIA card (NVDEC), or
+  on Linux an Intel or AMD one (Quick Sync or VAAPI), when it passes a test
+  decode at start, and falls back to the processor; one setting picks the order
+  (Settings > System > Hardware), and a way that fails is tried again later. Intel
+  Quick Sync on Linux needs Intel's GPU runtime (`libmfx-gen1.2` on Debian/Ubuntu,
+  `intel-vpl-gpu-rt` on Fedora); without it Gen12+ Intel uses VAAPI, which fails
+  on some cameras. Auto
+  keeps video memory free on the NVIDIA card for the AI and other programs: past the limit
+  (1.5 GB by default) cameras use Intel or the processor and move back when there is room. Cameras with burned-in text or masks hidden in recordings
   use the sub stream for motion and re-encode recordings on the card's encoder.
   Status says when a large camera has no sub stream and offers to find one.
 - **Camera report:** a text file with what a camera sends and its recent
@@ -346,7 +365,7 @@ State topics: `<prefix>/<cam>/{motion,person,vehicle,animal,online,asleep}` (`ON
 **Live video.** Add the Generic Camera integration per camera, with the camera's numeric `id` from `/api/cameras` (8090 is the default port):
 
 - Still image URL: `http://user:pass@HOST:8090/api/snapshot/ID`
-- Stream source: `http://user:pass@HOST:8090/api/live/ID/stream` (fragmented MP4; add `?q=sub` for the sub stream). This works for cameras on the built-in reader (RTSP and HTTP-FLV URLs, the default); cameras re-encoded through ffmpeg (masks, overlay, `ingest = "ffmpeg"`) have no live stream.
+- Stream source: `http://user:pass@HOST:8090/api/live/ID/stream` (fragmented MP4; add `?q=sub` for the sub stream). This works for cameras on the built-in reader (RTSP and HTTP-FLV URLs, the default); cameras re-encoded through ffmpeg (masks hidden in recordings, burned-in text, `ingest = "ffmpeg"`) have no live stream, and neither does a camera whose masks are hidden on screen only (the stream would show the masked area); use the MJPEG address for those.
 
 HTTP Basic auth is accepted on these endpoints, so the credentials go in the URL. Use an account that can see the camera. Snapshot and stream requests wake a sleeping battery camera.
 

@@ -37,6 +37,7 @@ import { helperHtml, wireHelper, readHelper, pairDialog, helpersListHtml } from 
 import { helpButton } from './help.js';
 import { netinfoHtml, wireNetinfo } from './netinfo.js';
 import { addrHtml, wireAddr, addrValidate, addrErrKey, addrSetSub, addrChanged, addrRebaseSub } from './camaddr_form.js';
+import { catchUpOptions } from './camaddr.js';
 import { openZoneEditor, zonesSummary } from './zones.js';
 import { MOTION_PRESETS } from './sp_kit.js';
 import { armStrip, loadArmData } from './armstrip.js';
@@ -128,7 +129,7 @@ function wireOnvif(d, c, ctx) {
 }
 
 // ---------- hardware decoding and the sub stream ----------
-// hwaccel: null / "auto", "off", "vaapi[:/dev/dri/renderD129]", "qsv[:...]"; anything
+// hwaccel: null / "auto", "off", "cuda", "vaapi[:/dev/dri/renderD129]", "qsv[:...]"; anything
 // else written by hand is kept and shown as it is.
 function hwParse(v) {
   const s = String(v == null ? '' : v).trim();
@@ -137,6 +138,7 @@ function hwParse(v) {
   if (['off', 'none', 'software', 'cpu'].includes(low)) return { kind: 'off', node: '' };
   const m = /^(vaapi|qsv)(?::(.*))?$/i.exec(s);
   if (m) return { kind: m[1].toLowerCase(), node: (m[2] || '').trim() };
+  if (low === 'cuda') return { kind: 'cuda', node: '' };
   return { kind: s, node: '', other: true };
 }
 // What the form says, as the setting (null = Auto). A field that is not there keeps what is set.
@@ -163,11 +165,11 @@ function decodeNow(c) {
 }
 function hwHtml(c, multi) {
   const h = hwParse(c.hwaccel);
-  const opts = [['auto', 'Auto (graphics card when it works)'], ['off', 'Off (processor)'], ['vaapi', 'VAAPI'], ['qsv', 'Quick Sync (QSV)']];
+  const opts = [['auto', 'Auto (server setting)'], ['off', 'Off (processor)'], ['cuda', 'NVIDIA (NVDEC)'], ['vaapi', 'VAAPI'], ['qsv', 'Quick Sync (QSV)']];
   if (h.other) opts.push([h.kind, h.kind]);
   const nodeOpts = '<option value="">first one that works</option>' + (h.node ? '<option value="' + esc(h.node) + '" selected>' + esc(h.node) + '</option>' : '');
   return '<div data-hwbox>' + field('Hardware decoding', sel('hw_kind', opts, h.kind),
-    'How motion detection decodes the picture. Auto uses the graphics card (VAAPI) when it passed a test decode at start, and the processor otherwise; a card that fails later is replaced by the processor at once. Linux only for now: on Windows and macOS, Auto uses the processor.') +
+    'How motion detection decodes the picture. Auto follows Settings, System, Hardware (by default NVIDIA first, then Intel Quick Sync, then VAAPI, among the ways that passed a test decode at start; else the processor). A way that fails later is replaced at once and tried again later.') +
     '<div data-hwnode hidden>' + field('Graphics card', '<select data-k="hw_node">' + nodeOpts + '</select>') + '</div>' +
     (multi ? '' : '<div class="hint" data-hwnow>' + decodeNow(c) + '</div>') + '</div>';
 }
@@ -896,6 +898,8 @@ function readForm(d, c, isNew) {
   if (isNew) { body.enabled = true; } else {
     body.enabled = v('enabled') === '1'; // zones / ignore_zones are owned by the zones editor; the server keeps what it has.
     const cf = d.querySelector('[data-cardfill]'); if (cf) body.fill_from_card = cf.checked;
+    const cu = d.querySelector('[data-catchup]');
+    if (cu) { body.catch_up_from_card = cu.checked; body.catch_up_every = Number(v('catch_up_every')) || 0; }
     body.also_trigger = [...d.querySelectorAll('[data-trig]:checked')].map(x => x.dataset.trig);
     const wd = readWatchdog(d);
     if (wd !== undefined && v('src') === 'net') body.watchdog = wd;
@@ -1068,6 +1072,17 @@ function cardFillHtml(c) {
     'When the camera drops off (Wi-Fi, a router restart, AmberSight restarting) and is back, the missing part is copied from its memory card and appears on the timeline marked as from the card. Reolink cameras with a card, recording continuously. Holes up to 2 hours.') +
     '<div class="hint cs-cfst" data-cfst aria-live="polite">' + (st && st.text ? esc(st.text) : '') + '</div>';
 }
+// ---------- battery cameras: events the card has and AmberSight missed ----------
+function catchUpHtml(c) {
+  const st = c.card_catchup_status;
+  const every = String(c.catch_up_every != null ? c.catch_up_every : 60);
+  const opts = catchUpOptions(every);
+  return swHtml('data-catchup', !!c.catch_up_from_card, 'Import missed events from the camera\'s card',
+    'When a push is missed (push off in the Reolink app, Wi-Fi or DNS trouble) or AmberSight was down, the camera still records to its card. Its recordings of the last 12 hours that AmberSight has no event for are imported as events, marked "from card". Events older than a few minutes send no notification. Each look wakes the camera.') +
+    field('Look at the card', sel('catch_up_every', opts, every),
+      'Always after AmberSight starts, after the camera was unreachable, and after a push that brought no recording. If the camera stays asleep, it is woken to look at most every three times the period.') +
+    '<div class="hint cs-cfst" aria-live="polite">' + (st && st.text ? esc(st.text) : '') + '</div>';
+}
 function wireCardFill(d, c) {
   const cb = d.querySelector('[data-cardfill]'), st = d.querySelector('[data-cfst]');
   if (!cb || c.id == null) return;
@@ -1124,7 +1139,7 @@ function sectionsOf(c, isNew, multi) {
       field('Record', onoff('record', c.record !== false)) +
       field('Record mode', sel('record_mode', [['0', 'continuous'], ['2', 'continuous: sub stream, main stream around events'], ['1', 'motion only']], c.record_motion_only ? '1' : (c.record_sub ? '2' : '0')),
         'The middle choice keeps the full picture only around events and the sub stream the rest of the time, using far less space. It needs a sub stream URL; without one the camera records continuously.') +
-      (isNew || multi || OP ? '' : cardFillHtml(c)) +
+      (isNew || multi || OP ? '' : c.catch_up_from_card != null ? catchUpHtml(c) : cardFillHtml(c)) +
       copyHtml(c, multi),
       ovNum('pre_roll', 'Pre-roll (s)', c.pre_roll, m.pre_roll != null ? m.pre_roll + ' s' : '', 'type="number" min="0"', 'Video kept from before an event starts.') +
       ovNum('post_roll', 'Post-roll (s)', c.post_roll, m.post_roll != null ? m.post_roll + ' s' : '', 'type="number" min="0"', 'Video kept after it ends.') +
@@ -1168,10 +1183,10 @@ function sectionsOf(c, isNew, multi) {
     av: [
       field('Audio', onoff('audio', isNew ? true : !!c.audio), 'Sound in the live view and in recordings, when the camera sends it.') +
       field('Text on the picture', text('overlay_text', c.overlay_text || '', 'maxlength="120" placeholder="e.g. {short} · {site}   {date} {time}"'),
-        'Shown on this camera in Live and full size. Fill-ins: {name}, {short} (short name), {site} (this server), {date}, {time}, and {v:NAME} for a value an automation sends in (weather or a temperature from Home Assistant, for example) over MQTT (<code>&lt;prefix&gt;/overlay/NAME/set</code>) or <code>POST /api/overlay/NAME</code>. Empty = no text. {v:NAME} shows in live view, not in burned-in recordings.'),
+        'Drawn by the app over this camera\'s live view and playback (playback shows the recording\'s own date and time), and put into its snapshots, event pictures and time-lapse frames. Downloads carry the time as subtitles, or the text itself when "Burn the text into this clip" is on. Fill-ins: {name}, {short} (short name), {site} (this server), {date}, {time}, and {v:NAME} for a value an automation sends in (weather or a temperature from Home Assistant, for example) over MQTT (<code>&lt;prefix&gt;/overlay/NAME/set</code>) or <code>POST /api/overlay/NAME</code>. Empty = no text. {v:NAME} shows in live view only.'),
       field('Corner', sel('overlay_pos', [['bottom-left', 'bottom left'], ['bottom-right', 'bottom right'], ['top-left', 'top left'], ['top-right', 'top right']], c.overlay_pos || 'bottom-left')) +
       field('Also burn it into recordings', onoff('overlay', !!c.overlay),
-        'The text becomes part of the video files (without text set: name, date and time). This re-encodes the camera\'s video (on the graphics card when it has a video encoder that passed the test at start, else on the processor: about one core per 4K camera) and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Recordings are unaffected; leave it off unless they must carry the text.') +
+        'Off: the app draws the text, which costs nothing. On: the text becomes part of the video files too (without text set: name, date and time). This re-encodes the camera\'s video (on the graphics card when it has a video encoder that passed the test at start, else on the processor: about one core per 4K camera) and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Leave it off unless the files themselves must carry the text.') +
       (isNew || multi ? '' : reencodeHtml(c))],
   };
   if (OP) return { motion: out.motion, alerts: out.alerts, ai: out.ai };
@@ -1327,7 +1342,7 @@ bus.on('cameras', () => {
   markTile();
   const c = camFromId(cur.id);
   const dot = cur.root.querySelector('[data-dot]');
-  if (c && dot) dot.className = 'cs-dot ' + dotClass(c);
+  if (c && dot) { dot.className = 'cs-dot ' + dotClass(c); dot.title = dotTitle(c); }
 });
 // Phones: the section index scrolls sideways; faded edges show there is more that way.
 function idxFade(root) {
@@ -1341,8 +1356,8 @@ function idxFade(root) {
   if (window.ResizeObserver) new ResizeObserver(upd).observe(x);
   upd();
 }
-const dotClass = (c) => (c.enabled === false ? 'off' : c.online ? 'ok' : 'bad');
-const dotTitle = (c) => (c.enabled === false ? 'Disabled' : c.online ? 'Online' : 'Offline');
+const dotClass = (c) => (c.enabled === false ? 'off' : c.online ? 'ok' : c.sleeping ? 'sleep' : 'bad');
+const dotTitle = (c) => (c.enabled === false ? 'Disabled' : c.online ? 'Online' : c.sleeping ? 'Asleep (a battery camera saving power)' : 'Offline');
 
 // Everything the user can change, as one string: dirty = it differs from the opening state.
 // (data-nosig: fields that only feed another field, such as the address parts of the stream URL.)

@@ -74,6 +74,12 @@ struct Shared {
     /// Set by start_preview() until the session thread takes the request: a
     /// running SD download stops early so live video is not kept waiting.
     preview_wanted: AtomicBool,
+    /// When a sign-in last worked after one or more failed (epoch ms; 0 never):
+    /// the camera was unreachable for a while and is back.
+    reconnected_ms: std::sync::atomic::AtomicI64,
+    /// Whether the card recordings' info headers are on local time (1) or
+    /// UTC (0), as a card listing settled it; -1 until known.
+    header_local: std::sync::atomic::AtomicI8,
 }
 
 /// The camera's clock minus UTC from its cmd 104 reply (`SystemGeneral`): its
@@ -104,8 +110,41 @@ enum Cmd {
     /// Stream the SD-card recording for a time range (epoch ms, converted to
     /// the camera's clock just before asking). Runs once no preview is active,
     /// on the same session.
-    Download { from_ms: i64, to_ms: i64, reply: SyncSender<Download> },
+    Download { from_ms: i64, to_ms: i64, limit: Duration, max_bytes: usize, reply: SyncSender<Download> },
+    /// List the card's recordings in a time range (epoch ms), without
+    /// downloading them (see `super::cardlist`). Runs like a download.
+    ListClips { from_ms: i64, to_ms: i64, max_clips: usize, max_asks: u32, reply: SyncSender<ClipList> },
     Shutdown,
+}
+
+/// A waiting SD request (a download or a listing).
+enum SdJob {
+    Download { from_ms: i64, to_ms: i64, limit: Duration, max_bytes: usize, reply: SyncSender<Download> },
+    List { from_ms: i64, to_ms: i64, max_clips: usize, max_asks: u32, reply: SyncSender<ClipList> },
+}
+
+/// One recording on the card, on this server's clock (epoch ms).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListedClip {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// Which clock its header is on was settled (see `super::cardlist`).
+    pub sure: bool,
+}
+
+/// What a card listing found.
+#[derive(Debug, Default)]
+pub struct ClipList {
+    pub clips: Vec<ListedClip>,
+    /// The whole time range was looked at.
+    pub complete: bool,
+    /// Cut short for live video: try again later.
+    pub gave_way: bool,
+    /// Stopped at the limit of one listing: the rest is for the next one.
+    /// Any other early end (not `complete`) is the camera's doing.
+    pub ran_out: bool,
+    /// Why it ended early, for the log.
+    pub why: Option<String>,
 }
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
@@ -130,9 +169,13 @@ fn on_camera_clock(ms: i64, offset_s: Option<i64>) -> Option<NaiveDateTime> {
     }
 }
 
-/// How long one SD download may run, and how much it may bring back.
+/// How long one SD download may run, and how much it may bring back (the
+/// lead-in; a catch-up download says its own, up to MAX_DOWNLOAD_LIMIT and
+/// MAX_DOWNLOAD_CAP).
 const DOWNLOAD_LIMIT: Duration = Duration::from_secs(45);
 const MAX_DOWNLOAD_BYTES: usize = 32 << 20;
+pub const MAX_DOWNLOAD_LIMIT: Duration = Duration::from_secs(10 * 60);
+pub const MAX_DOWNLOAD_CAP: usize = 128 << 20;
 
 /// The cmd 143 request: the main-stream recording between `from` and `to`
 /// (camera local time; time parts are separate elements, not zero-padded).
@@ -171,6 +214,8 @@ impl BaichuanClient {
             clock_offset_s: std::sync::atomic::AtomicI64::new(i64::MIN),
             card_offset_s: std::sync::atomic::AtomicI64::new(i64::MIN),
             preview_wanted: AtomicBool::new(false),
+            reconnected_ms: std::sync::atomic::AtomicI64::new(0),
+            header_local: std::sync::atomic::AtomicI8::new(-1),
             connected: AtomicBool::new(false),
             alive: AtomicBool::new(true),
         });
@@ -203,10 +248,35 @@ impl BaichuanClient {
     /// first. Blocks; call from a worker thread. `None` if the session could
     /// not be had; empty bytes if nothing came.
     pub fn download(&self, from_ms: i64, to_ms: i64) -> Option<Download> {
-        let (reply, rx) = std::sync::mpsc::sync_channel(1);
-        self.cmd_tx.send(Cmd::Download { from_ms, to_ms, reply }).ok()?;
-        rx.recv_timeout(Duration::from_secs(15 * 60)).ok()
+        self.download_within(from_ms, to_ms, DOWNLOAD_LIMIT, MAX_DOWNLOAD_BYTES)
     }
+
+    /// As [`BaichuanClient::download`], running at most `limit` and bringing
+    /// at most `max_bytes` (capped at MAX_DOWNLOAD_LIMIT / MAX_DOWNLOAD_CAP).
+    pub fn download_within(&self, from_ms: i64, to_ms: i64, limit: Duration, max_bytes: usize) -> Option<Download> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        let (limit, max_bytes) = (limit.min(MAX_DOWNLOAD_LIMIT), max_bytes.min(MAX_DOWNLOAD_CAP));
+        self.cmd_tx.send(Cmd::Download { from_ms, to_ms, limit, max_bytes, reply }).ok()?;
+        rx.recv_timeout(Duration::from_secs(15 * 60) + limit).ok()
+    }
+
+    /// The card's recordings between `from_ms` and `to_ms` (epoch), listed
+    /// without downloading them: at most `max_clips`, in at most `max_asks`
+    /// requests. Signs in if needed (waking the camera) and waits for any
+    /// running preview first. Blocks. `None` if the session could not be had.
+    pub fn list_clips(&self, from_ms: i64, to_ms: i64, max_clips: usize, max_asks: u32) -> Option<ClipList> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        self.cmd_tx.send(Cmd::ListClips { from_ms, to_ms, max_clips, max_asks, reply }).ok()?;
+        rx.recv_timeout(Duration::from_secs(20 * 60)).ok()
+    }
+
+    /// When the camera was last back after sign-ins to it had failed (epoch
+    /// ms), if it has been since this client started.
+    pub fn reconnected_at_ms(&self) -> Option<i64> {
+        let v = self.shared.reconnected_ms.load(Ordering::Relaxed);
+        (v > 0).then_some(v)
+    }
+
 
     /// Whether the session is signed in to the camera right now.
     pub fn is_connected(&self) -> bool {
@@ -281,6 +351,8 @@ fn run(
     // backoff a request is refused at once (the worker retries later).
     let mut backoff = Duration::from_secs(10);
     let mut retry_at: Option<Instant> = None;
+    // A sign-in failed since the last one that worked.
+    let mut failed = false;
     while shared.alive.load(Ordering::Relaxed) {
         let first = match cmd_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(c @ Cmd::StartPreview(_)) => {
@@ -288,7 +360,7 @@ fn run(
                 shared.preview_wanted.store(false, Ordering::Relaxed);
                 c
             }
-            Ok(c @ Cmd::Download { .. }) => c,
+            Ok(c @ (Cmd::Download { .. } | Cmd::ListClips { .. })) => c,
             Ok(Cmd::StopPreview) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Ok(Cmd::Shutdown) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
@@ -301,6 +373,9 @@ fn run(
             Ok(mut session) => {
                 backoff = Duration::from_secs(10);
                 retry_at = None;
+                if std::mem::take(&mut failed) {
+                    shared.reconnected_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                }
                 shared.connected.store(true, Ordering::Relaxed);
                 let _ = event_tx.send(CamEvent::Connected(true));
                 if let Some(b) = session.battery.take() {
@@ -315,6 +390,7 @@ fn run(
             Err(e) => {
                 debug!("baichuan '{host}': connect failed: {e:#}; next try in {} s", backoff.as_secs());
                 let _ = event_tx.send(CamEvent::Connected(false));
+                failed = true;
                 retry_at = Some(Instant::now() + backoff);
                 // Capped at a minute: tries happen only when video is wanted,
                 // so this is gentle on the account and a camera back on the
@@ -336,8 +412,8 @@ const IDLE_SIGN_OUT: Duration = Duration::from_secs(15);
 /// preview for IDLE_SIGN_OUT. `first` is the request that caused the sign-in.
 /// Returns why it ended, for the log.
 fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, event_tx: &Sender<CamEvent>, shared: &Shared) -> String {
-    // SD downloads asked for while preview runs wait here until it stops.
-    let mut downloads: std::collections::VecDeque<(i64, i64, SyncSender<Download>)> = Default::default();
+    // SD downloads and listings asked for while preview runs wait here until it stops.
+    let mut downloads: std::collections::VecDeque<SdJob> = Default::default();
     let mut previewing = false;
     // The camera often ignores the first Preview request over UDP, so resend it
     // until media actually flows (`flowing`), the same fix the probe needed.
@@ -360,7 +436,7 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
     while shared.alive.load(Ordering::Relaxed) {
         // No preview: run a waiting SD download now, on this session.
         if !previewing {
-            if let Some((from_ms, to_ms, reply)) = downloads.pop_front() {
+            if let Some(job) = downloads.pop_front() {
                 // The card is indexed by the camera's own clock: read it now.
                 if let Some(off) = session.read_card_clock() {
                     shared.card_offset_s.store(off, Ordering::Relaxed);
@@ -368,16 +444,24 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
                 let card = Some(shared.card_offset_s.load(Ordering::Relaxed))
                     .filter(|&v| v != i64::MIN)
                     .or_else(|| Some(shared.clock_offset_s.load(Ordering::Relaxed)).filter(|&v| v != i64::MIN));
-                let bytes = match (on_camera_clock(from_ms, card), on_camera_clock(to_ms, card)) {
-                    (Some(from), Some(to)) => {
-                        let b = session.download(from, to, DOWNLOAD_LIMIT, &shared.preview_wanted);
-                        info!("baichuan: SD recording {from} - {to} (camera clock): {} KB", b.len() / 1024);
-                        b
+                match job {
+                    SdJob::Download { from_ms, to_ms, limit, max_bytes, reply } => {
+                        let bytes = match (on_camera_clock(from_ms, card), on_camera_clock(to_ms, card)) {
+                            (Some(from), Some(to)) => {
+                                let b = session.download(from, to, limit, max_bytes, &shared.preview_wanted);
+                                info!("baichuan: SD recording {from} - {to} (camera clock): {} KB", b.len() / 1024);
+                                b
+                            }
+                            _ => Vec::new(),
+                        };
+                        let aborted = shared.preview_wanted.load(Ordering::Relaxed);
+                        let _ = reply.send(Download { bytes, card_offset_s: card, aborted });
                     }
-                    _ => Vec::new(),
-                };
-                let aborted = shared.preview_wanted.load(Ordering::Relaxed);
-                let _ = reply.send(Download { bytes, card_offset_s: card, aborted });
+                    SdJob::List { from_ms, to_ms, max_clips, max_asks, reply } => {
+                        let list = list_card(session, shared, card, from_ms, to_ms, max_clips, max_asks);
+                        let _ = reply.send(list);
+                    }
+                }
                 idle_since = Instant::now();
                 continue;
             }
@@ -424,8 +508,13 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
                     frame_tx = None;
                 }
                 // A few at most (one per event); more are refused (reply dropped).
-                Cmd::Download { from_ms, to_ms, reply } if downloads.len() < 4 => downloads.push_back((from_ms, to_ms, reply)),
-                Cmd::Download { .. } => {}
+                Cmd::Download { from_ms, to_ms, limit, max_bytes, reply } if downloads.len() < 4 => {
+                    downloads.push_back(SdJob::Download { from_ms, to_ms, limit, max_bytes, reply })
+                }
+                Cmd::ListClips { from_ms, to_ms, max_clips, max_asks, reply } if downloads.len() < 4 => {
+                    downloads.push_back(SdJob::List { from_ms, to_ms, max_clips, max_asks, reply })
+                }
+                Cmd::Download { .. } | Cmd::ListClips { .. } => {}
                 Cmd::Shutdown => {
                     shared.alive.store(false, Ordering::Relaxed);
                     return "shutting down".into();
@@ -479,6 +568,42 @@ fn serve(session: &mut Session, first: Option<Cmd>, cmd_rx: &Receiver<Cmd>, even
         }
     }
     "shutting down".into()
+}
+
+/// List the card over [from_ms, to_ms] on this session (see `super::cardlist`):
+/// one cmd 143 per recording, only its first header read. `card` is the
+/// camera's clock minus UTC (s); without it, this server's local time.
+fn list_card(session: &mut Session, shared: &Shared, card: Option<i64>, from_ms: i64, to_ms: i64, max_clips: usize, max_asks: u32) -> ClipList {
+    let off = card.or_else(|| {
+        use chrono::{Offset, TimeZone};
+        chrono::Local.timestamp_millis_opt(to_ms).single().map(|t| t.offset().fix().local_minus_utc() as i64)
+    });
+    let Some(off) = off else { return ClipList { why: Some("the camera's clock is not known".into()), ..Default::default() } };
+    let (Some(from), Some(to)) = (on_camera_clock(from_ms, Some(off)), on_camera_clock(to_ms, Some(off))) else {
+        return ClipList { why: Some("the time range cannot be placed".into()), ..Default::default() };
+    };
+    let known = match shared.header_local.load(Ordering::Relaxed) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    let walked = super::cardlist::walk(from, to, off, known, max_clips, max_asks, |a, b| session.first_clip(a, b, &shared.preview_wanted));
+    // None too: a walk that found the settled clock wrong forgets it.
+    shared.header_local.store(walked.header_local.map_or(-1, |l| l as i8), Ordering::Relaxed);
+    let epoch = |t: NaiveDateTime| t.and_utc().timestamp_millis() - off * 1000;
+    info!(
+        "baichuan: card listing {from} - {to} (camera clock): {} recording(s) in {} ask(s){}",
+        walked.clips.len(),
+        walked.asks,
+        walked.why.map(|w| format!(", stopped: {w}")).unwrap_or_default()
+    );
+    ClipList {
+        clips: walked.clips.iter().map(|c| ListedClip { start_ms: epoch(c.start), end_ms: epoch(c.end), sure: c.sure }).collect(),
+        complete: walked.complete,
+        gave_way: walked.gave_way,
+        ran_out: walked.ran_out,
+        why: walked.why.map(String::from),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -799,7 +924,7 @@ impl Session {
     /// early, the stream is ended with an empty cmd 144 and its answer awaited;
     /// without that the camera stops answering anything else on the session.
     /// `abort` cuts it short (live video is wanted: it comes first).
-    fn download(&mut self, from: NaiveDateTime, to: NaiveDateTime, limit: Duration, abort: &AtomicBool) -> Vec<u8> {
+    fn download(&mut self, from: NaiveDateTime, to: NaiveDateTime, limit: Duration, max_bytes: usize, abort: &AtomicBool) -> Vec<u8> {
         let mut out = Vec::new();
         let until = Instant::now() + limit;
         let (mut buf, mut tmp) = (Vec::new(), [0u8; 16384]);
@@ -809,7 +934,7 @@ impl Session {
             if self.send_xml(bc::MSG_DOWNLOAD, 0, &download_xml(from, to)).is_err() {
                 return out;
             }
-            while Instant::now() < until && out.len() < MAX_DOWNLOAD_BYTES && !abort.load(Ordering::Relaxed) {
+            while Instant::now() < until && out.len() < max_bytes && !abort.load(Ordering::Relaxed) {
                 match self.read(&mut tmp) {
                     Ok(0) => return out,
                     Ok(n) => buf.extend_from_slice(&tmp[..n]),
@@ -859,7 +984,97 @@ impl Session {
         out
     }
 
+    /// The first recording in [from, to] (camera local time, within one day):
+    /// ask cmd 143, read only its info header, then end the stream (cmd 144).
+    /// A camera still waking answers 400: asked again a few times, then taken
+    /// as nothing recorded then.
+    fn first_clip(&mut self, from: NaiveDateTime, to: NaiveDateTime, abort: &AtomicBool) -> super::cardlist::Answer {
+        use super::cardlist::Answer;
+        let mut refused = 0;
+        loop {
+            if abort.load(Ordering::Relaxed) {
+                return Answer::GaveWay;
+            }
+            if self.send_xml(bc::MSG_DOWNLOAD, 0, &download_xml(from, to)).is_err() {
+                return Answer::Silent;
+            }
+            let until = Instant::now() + Duration::from_secs(12);
+            let (mut buf, mut tmp, mut media) = (Vec::new(), [0u8; 16384], Vec::<u8>::new());
+            let mut got: Option<Answer> = None;
+            let mut was_refused = false;
+            'read: while Instant::now() < until && !abort.load(Ordering::Relaxed) {
+                match self.read(&mut tmp) {
+                    Ok(0) => return Answer::Silent,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(e) if is_wouldblock(&e) => {}
+                    Err(_) => return Answer::Silent,
+                }
+                loop {
+                    match bc::parse_msg(&buf) {
+                        Ok(Some((used, m))) => {
+                            buf.drain(..used);
+                            if m.header.msg_id == bc::MSG_KEEPALIVE {
+                                let _ = self.ack_keepalive(m.header.channel, m.header.msg_num);
+                                continue;
+                            }
+                            if m.header.msg_id != bc::MSG_DOWNLOAD {
+                                continue;
+                            }
+                            if m.header.status == 400 && media.is_empty() {
+                                was_refused = true;
+                                break 'read;
+                            }
+                            if m.body.is_empty() {
+                                // The end of the recording, with none in it.
+                                return if media.is_empty() { Answer::Nothing } else { Answer::Silent };
+                            }
+                            let (_, pay) = self.decode_msg(&m.header, &m.body);
+                            if pay.is_empty() {
+                                if m.header.status != 200 {
+                                    return Answer::Nothing; // refused
+                                }
+                                continue;
+                            }
+                            // (The header comes first: past this much it is not there.)
+                            if media.len() < 64 * 1024 {
+                                media.extend_from_slice(&pay);
+                            }
+                            if let Some((start, end)) = super::media::first_info_times(&media) {
+                                got = Some(Answer::Clip { start, end });
+                                break 'read;
+                            }
+                            if media.len() >= 64 * 1024 {
+                                break 'read;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            buf.clear();
+                            break;
+                        }
+                    }
+                }
+            }
+            if was_refused {
+                refused += 1;
+                if refused > 3 {
+                    return Answer::Nothing;
+                }
+                std::thread::sleep(Duration::from_millis(1500));
+                continue;
+            }
+            // Stop this stream before the next ask (also after a timeout).
+            self.stop_download();
+            return match got {
+                Some(a) => a,
+                None if abort.load(Ordering::Relaxed) => Answer::GaveWay,
+                None => Answer::Silent,
+            };
+        }
+    }
+
     /// End a cmd 143 stream early: an empty cmd 144, then wait (up to 3 s)
+
     /// for its answer, dropping the stream's tail meanwhile.
     fn stop_download(&mut self) {
         if self.send_modern(bc::MSG_DOWNLOAD_STOP, "", "").is_err() {

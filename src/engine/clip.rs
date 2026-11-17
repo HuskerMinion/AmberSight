@@ -62,7 +62,15 @@ impl Engine {
     }
 }
 
+/// An event imported from a battery camera's card (card_catchup.rs).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CardImport {
+    /// Recent enough to notify as usual (otherwise it sends no alert).
+    pub notify: bool,
+}
+
 pub(super) fn finalize_event(
+
     engine: &Arc<Engine>,
     handle: &Arc<CameraHandle>,
     cfg: &CameraConfig,
@@ -71,12 +79,14 @@ pub(super) fn finalize_event(
     end: i64,
     score: f64,
     thumb_jpeg: Vec<u8>,
+    thumb_ms: Option<i64>,
     ai: super::ai_check::AiOutcome,
     motion_cfg: &crate::config::MotionConfig,
     slug_name: &str,
     seg_dir: &std::path::Path,
     clips_dir: &std::path::Path,
     thumbs_dir: &std::path::Path,
+    card: Option<CardImport>,
 ) {
     // Recordings the index knows are finished, with their exact times
     // (recordings that just closed are indexed on their own thread: give
@@ -117,8 +127,9 @@ pub(super) fn finalize_event(
             slug_name, seg_dir, clips_dir,
         )
     };
-    // Event thumbnail: the highest-motion frame seen during the event.
-    let thumb = save_thumb(&id, &thumb_jpeg, thumbs_dir);
+    // Event thumbnail: the highest-motion frame seen during the event, with
+    // its own time (the event's start when not known).
+    let thumb = save_thumb(&id, &event_picture(cfg, thumb_jpeg, thumb_ms.unwrap_or(start * 1000)), thumbs_dir);
     let mut ev = Event {
         protect: false,
         id: id.clone(),
@@ -138,6 +149,11 @@ pub(super) fn finalize_event(
     let alerts_on = engine.alerts_enabled(cfg);
     // A loud sound alerts on its own: AI looks at pictures, not sounds.
     let mut alert_ok = (!ai.ran || ai.confirmed || ai.sound) && alerts_on;
+    // Caught up later from a battery camera's card: an old event sends nothing.
+    let card_quiet = card.is_some_and(|c| !c.notify) && alert_ok;
+    if card_quiet {
+        alert_ok = false;
+    }
     let by_sound = ai.sound;
     let mut odt_quiet = false;
     // The external detector found nothing it knows (what was detected, not a notification setting).
@@ -231,6 +247,8 @@ pub(super) fn finalize_event(
             "ai_failed"
         } else if alert_ok {
             "sent"
+        } else if card_quiet {
+            "from_card"
         } else if quiet_people {
             "quiet_people"
         } else if known_only {
@@ -262,6 +280,8 @@ pub(super) fn finalize_event(
         if let Err(e) = engine.db.save_ai_review(&id, &cfg.name, start, alert_ok, &review.to_string()) {
             warn!("could not save the AI review for {id}: {e:#}");
         }
+        // Looks that failed on the graphics card are done again later.
+        super::ai_gpu::queue_failed(engine, &id, &cfg.name, start, &ai);
     }
     // Alert actions that pass {clip} need a real file.
     let wants_file = engine
@@ -301,6 +321,11 @@ pub(super) fn finalize_event(
         }
     }
     engine.record_event_as(ev, alert_ok, headline.as_deref());
+    if card.is_some() {
+        if let Err(e) = engine.db.set_event_from_card(&ev_id) {
+            warn!("could not mark event {ev_id} as from the camera's card: {e:#}");
+        }
+    }
     // Also saved to the camera's copy folder (on its own threads, later). By
     // what was detected, never by notification settings: a copy must not be
     // lost to "alerts off", a schedule, a pause or a limit.
@@ -401,6 +426,35 @@ pub(super) fn run_odt(command_line: String) -> Vec<String> {
     }
     labels
 }
+/// An event's picture as it is kept: the camera's privacy masks blacked out
+/// (again: the analysed pictures already are) and marked with their
+/// revision, and the camera's text burned in with the event's start time
+/// (`start_s`). A masked picture that cannot be made is not kept.
+pub(super) fn event_picture(cfg: &CameraConfig, jpeg: Vec<u8>, at_ms: i64) -> Vec<u8> {
+    use crate::privacy;
+    if jpeg.is_empty() {
+        return jpeg;
+    }
+    let rev = privacy::revision(cfg);
+    let made = match privacy::text_filter(cfg, privacy::Clock::At(at_ms)) {
+        Some(text) => privacy::burn(&jpeg, &privacy::chain(&privacy::camera_mask_filter(cfg), &text)).or_else(|e| {
+            tracing::debug!("camera '{}': event picture text: {e:#}", cfg.name);
+            privacy::black_out_jpeg(&jpeg, &cfg.privacy_masks)
+        }),
+        None if !rev.is_empty() => privacy::black_out_jpeg(&jpeg, &cfg.privacy_masks),
+        None => return jpeg,
+    };
+    match made {
+        Ok(j) if rev.is_empty() => j,
+        Ok(j) => privacy::with_mark(&j, &rev),
+        Err(_) if rev.is_empty() => jpeg,
+        Err(e) => {
+            warn!("camera '{}': event picture could not be masked: {e:#}", cfg.name);
+            Vec::new()
+        }
+    }
+}
+
 pub(super) fn save_thumb(id: &str, frame: &[u8], thumbs_dir: &std::path::Path) -> bool {
     if frame.is_empty() {
         return false;
@@ -608,5 +662,15 @@ mod tests {
                 "cam-7-rec-seg000000.mp4",
             ]
         );
+    }
+
+    #[test]
+    fn seconds_and_milliseconds_stamps_both_count() {
+        // ffmpeg-pipeline files before 0.11 have the start in seconds, later ones in ms.
+        assert_eq!(parse_segment_name("office_wyze-1794849248-seg000047.mp4", "office_wyze"), Some(("office_wyze-1794849248-seg", 47)));
+        assert_eq!(parse_segment_name("office_wyze-1794849248123-seg000047.mp4", "office_wyze"), Some(("office_wyze-1794849248123-seg", 47)));
+        let files = vec![f("office_wyze-1794849248-seg000000.mp4", 500), f("office_wyze-1794849300123-seg000000.mp4", 510)];
+        let got = select_segments(&files, "office_wyze", 10, 495, 505, 0, 0, 1000);
+        assert_eq!(got, vec!["office_wyze-1794849248-seg000000.mp4", "office_wyze-1794849300123-seg000000.mp4"]);
     }
 }

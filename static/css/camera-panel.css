@@ -21,6 +21,7 @@
 .cs-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
 .cs-dot.ok { background: var(--ok); }
 .cs-dot.bad { background: var(--fault); }
+.cs-dot.sleep { background: var(--info); }
 .cs-state { font-size: var(--fs-s); color: var(--muted); white-space: nowrap; }
 .cs-state.dirty { color: var(--warn); }
 .cs-state.dirty::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 6px; vertical-align: 1px; }
@@ -135,6 +136,7 @@
 .ze-win { background: var(--surface); color: var(--text); display: flex; flex-direction: column; outline: 0;
   width: min(1240px, calc(100vw - 32px)); height: min(860px, calc(100dvh - 32px)); border: 1px solid var(--line2); border-radius: var(--r2); box-shadow: var(--shadow); overflow: hidden; }
 .ze-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s3); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); flex: none; }
+.ze-acts { display: flex; gap: var(--s2); margin-left: auto; flex: none; }
 .ze-title { margin: 0; font-size: var(--fs-l); font-weight: 600; }
 .ze-title .muted { font-weight: 400; margin-left: 6px; color: var(--muted); }
 .ze-sp { flex: 1; }
@@ -148,6 +150,11 @@
 .ze-seg button:disabled { opacity: .4; cursor: not-allowed; }
 .ze-note { padding: var(--s2) var(--s4); font-size: var(--fs-s); color: var(--text); background: var(--info-soft); border-bottom: 1px solid var(--line); flex: none; }
 .ze-note[hidden], .ze-polybar[hidden] { display: none; }
+.ze-ml { display: flex; flex-direction: column; gap: 4px; }
+.ze-ml p { margin: 0; }
+.ze-mlrow { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.ze-mlk { font-weight: 600; }
+.ze-ml .ze-seg { background: var(--surface); }
 .ze-polybar { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; justify-content: center; max-width: calc(100% - 16px);
   padding: 6px 8px; background: var(--surface); color: var(--text); border: 1px solid var(--line2); border-radius: var(--r2); box-shadow: var(--shadow); font-size: var(--fs-s); }
 .ze-polybar .btn { min-height: 30px; padding: 2px 10px; }

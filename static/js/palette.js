@@ -44,6 +44,7 @@ const SETTINGS = [
   ['system/logs', 'Logs', 'System', 'errors warnings debug'],
   ['system/audit', 'Audit log', 'System', 'who changed sign in history'],
   ['system/backup', 'Backup', 'System', 'restore export settings save settings'],
+  ['system/hardware', 'Hardware decoding', 'System', 'gpu graphics card nvidia nvdec intel quick sync vaapi amd decode processor cpu'],
 ];
 
 function link(h) { return () => { if (location.hash !== h) location.hash = h; }; }

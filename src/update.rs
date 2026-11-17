@@ -1137,7 +1137,7 @@ pub fn before_update_notice(data_dir: &Path) -> String {
         "Before you update:\n\
          - A running AmberSight keeps running the old version until you restart it. The restart means about a minute with no recording and no live view (longer on big sites).\n\
          - Right after the restart, playback and the timeline can be slow for a few minutes while it checks its recordings.\n\
-         - If the update changes the database, a copy of it is saved first, if there is room, in {} (pre-upgrade-...). Going back to the older version afterwards is not recommended: it runs, but warns, and ignores the newer parts.",
+         - If the update changes the database, a copy of it is saved first, if there is room, in {} (pre-upgrade-...). On a big database on a spinning drive that copy can add a minute or more to the restart. Going back to the older version afterwards is not recommended: it runs, but warns, and ignores the newer parts.",
         backups.display()
     )
 }

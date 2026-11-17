@@ -86,7 +86,19 @@ pub fn is_native_kind(kind: &str) -> bool {
     matches!(kind, "continuous" | "triggered" | "sub")
 }
 
-/// A camera's native-format recordings over [from_ms, to_ms], for clips;
+/// Recordings playback, fast playback, filmstrips, time-lapses and event
+/// clips read straight from the files: the native format, and the
+/// main-stream files of the ffmpeg pipeline ("legacy"), which its recorders
+/// write as fragmented MP4 that plays the same way. (A camera on ffmpeg
+/// still gets each event's clip joined into a file of its own, see
+/// `clip.rs`.) A plain MP4 from an older ffmpeg recorder cannot be read
+/// that way: [`sources_q`] leaves those out (the sub stream, where it was
+/// recorded, plays that time instead).
+pub fn is_playable_kind(kind: &str) -> bool {
+    is_native_kind(kind) || kind == "legacy"
+}
+
+/// A camera's recordings that play straight from the files over [from_ms, to_ms], for clips;
 /// the sub stream's are marked low quality (used only where nothing else
 /// was recorded). `resolve` maps an index row to its file.
 pub fn sources(db: &Db, camera_slug: &str, from_ms: i64, to_ms: i64, resolve: impl Fn(&SegmentRow) -> PathBuf) -> anyhow::Result<Vec<SourceSegment>> {
@@ -103,21 +115,24 @@ pub fn sources_q(
     small: bool,
     resolve: impl Fn(&SegmentRow) -> PathBuf,
 ) -> anyhow::Result<Vec<SourceSegment>> {
-    let mut rows: Vec<SegmentRow> = db.segments_overlapping(camera_slug, from_ms, to_ms)?.into_iter().filter(|r| is_native_kind(&r.kind)).collect();
+    let mut rows: Vec<SegmentRow> = db.segments_overlapping(camera_slug, from_ms, to_ms)?.into_iter().filter(|r| is_playable_kind(&r.kind)).collect();
+    // A main-stream file of the ffmpeg pipeline counts only when it can be played from the file
+    // (fragmented, as current recorders write it): a plain MP4 from an older recorder would be
+    // passed over when opened, and must not hide the sub-stream copy of that time below. That
+    // only matters where the sub stream was recorded too, so only those files are looked at
+    // (elsewhere a plain one is passed over when opened, as any unreadable recording is), and
+    // only those that may be from an older recorder (see `Db::fragmented_since_ms`).
+    if rows.iter().any(|r| r.kind == "legacy") && rows.iter().any(|r| r.kind == "sub") {
+        let subs = merged_spans(rows.iter().filter(|r| r.kind == "sub").map(|r| (r.start_ms, r.end_ms)), 0);
+        let since = db.fragmented_since_ms();
+        rows.retain(|r| r.kind != "legacy" || !legacy_needs_a_look(r, since) || !overlaps(&subs, r.start_ms, r.end_ms) || crate::ingest::splice::plays_from_file(&resolve(r)));
+    }
     let small = small && rows.iter().any(|r| r.kind == "sub");
     // The other stream's files are only kept where they fill a gap in the
     // preferred one (each file costs disk seeks; where both were recorded
     // the other copy would never be shown).
     if rows.iter().any(|r| r.kind == "sub") && rows.iter().any(|r| r.kind != "sub") {
-        let mut spans: Vec<(i64, i64)> = rows.iter().filter(|r| (r.kind == "sub") == small).map(|r| (r.start_ms, r.end_ms)).collect();
-        spans.sort_unstable();
-        let mut merged: Vec<(i64, i64)> = Vec::new();
-        for (a, b) in spans {
-            match merged.last_mut() {
-                Some(m) if a <= m.1 + SPAN_GAP_MS => m.1 = m.1.max(b),
-                _ => merged.push((a, b)),
-            }
-        }
+        let merged = merged_spans(rows.iter().filter(|r| (r.kind == "sub") == small).map(|r| (r.start_ms, r.end_ms)), SPAN_GAP_MS);
         let covered = |a: i64, b: i64| {
             let i = merged.partition_point(|m| m.0 <= a);
             i > 0 && merged[i - 1].1 >= b
@@ -134,6 +149,37 @@ pub fn sources_q(
         .collect())
 }
 
+/// `spans` sorted and merged where they touch or are at most `gap` apart.
+fn merged_spans(spans: impl Iterator<Item = (i64, i64)>, gap: i64) -> Vec<(i64, i64)> {
+    let mut spans: Vec<(i64, i64)> = spans.collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (a, b) in spans {
+        match merged.last_mut() {
+            Some(m) if a <= m.1 + gap => m.1 = m.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
+/// Whether [a, b) overlaps one of the sorted, merged `spans`.
+fn overlaps(spans: &[(i64, i64)], a: i64, b: i64) -> bool {
+    // The first span ending after `a`: it overlaps when it starts before `b`.
+    let i = spans.partition_point(|s| s.1 <= a);
+    spans.get(i).is_some_and(|s| s.0 < b)
+}
+
+/// A legacy recording smaller than this is looked at whenever it was made: an ffmpeg recorder
+/// stopped mid-file leaves one with no fragment in it.
+const LEGACY_TINY_BYTES: i64 = 4096;
+
+/// Whether a main-stream recording of the ffmpeg pipeline may not play from the file: one that
+/// started before `fragmented_since` (it may be a plain MP4 from an older recorder), or a tiny one.
+fn legacy_needs_a_look(r: &SegmentRow, fragmented_since: i64) -> bool {
+    r.start_ms < fragmented_since || r.bytes < LEGACY_TINY_BYTES
+}
+
 /// The longest an event can run (s): bounds the lookup for the clip holding a moment.
 const EVENT_MAX_SECS: i64 = 2 * 3600;
 
@@ -148,10 +194,10 @@ pub struct EventClipAt {
 
 /// The saved event clip that shows [from_ms, to_ms] (the one holding
 /// `from_ms`, else the first that starts inside the window), for a window
-/// with no recordings playback can read. A camera on the ffmpeg pipeline
-/// keeps its main-stream recordings in a form playback does not read
-/// ("legacy"): the timeline shows them, and each event's video is joined
-/// into a clip file, so that file is what there is to play. The clip starts
+/// with no recordings playback can read: plain MP4 from an older ffmpeg
+/// recorder (current ones are read straight from the file, see
+/// [`is_playable_kind`]); each event's video was joined into a clip file,
+/// so that file is what there is to play. The clip starts
 /// where the first recording joined into it starts (as the index has it);
 /// with none left, at the event's pre-roll. The end is where the last of
 /// those recordings ends: it can overstate what the clip file really holds
@@ -172,28 +218,7 @@ pub fn event_clip_at(db: &Db, camera: &str, from_ms: i64, to_ms: i64, pre: i64, 
         if !path.is_file() {
             continue;
         }
-        let (a, b) = ((ev.start - pre) * 1000, (ev.end + post) * 1000);
-        // What build_clip joined: the main-stream recordings over the window.
-        let rows: Vec<SegmentRow> = db.segments_overlapping(&cam, a, b)?.into_iter().filter(|r| r.kind != "sub").collect();
-        let (mut start_ms, mut end_ms) = if rows.is_empty() {
-            (a, b)
-        } else {
-            (rows.iter().map(|r| r.start_ms).min().unwrap_or(a), rows.iter().map(|r| r.end_ms).max().unwrap_or(b))
-        };
-        // The rows overlapping the event are not always what was joined: the
-        // index lags when the clip is made, so it can hold a later subset.
-        // The file knows its own length; the start it was joined from is
-        // saved beside it (".start", written by build_clip).
-        let len = mp4_duration_ms(&path);
-        let saved = std::fs::read_to_string(path.with_extension("start")).ok().and_then(|t| t.trim().parse::<i64>().ok());
-        match (saved, len) {
-            (Some(s), Some(d)) => (start_ms, end_ms) = (s, s + d),
-            (Some(s), None) => start_ms = s,
-            // Older clips: no saved start. The joined recordings end where
-            // the rows end; the file's length places its start from there.
-            (None, Some(d)) if d < end_ms - start_ms => start_ms = end_ms - d,
-            _ => {}
-        }
+        let (start_ms, end_ms) = clip_file_span(db, &cam, &path, ev.start, ev.end, pre, post)?;
         if end_ms <= from_ms || start_ms >= to_ms {
             continue;
         }
@@ -208,6 +233,41 @@ pub fn event_clip_at(db: &Db, camera: &str, from_ms: i64, to_ms: i64, pre: i64, 
         };
     }
     Ok(best)
+}
+
+/// The stretch (epoch ms) a saved event clip file shows: the start saved
+/// beside it (".start", written by build_clip) and the file's own length;
+/// for older clips, the main-stream recordings over the event and its rolls
+/// (`ev_start`/`ev_end` s, `pre`/`post` s), placed from their end by the
+/// file's length.
+fn clip_file_span(db: &Db, cam: &str, path: &std::path::Path, ev_start: i64, ev_end: i64, pre: i64, post: i64) -> anyhow::Result<(i64, i64)> {
+    let (a, b) = ((ev_start - pre) * 1000, (ev_end + post) * 1000);
+    // The start saved beside it and the file's own length: all that is
+    // needed (no database).
+    let len = mp4_duration_ms(path);
+    let saved = std::fs::read_to_string(path.with_extension("start")).ok().and_then(|t| t.trim().parse::<i64>().ok());
+    if let (Some(s), Some(d)) = (saved, len) {
+        return Ok((s, s + d));
+    }
+    // What build_clip joined: the main-stream recordings over the window.
+    let rows: Vec<SegmentRow> = db.segments_overlapping(cam, a, b)?.into_iter().filter(|r| r.kind != "sub").collect();
+    let (mut start_ms, end_ms) = if rows.is_empty() {
+        (a, b)
+    } else {
+        (rows.iter().map(|r| r.start_ms).min().unwrap_or(a), rows.iter().map(|r| r.end_ms).max().unwrap_or(b))
+    };
+    // The rows overlapping the event are not always what was joined: the
+    // index lags when the clip is made, so it can hold a later subset.
+    // The file knows its own length; the start it was joined from is
+    // saved beside it (".start", written by build_clip).
+    match (saved, len) {
+        (Some(s), None) => start_ms = s,
+        // Older clips: no saved start. The joined recordings end where
+        // the rows end; the file's length places its start from there.
+        (None, Some(d)) if d < end_ms - start_ms => start_ms = end_ms - d,
+        _ => {}
+    }
+    Ok((start_ms, end_ms))
 }
 
 /// The length (ms) an MP4 file says it has (its mvhd box, found by walking
@@ -271,7 +331,8 @@ pub fn mp4_duration_ms(path: &std::path::Path) -> Option<i64> {
     None
 }
 
-/// Plan a clip over [from_ms, to_ms] from native-format recordings only.
+/// Plan a clip over [from_ms, to_ms] from the recordings that play straight
+/// from the files ([`is_playable_kind`]).
 pub fn window_clip(
     db: &Db,
     camera: &str,
@@ -283,13 +344,15 @@ pub fn window_clip(
 }
 
 /// Decode one frame of `clip` at `offset_s` seconds into a JPEG with ffmpeg,
-/// optionally scaled to `width` pixels wide.
-fn extract_jpeg(clip: VirtualClip, offset_s: f64, width: Option<u32>) -> anyhow::Result<Vec<u8>> {
+/// optionally scaled to `width` pixels wide. `pre`: filters on the picture
+/// as recorded, before the scaling (privacy masks, text; empty: none).
+fn extract_jpeg(clip: VirtualClip, offset_s: f64, width: Option<u32>, pre: &str) -> anyhow::Result<Vec<u8>> {
     use std::process::Stdio;
     let mut cmd = crate::child::ffmpeg();
     cmd.args(["-hide_banner", "-loglevel", "error", "-i", "-"]).args(["-ss", &format!("{offset_s:.3}")]);
-    if let Some(w) = width {
-        cmd.args(["-vf", &format!("scale={w}:-2")]);
+    let vf = crate::privacy::chain(pre, &width.map(|w| format!("scale={w}:-2")).unwrap_or_default());
+    if !vf.is_empty() {
+        cmd.args(["-vf", &vf]);
     }
     let mut child = cmd
         .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", if width.is_some() { "5" } else { "3" }, "-"])
@@ -320,15 +383,17 @@ fn extract_jpeg(clip: VirtualClip, offset_s: f64, width: Option<u32>) -> anyhow:
 }
 
 /// Frame at `at_ms` from a clip that starts at the preceding keyframe.
+/// `vf`: filters for the picture (privacy masks, text; empty: none).
 pub fn still_jpeg(
     db: &Db,
     camera: &str,
     at_ms: i64,
+    vf: &str,
     resolve: impl Fn(&SegmentRow) -> PathBuf,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     let Some(clip) = window_clip(db, camera, at_ms, at_ms + 1000, resolve)? else { return Ok(None) };
     let offset = ((at_ms - clip.start_ms) as f64 / 1000.0).max(0.0);
-    extract_jpeg(clip, offset, None).map(Some)
+    extract_jpeg(clip, offset, None, vf).map(Some)
 }
 
 /// A filmstrip: small pictures of a camera across [from, to] in one JPEG
@@ -370,7 +435,9 @@ pub const MAX_FILMSTRIP_FRAMES: u32 = 240;
 const MAX_FILMSTRIP_STEP_MS: i64 = 2 * 3600 * 1000;
 
 /// One picture every `step_ms` (keyframes only, the sub stream when there
-/// is one), `w` pixels wide (16:9 cells), laid out 12 to a row.
+/// is one), `w` pixels wide (16:9 cells), laid out 12 to a row. `masks`:
+/// the camera's privacy mask filter, `rev` its revision (part of the cache key).
+#[allow(clippy::too_many_arguments)]
 pub fn filmstrip(
     db: &Db,
     camera: &str,
@@ -378,10 +445,11 @@ pub fn filmstrip(
     step_ms: i64,
     n: u32,
     w: u32,
+    (masks, rev): (&str, &str),
     resolve: impl Fn(&SegmentRow) -> PathBuf,
 ) -> anyhow::Result<Option<Filmstrip>> {
     use std::sync::{Mutex, OnceLock};
-    type Key = (String, i64, i64, u32, u32);
+    type Key = (String, i64, i64, u32, u32, String);
     static CACHE: OnceLock<Mutex<std::collections::VecDeque<(Key, std::sync::Arc<Filmstrip>)>>> = OnceLock::new();
     static JOBS: Gate = Gate::new(FILMSTRIP_JOBS);
     let n = n.clamp(1, MAX_FILMSTRIP_FRAMES);
@@ -392,7 +460,7 @@ pub fn filmstrip(
     let from_ms = from_ms.clamp(0, Utc::now().timestamp_millis() + 86_400_000);
     let to_ms = from_ms + step_ms * n as i64;
     let cam = slug(camera);
-    let key = (cam.clone(), from_ms, step_ms, n, w);
+    let key = (cam.clone(), from_ms, step_ms, n, w, rev.to_string());
     let cache = CACHE.get_or_init(Default::default);
     // Spans still being recorded change; only cache what is over.
     let settled = to_ms < Utc::now().timestamp_millis() - 120_000;
@@ -419,7 +487,8 @@ pub fn filmstrip(
     let cols = k.min(12);
     let rows = k.div_ceil(cols);
     yield_to_playback();
-    let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={cols}x{rows}");
+    // (Masks on each picture as recorded, before it is fitted into its cell.)
+    let vf = crate::privacy::chain(masks, &format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={cols}x{rows}"));
     let jpeg = run_ffmpeg_jpeg(clip, &vf)?;
     let f = Filmstrip { jpeg, times, cols, w, h };
     if settled {
@@ -608,13 +677,13 @@ fn run_ffmpeg_reverse(clip: VirtualClip, cancelled: &dyn Fn() -> bool) -> anyhow
 /// while the next decodes). Decoding on the graphics card where it can
 /// (Windows D3D11, which also works for a service), else on the CPU.
 /// Returns how many frames there were.
-fn run_ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
+fn run_ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, masks: &str, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
     #[cfg(windows)]
     {
         use std::sync::atomic::{AtomicBool, Ordering};
         static HW_BROKEN: AtomicBool = AtomicBool::new(false);
         if !HW_BROKEN.load(Ordering::Relaxed) {
-            match ffmpeg_frames(clip.clone(), fps, width, true, each) {
+            match ffmpeg_frames(clip.clone(), fps, width, masks, true, each) {
                 Ok(n) => return Ok(n),
                 // (Only a start that made nothing: frames already handed on
                 // cannot be taken back.)
@@ -626,13 +695,20 @@ fn run_ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, each: &mut dyn FnM
             }
         }
     }
-    ffmpeg_frames(clip, fps, width, false, each)
+    ffmpeg_frames(clip, fps, width, masks, false, each)
 }
 
-fn ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, hw: bool, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
+/// Decode `clip` into `fps` JPEGs a second (at most `width` wide), each handed
+/// to `each` as it comes (an error from `each` stops it and is returned).
+/// `masks`: privacy mask filter blacked out in each (empty: none).
+pub(crate) fn clip_frames(clip: VirtualClip, fps: u32, width: u32, masks: &str, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
+    run_ffmpeg_frames(clip, fps, width, masks, each)
+}
+
+fn ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, masks: &str, hw: bool, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
     use std::io::Read;
     use std::process::Stdio;
-    let vf = format!("fps={fps},scale='min({width},iw)':-2");
+    let vf = crate::privacy::chain(&format!("fps={fps},scale='min({width},iw)':-2"), masks);
     let hwargs: &[&str] = if hw { &["-hwaccel", "d3d11va"] } else { &[] };
     let mut child = crate::child::ffmpeg()
         .args(["-hide_banner", "-loglevel", "error"])
@@ -735,15 +811,18 @@ pub const MAX_PREVIEW_WIDTH: u32 = 640;
 /// at or before `at_ms` (no decoding up to the exact moment), from the sub
 /// stream when it was recorded (much cheaper to decode), `width` wide.
 /// Returns the picture and the keyframe's time.
+/// `masks`: the camera's privacy mask filter, `rev` its revision (part of
+/// the cache key).
 pub fn preview_jpeg(
     db: &Db,
     camera: &str,
     at_ms: i64,
     width: u32,
+    (masks, rev): (&str, &str),
     resolve: impl Fn(&SegmentRow) -> PathBuf,
 ) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
     use std::sync::{Mutex, OnceLock};
-    type Entry = ((String, i64, u32), Vec<u8>);
+    type Entry = ((String, i64, u32, String), Vec<u8>);
     static CACHE: OnceLock<Mutex<std::collections::VecDeque<Entry>>> = OnceLock::new();
     const CACHE_LEN: usize = 400;
     static PREVIEWS: Gate = Gate::new(3);
@@ -752,7 +831,7 @@ pub fn preview_jpeg(
     let cam = slug(camera);
     let segs = sources_q(db, &cam, at_ms, at_ms + 1000, true, resolve)?;
     let Some(clip) = VirtualClip::plan_trick(&segs, at_ms, at_ms + 1000, 1, 100)? else { return Ok(None) };
-    let key = (cam, clip.start_ms, width);
+    let key = (cam, clip.start_ms, width, rev.to_string());
     let cache = CACHE.get_or_init(Default::default);
     if let Some((_, jpeg)) = cache.lock().unwrap().iter().find(|(k, _)| *k == key) {
         return Ok(Some((jpeg.clone(), clip.start_ms)));
@@ -760,7 +839,7 @@ pub fn preview_jpeg(
     let start = clip.start_ms;
     // Each one is an ffmpeg run: a few at a time.
     let Some(_slot) = PREVIEWS.enter(std::time::Duration::from_secs(5)) else { anyhow::bail!("busy") };
-    let jpeg = extract_jpeg(clip, 0.0, Some(width))?;
+    let jpeg = extract_jpeg(clip, 0.0, Some(width), masks)?;
     let mut c = cache.lock().unwrap();
     if c.len() >= CACHE_LEN {
         c.pop_front();
@@ -782,6 +861,31 @@ impl Engine {
             (m.pre_roll as i64, m.post_roll as i64)
         };
         event_clip_at(&self.db, camera, from_ms, to_ms, pre, post, |id| self.clip_file_path(id))
+    }
+
+    /// Where an event's saved clip file starts (epoch ms), for its
+    /// x-clip-start-ms and the clock burned into it: the start saved beside
+    /// it, else from the recordings joined into it, else the event's start
+    /// less the pre-roll. None: no such event. (The server asks
+    /// [`Engine::clip_span_ms`] with the event it has already read.)
+    #[cfg(test)]
+    pub(crate) fn clip_file_start_ms(&self, id: &str) -> Option<i64> {
+        let ev = self.db.get_event(id).ok().flatten()?;
+        Some(self.clip_span_ms(&ev).0)
+    }
+
+    /// The stretch (epoch ms) an event's clip shows: its saved file's (see
+    /// [`Engine::clip_file_start_ms`]), else the recordings over the event
+    /// and its rolls; if those cannot be read, the event less its pre-roll
+    /// to its end plus its post-roll.
+    pub(crate) fn clip_span_ms(&self, ev: &Event) -> (i64, i64) {
+        let (pre, post) = {
+            let m = self.config.lock().unwrap().motion_for(&ev.camera);
+            (m.pre_roll as i64, m.post_roll as i64)
+        };
+        let end = ev.end.max(ev.start);
+        let path = self.clip_file_path(&ev.id);
+        clip_file_span(&self.db, &slug(&ev.camera), &path, ev.start, end, pre, post).unwrap_or(((ev.start - pre) * 1000, (end + post) * 1000))
     }
 
     /// Names of all configured cameras.
@@ -904,12 +1008,16 @@ impl Engine {
     pub fn event_track(&self, id: &str, part: u32) -> anyhow::Result<Option<(u32, TrackFrames)>> {
         use std::sync::{Arc, Mutex, OnceLock};
         type Track = Arc<(u32, TrackFrames)>;
-        type Cache = Mutex<std::collections::VecDeque<((String, u32), Track)>>;
+        type Cache = Mutex<std::collections::VecDeque<((String, u32, String), Track)>>;
         static CACHE: OnceLock<Cache> = OnceLock::new();
         static JOBS: Gate = Gate::new(1);
         const FPS: i64 = 3;
         let cache = CACHE.get_or_init(Default::default);
-        let key = (id.to_string(), part);
+        // (What the AI saw changes with the camera's privacy masks.)
+        let ev_at = self.db.get_event(id)?.map(|e| (e.camera, track_window(e.start, e.end).0));
+        let look = ev_at.as_ref().and_then(|(c, from)| self.picture_cfg_at(c, *from));
+        let masks = look.as_ref().map(crate::privacy::camera_mask_filter).unwrap_or_default();
+        let key = (id.to_string(), part, look.as_ref().map(crate::privacy::revision).unwrap_or_default());
         let cached = || cache.lock().unwrap().iter().find(|(k, _)| *k == key).map(|(_, t)| (t.0, t.1.clone()));
         if let Some(t) = cached() {
             return Ok(Some(t));
@@ -935,7 +1043,7 @@ impl Engine {
         let t0 = std::time::Instant::now();
         let mut out = Vec::new();
         let mut ai_time = std::time::Duration::ZERO;
-        run_ffmpeg_frames(clip, FPS as u32, if tiled.is_some() { 1920 } else { 640 }, &mut |n, jpeg| {
+        run_ffmpeg_frames(clip, FPS as u32, if tiled.is_some() { 1920 } else { 640 }, &masks, &mut |n, jpeg| {
             // The clip starts at the keyframe before the part: only its own frames.
             let t = start + (n as i64 * 1000) / FPS;
             if t < pf || t >= pt {
@@ -1023,16 +1131,51 @@ impl Engine {
         crate::ingest::splice::key_picture(&segs, at_ms)
     }
 
+    /// The camera's settings, for the pictures it makes now (privacy masks,
+    /// text). Pictures of its recordings: [`Engine::picture_cfg_at`].
+    pub(crate) fn picture_cfg(&self, camera: &str) -> Option<CameraConfig> {
+        let set_up = crate::privacy::camera_cfg(&self.config.lock().unwrap(), camera);
+        // A camera removed with masks: the ones it had (see masked::gone_cfg).
+        set_up.or_else(|| crate::transcode::masked::gone_cfg(&self.db, camera))
+    }
+
+    /// The camera's settings for pictures made of its recordings from
+    /// `from_ms` on: also with the masks of cameras removed under its name
+    /// that apply to them (see masked::pictures_cfg).
+    pub(crate) fn picture_cfg_at(&self, camera: &str, from_ms: i64) -> Option<CameraConfig> {
+        let set_up = crate::privacy::camera_cfg(&self.config.lock().unwrap(), camera);
+        crate::transcode::masked::pictures_cfg(&self.db, set_up, camera, from_ms)
+    }
+
+    /// The privacy mask filter and its revision for pictures of the
+    /// camera's recordings from `from_ms` on (both empty without masks).
+    fn masks_of(&self, camera: &str, from_ms: i64) -> (String, String) {
+        self.picture_cfg_at(camera, from_ms).map(|c| (crate::privacy::camera_mask_filter(&c), crate::privacy::revision(&c))).unwrap_or_default()
+    }
+
     pub fn filmstrip(&self, camera: &str, from_ms: i64, step_ms: i64, n: u32, w: u32) -> anyhow::Result<Option<Filmstrip>> {
-        filmstrip(&self.db, camera, from_ms, step_ms, n, w, |r| self.segment_path(r))
+        let (masks, rev) = self.masks_of(camera, from_ms);
+        filmstrip(&self.db, camera, from_ms, step_ms, n, w, (&masks, &rev), |r| self.segment_path(r))
     }
 
     pub fn preview_at(&self, camera: &str, at_ms: i64, width: u32) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
-        preview_jpeg(&self.db, camera, at_ms, width, |r| self.segment_path(r))
+        let (masks, rev) = self.masks_of(camera, at_ms);
+        preview_jpeg(&self.db, camera, at_ms, width, (&masks, &rev), |r| self.segment_path(r))
     }
 
+    /// A full-size picture of the recording at `at_ms`: privacy masks
+    /// blacked out, the camera's text burned in with that moment's time.
     pub fn still_at(&self, camera: &str, at_ms: i64) -> anyhow::Result<Option<Vec<u8>>> {
-        still_jpeg(&self.db, camera, at_ms, |r| self.segment_path(r))
+        let vf = self.picture_cfg_at(camera, at_ms).map(|c| crate::privacy::picture_filter(&c, crate::privacy::Clock::At(at_ms))).unwrap_or_default();
+        still_jpeg(&self.db, camera, at_ms, &vf, |r| self.segment_path(r))
+    }
+
+    /// As [`Engine::still_at`] with the privacy masks only (no text): for AI
+    /// and text reading (plates, faces), which must not see the masked area
+    /// nor read the camera's own text as part of the picture.
+    pub fn still_masked_at(&self, camera: &str, at_ms: i64) -> anyhow::Result<Option<Vec<u8>>> {
+        let vf = self.picture_cfg_at(camera, at_ms).map(|c| crate::privacy::camera_mask_filter(&c)).unwrap_or_default();
+        still_jpeg(&self.db, camera, at_ms, &vf, |r| self.segment_path(r))
     }
 }
 
@@ -1075,6 +1218,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_saved_clip_file_starts_where_it_says() {
+        let name = format!("Clip Start {}", std::process::id());
+        let cfg: crate::config::Config = toml::from_str(&format!("[motion]\npre_roll = 5\n[[cameras]]\nname = \"{name}\"\nurl = \"rtsp://192.0.2.10/s\"\n")).unwrap();
+        let e = Engine::for_test(cfg);
+        let id = format!("{}-7000", slug(&name));
+        e.db.insert_event(&Event { id: id.clone(), camera_id: 0, camera: name.clone(), start: 7000, end: 7010, score: 1.0, clip: None, thumb: None, objects: vec![], protect: false }).unwrap();
+        let path = e.clip_file_path(&id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"x").unwrap();
+        // No saved start, no recordings, no length: the event's start less its pre-roll.
+        assert_eq!(e.clip_file_start_ms(&id), Some(6_995_000));
+        // The start saved beside it.
+        std::fs::write(path.with_extension("start"), "7002500").unwrap();
+        assert_eq!(e.clip_file_start_ms(&id), Some(7_002_500));
+        assert_eq!(e.clip_file_start_ms("nothing-1"), None);
+        let _ = std::fs::remove_file(path.with_extension("start"));
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// ftyp, mdat, then moov/mvhd saying `ms` (timescale 1000): where ffmpeg puts them.
     fn mp4_with_duration(ms: u32) -> Vec<u8> {
         let mut v = Vec::new();
@@ -1104,8 +1267,9 @@ mod tests {
         let db = Db::open(&dir.join("t.db")).unwrap();
         let row = |path: &str, a: i64, b: i64, kind: &str| SegmentRow { path: path.into(), start_ms: a, end_ms: b, bytes: 1, video_frames: 1, kind: kind.into(), folder: String::new() };
         let ev = |id: &str, start: i64, end: i64| Event { id: id.into(), camera_id: 0, camera: "Garage Temp".into(), start, end, score: 1.0, clip: Some(format!("/data/clips/{id}.mp4")), thumb: None, objects: vec![], protect: false };
-        // ffmpeg's motion-only recordings around two events (shown on the
-        // timeline, not read by playback), and a sub-stream file.
+        // ffmpeg's motion-only recordings around two events, in a form playback
+        // cannot read (here: no file at all; on a site, plain MP4 from an older
+        // ffmpeg recorder), and a sub-stream file.
         db.insert_segment("garage_temp", &row("a1.mp4", 995_000, 1_005_000, "legacy")).unwrap();
         db.insert_segment("garage_temp", &row("a2.mp4", 1_005_000, 1_015_000, "legacy")).unwrap();
         db.insert_segment("garage_temp", &row("b1.mp4", 2_000_000, 2_010_000, "legacy")).unwrap();
@@ -1174,6 +1338,142 @@ mod tests {
         );
     }
 
+    /// Recordings in `dir/<sub>` from one writer (3 s each over 10 s), as index rows of `kind`.
+    fn write_recordings(dir: &std::path::Path, sub: &str, kind: &str) -> Vec<SegmentRow> {
+        let mut entry = vec![0, 0, 0, 16];
+        entry.extend_from_slice(b"avc1");
+        entry.extend_from_slice(&[0; 8]);
+        let track = TrackInfo { kind: TrackKind::Video, timescale: 90000, sample_entry: entry, width: 64, height: 48 };
+        let mut w = SegmentWriter::new(&dir.join(sub), "front_door-1", vec![track], 3).unwrap();
+        for i in 0..100i64 {
+            w.push_video(i * 9000, vec![(i % 251) as u8; 40], i % 10 == 0).unwrap();
+        }
+        w.finish().unwrap();
+        w.take_closed()
+            .iter()
+            .map(|s| SegmentRow {
+                path: format!("{sub}/{}", s.path.file_name().unwrap().to_string_lossy()),
+                start_ms: s.start_ms,
+                end_ms: s.end_ms,
+                bytes: std::fs::metadata(&s.path).unwrap().len() as i64,
+                video_frames: 0,
+                kind: kind.into(),
+                folder: String::new(),
+            })
+            .collect()
+    }
+
+    /// A day of short main-stream recordings of the ffmpeg pipeline (a filmstrip or time-lapse
+    /// asks for that): with no sub stream recorded, no file is looked at; with one, only the
+    /// files from before the database's fragmented mark (and tiny ones) are. Timing note: before,
+    /// each of these calls cost a stat per row and an open plus a few reads per file not yet
+    /// known (17,280 files a day at 5 s segments; minutes on a cold hard disk); now the rows
+    /// alone (a few ms for a day).
+    #[test]
+    fn a_day_of_legacy_recordings_is_not_opened_to_list_it() {
+        let dir = std::env::temp_dir().join(format!("amber-legacyday-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        let day0 = 1_790_000_000_000i64;
+        let row = |path: String, a: i64, b: i64, kind: &str, bytes: i64| SegmentRow { path, start_ms: a, end_ms: b, bytes, video_frames: 1, kind: kind.into(), folder: String::new() };
+        let n = 17_280i64;
+        for i in 0..n {
+            db.insert_segment("yard", &row(format!("main/yard-seg{i:06}.mp4"), day0 + i * 5000, day0 + (i + 1) * 5000, "legacy", 900_000)).unwrap();
+        }
+        let resolve = |r: &SegmentRow| dir.join(&r.path);
+        let looks = || crate::ingest::splice::LOOKS.with(|c| c.get());
+        let before = looks();
+        let t = std::time::Instant::now();
+        let segs = sources_q(&db, "yard", day0, day0 + 86_400_000, false, resolve).unwrap();
+        let took = t.elapsed();
+        assert_eq!(segs.len(), n as usize);
+        assert_eq!(looks() - before, 0, "no file looked at");
+        eprintln!("a day of {n} legacy recordings listed in {took:?}");
+        // Sub-stream files over an hour of it: the main-stream files there are from before the
+        // mark (this database was made just now), so those, and only those, are looked at; they
+        // are not on the disk, so the sub stream plays there.
+        let hour = 720;
+        for i in 0..hour {
+            db.insert_segment("yard", &row(format!("sub/yard-sub-seg{i:06}.mp4"), day0 + i * 5000, day0 + (i + 1) * 5000, "sub", 90_000)).unwrap();
+        }
+        let before = looks();
+        let segs = sources_q(&db, "yard", day0, day0 + 86_400_000, false, resolve).unwrap();
+        assert_eq!(looks() - before, hour as usize);
+        assert_eq!(segs.iter().filter(|s| s.sub).count(), hour as usize);
+        assert_eq!(segs.iter().filter(|s| !s.sub).count(), (n - hour) as usize);
+        // Recorded after the mark (by a version whose recorders write fragmented MP4): not looked at.
+        db.set_fragmented_since_ms(day0);
+        let before = looks();
+        let segs = sources_q(&db, "yard", day0, day0 + 86_400_000, false, resolve).unwrap();
+        assert_eq!(looks() - before, 0);
+        assert!(segs.iter().all(|s| !s.sub), "the main stream wins where both were recorded");
+        // A tiny one is looked at whenever it was made (a recorder stopped mid-file).
+        db.insert_segment("yard", &row("main/yard-tiny.mp4".into(), day0 + 1000, day0 + 2000, "legacy", 28)).unwrap();
+        let before = looks();
+        sources_q(&db, "yard", day0, day0 + 86_400_000, false, resolve).unwrap();
+        assert_eq!(looks() - before, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A closed recording's answer is kept without looking at the file again; one still being
+    /// written is looked at (its size and time) each time.
+    #[test]
+    fn a_closed_recordings_answer_is_kept_without_a_look() {
+        let dir = std::env::temp_dir().join(format!("amber-settled-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rows = write_recordings(&dir, "main", "legacy");
+        let (old, new) = (dir.join(&rows[0].path), dir.join(&rows[1].path));
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
+        let looks = || crate::ingest::splice::LOOKS.with(|c| c.get());
+        let before = looks();
+        for _ in 0..5 {
+            assert!(crate::ingest::splice::plays_from_file(&old));
+            assert!(crate::ingest::splice::plays_from_file(&new));
+        }
+        assert_eq!(looks() - before, 1 + 5, "the closed one once, the new one every time");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An ffmpeg-pipeline camera with plain MP4 main-stream files (from an older recorder) and
+    /// sub-stream files over the same time: playback plays the sub stream there (the plain
+    /// files cannot be read from the file and must not hide it). Fragmented main-stream files
+    /// still win over the sub stream.
+    #[test]
+    fn plain_mp4_main_stream_files_leave_the_time_to_the_sub_stream() {
+        let dir = std::env::temp_dir().join(format!("amber-plainmp4-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("main")).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let subs = write_recordings(&dir, "sub", "sub");
+        let (t0, t1) = (subs[0].start_ms, subs.last().unwrap().end_ms);
+        for r in &subs {
+            db.insert_segment("front_door", r).unwrap();
+        }
+        // One plain MP4 (ftyp, mdat, moov) over the whole span.
+        std::fs::write(dir.join("main/plain.mp4"), mp4_with_duration((t1 - t0) as u32)).unwrap();
+        let plain = SegmentRow { path: "main/plain.mp4".into(), start_ms: t0, end_ms: t1, bytes: 1, video_frames: 1, kind: "legacy".into(), folder: String::new() };
+        db.insert_segment("front_door", &plain).unwrap();
+        let resolve = |r: &SegmentRow| dir.join(&r.path);
+        assert!(!crate::ingest::splice::plays_from_file(&dir.join("main/plain.mp4")));
+        assert!(crate::ingest::splice::plays_from_file(&resolve(&subs[0])));
+        let segs = sources_q(&db, "front_door", t0 + 2500, t0 + 6200, false, resolve).unwrap();
+        assert!(!segs.is_empty() && segs.iter().all(|s| s.sub), "the sub stream's files: {segs:?}");
+        let clip = window_clip(&db, "Front Door", t0 + 2500, t0 + 6200, resolve).unwrap().expect("the sub stream plays");
+        assert!(clip.sub);
+        assert_eq!((clip.start_ms - t0, clip.end_ms - t0), (2000, 7000));
+        // Fragmented main-stream files (current ffmpeg recorders) over the same time: those play.
+        db.delete_segment("main/plain.mp4").unwrap();
+        for r in write_recordings(&dir, "main", "legacy") {
+            db.insert_segment("front_door", &r).unwrap();
+        }
+        let segs = sources_q(&db, "front_door", t0 + 2500, t0 + 6200, false, resolve).unwrap();
+        assert!(!segs.is_empty() && segs.iter().all(|s| !s.sub), "the main stream's files: {segs:?}");
+        assert!(!window_clip(&db, "Front Door", t0 + 2500, t0 + 6200, resolve).unwrap().unwrap().sub);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn window_across_two_segments_is_keyframe_aligned() {
         let dir = std::env::temp_dir().join(format!("amber-playback-test-{}", std::process::id()));
@@ -1224,6 +1524,48 @@ mod tests {
         assert_eq!(clip.end_ms - t0, 7000);
         assert!(window_clip(&db, "Front Door", t0 + 90_000, t0 + 95_000, resolve).unwrap().is_none());
         assert!(window_clip(&db, "Other", t0, t0 + 5000, resolve).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ffmpeg pipeline re-encoding a steady frame rate (burned-in text or
+    /// privacy masks) writes one sample duration per fragment (tfhd), none per
+    /// sample. Those fragments last their time: a still inside one is found,
+    /// and a clip starts at the keyframe before the moment asked for and ends
+    /// where its last fragment does.
+    #[test]
+    fn ffmpeg_recordings_with_a_steady_frame_rate_have_stills_anywhere() {
+        if !crate::child::ffmpeg().arg("-version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no ffmpeg here: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("amber-cfr-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("seg")).unwrap();
+        // As the recorder writes them: 6 s files, a keyframe (and fragment) every 2 s.
+        let out = crate::child::ffmpeg()
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "12"])
+            .args(["-c:v", "libx264", "-g", "20", "-pix_fmt", "yuv420p", "-f", "segment", "-segment_time", "6", "-reset_timestamps", "1"])
+            .args(["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"])
+            .arg(dir.join("seg/cam-seg%06d.mp4"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let t0 = 1_700_000_000_000i64;
+        for i in 0..2i64 {
+            let path = format!("seg/cam-seg{i:06}.mp4");
+            let bytes = std::fs::metadata(dir.join(&path)).unwrap().len() as i64;
+            db.insert_scanned_segment("cam", &SegmentRow { path, start_ms: t0 + i * 6000, end_ms: t0 + (i + 1) * 6000, bytes, video_frames: 0, kind: "legacy".into(), folder: String::new() }).unwrap();
+        }
+        let resolve = |r: &SegmentRow| dir.join(&r.path);
+        // A moment inside a fragment (none starts within the second after it).
+        for at in [t0 + 500, t0 + 2_500, t0 + 7_000, t0 + 11_200] {
+            let clip = window_clip(&db, "Cam", at, at + 1000, resolve).unwrap().unwrap_or_else(|| panic!("a clip at {}", at - t0));
+            assert_eq!(clip.start_ms, t0 + (at - t0) / 2000 * 2000, "starts at the keyframe before");
+            assert!(still_jpeg(&db, "Cam", at, "", resolve).unwrap().is_some(), "a still at {}", at - t0);
+        }
+        let clip = window_clip(&db, "Cam", t0 + 3_000, t0 + 60_000, resolve).unwrap().unwrap();
+        assert_eq!((clip.start_ms - t0, clip.end_ms - t0), (2_000, 12_000));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

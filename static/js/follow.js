@@ -4,6 +4,7 @@
 
 import { state, api, esc, openDlg, toast, enc } from './core.js';
 import { showTab } from './nav.js';
+import { maskRevQ } from './masks.js';
 
 const KEY = 'ambs.followMin';
 const WINDOWS = [[120, '2 minutes'], [300, '5 minutes'], [600, '10 minutes'], [1800, '30 minutes'], [3600, '1 hour'], [10800, '3 hours']];
@@ -36,7 +37,7 @@ function playAt(camName, ms, dlg) {
 
 function picHtml(s) {
   const b = s.box;
-  return '<span class="fw-pic"><img loading="lazy" src="/api/smart/pic/' + s.pic + '" alt="">' +
+  return '<span class="fw-pic"><img loading="lazy" src="/api/smart/pic/' + s.pic + maskRevQ(state.cams.find(c => c.name === s.camera), '?') + '" alt="">' +
     (b ? '<span class="smq-box" style="left:' + (b[0] * 100) + '%;top:' + (b[1] * 100) + '%;width:' + (b[2] * 100) + '%;height:' + (b[3] * 100) + '%"></span>' : '') + '</span>';
 }
 

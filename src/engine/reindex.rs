@@ -4,6 +4,8 @@
 //! Recordings closed since are indexed as they close. Works one file at a
 //! time and waits while anyone is playing recordings. Once a pass has
 //! finished, later starts check only the recordings indexed since.
+//! Entries saved in an older layout format (see splice::index::FORMAT) are
+//! read again afterwards, the same gentle way.
 
 use super::*;
 use std::time::Duration;
@@ -42,6 +44,110 @@ pub fn reindex_loop(engine: Arc<Engine>) {
     thread::sleep(Duration::from_secs(180));
     PASS_RUNNING.store(true, Ordering::Relaxed);
     let _running = PassGuard;
+    fill_pass(&engine);
+    upgrade_pass(wait_for_quiet);
+}
+
+/// Bring the entries saved in an older layout format up to date (see
+/// splice::index::FORMAT). The built-in recorder's need nothing (their
+/// headers are marked once, in the small header table); only entries with
+/// another header (ffmpeg's: they count as not indexed, playback reads such
+/// a file itself and stills fall back to its first keyframe) are read
+/// again. A start after a finished pass, or with no such header at all,
+/// reads nothing of the layouts. Otherwise the entries are looked through
+/// once on a read-only connection (playback and indexing do not wait for
+/// it), in steps, waiting while anyone plays recordings (`quiet`), and the
+/// files found are read again one at a time the same way. An entry whose
+/// file is gone (its folder is there, the file not) or damaged is dropped;
+/// one that cannot be reached now (a drive offline, a share, a lock) is
+/// kept and looked at again at the next start. Gives what was done.
+pub(crate) fn upgrade_pass(quiet: impl Fn()) -> Upgraded {
+    let mut n = Upgraded::default();
+    let crate::ingest::splice::UpgradePlan::Scan(others) = crate::ingest::splice::upgrade_plan() else { return n };
+    info!("layout index: looking for recordings saved in an older format");
+    let t0 = std::time::Instant::now();
+    let mut after = String::new();
+    loop {
+        quiet();
+        let (again, last) = match crate::ingest::splice::upgrade_chunk(&after, UPGRADE_CHUNK, &others) {
+            Ok(r) => r,
+            Err(e) => {
+                // (Not noted as done: looked at again at the next start.)
+                warn!("layout index: could not look through the saved layouts: {e}");
+                return n;
+            }
+        };
+        for p in &again {
+            quiet();
+            let path = std::path::Path::new(p);
+            match crate::ingest::splice::index_recording(path) {
+                Ok(true) => n.redone += 1,
+                Ok(false) => n.had += 1,
+                Err(e) if unreachable(&e, path) => n.kept += 1,
+                Err(_) => {
+                    // Removed (its folder is there, the file is not), or damaged.
+                    crate::ingest::splice::forget(path);
+                    n.dropped += 1;
+                }
+            }
+            thread::sleep(Duration::from_millis(UPGRADE_PAUSE_MS));
+        }
+        let Some(last) = last else { break };
+        after = last;
+        thread::sleep(Duration::from_millis(UPGRADE_PAUSE_MS));
+    }
+    // Done even with entries out of reach kept: they count as not indexed
+    // (another's header, the first format), so each is read again when it
+    // is played; the whole index is not looked through at every start.
+    crate::ingest::splice::upgrade_done();
+    info!(
+        "layout index: {} older-format recordings read again, {} were already, {} gone or damaged, {} out of reach for now, in {} min",
+        n.redone,
+        n.had,
+        n.dropped,
+        n.kept,
+        t0.elapsed().as_secs() / 60
+    );
+    n
+}
+
+/// What the format upgrade did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Upgraded {
+    /// Files read again.
+    pub redone: u64,
+    /// Already current by the time they came up (played meanwhile).
+    pub had: u64,
+    /// Entries dropped: the file is gone, or damaged.
+    pub dropped: u64,
+    /// Entries kept as they are: the file could not be reached now.
+    pub kept: u64,
+}
+
+/// Whether reading `path` failed because it cannot be reached now (rather
+/// than being gone or damaged): an input/output error other than "not
+/// found", or "not found" while its folder is missing too (an archive drive
+/// or share that is offline).
+fn unreachable(e: &anyhow::Error, path: &std::path::Path) -> bool {
+    let Some(io) = e.chain().find_map(|c| c.downcast_ref::<std::io::Error>()) else { return false };
+    match io.kind() {
+        // (Shorter than its boxes say: damaged.)
+        std::io::ErrorKind::UnexpectedEof => return false,
+        std::io::ErrorKind::NotFound => {}
+        _ => return true,
+    }
+    !path.parent().is_some_and(|d| d.is_dir())
+}
+
+/// Entries looked through per step of the upgrade scan.
+const UPGRADE_CHUNK: usize = 2000;
+
+/// The pause between two files the format upgrade reads again, and between
+/// two steps of its scan.
+const UPGRADE_PAUSE_MS: u64 = if cfg!(test) { 0 } else { 25 };
+
+/// Index the recordings made before the index existed (see the module).
+fn fill_pass(engine: &Arc<Engine>) {
     let t0 = std::time::Instant::now();
     // Recordings closed from now on are indexed as they close; this pass
     // covers everything up to here.
@@ -84,7 +190,7 @@ pub fn reindex_loop(engine: Arc<Engine>) {
                 let Some(&(last, _)) = rows.last() else { break };
                 after = last;
                 for (_, row) in rows {
-                    check(&engine, &row, &mut n);
+                    check(engine, &row, &mut n);
                 }
             }
         }
@@ -106,7 +212,7 @@ pub fn reindex_loop(engine: Arc<Engine>) {
                 for (id, row) in rows {
                     before_ms = row.start_ms;
                     before_id = id;
-                    check(&engine, &row, &mut n);
+                    check(engine, &row, &mut n);
                 }
             }
         }
@@ -151,6 +257,24 @@ fn check(engine: &Arc<Engine>, row: &crate::db::SegmentRow, n: &mut Counts) {
 #[cfg(test)]
 mod tests {
     use super::index_nearly_full;
+
+    /// An entry is dropped only when its file is gone from a folder that is
+    /// there, or the file is damaged; a drive or share out of reach keeps it.
+    #[test]
+    fn only_gone_or_damaged_files_lose_their_entry() {
+        let dir = std::env::temp_dir().join(format!("amber-reindex-reach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let io = |k: std::io::ErrorKind| anyhow::Error::from(std::io::Error::from(k)).context("open the file");
+        let gone = dir.join("gone.mp4");
+        assert!(!super::unreachable(&io(std::io::ErrorKind::NotFound), &gone), "its folder is there: gone");
+        let offline = dir.join("no-such-drive").join("x.mp4");
+        assert!(super::unreachable(&io(std::io::ErrorKind::NotFound), &offline), "its folder is missing too: out of reach");
+        assert!(super::unreachable(&io(std::io::ErrorKind::PermissionDenied), &gone), "locked");
+        assert!(super::unreachable(&io(std::io::ErrorKind::TimedOut), &gone), "a share");
+        assert!(!super::unreachable(&anyhow::anyhow!("moof without mfhd"), &gone), "damaged");
+        assert!(!super::unreachable(&io(std::io::ErrorKind::UnexpectedEof), &gone), "cut short: damaged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_nearly_full_index_is_not_checked_again() {

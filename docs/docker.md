@@ -121,7 +121,7 @@ host networking that setting is the host's own.
 ## Hardware video decode
 
 Pass `/dev/dri` through (`--device /dev/dri`) for Intel or AMD hardware
-decode (VAAPI); the container joins the groups that own those devices by
+decode (VAAPI, and Intel Quick Sync, whose runtime the image includes); the container joins the groups that own those devices by
 itself. Motion detection then decodes on the graphics card by itself: at
 start AmberSight test-decodes a short H.264 and H.265 sample on each render
 node and uses the first that decodes it right (Status > Cameras shows GPU or
@@ -207,6 +207,27 @@ and `docker compose -f docker/compose.yaml up -d --build`.
 `:latest` and `:cuda` always point at the newest release; use a version tag
 (e.g. `ghcr.io/huskerminion/ambersight:0.11.0`) to stay on one release and
 update when you choose. Settings and recordings stay in the mounted folders.
+
+## Cameras fail with "Resource temporarily unavailable"
+
+A camera note like `the system would not start another process or thread
+(Resource temporarily unavailable)`, or ffmpeg lines such as
+`pthread_create() failed` or `Error while opening decoder: Resource
+temporarily unavailable` (followed by `error code: -22`), mean the container
+ran out of processes and threads. A container started with a low
+`--pids-limit` (or `pids_limit:` in Compose) allows only that many in all;
+a camera that AmberSight re-encodes (an overlay, privacy masks, or
+`ingest = "ffmpeg"`) runs an ffmpeg with a dozen or more threads, and 4K
+cameras need the most.
+
+- Raise or remove the limit: `--pids-limit -1` (no limit), or a few hundred
+  per 4K camera; `pids_limit: -1` in Compose. On Unraid, remove `--pids-limit`
+  from Extra Parameters.
+- Or move the camera back to the built-in reader (turn off the overlay,
+  remove the privacy masks and any `ingest = "ffmpeg"` line), which needs no
+  ffmpeg process per camera. The camera report says why a camera is on ffmpeg.
+- The camera report (Network section of the camera's settings) shows the
+  container's limit and how much of it is in use under **This server**.
 
 ## Restarts and stopping
 

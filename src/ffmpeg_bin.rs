@@ -145,6 +145,44 @@ pub fn rtsp_timeout_args(micros: u64) -> [String; 2] {
     [rtsp_timeout_flag(major()).to_string(), micros.to_string()]
 }
 
+/// The major and minor version in an ffmpeg version string: "4.4.2-0ubuntu0.22.04.1"
+/// gives (4, 4), "n7.1" (7, 1), "8.0.1-3ubuntu2" (8, 0), "7" (7, 0); git
+/// builds ("N-112345-g...", "git-2024-...") give None (new).
+pub fn major_minor_of(v: &str) -> Option<(u32, u32)> {
+    let major = major_of(v).or_else(|| {
+        // (A bare "7".)
+        let v = v.strip_prefix('n').unwrap_or(v);
+        (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit())).then(|| v.parse().ok()).flatten()
+    })?;
+    let v = v.strip_prefix('n').unwrap_or(v);
+    let rest = v.split_once('.').map(|(_, r)| r).unwrap_or("");
+    let minor: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    Some((major, minor.parse().unwrap_or(0)))
+}
+
+/// Whether the ffmpeg of this version string knows `-fps_mode` (5.1 and
+/// newer; ffmpeg 9 no longer knows the older `-vsync`). Unknown or a git
+/// build: taken as new.
+pub fn fps_mode_ok_for(version: Option<&str>) -> bool {
+    version.and_then(major_minor_of).is_none_or(|v| v >= (5, 1))
+}
+
+/// The arguments that keep every frame's own time (no frames dropped or
+/// doubled) for an ffmpeg of this version string: `-fps_mode passthrough`,
+/// or `-vsync passthrough` before 5.1 (Ubuntu 22.04 has 4.4, Debian 11 4.3).
+pub fn passthrough_args_for(version: Option<&str>) -> [&'static str; 2] {
+    if fps_mode_ok_for(version) {
+        ["-fps_mode", "passthrough"]
+    } else {
+        ["-vsync", "passthrough"]
+    }
+}
+
+/// [`passthrough_args_for`] the ffmpeg in use.
+pub fn passthrough_args() -> [&'static str; 2] {
+    passthrough_args_for(STATE.lock().unwrap().version.as_deref())
+}
+
 /// A Status note when the ffmpeg in use is older than 5.
 pub fn old_note() -> Option<String> {
     let v = STATE.lock().unwrap().version.clone()?;
@@ -458,6 +496,33 @@ mod tests {
     fn sha(data: &[u8]) -> String {
         use sha2::{Digest, Sha256};
         Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn frame_times_are_kept_with_the_option_this_ffmpeg_knows() {
+        for (v, want) in [
+            ("4.4.2-0ubuntu0.22.04.1", Some((4, 4))),
+            ("4.3.8-0+deb11u1", Some((4, 3))),
+            ("n4.4.2", Some((4, 4))),
+            ("5.0.3", Some((5, 0))),
+            ("5.1.6-0+deb12u1", Some((5, 1))),
+            ("n7.1", Some((7, 1))),
+            ("8.0.1-3ubuntu2", Some((8, 0))),
+            ("8.1.2-essentials_build-www.gyan.dev", Some((8, 1))),
+            ("7", Some((7, 0))),
+            ("N-112345-gabcdef0123", None),
+            ("git-2024-05-01-abc", None),
+            ("?", None),
+        ] {
+            assert_eq!(major_minor_of(v), want, "{v}");
+        }
+        for v in ["4.4.2-0ubuntu0.22.04.1", "4.3.8-0+deb11u1", "5.0.3", "n4.4.2"] {
+            assert_eq!(passthrough_args_for(Some(v)), ["-vsync", "passthrough"], "{v}");
+        }
+        for v in ["5.1.6-0+deb12u1", "n7.1", "8.0.1-3ubuntu2", "N-112345-gabcdef0123", "9.0"] {
+            assert_eq!(passthrough_args_for(Some(v)), ["-fps_mode", "passthrough"], "{v}");
+        }
+        assert_eq!(passthrough_args_for(None), ["-fps_mode", "passthrough"], "not known yet: new");
     }
 
     #[test]

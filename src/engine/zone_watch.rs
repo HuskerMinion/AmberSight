@@ -151,7 +151,8 @@ fn announce(engine: &Engine, handle: &CameraHandle, cfg: &CameraConfig, z: &Name
     };
     let id = format!("{}-{}-zone{}", slug(&cfg.name), start, seq);
     let thumb_path = engine.data_dir.join("thumbs").join(format!("{id}.jpg"));
-    let thumb = !jpeg.is_empty() && std::fs::write(&thumb_path, jpeg).is_ok();
+    let pic = super::clip::event_picture(cfg, jpeg.to_vec(), at * 1000);
+    let thumb = !pic.is_empty() && std::fs::write(&thumb_path, pic).is_ok();
     let tag = hit.tag();
     info!("camera '{}': {tag} ({})", cfg.name, hit.label);
     if let Some(m) = engine.mqtt.get() {

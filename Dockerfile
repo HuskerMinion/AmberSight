@@ -17,11 +17,12 @@ RUN RUSTFLAGS='--remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo=~
 FROM debian:trixie-slim
 # ffmpeg: recording, clips and cameras the built-in reader can't take.
 # Debian's ffmpeg decodes H.264 and H.265. Hardware decode (VAAPI/QSV) needs
-# the drivers below and /dev/dri passed in.
+# the drivers below and /dev/dri passed in; libmfx-gen1.2 is Intel's Quick
+# Sync runtime (Gen12+), without which QSV fails and Intel falls back to VAAPI.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata tini mesa-va-drivers fonts-dejavu-core \
  && if [ "$(dpkg --print-architecture)" = amd64 ]; then \
-      apt-get install -y --no-install-recommends intel-media-va-driver; fi \
+      apt-get install -y --no-install-recommends intel-media-va-driver libmfx-gen1.2; fi \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 1000 --user-group --home-dir /data --no-create-home ambersight \
  && mkdir -p /config /data \

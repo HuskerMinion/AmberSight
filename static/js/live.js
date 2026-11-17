@@ -1,7 +1,7 @@
 // live.js - Live tab: grid with paging/layouts/cycle, full screen (swipe / arrows), motion boxes,
 // zone drawing. The players (MSE video, JPEG pictures) are in player.js.
 
-import { savedToast, $, state, bus, api, refreshCameras, esc, msgDlg, toast, camFromId, ic, downloadUrl, bigQ, lowQ, openDlg, overlayOpen, backLayer, overlaysChanged, can } from './core.js';
+import { savedToast, $, state, bus, api, refreshCameras, esc, msgDlg, toast, camFromId, ic, downloadUrl, bigQ, openDlg, overlayOpen, backLayer, overlaysChanged, can } from './core.js';
 import { isActive } from './nav.js';
 import { tvOn, tvOne, enterTv, setOne, onTvChange } from './fullscreen.js';
 import * as Layouts from './layouts.js';
@@ -14,6 +14,7 @@ import { plan, BIG, STYLES } from './viewfit.js';
 import { mark } from './diag.js';
 import { isPhone, device } from './device.js';
 import { startLive, startJpeg, markFirstFrame } from './player.js';
+import { watchMasks, refreshMasks, paintMasks, fitRect } from './masks.js';
 export { startLive, startJpeg, noSound } from './player.js';
 import { openCameraDialog, setCameraEnabled, pauseAlertsDlg, resumeAlerts, pausedText, rebootDlg, canReboot } from './cameras.js';
 
@@ -244,7 +245,7 @@ let order = [];          // camera ids of the whole ordered list (all pages), us
 let cycleTimer = null;
 
 export function stopTiles() {
-  for (const id in liveTiles) { const t = liveTiles[id]; if (t.spk) t.spk.destroy(); if (t.zoom) t.zoom.destroy(); if (t.player) t.player.stop(); clearTimeout(t.sleepTimer); }
+  for (const id in liveTiles) { const t = liveTiles[id]; if (t.masks) t.masks.stop(); if (t.spk) t.spk.destroy(); if (t.zoom) t.zoom.destroy(); if (t.player) t.player.stop(); clearTimeout(t.sleepTimer); }
   liveTiles = {}; liveSig = null;
 }
 
@@ -259,7 +260,9 @@ const OVL_POS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
 export function overlayPos(c) { return OVL_POS.includes(c.overlay_pos) ? c.overlay_pos : 'bottom-left'; }
 // Fill-ins: {name} {short} {site} {date} {time}, and {v:NAME} for a named
 // overlay variable an automation pushes in (weather, a temperature, ...).
-export function overlayText(c, now) {
+// recorded: the text over a recording (now = its time): a variable's value is
+// today's, so {v:NAME} shows nothing there.
+export function overlayText(c, now, recorded) {
   const tpl = (c.overlay_text || '').trim();
   if (!tpl) return '';
   const d = now || new Date();
@@ -272,16 +275,72 @@ export function overlayText(c, now) {
   // One pass, so a value that itself holds braces is shown as it is. An
   // unset or expired variable, or an unknown fill-in, shows nothing.
   return tpl.replace(/\{([^}]*)\}/g, (_, k) => {
-    if (k.startsWith('v:')) { const v = state.overlayVars && state.overlayVars[k.slice(2)]; return v == null ? '' : String(v); }
+    if (k.startsWith('v:')) { if (recorded) return ''; const v = state.overlayVars && state.overlayVars[k.slice(2)]; return v == null ? '' : String(v); }
     return Object.prototype.hasOwnProperty.call(vals, k) ? vals[k] : '';
   });
 }
-function paintOverlayText(el) {
-  const c = camFromId(Number(el.dataset.camid));
-  el.textContent = c ? overlayText(c) : '';
+// el._at(): the moment shown (ms) for recorded video (the recording's own
+// time; null while not known), else now. el._cam: the camera, when it is
+// not one of the cameras listed (an event's).
+export function paintOverlayText(el) {
+  const c = camFromId(Number(el.dataset.camid)) || el._cam;
+  let d = null;
+  if (el._at) { const t = el._at(); d = t == null ? null : new Date(t); }
+  const text = c && (!el._at || d) ? overlayText(c, d || undefined, !!el._at && !(el._live && el._live())) : '';
+  if (el.textContent !== text) el.textContent = text;
+  el.hidden = !text;
+  if (text) placeOverlayText(el);
+}
+// Keep the text inside the picture when the video is letterboxed or
+// pillarboxed in its box: its corner is the picture's corner, not the box's.
+function placeOverlayText(el) {
+  const host = el.parentElement;
+  const m = host && [...host.querySelectorAll('video, img, canvas')].find((e) => e.offsetWidth >= host.clientWidth * 0.4 && e.offsetHeight > 0);
+  let l = 0, t = 0, r = 0, b = 0;
+  if (m && host.clientWidth) {
+    const cs = getComputedStyle(m);
+    const nw = m.videoWidth || m.naturalWidth || (m.tagName === 'CANVAS' ? m.width : 0);
+    const nh = m.videoHeight || m.naturalHeight || (m.tagName === 'CANVAS' ? m.height : 0);
+    const f = fitRect(m.clientWidth, m.clientHeight, nw, nh, cs.objectFit, cs.objectPosition);
+    // (Where the media box sits in the host, before any zoom transform.)
+    let ox = 0, oy = 0;
+    if (m.offsetParent === host) { ox = m.offsetLeft; oy = m.offsetTop; }
+    else { const a = m.getBoundingClientRect(), h = host.getBoundingClientRect(); ox = a.left - h.left; oy = a.top - h.top; }
+    l = Math.max(0, Math.round(ox + m.clientLeft + f.left));
+    t = Math.max(0, Math.round(oy + m.clientTop + f.top));
+    r = Math.max(0, Math.round(host.clientWidth - (ox + m.clientLeft + f.left + f.width)));
+    b = Math.max(0, Math.round(host.clientHeight - (oy + m.clientTop + f.top + f.height)));
+  }
+  const s = el.style, px = (v) => v + 'px';
+  if (s.getPropertyValue('--otl') !== px(l)) s.setProperty('--otl', px(l));
+  if (s.getPropertyValue('--ott') !== px(t)) s.setProperty('--ott', px(t));
+  if (s.getPropertyValue('--otr') !== px(r)) s.setProperty('--otr', px(r));
+  if (s.getPropertyValue('--otb') !== px(b)) s.setProperty('--otb', px(b));
 }
 // Once a second, so {time} ticks.
 setInterval(() => { document.querySelectorAll('.ovltext[data-camid]').forEach(paintOverlayText); }, 1000);
+// The camera's text on the picture in `host`, drawn by the app (nothing when
+// it has none, or when it is burned into the video). opts.big: the full-size
+// style; opts.at(): the moment shown, for recorded video (see paintOverlayText);
+// opts.live(): true while that video is the live stream after all.
+export function addOverlayText(host, c, opts) {
+  if (!c || !(c.overlay_text || '').trim() || c.overlay) return null;
+  opts = opts || {};
+  const ot = document.createElement('div');
+  ot.className = 'ovltext' + (opts.big ? ' ovltext-big' : '') + ' pos-' + overlayPos(c);
+  ot.dataset.camid = String(c.id);
+  if (opts.at) ot._at = opts.at;
+  if (opts.live) ot._live = opts.live;
+  ot._cam = c;
+  host.appendChild(ot);
+  paintOverlayText(ot);
+  // (Placed again once the picture's size is known, and when the box changes.)
+  const again = () => { if (ot.isConnected && !ot.hidden) placeOverlayText(ot); };
+  host.addEventListener('loadedmetadata', again, true);
+  host.addEventListener('load', again, true);
+  if (window.ResizeObserver) new ResizeObserver(again).observe(host);
+  return ot;
+}
 
 // What a tile calls a camera: its short name, or for another server's camera
 // its own name and where it is.
@@ -526,7 +585,10 @@ function grabLast(t) {
     const k = Math.min(1, 640 / w);
     const cv = document.createElement('canvas');
     cv.width = Math.round(w * k); cv.height = Math.round(h * k);
-    cv.getContext('2d').drawImage(m, 0, 0, cv.width, cv.height);
+    const cx = cv.getContext('2d');
+    cx.drawImage(m, 0, 0, cv.width, cv.height);
+    // (A frame of the camera's own video: its privacy masks go into it too.)
+    if (m.tagName === 'VIDEO') paintMasks(cx, cv.width, cv.height, camFromId(t.camId));
     cv.className = 'lastcv';
     t.last = { cv, at: Date.now() };
   } catch (e) { /* not drawable */ }
@@ -1013,7 +1075,7 @@ export function renderLive() {
   }
   if (tlHook) tlHook.shown(shown.map(c => c.id));
   const sigCams = arrange ? shown.slice().sort((x, y) => x.id - y.id) : shown;
-  const sig = JSON.stringify([!!tlHook, smoothGrid(), style, soloId, page, per, !!arrange, sigCams.map(c => [c.id, c.enabled, c.name, c.short_name, c.groups, c.record, c.record_motion_only, c.record_sub, c.schedule, c.zones, c.ignore_zones, c.ingest, c.overlay_text, c.overlay_pos, c.overlay])]);
+  const sig = JSON.stringify([!!tlHook, smoothGrid(), style, soloId, page, per, !!arrange, sigCams.map(c => [c.id, c.enabled, c.name, c.short_name, c.groups, c.record, c.record_motion_only, c.record_sub, c.schedule, c.zones, c.ignore_zones, c.ingest, c.overlay_text, c.overlay_pos, c.overlay, c.privacy_masks, c.mask_mode])]);
   if (sig === liveSig) {
     for (const c of shown) if (liveTiles[c.id]) { setTileMedia(liveTiles[c.id], c); updateTile(liveTiles[c.id], c); }
     fitGrid();
@@ -1028,7 +1090,10 @@ export function renderLive() {
     const frame = document.createElement('div');
     frame.className = 'frame';
     // Large tiles (Focus styles) play the main stream; the rest the light sub stream.
-    const t = { frame, tile, player: null, media: null, mode: null, offSince: 0, wakeUntil: 0, big: shown.indexOf(c) < bigN };
+    const t = { frame, tile, camId: c.id, player: null, media: null, mode: null, offSince: 0, wakeUntil: 0, big: shown.indexOf(c) < bigN };
+    // Privacy masks over the camera's video (live, and the timeline's
+    // recordings and fast/reverse playback in timeline mode).
+    t.masks = watchMasks(frame, () => camFromId(c.id) || c);
     setTileMedia(t, c);
     frame.addEventListener('contextmenu', (ev) => tileMenu(ev, c));
     // Zones and motion boxes sit on a layer the size of the picture itself
@@ -1058,14 +1123,8 @@ export function renderLive() {
     if (!arrange && !tlHook) t.zoom = tileZoomFor(t, frame, c.id);
     // The camera's own text on the picture (drawn here; costs the server
     // nothing). When it is burned into the video, the picture already has it.
-    // (Not over recorded footage in timeline mode: {time} would be today's.)
-    if ((c.overlay_text || '').trim() && !c.overlay && !tlHook) {
-      const ot = document.createElement('div');
-      ot.className = 'ovltext pos-' + overlayPos(c);
-      ot.dataset.camid = String(c.id);
-      frame.appendChild(ot);
-      paintOverlayText(ot);
-    }
+    // (Timeline mode: the player draws it with the recording's time, livetl.js.)
+    if (!tlHook) addOverlayText(frame, c);
     const act = document.createElement('div');
     act.className = 'tileact';
     act.onpointerdown = (ev) => ev.stopPropagation();
@@ -1312,8 +1371,10 @@ let fullPlayer = null;
 
 let fullSpk = null;
 let fullPills = null;   // corner pills + edge of the full view
+let fullMasks = null;   // privacy masks over the full view's video
 
 export function stopFull() {
+  if (fullMasks) { fullMasks.stop(); fullMasks = null; }
   if (fullSpk) { fullSpk.destroy(); fullSpk = null; }
   if (fullPlayer) { fullPlayer.stop(); fullPlayer = null; }
   clearInterval(window.__fullTimer);
@@ -1337,13 +1398,9 @@ function mountFull() {
   content.appendChild(video);
   $('lightbox').dataset.cam = String(fullCamId);
   const c = camFromId(fullCamId);
-  if (c && (c.overlay_text || '').trim() && !c.overlay) {
-    const ot = document.createElement('div');
-    ot.className = 'ovltext big pos-' + overlayPos(c);
-    ot.dataset.camid = String(fullCamId);
-    content.appendChild(ot);
-    paintOverlayText(ot);
-  }
+  const camId = fullCamId;
+  fullMasks = watchMasks(content, () => camFromId(camId) || c);
+  addOverlayText(content, c, { big: true });
   if (c) video.title = c.name;
   // Same pills and edge as the tiles (the name is in the toolbar above).
   if (c) {
@@ -1430,23 +1487,6 @@ export function closeFull() {
   fullCamId = null;
   if (wasOpen) bus.emit('full', null);
   overlaysChanged();
-}
-
-// Play a recorded event clip in the lightbox (used by the timeline).
-export function playClipLightbox(id) {
-  stopFull();
-  fullCamId = null;
-  const lb = $('lightbox');
-  lb.classList.remove('cam');
-  placeFull();
-  $('fullName').hidden = true;
-  const v = document.createElement('video');
-  v.src = '/api/clips/' + id + lowQ(true);
-  v.controls = true;
-  v.autoplay = true;
-  v.playsInline = true;
-  $('lightContent').appendChild(v);
-  lb.style.display = 'flex';
 }
 
 function stepFull(delta) {
@@ -1569,7 +1609,7 @@ export function initLive() {
     lastQuality = q;
   });
   bus.on('layouts', () => { page = 0; if (arrange) finishArrange(false); renderLive(); armCycle(); });
-  bus.on('cameras', () => { camsRx = Date.now(); renderLive(); const fc = fullCamId !== null && camFromId(fullCamId); if (fc && fullPills) paintPills(fullPills, fc); });
+  bus.on('cameras', () => { camsRx = Date.now(); renderLive(); refreshMasks(); const fc = fullCamId !== null && camFromId(fullCamId); if (fc && fullPills) paintPills(fullPills, fc); });
   // Esc: stop arranging, else drop the tool, else clear the selection.
   window.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Escape' || ev.defaultPrevented || ev.timeStamp === escTs || !isActive('live') || fullCamId !== null) return;

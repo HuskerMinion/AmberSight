@@ -57,7 +57,7 @@ impl Engine {
                 // Continuous recording should close a segment at least every
                 // few segment lengths while the camera is online.
                 let online_for = st.online_since.map(|s| now - s).unwrap_or(0);
-                if st.online && run.record && !run.record_motion_only && !run.on_demand && online_for > 4 * seg_secs.max(10) {
+                if st.online && run.record && !run.record_motion_only && !run.on_demand && online_for > 4 * seg_secs.max(10) && super::mask_settings::record_blocker(&run).is_none() {
                     // A camera recording its main stream all the time: judge
                     // by that (a sub-stream copy still being written must not
                     // hide a main recording that stopped).
@@ -70,6 +70,13 @@ impl Engine {
                         warnings.push(w);
                     }
                 }
+            }
+            // Masks to be burned into recordings that cannot be: nothing is
+            // recorded rather than the unmasked picture.
+            if let (true, Some(w)) = (enabled, super::mask_settings::record_blocker(&run)) {
+                problem(format!("maskrec:{}", h.id), &w);
+                shorts.push(format!("{} records nothing", run.name));
+                warnings.push(w);
             }
             if enabled {
                 if let Some(skew) = st.clock_skew.filter(|s| s.abs() > 30.0) {
@@ -153,6 +160,7 @@ impl Engine {
                 "live_viewers": h.live_main.viewers() + h.live_sub.viewers(),
                 // Holes filled from the camera's own card (null: not turned on).
                 "card_fill": if run.fill_from_card { serde_json::json!(super::card_fill::status(&run.name)) } else { serde_json::Value::Null },
+                "card_catchup": if run.catch_up_on() { serde_json::json!(super::card_catchup::status(&run.name)) } else { serde_json::Value::Null },
             }));
         }
         // Event clips that cannot be saved to a camera's copy folder.
@@ -232,6 +240,8 @@ impl Engine {
         // decoders that left the card while running.
         let mut notes = crate::hwdecode::notes();
         notes.extend(hw_notes);
+        // Text now drawn on screen instead of burned in (0.11.1), for a while.
+        notes.extend(super::mask_settings::overlay_note(&self.db, now * 1000));
         // Camera notes carry a button: note_fixes[] = {note (index into notes), camera, kind}.
         let mut note_fixes: Vec<serde_json::Value> = Vec::new();
         for (text, cam, kind) in cam_notes {
@@ -335,6 +345,13 @@ mod tests {
         assert!(!wants_sub_note(&cam("rtsp://192.0.2.1/main", None, false, true)), "owner said it has none");
         assert!(!wants_sub_note(&cam("push://k", None, false, false)));
         assert!(!wants_sub_note(&cam("baichuan://192.0.2.1", None, false, false)));
+    }
+
+    #[test]
+    fn the_process_limit_note_stays_whole() {
+        let w = crate::proclimit::limit_words(&crate::proclimit::ProcLimits { pids_max: Some("100".into()), pids_current: Some(99), nproc: None }, true);
+        assert_eq!(plain_error(&w), w);
+        assert!(plain_error(&w).contains("--pids-limit"));
     }
 
     #[test]

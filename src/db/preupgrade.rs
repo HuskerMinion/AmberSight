@@ -10,6 +10,8 @@ const PREFIX: &str = "pre-upgrade-v";
 const KEEP: usize = 2;
 /// Free space wanted beyond the copy's own size.
 const SPARE_BYTES: u64 = 512 << 20;
+/// A copy slower than this gets a log line saying why.
+const SLOW_SECS: f32 = 10.0;
 const STAMP: &str = "%Y%m%d-%H%M%S";
 
 /// Save a copy of the database file at `path` when it is at an older version
@@ -24,14 +26,21 @@ pub fn copy_before_upgrade(path: &Path, target: i64) -> Option<PathBuf> {
     }
 }
 
+fn open_rw(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    let conn = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))?;
+    Ok(conn)
+}
+
 fn try_copy(path: &Path, target: i64) -> anyhow::Result<Option<PathBuf>> {
     use anyhow::Context;
     if !path.is_file() {
         return Ok(None);
     }
-    let conn = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    conn.busy_timeout(std::time::Duration::from_secs(30))?;
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let version: i64 = {
+        let conn = open_rw(path)?;
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0))?
+    };
     if version < 1 || version >= target {
         return Ok(None);
     }
@@ -53,19 +62,60 @@ fn try_copy(path: &Path, target: i64) -> anyhow::Result<Option<PathBuf>> {
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let file = dir.join("ambersight.db");
     let t0 = Instant::now();
-    let r = conn.execute("VACUUM INTO ?1", [file.to_string_lossy()]).with_context(|| format!("copy to {}", file.display()));
+    let r = copy_file(path, &file, size).or_else(|e| {
+        // The plain copy did not work (or something else has the database open):
+        // fall back to the slower rebuild, which works on a live database.
+        tracing::warn!("copying the database file did not work ({e:#}); rebuilding it into the copy instead (slower)");
+        let _ = std::fs::remove_file(&file);
+        open_rw(path)?.execute("VACUUM INTO ?1", [file.to_string_lossy()]).map(|_| ()).with_context(|| format!("copy to {}", file.display()))
+    });
     if let Err(e) = r {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
+    let secs = t0.elapsed().as_secs_f32();
     tracing::info!(
-        "saved a copy of the database (version {version}, {} MB) to {} in {:.1} s before upgrading it to version {target}",
+        "saved a copy of the database (version {version}, {} MB) to {} in {secs:.1} s before upgrading it to version {target}",
         size >> 20,
         file.display(),
-        t0.elapsed().as_secs_f32()
     );
+    if secs > SLOW_SECS {
+        tracing::warn!("the database copy took {secs:.0} s: on a spinning drive this can take a minute or more, and recording starts after it");
+    }
     prune(&root);
     Ok(Some(file))
+}
+
+/// Copy the database file front to back (what a spinning drive is good at; `VACUUM INTO` and
+/// the backup API read it page by page in index order). Nothing else has the database open
+/// this early in `Db::open`. A connection takes it exclusively and folds the write-ahead log
+/// into the main file, then closes (Windows will not let the file be read while SQLite holds
+/// it exclusively). Anything unexpected is an error, and the caller then uses `VACUUM INTO`.
+fn copy_file(path: &Path, to: &Path, size_before: u64) -> anyhow::Result<()> {
+    use anyhow::{bail, Context};
+    {
+        let c = open_rw(path)?;
+        c.busy_timeout(std::time::Duration::from_secs(2))?; // someone else has it: no waiting, use the rebuild
+        c.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        let (busy, log, done): (i64, i64, i64) = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        // (-1 / -1 means it is not in write-ahead mode: nothing to fold in.)
+        if busy != 0 || (log > 0 && done < log) {
+            bail!("the write-ahead log could not be folded in (busy {busy}, {done} of {log} pages)");
+        }
+    }
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    if std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0) > 0 {
+        bail!("the write-ahead log is not empty");
+    }
+    let n = std::fs::copy(path, to).with_context(|| format!("copy {} to {}", path.display(), to.display()))?;
+    let now = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if n != now || now < size_before {
+        bail!("the copy is {n} bytes but the database is {now}");
+    }
+    // Make it durable before the upgrade starts changing the original.
+    std::fs::OpenOptions::new().write(true).open(to).and_then(|f| f.sync_all()).with_context(|| format!("flush {}", to.display()))?;
+    Ok(())
 }
 
 /// Keep only the newest `KEEP` pre-upgrade folders (their name ends in the stamp).
@@ -120,6 +170,76 @@ mod tests {
         make(&q, 0);
         assert!(copy_before_upgrade(&q, 29).is_none(), "a new database has nothing to save");
         assert!(copy_before_upgrade(&d.join("missing.db"), 29).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn integrity(p: &Path) -> String {
+        rusqlite::Connection::open(p).unwrap().query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap()
+    }
+
+    fn count(p: &Path) -> i64 {
+        rusqlite::Connection::open(p).unwrap().query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_big_database_in_wal_mode_is_copied_whole_and_valid() {
+        let d = temp("wal");
+        let p = d.join("ambersight.db");
+        {
+            let c = rusqlite::Connection::open(&p).unwrap();
+            c.pragma_update(None, "journal_mode", "WAL").unwrap();
+            c.execute_batch("CREATE TABLE t (x INTEGER, s TEXT UNIQUE);").unwrap();
+            c.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 20000) INSERT INTO t SELECT i, hex(randomblob(40)) FROM n;").unwrap();
+            c.pragma_update(None, "user_version", 28).unwrap();
+        }
+        let copy = copy_before_upgrade(&p, 29).expect("a copy");
+        assert_eq!(integrity(&copy), "ok");
+        assert_eq!(count(&copy), 20000);
+        assert_eq!(std::fs::metadata(&copy).unwrap().len(), std::fs::metadata(&p).unwrap().len(), "the whole file, front to back");
+        assert!(!copy.with_file_name("ambersight.db-wal").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rows_still_in_the_wal_are_in_the_copy() {
+        let d = temp("wal-left");
+        let live = d.join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        let lp = live.join("ambersight.db");
+        let c = rusqlite::Connection::open(&lp).unwrap();
+        c.pragma_update(None, "journal_mode", "WAL").unwrap();
+        c.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        c.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);").unwrap();
+        c.pragma_update(None, "user_version", 28).unwrap();
+        c.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 500) INSERT INTO t SELECT i FROM n;").unwrap();
+        // What a crash leaves: the main file and a write-ahead log holding the newest rows.
+        let crashed = d.join("crashed");
+        std::fs::create_dir_all(&crashed).unwrap();
+        let p = crashed.join("ambersight.db");
+        std::fs::copy(&lp, &p).unwrap();
+        std::fs::copy(live.join("ambersight.db-wal"), crashed.join("ambersight.db-wal")).unwrap();
+        drop(c);
+        assert!(std::fs::metadata(crashed.join("ambersight.db-wal")).unwrap().len() > 0, "the test needs a non-empty log");
+        let copy = copy_before_upgrade(&p, 29).expect("a copy");
+        assert_eq!(integrity(&copy), "ok");
+        assert_eq!(count(&copy), 501);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_database_someone_else_has_open_is_still_copied_by_rebuilding() {
+        let d = temp("busy");
+        let p = d.join("ambersight.db");
+        let other = rusqlite::Connection::open(&p).unwrap();
+        other.pragma_update(None, "journal_mode", "WAL").unwrap();
+        other.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (7);").unwrap();
+        other.pragma_update(None, "user_version", 28).unwrap();
+        let reader = other.prepare("SELECT x FROM t").unwrap();
+        drop(reader);
+        let copy = copy_before_upgrade(&p, 29).expect("a copy");
+        assert_eq!(integrity(&copy), "ok");
+        assert_eq!(count(&copy), 1);
+        drop(other);
         let _ = std::fs::remove_dir_all(&d);
     }
 

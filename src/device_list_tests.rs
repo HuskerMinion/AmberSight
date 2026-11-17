@@ -565,19 +565,55 @@ async fn a_password_change_ends_the_sessions_without_waiting_for_a_push_service(
     let u = "so-ivy";
     let mine = browser(&e, u, EDGE, "192.0.2.82", "").await;
     let phone = browser(&e, u, SAFARI_IPHONE, "192.0.2.83", "").await;
-    // A phone whose push service never answers.
-    e.db.push_save(&crate::db::PushSub { endpoint: "https://192.0.2.254/push/dead".into(), user: u.into(), p256dh: "p".into(), auth: "a".into(), device: "d".into(), kind: "browser".into(), ..Default::default() }, 1).unwrap();
-    e.db.push_set_session_device("https://192.0.2.254/push/dead", Some(&crate::devices::browser_hash(&phone.cookie))).unwrap();
+    // The phone's push server, on this computer: it takes the message and never answers
+    // until the test lets it. (Not timed: a full parallel test run makes any time limit
+    // flaky. The push service is only reached once the response is made.)
+    let push = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    push.set_nonblocking(true).unwrap();
+    let port = push.local_addr().unwrap().port();
+    e.config.lock().unwrap().push.app_hosts = vec![format!("127.0.0.1:{port}")];
+    let endpoint = format!("http://127.0.0.1:{port}/upDead?up=1");
+    let keys = {
+        use base64::Engine as _;
+        use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+        let k = p256::SecretKey::random(&mut rand::rngs::OsRng);
+        let b = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        (b.encode(k.public_key().to_encoded_point(false).as_bytes()), b.encode([5u8; 16]))
+    };
+    e.db.push_save(&crate::db::PushSub { endpoint: endpoint.clone(), user: u.into(), p256dh: keys.0, auth: keys.1, device: "d".into(), kind: "app".into(), ..Default::default() }, 1).unwrap();
+    e.db.push_set_session_device(&endpoint, Some(&crate::devices::browser_hash(&phone.cookie))).unwrap();
     let mut req = post("/api/me/password", serde_json::json!({ "current": "pw-test-1", "new": "pw-new-long-1" }), EDGE, &format!("as_session={}", mine.token), "192.0.2.82");
     req.extensions_mut().insert(Caller(u.into(), crate::auth::generation(u)));
-    let started = std::time::Instant::now();
+    // This test runs on one thread: a message sent on a task of its own cannot start
+    // before the request is answered. A request that waited for the push service (with any
+    // time limit) would have connected to it by the time it was answered, as nobody answers.
     let r = crate::users_http::change_own_password(State(e.clone()), req).await;
+    let connected_during_request = push.accept().is_ok();
     assert_eq!(r.status(), StatusCode::OK, "{}", text(r).await);
-    assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+    assert!(!connected_during_request, "the request waited for the push service");
     let acc = crate::auth::accounts(&e.config.lock().unwrap());
     assert!(crate::auth::session_identity(&phone.token, &acc).is_none(), "ended in the request itself");
     assert!(crate::auth::session_identity(&mine.token, &acc).is_some());
     assert!(endpoints(&e, u).is_empty());
+    // And the phone is told, after the response.
+    let mut conn = None;
+    for _ in 0..600 {
+        if let Ok((c, _)) = push.accept() {
+            conn = Some(c);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let mut conn = conn.expect("the phone is told it was signed out");
+    {
+        use std::io::{BufRead, Write};
+        conn.set_nonblocking(false).unwrap();
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(conn.try_clone().unwrap()).read_line(&mut line).unwrap();
+        assert_eq!(line.trim_end(), "POST /upDead?up=1 HTTP/1.1");
+        let _ = conn.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    }
     let _ = std::fs::remove_file(&path);
 }
 

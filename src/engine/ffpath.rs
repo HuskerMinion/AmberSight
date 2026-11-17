@@ -27,8 +27,8 @@ pub fn why_ffmpeg(cfg: &CameraConfig, ingest: &str, fallback: Option<&str>) -> O
     if cfg.overlay {
         picture.push("\"Also burn it into recordings\" is on (Audio & text): burning text into the video needs ffmpeg. Turn it off to use the built-in reader");
     }
-    if !cfg.privacy_masks.is_empty() {
-        picture.push("the camera has privacy masks, which ffmpeg burns into the picture. Remove them (Motion > Edit zones) to use the built-in reader");
+    if cfg.mask_in_recording() {
+        picture.push("its privacy masks are set to \"Hide in recordings too\", which ffmpeg burns into the recordings. Choose \"Hide on screen and in pictures\" (Motion > Edit zones) to use the built-in reader");
     }
     if !picture.is_empty() {
         return Some(picture.join("; and "));
@@ -65,7 +65,7 @@ pub fn reencode_cause(cfg: &CameraConfig) -> Option<Reencode> {
     }
     if cfg.overlay {
         Some(Reencode::Overlay)
-    } else if !cfg.privacy_masks.is_empty() {
+    } else if cfg.mask_in_recording() {
         Some(Reencode::Masks)
     } else if !cfg.direct {
         Some(Reencode::NoDirect)
@@ -79,7 +79,7 @@ pub fn reencode_cause(cfg: &CameraConfig) -> Option<Reencode> {
 pub fn reencode_text(name: &str, cause: Reencode, encoder: Option<&str>) -> String {
     let (why, fix) = match cause {
         Reencode::Overlay => ("to burn in the text", "Turn off \"Also burn it into recordings\" (Audio & text) to record the camera's own stream, or keep it."),
-        Reencode::Masks => ("to burn in the privacy masks", "Remove the masks (Motion > Edit zones) to record the camera's own stream, or keep them."),
+        Reencode::Masks => ("to burn in the privacy masks", "Choose \"Hide on screen and in pictures\" for the masks (Motion > Edit zones) to record the camera's own stream, use the camera's own privacy mask, or keep it."),
         Reencode::NoDirect => ("because Direct copy is off", "Turn on Direct copy (Recording) to record the camera's own stream."),
     };
     match encoder {
@@ -196,13 +196,74 @@ pub fn rec_encode_args(e: Option<&Encoder>, segment_seconds: u64) -> Vec<String>
         }
     }
     v.push("-force_key_frames".into());
-    v.push(format!("expr:gte(t,n_forced*{})", segment_seconds.max(1)));
+    v.push(format!("expr:gte(t,n_forced*{})", rec_key_interval(segment_seconds)));
     v
+}
+
+// ---------------------------------------------------------------------------
+// Threads per ffmpeg
+// ---------------------------------------------------------------------------
+
+/// ffmpeg starts about one thread per core for each decoder, filter graph
+/// and encoder (a 4K re-encode on 24 cores: 120+ threads). A container with
+/// a process limit (`--pids-limit`) or a small machine with many cameras
+/// then runs out ("pthread_create() failed"), so each camera's ffmpeg gets a
+/// bounded number: `THREADS` (fewer on a machine with fewer cores), for
+/// every picture size.
+pub const THREADS: usize = 6;
+
+/// The threads the encoder of one camera's recording may use.
+pub fn thread_budget(cores: usize) -> usize {
+    THREADS.min(cores.max(1))
+}
+
+/// `thread_budget` on this machine.
+pub fn thread_budget_now() -> usize {
+    thread_budget(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2))
+}
+
+/// Global options (before the input): the filter graph runs on one thread
+/// beside the decoder and encoder (its slice threads add a thread per core).
+pub fn graph_thread_args() -> Vec<String> {
+    ["-filter_threads", "1", "-filter_complex_threads", "1"].map(String::from).to_vec()
+}
+
+/// Input option (right before `-i`): the decoder's threads, half the budget.
+pub fn decode_thread_args(budget: usize) -> Vec<String> {
+    vec!["-threads".into(), (budget / 2).max(1).to_string()]
+}
+
+/// Output option for the encoder of the recording. Only libx264 takes
+/// it: the hardware encoders do their work on the card.
+pub fn encode_thread_args(e: Option<&Encoder>, budget: usize) -> Vec<String> {
+    match e.and_then(|e| e.hw) {
+        None => vec!["-threads".into(), budget.max(1).to_string()],
+        Some(_) => Vec::new(),
+    }
+}
+
+/// Output option for the small analysis pictures (JPEG, one thread: the
+/// encoder otherwise starts one per core).
+pub fn analysis_thread_args() -> Vec<String> {
+    vec!["-threads".into(), "1".into()]
+}
+
+/// Seconds between forced keyframes in recorded segments: 2 (1 when the
+/// segment length is odd), so every segment boundary is still a keyframe
+/// but playback seeks, filmstrips and time-lapses find a picture every
+/// couple of seconds, as with the built-in reader's recordings, instead of
+/// one per file.
+pub fn rec_key_interval(segment_seconds: u64) -> u64 {
+    if segment_seconds.max(1) % 2 == 0 { 2 } else { 1 }
 }
 
 /// Whether a recorder's ffmpeg error is about the hardware encoder or
 /// decoder (not the camera or the folder).
 pub fn hw_encode_blamed(text: &str) -> bool {
+    // "Error while opening encoder" after a refused thread is the system's limit, not the card.
+    if crate::proclimit::is_spawn_limit(text) {
+        return false;
+    }
     const WORDS: [&str; 16] = ["nvenc", "cuda", "vaapi", "qsv", "hwupload", "hwaccel", "hw_frames", "hwframe", "device creation", "error while opening encoder", "could not open encoder", "d3d11", "amf", "videotoolbox", "no device available", "impossible to convert"];
     text.lines().any(|l| {
         let low = l.to_ascii_lowercase();
@@ -478,6 +539,11 @@ mod tests {
         assert!(w.contains("Also burn it into recordings") && w.contains("Turn it off"), "{w}");
         let w = why_ffmpeg(&cam("privacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]"), "ffmpeg", None).unwrap();
         assert!(w.contains("privacy masks"), "{w}");
+        let w = why_ffmpeg(&cam("mask_mode = \"recording\"\nprivacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]"), "ffmpeg", None).unwrap();
+        assert!(w.contains("Hide in recordings too"), "{w}");
+        // Masks only on screen do not need ffmpeg: on it for another reason, that one is said.
+        let w = why_ffmpeg(&cam("ingest = \"ffmpeg\"\nmask_mode = \"screen\"\nprivacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]"), "ffmpeg", None).unwrap();
+        assert!(!w.contains("privacy masks") && w.contains("ingest = \"ffmpeg\""), "{w}");
         let w = why_ffmpeg(&cam("ingest = \"ffmpeg\""), "ffmpeg", None).unwrap();
         assert!(w.contains("ingest = \"ffmpeg\""), "{w}");
         let w = why_ffmpeg(&cam(""), "ffmpeg (fallback)", Some("SETUP failed: 461")).unwrap();
@@ -493,11 +559,41 @@ mod tests {
         assert_eq!(reencode_cause(&cam("record = true\ndirect = true\noverlay = true")), Some(Reencode::Overlay));
         assert_eq!(reencode_cause(&cam("record = false\noverlay = true")), None);
         assert_eq!(reencode_cause(&cam("record = true")), Some(Reencode::NoDirect));
+        let m = "privacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]";
+        assert_eq!(reencode_cause(&cam(&format!("direct = true\n{m}"))), Some(Reencode::Masks), "masks from before the level: in the recordings");
+        assert_eq!(reencode_cause(&cam(&format!("direct = true\nmask_mode = \"recording\"\n{m}"))), Some(Reencode::Masks));
+        assert_eq!(reencode_cause(&cam(&format!("direct = true\nmask_mode = \"screen\"\n{m}"))), None, "screen masks: the camera's own stream");
+        assert_eq!(reencode_cause(&cam("direct = true\nmask_mode = \"recording\"")), None, "a level without masks is nothing");
         let t = reencode_text("Porch", Reencode::Overlay, None);
         assert!(t.starts_with("Porch: recordings are re-encoded to burn in the text (about one processor core per 4K camera)"), "{t}");
         assert!(t.contains("Turn off \"Also burn it into recordings\""));
         let t = reencode_text("Porch", Reencode::Masks, Some("NVENC"));
         assert!(t.contains("graphics card (NVENC)") && t.contains("little processor time"), "{t}");
+    }
+
+    #[test]
+    fn thread_caps_are_bounded_and_fit_the_machine() {
+        // 6, never more than the cores.
+        assert_eq!(thread_budget(24), 6);
+        assert_eq!(thread_budget(6), 6);
+        assert_eq!(thread_budget(2), 2);
+        assert_eq!(thread_budget(1), 1);
+        assert_eq!(thread_budget(0), 1);
+        assert_eq!(graph_thread_args().join(" "), "-filter_threads 1 -filter_complex_threads 1");
+        assert_eq!(decode_thread_args(6), vec!["-threads", "3"]);
+        assert_eq!(decode_thread_args(1), vec!["-threads", "1"]);
+        assert_eq!(analysis_thread_args(), vec!["-threads", "1"]);
+    }
+
+    #[test]
+    fn only_the_software_encoder_gets_a_thread_flag() {
+        assert_eq!(encode_thread_args(None, 6), vec!["-threads", "6"]);
+        for hw in [Hw::Nvenc, Hw::Qsv, Hw::Vaapi, Hw::Amf, Hw::Videotoolbox] {
+            let e = Encoder { hw: Some(hw), device: None };
+            assert!(encode_thread_args(Some(&e), 6).is_empty(), "{hw:?}");
+        }
+        // The encode arguments themselves are unchanged.
+        assert!(!rec_encode_args(None, 4).iter().any(|a| a == "-threads"));
     }
 
     #[test]
@@ -512,9 +608,12 @@ mod tests {
         assert_eq!(rec_upload(Some(&va)), Some("format=nv12,hwupload"));
         assert_eq!(rec_upload(None), None);
         let e = rec_encode_args(Some(&va), 10).join(" ");
-        assert!(e.starts_with("-c:v h264_vaapi") && e.ends_with("-force_key_frames expr:gte(t,n_forced*10)"), "{e}");
+        assert!(e.starts_with("-c:v h264_vaapi") && e.ends_with("-force_key_frames expr:gte(t,n_forced*2)"), "{e}");
         let e = rec_encode_args(None, 4).join(" ");
-        assert_eq!(e, "-c:v libx264 -preset veryfast -pix_fmt yuv420p -force_key_frames expr:gte(t,n_forced*4)");
+        assert_eq!(e, "-c:v libx264 -preset veryfast -pix_fmt yuv420p -force_key_frames expr:gte(t,n_forced*2)");
+        assert_eq!(rec_key_interval(30), 2);
+        assert_eq!(rec_key_interval(15), 1);
+        assert_eq!(rec_key_interval(0), 1);
         assert!(rec_encode_args(Some(&nv), 4).join(" ").contains("h264_nvenc"));
         assert_eq!(encoder_label(&va), "VAAPI on /dev/dri/renderD129");
         assert!(hw_encode_blamed("[h264_nvenc @ 0x1] OpenEncodeSessionEx failed: out of memory (10)\nError while opening encoder"));

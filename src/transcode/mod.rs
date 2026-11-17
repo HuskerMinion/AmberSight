@@ -14,6 +14,7 @@ pub mod cache;
 pub mod file;
 pub mod http;
 pub mod live;
+pub mod masked;
 pub mod mp4;
 
 use mp4::{VideoCodec, VideoDesc};
@@ -278,6 +279,11 @@ pub enum Why {
     Fps,
     BusyFallback,
     Off,
+    /// The privacy masks are burned in (a player that does not draw them,
+    /// or a download).
+    Masks,
+    /// The camera's text is burned in (a download asked for it).
+    Text,
 }
 
 impl Why {
@@ -288,6 +294,8 @@ impl Why {
             Why::Fps => "fps",
             Why::BusyFallback => "busy_fallback",
             Why::Off => "off",
+            Why::Masks => "masks",
+            Why::Text => "text",
         }
     }
 }
@@ -556,6 +564,18 @@ fn start_probe() {
 /// Whether the test encodes have finished.
 pub fn probed() -> bool {
     PROBED.get().is_some()
+}
+
+/// Whether [`encoders_for`] answers at once now: the test encodes have
+/// finished, or the encoders are off. Starts the test if it has not begun
+/// (for a caller that waits for it in steps, looking at something else
+/// meanwhile).
+pub fn encoders_ready() -> bool {
+    if config().encoder == "off" {
+        return true;
+    }
+    start_probe();
+    probed()
 }
 
 /// Start the test encodes in the background (at start), so the first
@@ -944,6 +964,23 @@ impl Drop for DownloadSlot {
 /// A place for one fitted download. None: `MAX_FIT_DOWNLOADS` are running.
 pub fn reserve_download() -> Option<DownloadSlot> {
     take(&DOWNLOADS, MAX_FIT_DOWNLOADS).then(|| DownloadSlot(()))
+}
+
+/// How many places for these encoders are free now (hardware and software).
+pub fn free_places(encoders: &[Encoder]) -> usize {
+    let cfg = config();
+    let free = |c: &AtomicUsize, max: usize| max.saturating_sub(c.load(Ordering::SeqCst));
+    let hw = if encoders.iter().any(|e| e.hw.is_some()) { free(&HW_RUNNING, cfg.max_hardware) } else { 0 };
+    let sw = if encoders.iter().any(|e| e.hw.is_none()) { free(&SW_RUNNING, cfg.max_software) } else { 0 };
+    hw + sw
+}
+
+/// How many places these encoders have in all (busy or not).
+pub fn capacity(encoders: &[Encoder]) -> usize {
+    let cfg = config();
+    let hw = if encoders.iter().any(|e| e.hw.is_some()) { cfg.max_hardware } else { 0 };
+    let sw = if encoders.iter().any(|e| e.hw.is_none()) { cfg.max_software } else { 0 };
+    hw + sw
 }
 
 /// Whether a place is free now (for `info`, which starts nothing).

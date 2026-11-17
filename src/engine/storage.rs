@@ -483,7 +483,8 @@ pub(super) fn segment_scan_loop(engine: Arc<Engine>) {
             .collect();
         // Only the last hour's: the files are still walked (to chain start times), but the
         // database is held for those alone, not for every recording the camera ever made.
-        // Older ones a stop or crash left out are added by the folder sweep.
+        // Older ones a stop or crash left out are added by the folder sweep (it adds those
+        // since its last full read of the folder, see sweep_add_since).
         let since_ms = (Utc::now().timestamp() - 3600) * 1000;
         if let Err(e) = engine.db.import_recent_camera_dirs(&dirs, seg, since_ms) {
             warn!("recordings scan failed: {e:#}");
@@ -532,6 +533,7 @@ pub(super) fn retention_loop(engine: Arc<Engine>) {
         }
         if passes % 60 == 0 {
             sweep_ai_frames(&engine);
+            sweep_temp_files(&engine.data_dir, true);
             let _ = engine.db.prune_faces(Utc::now().timestamp_millis() - super::faces::KEEP_UNNAMED_MS);
             let _ = engine.db.prune_plates(Utc::now().timestamp_millis() - super::lpr::keep_ms(&engine));
             // Signal history as long as recordings are kept.
@@ -560,6 +562,77 @@ pub(super) fn sweep_ai_frames(engine: &Engine) {
     }
 }
 
+/// Temporary files in use (an export being written or sent): the sweep
+/// leaves them alone however old they look. Removed from the list, and the
+/// file deleted, when the last holder drops it.
+pub(crate) struct TempInUse(std::path::PathBuf);
+
+fn temp_in_use() -> &'static Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static IN_USE: std::sync::OnceLock<Mutex<std::collections::HashSet<std::path::PathBuf>>> = std::sync::OnceLock::new();
+    IN_USE.get_or_init(Default::default)
+}
+
+impl TempInUse {
+    pub(crate) fn new(path: std::path::PathBuf) -> Self {
+        temp_in_use().lock().unwrap().insert(path.clone());
+        TempInUse(path)
+    }
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempInUse {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        temp_in_use().lock().unwrap().remove(&self.0);
+    }
+}
+
+/// Temporary files left over from a crash or a stopped job, in `data_dir`:
+/// in tmp/, exports (`export-*`, after an hour), time subtitle files
+/// (`subs-*.srt`) and burned-in clips (`burn-*.mp4`), after a day; with
+/// `thumbs`, the half-written pictures (`*.part`) a masked picture's rewrite
+/// leaves (after a day). Files in use (see [`TempInUse`]) stay.
+pub(crate) fn sweep_temp_files(data_dir: &std::path::Path, thumbs: bool) {
+    let age = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
+    let in_use = |p: &std::path::Path| temp_in_use().lock().unwrap().contains(p);
+    const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
+    const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
+    if let Ok(rd) = std::fs::read_dir(data_dir.join("tmp")) {
+        for f in rd.flatten() {
+            let (p, name) = (f.path(), f.file_name().to_string_lossy().into_owned());
+            let old = if name.starts_with("export-") {
+                age(&p) > HOUR
+            } else if (name.starts_with("subs-") && name.ends_with(".srt")) || (name.starts_with("burn-") && name.ends_with(".mp4")) {
+                age(&p) > DAY
+            } else {
+                false
+            };
+            if old && p.is_file() && !in_use(&p) {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    if !thumbs {
+        return;
+    }
+    // thumbs/<id>.jpg, thumbs/ai/<id>/<n>.jpg and the like: a few levels.
+    let mut dirs = vec![(data_dir.join("thumbs"), 0)];
+    while let Some((d, depth)) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for f in rd.flatten() {
+            let Ok(t) = f.file_type() else { continue };
+            let p = f.path();
+            if t.is_dir() && depth < 3 {
+                dirs.push((p, depth + 1));
+            } else if t.is_file() && p.extension().is_some_and(|e| e == "part") && age(&p) > DAY {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+}
+
 /// Clears a "running" flag when dropped, also when the thread panics.
 pub(super) struct ClearOnDrop(pub(super) &'static std::sync::atomic::AtomicBool);
 
@@ -570,27 +643,17 @@ impl Drop for ClearOnDrop {
 }
 
 static SWEEPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// A small site's sweep comes every few hours; a big one (a walk takes many minutes on a
-/// spinning drive) once a day.
-const SWEEP_EVERY_SMALL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
-const SWEEP_EVERY_BIG: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
-/// From this many recordings on a site is big.
-const BIG_SITE_FILES: i64 = 100_000;
+/// Set when a recording that retention removed from the index could not be deleted from the
+/// disk (locked by a scanner or a player): the next sweep reads every folder in full.
+pub(super) static SWEEP_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The sweep comes this often. A pass is cheap: a camera folder is read in full only when it is
+/// due (see [`crate::db::sweep_plan`]); the orphan clips and pictures are listed every time.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 const SWEEP_FIRST_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-/// Time between sweeps for a site whose last full walks looked at `files` recordings.
-fn sweep_every(files: i64) -> std::time::Duration {
-    if files >= BIG_SITE_FILES {
-        SWEEP_EVERY_BIG
-    } else {
-        SWEEP_EVERY_SMALL
-    }
-}
 
 /// Whether a folder sweep should start now (and none is running); marks it running.
 /// Never while the start-up indexing runs (both would list the same folders).
-/// `every` gives the time to the next one (asked only when one starts).
-fn sweep_due(importing: bool, every: impl FnOnce() -> std::time::Duration) -> bool {
+fn sweep_due(importing: bool) -> bool {
     // When the next one is due (the first: 30 minutes after start).
     static NEXT_SWEEP: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     let mut next = NEXT_SWEEP.lock().unwrap();
@@ -599,7 +662,7 @@ fn sweep_due(importing: bool, every: impl FnOnce() -> std::time::Duration) -> bo
     if now < due_at || importing || SWEEPING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
-    *next = Some(now + every());
+    *next = Some(now + SWEEP_EVERY);
     true
 }
 
@@ -624,6 +687,136 @@ impl Pace {
     }
 }
 
+/// One camera's segments folder as the sweep sees it.
+struct SweepFolder<'a> {
+    /// The storage folder's name ("" = the data folder).
+    name: &'a str,
+    root: &'a std::path::Path,
+    slug: &'a str,
+    /// Whether a configured camera records here (its recordings the index misses are added).
+    import: bool,
+    segment_seconds: u64,
+}
+
+/// What the sweep did with one camera folder.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FolderSweep {
+    /// Not read (read less than a week ago, or untouched since a clean read).
+    skipped: bool,
+    added: usize,
+    deleted: usize,
+    /// Stray files that would not go (locked): the folder is read again at the next sweep (for
+    /// the same files alone, only the next [`STUCK_SWEEPS`] - 1 sweeps).
+    failed: usize,
+}
+
+/// The sweep of one camera folder: nothing when it is not due (see [`crate::db::sweep_plan`]);
+/// else it is listed once, the recordings the index misses are added (those since the folder's
+/// last full read, at least the last two days: see [`sweep_add_since`]), and files older than `cutoff` that the index does not keep are deleted. A read that found
+/// nothing to fix is noted, so the folder is left alone until it is due again; one that fixed
+/// something is not, so the next sweep looks again.
+fn sweep_camera_folder(
+    db: &crate::db::Db,
+    f: &SweepFolder,
+    since_ms: i64,
+    cutoff: i64,
+    wanted: bool,
+    (full_every, quiet_every): (std::time::Duration, std::time::Duration),
+    pace: &mut Pace,
+) -> FolderSweep {
+    let seg_dir = f.root.join("cameras").join(f.slug).join("segments");
+    // The folder's time is read before it is listed: a change during the read shows next time.
+    let mtime = crate::db::dir_mtime_ns(&seg_dir);
+    let now_ms = Utc::now().timestamp_millis();
+    let mark = db.sweep_mark(f.name, f.slug).unwrap_or(None);
+    let since_ms = sweep_add_since(since_ms, mark);
+    if crate::db::sweep_plan(mark, mtime, now_ms, wanted, full_every, quiet_every) == crate::db::SweepPlan::Skip {
+        return FolderSweep { skipped: true, ..Default::default() };
+    }
+    let Some(listing) = crate::db::list_dir_files(&seg_dir, &mut || pace.file()) else { return FolderSweep::default() };
+    let mut out = FolderSweep::default();
+    if f.import {
+        match db.import_recent_listed(f.name, f.root, f.slug, f.segment_seconds, since_ms, &listing) {
+            Ok(n) => out.added = n,
+            Err(e) => tracing::warn!("folder sweep: could not add missing recordings: {e:#}"),
+        }
+    }
+    let failed = prune_listed(db, f.root, &listing, cutoff, &mut out.deleted);
+    out.failed = failed.len();
+    // The same files that would not go (owned by another user, say), sweep after sweep, with
+    // nothing else to fix: after a few sweeps the read counts as clean anyway, so the folder is
+    // not read in full every six hours for good.
+    let only_those = out.added == 0 && out.deleted == 0;
+    let stuck = stuck_only(&seg_dir, if only_those { failed } else { Vec::new() });
+    if stuck || (out.added == 0 && out.deleted == 0 && out.failed == 0) {
+        // The folder's time counts for a later skip only when it had settled before the read
+        // and every recording in it is in the index (else a stray not yet old enough to go
+        // would be skipped past its age).
+        let listed = listing.iter().filter(|l| l.is_file && crate::db::is_segment_name(&l.name)).count() as i64;
+        let settled = mtime.is_some_and(|m| now_ms - m / 1_000_000 >= 10_000);
+        let all_indexed = db.indexed_in_folder(f.name, f.slug).is_ok_and(|n| n == listed);
+        let noted = if settled && all_indexed { mtime.unwrap_or(-1) } else { -1 };
+        let _ = db.set_sweep_mark(f.name, f.slug, noted, listed, now_ms);
+    } else {
+        let _ = db.clear_sweep_mark(f.name, f.slug);
+    }
+    out
+}
+
+/// Sweeps in a row that find only the same files that would not go before the folder's read
+/// counts as clean anyway (see [`stuck_only`]).
+const STUCK_SWEEPS: u32 = 3;
+
+/// Whether the files that would not go at this read of `seg_dir` (`failed`, the read's only
+/// problem; empty: none) are the same as at each of the last [`STUCK_SWEEPS`] - 1 reads.
+/// Logged once when that is first so. Kept in memory: a restart starts the count again.
+fn stuck_only(seg_dir: &std::path::Path, mut failed: Vec<std::path::PathBuf>) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static STUCK: OnceLock<Mutex<HashMap<std::path::PathBuf, (Vec<std::path::PathBuf>, u32)>>> = OnceLock::new();
+    let mut m = STUCK.get_or_init(Default::default).lock().unwrap();
+    if failed.is_empty() {
+        m.remove(seg_dir);
+        return false;
+    }
+    failed.sort();
+    let e = m.entry(seg_dir.to_path_buf()).or_insert_with(|| (Vec::new(), 0));
+    if e.0 == failed {
+        e.1 = e.1.saturating_add(1);
+    } else {
+        *e = (failed, 1);
+    }
+    if e.1 == STUCK_SWEEPS {
+        let names: Vec<String> = e.0.iter().take(5).map(|p| p.display().to_string()).collect();
+        let more = if e.0.len() > 5 { format!(" and {} more", e.0.len() - 5) } else { String::new() };
+        tracing::warn!(
+            "folder sweep: could not delete {}{more} ({} sweeps in a row; check who owns it). The folder is read again only when due.",
+            names.join(", "),
+            e.1
+        );
+    }
+    e.1 >= STUCK_SWEEPS
+}
+
+/// Slack before a folder's last full read (ms): a recording that was still being written then
+/// (and so left out) is added at the next read.
+const SWEEP_ADD_MARGIN_MS: i64 = 86_400_000;
+
+/// From when (ms) the sweep adds the recordings a folder read finds missing from the index:
+/// `since_ms` (two days back), or, when the folder was last read in full longer ago than that
+/// (a clean read is not repeated for a week or more, see [`crate::db::sweep_plan`]), from that
+/// read less [`SWEEP_ADD_MARGIN_MS`]. Every recording closed since the last read is then added
+/// before the strays past the retention age are deleted, so a missed one is never taken for a
+/// stray. A folder with no mark keeps the two days: it was never read (the start-up walk indexes
+/// everything on the disk) or its last read (at most one sweep ago) found something to fix and
+/// added what it found.
+fn sweep_add_since(since_ms: i64, mark: Option<(i64, i64, i64)>) -> i64 {
+    match mark {
+        Some((_, full_ms, _)) => since_ms.min(full_ms.saturating_sub(SWEEP_ADD_MARGIN_MS)),
+        None => since_ms,
+    }
+}
+
 /// Deletes files past `cutoff` the index does not cover: stray recordings in
 /// every camera folder on every drive, and clips/pictures with no event.
 fn folder_sweep(engine: &Arc<Engine>, cutoff: i64, paced: bool) {
@@ -632,8 +825,9 @@ fn folder_sweep(engine: &Arc<Engine>, cutoff: i64, paced: bool) {
     let dir = &engine.data_dir;
     // Recordings closed but never indexed (the server stopped before the
     // indexer got to them, or crashed): add the recent ones, so playback,
-    // caps and retention see them. Only the last two days: older ones
-    // would already have been found by an earlier sweep.
+    // caps and retention see them. Those since each folder's last full read
+    // (at least two days back, see sweep_add_since): older ones were found
+    // by that read.
     let (cams, seg) = {
         let c = engine.config.lock().unwrap();
         (c.cameras.clone(), c.storage.segment_seconds)
@@ -646,24 +840,38 @@ fn folder_sweep(engine: &Arc<Engine>, cutoff: i64, paced: bool) {
         })
         .collect();
     let since_ms = (Utc::now().timestamp() - 2 * 86400) * 1000;
-    let mut roots = vec![dir.clone()];
-    roots.extend(engine.config.lock().unwrap().storage.folders.iter().map(|f| f.path.clone()));
+    let mut roots = vec![(String::new(), dir.clone())];
+    roots.extend(engine.config.lock().unwrap().storage.folders.iter().map(|f| (f.name.clone(), f.path.clone())));
+    // A recording the disk would not give up asks for a full read of every folder.
+    let wanted = SWEEP_WANTED.swap(false, std::sync::atomic::Ordering::SeqCst);
+    let (full_every, quiet_every) = if cfg!(test) {
+        (std::time::Duration::ZERO, std::time::Duration::ZERO)
+    } else {
+        (crate::db::SWEEP_FULL_EVERY, crate::db::SWEEP_QUIET_FULL_EVERY)
+    };
     // Each camera folder is listed once, for both the missing recordings and the cleanup.
-    let mut added = 0;
-    for root in &roots {
+    let (mut added, mut read, mut skipped) = (0, 0, 0);
+    for (folder_name, root) in &roots {
         if let Ok(entries) = std::fs::read_dir(root.join("cameras")) {
             for cam in entries.flatten() {
                 let slug = cam.file_name().to_string_lossy().into_owned();
-                let seg_dir = cam.path().join("segments");
-                let Some(listing) = crate::db::list_dir_files(&seg_dir, &mut || pace.file()) else { continue };
-                if let Some((_, folder, _)) = dirs.iter().find(|(s, _, r)| *s == slug && r == root) {
-                    match engine.db.import_recent_listed(folder, root, &slug, seg, since_ms, &listing) {
-                        Ok(n) => added += n,
-                        Err(e) => tracing::warn!("folder sweep: could not add missing recordings: {e:#}"),
-                    }
+                let configured = dirs.iter().any(|(s, f, r)| *s == slug && r == root && f == folder_name);
+                let r = sweep_camera_folder(
+                    &engine.db,
+                    &SweepFolder { name: folder_name, root, slug: &slug, import: configured, segment_seconds: seg },
+                    since_ms,
+                    cutoff,
+                    wanted,
+                    (full_every, quiet_every),
+                    &mut pace,
+                );
+                if r.skipped {
+                    skipped += 1;
+                } else {
+                    read += 1;
+                    pace.folder();
                 }
-                prune_listed(&engine.db, root, &listing, cutoff);
-                pace.folder();
+                added += r.added;
             }
         }
     }
@@ -695,7 +903,11 @@ fn folder_sweep(engine: &Arc<Engine>, cutoff: i64, paced: bool) {
         pace.folder();
     }
     if paced {
-        tracing::info!("folder sweep looked at {} files in {} s", pace.n, started.elapsed().as_secs());
+        tracing::info!(
+            "folder sweep looked at {} files ({read} camera folder(s) read, {skipped} not due) in {} s",
+            pace.n,
+            started.elapsed().as_secs()
+        );
     }
 }
 
@@ -757,20 +969,21 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
         }
         for (_, s) in &old {
             let path = engine.segment_path(s);
-            let _ = std::fs::remove_file(&path);
+            // (The index forgets it below either way: one that would not go asks for a sweep.)
+            remove_retired(&path);
             crate::ingest::splice::forget(&path);
             super::playback::recordings_moved();
             db.delete_segment(&s.path)?;
         }
     }
     // Folder sweeps (files the index missed, orphan clips and pictures) list
-    // hundreds of thousands of files on the recording disks: every 6 hours, on a
-    // big site once a day (first one 30 minutes after start), on their own thread, paced so the
+    // hundreds of thousands of files on the recording disks: every 6 hours (first one
+    // 30 minutes after start; a camera folder is read in full only when due, see sweep_camera_folder), on their own thread, paced so the
     // disk the cameras record to is never busy for long. (Recordings in the
     // index go above, every pass.)
     if cfg!(test) {
         folder_sweep(engine, cutoff, false);
-    } else if sweep_due(db.importing(), || sweep_every(db.walked_files())) {
+    } else if sweep_due(db.importing()) {
         let engine = engine.clone();
         let spawned = std::thread::Builder::new().name("folder-sweep".into()).spawn(move || {
             let _running = ClearOnDrop(&SWEEPING);
@@ -1131,6 +1344,19 @@ fn retire_failed(e: &anyhow::Error) {
     }
 }
 
+/// Delete a recording the index is about to forget. One the disk would not give up (locked by
+/// a scanner or a player, probably) is found again only by a full read of its folder: that asks
+/// the next sweep for one ([`SWEEP_WANTED`]). True when it asked.
+fn remove_retired(path: &std::path::Path) -> bool {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            SWEEP_WANTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+        _ => false,
+    }
+}
+
 fn retire_segment(
     engine: &Arc<Engine>,
     rel: &str,
@@ -1175,7 +1401,7 @@ fn retire_segment(
             engine.db.set_segment_folder(rel, name)?;
         }
         None => {
-            let _ = std::fs::remove_file(src);
+            remove_retired(src);
             crate::ingest::splice::forget(src);
             super::playback::recordings_moved();
             engine.db.delete_segment(rel)?;
@@ -1238,7 +1464,10 @@ fn dir_bytes(dir: &std::path::Path) -> u64 {
 /// A recording a kept bookmark holds (crate::db::KEEP_WINDOW_MS) stays: asked
 /// for each old file just before it would go (the walk is slow; a bookmark may
 /// be kept meanwhile). `root`: the folder the index's paths hang from.
-fn prune_listed(db: &crate::db::Db, root: &std::path::Path, files: &[crate::db::ListedFile], cutoff: i64) {
+/// Counts the files deleted in `deleted`; returns the files that would not go (locked, say), so
+/// the sweep looks at the folder again instead of taking the read for a clean one.
+fn prune_listed(db: &crate::db::Db, root: &std::path::Path, files: &[crate::db::ListedFile], cutoff: i64, deleted: &mut usize) -> Vec<std::path::PathBuf> {
+    let mut failed = Vec::new();
     for f in files {
         // (No time known: 0, so it is looked at as an old one, as before.)
         let modified = f.mtime_ms.map(|ms| ms.div_euclid(1000)).unwrap_or(0);
@@ -1247,10 +1476,16 @@ fn prune_listed(db: &crate::db::Db, root: &std::path::Path, files: &[crate::db::
             if db.segment_kept(&crate::db::relative_path(root, &f.path)).unwrap_or(true) {
                 continue;
             }
-            let _ = std::fs::remove_file(&f.path);
+            match std::fs::remove_file(&f.path) {
+                Ok(()) => *deleted += 1,
+                // (A folder in the listing is not a recording; one gone meanwhile is fine.)
+                Err(e) if f.is_file && e.kind() != std::io::ErrorKind::NotFound => failed.push(f.path.clone()),
+                Err(_) => {}
+            }
             crate::ingest::splice::forget(&f.path);
         }
     }
+    failed
 }
 
 #[cfg(test)]
@@ -1258,11 +1493,305 @@ mod tests {
     use super::*;
 
     #[test]
-    fn big_sites_sweep_once_a_day_small_ones_every_few_hours() {
-        assert_eq!(sweep_every(0), SWEEP_EVERY_SMALL);
-        assert_eq!(sweep_every(BIG_SITE_FILES - 1), SWEEP_EVERY_SMALL);
-        assert_eq!(sweep_every(BIG_SITE_FILES), SWEEP_EVERY_BIG);
+    fn sweep_comes_every_six_hours_after_the_first_half_hour() {
+        assert_eq!(SWEEP_EVERY, std::time::Duration::from_secs(6 * 3600));
         assert!(SWEEP_FIRST_AFTER >= std::time::Duration::from_secs(30 * 60));
+    }
+
+    /// The sweep reads a camera folder once, notes it, and leaves it alone until it is due
+    /// (a week) or a recording that could not be deleted asks for a read; a folder it fixed
+    /// something in is read again at the next sweep.
+    #[test]
+    fn sweep_reads_a_camera_folder_only_when_it_is_due() {
+        let dir = std::env::temp_dir().join(format!("ambersight-sweepdue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seg = dir.join("cameras/cam/segments");
+        std::fs::create_dir_all(&seg).unwrap();
+        let now = std::time::SystemTime::now();
+        let write = |name: &str, age_s: u64| {
+            let p = seg.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - std::time::Duration::from_secs(age_s)).unwrap();
+            p
+        };
+        for i in 0..5 {
+            write(&format!("cam-1700000000-seg{i:06}.mp4"), 10 * 86400 - i * 60);
+        }
+        let db = crate::db::Db::open_in_memory().unwrap();
+        // The five are indexed (so none is a stray).
+        let st = db.import_existing_recordings(&dir, &[], 60).unwrap();
+        assert_eq!(st, 5);
+        let f = SweepFolder { name: "", root: &dir, slug: "cam", import: true, segment_seconds: 60 };
+        let week = (std::time::Duration::from_secs(7 * 86400), std::time::Duration::from_secs(28 * 86400));
+        let cutoff = Utc::now().timestamp() - 20 * 86400;
+        let since = (Utc::now().timestamp() - 2 * 86400) * 1000;
+        let mut pace = Pace { on: false, n: 0 };
+        // First sweep: no mark, read in full; nothing to fix, so it is noted.
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        assert_eq!(r, FolderSweep::default());
+        assert_eq!(pace.n, 5);
+        assert!(db.sweep_mark("", "cam").unwrap().is_some());
+        // Second sweep: not read at all.
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        assert!(r.skipped);
+        assert_eq!(pace.n, 5, "no file was looked at");
+        // A new stray old file in the folder: not seen while the folder is not due.
+        let stray = write("cam-1600000000-seg000000.mp4", 30 * 86400);
+        assert!(sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace).skipped);
+        assert!(stray.exists());
+        // A recording that could not be deleted asks for a read: the stray goes, the folder is read.
+        let r = sweep_camera_folder(&db, &f, since, cutoff, true, week, &mut pace);
+        assert_eq!((r.skipped, r.deleted), (false, 1));
+        assert!(!stray.exists());
+        assert_eq!(pace.n, 11);
+        // It fixed something: no mark, so the next sweep reads again, and that one (clean) notes it.
+        assert!(db.sweep_mark("", "cam").unwrap().is_none());
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        assert_eq!((r.skipped, r.deleted), (false, 0));
+        assert_eq!(pace.n, 16);
+        assert!(sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace).skipped);
+        // Due again (a zero-length week): read.
+        let none = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        assert!(!sweep_camera_folder(&db, &f, since, cutoff, false, none, &mut pace).skipped);
+        assert_eq!(pace.n, 21);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A recording the index misses (another process wrote it, a stop left it out) is added when
+    /// the folder is read, whatever its name's time stamp says (seconds or milliseconds).
+    #[test]
+    fn sweep_adds_recent_recordings_with_second_or_millisecond_names() {
+        let dir = std::env::temp_dir().join(format!("ambersight-sweepadd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seg = dir.join("cameras/cam/segments");
+        std::fs::create_dir_all(&seg).unwrap();
+        let now = std::time::SystemTime::now();
+        for (i, name) in ["cam-1794850000-seg000000.mp4", "cam-1794851000123-seg000000.mp4"].iter().enumerate() {
+            let p = seg.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - std::time::Duration::from_secs(3600 - i as u64 * 600)).unwrap();
+        }
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let f = SweepFolder { name: "", root: &dir, slug: "cam", import: true, segment_seconds: 60 };
+        let week = (std::time::Duration::from_secs(7 * 86400), std::time::Duration::from_secs(28 * 86400));
+        let mut pace = Pace { on: false, n: 0 };
+        let r = sweep_camera_folder(&db, &f, (Utc::now().timestamp() - 2 * 86400) * 1000, Utc::now().timestamp() - 3 * 86400, false, week, &mut pace);
+        assert_eq!(r.added, 2);
+        // It fixed something, so the next sweep reads again.
+        assert!(db.sweep_mark("", "cam").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sweep adds what is missing since the folder's last full read (with a day's slack),
+    /// at least the last two days.
+    #[test]
+    fn sweep_adds_from_the_last_full_read() {
+        let two_days = 1_000_000_000_000;
+        assert_eq!(sweep_add_since(two_days, None), two_days);
+        // Read an hour ago: the two days.
+        assert_eq!(sweep_add_since(two_days, Some((0, two_days + 2 * 86_400_000, 3))), two_days);
+        // Read 8 days ago: from 9 days back.
+        let eight = two_days - 6 * 86_400_000;
+        assert_eq!(sweep_add_since(two_days, Some((0, eight, 3))), eight - SWEEP_ADD_MARGIN_MS);
+    }
+
+    /// A folder read only once a week: a recording a stop left out 3-7 days before the read is
+    /// added, not left to be deleted as a stray later.
+    #[test]
+    fn a_weekly_read_adds_recordings_older_than_two_days() {
+        let dir = std::env::temp_dir().join(format!("ambersight-sweepweek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seg = dir.join("cameras/cam/segments");
+        std::fs::create_dir_all(&seg).unwrap();
+        let now = std::time::SystemTime::now();
+        let write = |name: String, age_s: u64| {
+            let p = seg.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - std::time::Duration::from_secs(age_s)).unwrap();
+            p
+        };
+        let t = Utc::now().timestamp();
+        for i in 0..3 {
+            write(format!("cam-{}-seg{i:06}.mp4", t - 10 * 86400 + i * 60), (10 * 86400 - i * 60 - 60) as u64);
+        }
+        let db = crate::db::Db::open_in_memory().unwrap();
+        assert_eq!(db.import_existing_recordings(&dir, &[], 60).unwrap(), 3);
+        let f = SweepFolder { name: "", root: &dir, slug: "cam", import: true, segment_seconds: 60 };
+        let week = (std::time::Duration::from_secs(7 * 86400), std::time::Duration::from_secs(28 * 86400));
+        let cutoff = t - 20 * 86400;
+        let since = (t - 2 * 86400) * 1000;
+        let mut pace = Pace { on: false, n: 0 };
+        assert_eq!(sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace), FolderSweep::default());
+        // That clean read was 8 days ago (and the folder has changed since).
+        let (_, _, files) = db.sweep_mark("", "cam").unwrap().unwrap();
+        db.set_sweep_mark("", "cam", -1, files, (t - 8 * 86400) * 1000).unwrap();
+        // A recording from 5 days ago that the index never got.
+        let missed = write(format!("cam-{}-seg000000.mp4", t - 5 * 86400), 5 * 86400 - 60);
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        assert_eq!((r.skipped, r.added, r.deleted), (false, 1, 0));
+        assert!(missed.exists());
+        assert_eq!(db.indexed_in_folder("", "cam").unwrap(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn is_root() -> bool {
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    /// Age retention: a recording the disk would not give up asks the next sweep for a full
+    /// read (the index forgets it, so only a read of the folder finds it again).
+    #[cfg(unix)]
+    #[test]
+    fn a_retired_recording_that_will_not_go_asks_for_a_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+        if is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ambersight-retire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.mp4");
+        std::fs::write(&p, b"x").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(remove_retired(&p), "a delete that failed asks for a sweep");
+        assert!(p.exists());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!remove_retired(&p));
+        assert!(!p.exists());
+        assert!(!remove_retired(&p), "one already gone does not ask");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stray that would not go is not a clean read: the folder is not marked, so the next
+    /// sweep (six hours on, not a week) tries again.
+    #[cfg(unix)]
+    #[test]
+    fn a_stray_that_will_not_go_keeps_the_folder_due() {
+        use std::os::unix::fs::PermissionsExt;
+        if is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ambersight-sweeplock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seg = dir.join("cameras/cam/segments");
+        std::fs::create_dir_all(&seg).unwrap();
+        let now = std::time::SystemTime::now();
+        let p = seg.join("cam-1600000000-seg000000.mp4");
+        std::fs::write(&p, b"x").unwrap();
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - std::time::Duration::from_secs(30 * 86400)).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let f = SweepFolder { name: "", root: &dir, slug: "cam", import: true, segment_seconds: 60 };
+        let week = (std::time::Duration::from_secs(7 * 86400), std::time::Duration::from_secs(28 * 86400));
+        let cutoff = Utc::now().timestamp() - 20 * 86400;
+        let since = (Utc::now().timestamp() - 2 * 86400) * 1000;
+        let mut pace = Pace { on: false, n: 0 };
+        std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!((r.skipped, r.added, r.deleted, r.failed), (false, 0, 0, 1));
+        assert!(db.sweep_mark("", "cam").unwrap().is_none(), "not marked as a clean read");
+        // Next sweep: read again, and this time it goes.
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        assert_eq!((r.skipped, r.deleted, r.failed), (false, 1, 0));
+        assert!(!p.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stray that can never go (another user's file, say) does not keep the folder read in full
+    /// every six hours for good: after a few sweeps that found only that, the read counts as clean
+    /// and the folder waits until it is due (a week). Anything else to fix starts the count again.
+    #[cfg(unix)]
+    #[test]
+    fn a_stray_that_never_goes_stops_keeping_the_folder_due() {
+        use std::os::unix::fs::PermissionsExt;
+        if is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ambersight-sweepstuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seg = dir.join("cameras/cam/segments");
+        std::fs::create_dir_all(&seg).unwrap();
+        let now = std::time::SystemTime::now();
+        let write = |name: &str, age_s: u64| {
+            let p = seg.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - std::time::Duration::from_secs(age_s)).unwrap();
+            p
+        };
+        let p = write("cam-1600000000-seg000000.mp4", 30 * 86400);
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let f = SweepFolder { name: "", root: &dir, slug: "cam", import: true, segment_seconds: 60 };
+        let week = (std::time::Duration::from_secs(7 * 86400), std::time::Duration::from_secs(28 * 86400));
+        let cutoff = Utc::now().timestamp() - 20 * 86400;
+        let since = (Utc::now().timestamp() - 2 * 86400) * 1000;
+        let mut pace = Pace { on: false, n: 0 };
+        let lock = |on: bool| std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(if on { 0o555 } else { 0o755 })).unwrap();
+        lock(true);
+        for _ in 1..STUCK_SWEEPS {
+            let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+            assert_eq!((r.skipped, r.deleted, r.failed), (false, 0, 1));
+            assert!(db.sweep_mark("", "cam").unwrap().is_none(), "still due");
+        }
+        // The last of those sweeps: marked, so the next ones skip the folder.
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        assert_eq!((r.skipped, r.failed), (false, 1));
+        assert!(db.sweep_mark("", "cam").unwrap().is_some(), "counted as clean");
+        assert!(sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace).skipped);
+        // Due again (a zero-length week), still stuck: marked again straight away.
+        let none = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, none, &mut pace);
+        assert_eq!((r.skipped, r.failed), (false, 1));
+        assert!(db.sweep_mark("", "cam").unwrap().is_some());
+        // Another file that would not go: a different problem, so the count starts again.
+        lock(false);
+        let q = write("cam-1600000100-seg000000.mp4", 30 * 86400);
+        lock(true);
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, none, &mut pace);
+        assert_eq!(r.failed, 2);
+        assert!(db.sweep_mark("", "cam").unwrap().is_none(), "new trouble: due again");
+        // Once the files can go, they do.
+        lock(false);
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, none, &mut pace);
+        assert_eq!((r.deleted, r.failed), (2, 0));
+        assert!(!p.exists() && !q.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Timing of the sweep of one big camera folder (run by hand:
+    /// `SWEEP_TIMING_FILES=200000 cargo test --release sweep_timing -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn sweep_timing_of_a_big_folder() {
+        let n: u32 = std::env::var("SWEEP_TIMING_FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
+        let dir = std::env::temp_dir().join(format!("ambersight-sweeptime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seg = dir.join("cameras/cam/segments");
+        std::fs::create_dir_all(&seg).unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 86400);
+        for i in 0..n {
+            let f = std::fs::File::create(seg.join(format!("cam-1700000000-seg{:06}.mp4", i % 1_000_000))).unwrap();
+            f.set_modified(t + std::time::Duration::from_secs(i as u64)).unwrap();
+        }
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let t0 = std::time::Instant::now();
+        db.import_existing_recordings(&dir, &[], 60).unwrap();
+        eprintln!("start-up index of {n} files: {:?}", t0.elapsed());
+        let f = SweepFolder { name: "", root: &dir, slug: "cam", import: true, segment_seconds: 60 };
+        let week = (std::time::Duration::from_secs(7 * 86400), std::time::Duration::from_secs(28 * 86400));
+        let cutoff = Utc::now().timestamp() - 30 * 86400;
+        let since = (Utc::now().timestamp() - 2 * 86400) * 1000;
+        let mut pace = Pace { on: false, n: 0 };
+        // The old sweep: always a full read (a zero-length week).
+        let none = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let t0 = std::time::Instant::now();
+        sweep_camera_folder(&db, &f, since, cutoff, false, none, &mut pace);
+        eprintln!("full read (what every sweep did): {:?}, {} files", t0.elapsed(), pace.n);
+        let before = pace.n;
+        let t0 = std::time::Instant::now();
+        let r = sweep_camera_folder(&db, &f, since, cutoff, false, week, &mut pace);
+        eprintln!("sweep not due: {:?}, skipped {}, files looked at {}", t0.elapsed(), r.skipped, pace.n - before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1542,6 +2071,55 @@ mod import_wait_tests {
         retention_pass(&e).unwrap();
         TEST_RESERVE.with(|r| r.set(None));
         assert_eq!((0..10).filter(|&i| file(i).exists()).count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A camera on the ffmpeg pipeline recording into an extra folder, its files named with the
+    /// start in seconds (before 0.11): indexed ones go by age and by the folder's cap, and old
+    /// ones the index never had go by age through the folder sweep, which adds recent ones.
+    #[test]
+    fn ffmpeg_recordings_in_an_extra_folder_are_pruned_by_age_and_cap() {
+        let dir = std::env::temp_dir().join(format!("ambersight-ffprune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let new = dir.join("new");
+        let seg = new.join("cameras/office_wyze/segments");
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let cfg = format!(
+            "[storage]\nretention_days = 1\n[[storage.folders]]\nname = \"new\"\npath = {:?}\nmax_mb = 1\n\
+             [[cameras]]\nname = \"Office Wyze\"\nurl = \"rtsp://192.0.2.10/stream0\"\ningest = \"ffmpeg\"\nfolder = \"new\"\n",
+            new.to_string_lossy()
+        );
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = dir.join("data");
+        let now = std::time::SystemTime::now();
+        let write = |name: &str, age_s: u64| {
+            let p = seg.join(name);
+            std::fs::write(&p, vec![0u8; 400_000]).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - std::time::Duration::from_secs(age_s)).unwrap();
+            p
+        };
+        // Three days old (past the 1-day retention), 10 s apart.
+        let old: Vec<_> = (0..3).map(|i| write(&format!("office_wyze-1794500000-seg{i:06}.mp4"), 3 * 86400 - i * 10)).collect();
+        // An hour old: five over the 1 MB cap together.
+        let recent: Vec<_> = (0..5).map(|i| write(&format!("office_wyze-1794849248-seg{i:06}.mp4"), 3600 - i * 10)).collect();
+        assert_eq!(e.db.import_camera_dirs(&[("office_wyze".into(), "new".into(), new.clone())], 10).unwrap(), 8);
+        // Never indexed: one three days old, one from a later run (milliseconds) 30 minutes old.
+        let stray_old = write("office_wyze-1794500100-seg000000.mp4", 3 * 86400);
+        let stray_new = write("office_wyze-1794851000123-seg000000.mp4", 1800);
+        assert!(e.db.segments_overlapping("office_wyze", 0, i64::MAX).unwrap().iter().all(|r| r.kind == "legacy" && r.folder == "new"));
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        assert!(old.iter().all(|p| !p.exists()), "past the age: deleted");
+        assert!(!stray_old.exists(), "an old file the index never had: deleted by the sweep");
+        // The sweep indexed the recent stray; the cap (1 MiB) then took the oldest recent ones.
+        let left: Vec<bool> = recent.iter().map(|p| p.exists()).collect();
+        assert_eq!(left, [false, false, false, false, true]);
+        assert!(stray_new.exists());
+        let rows = e.db.segments_overlapping("office_wyze", 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(e.db.folder_bytes("new").unwrap() <= 1024 * 1024);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2118,5 +2696,43 @@ mod writable_tests {
         assert!(unwritable_folders_with(&cs, now, Some(|_| false)).is_empty());
         assert!(UNWRITABLE.lock().unwrap().as_ref().unwrap().get(&key).is_none());
         std::fs::remove_dir_all(&d).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod temp_sweep_tests {
+    #[test]
+    fn old_temporary_files_are_swept_but_not_ones_in_use() {
+        let d = std::env::temp_dir().join(format!("amber-tmpsweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("tmp")).unwrap();
+        std::fs::create_dir_all(d.join("thumbs/ai/cam-1")).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        let hours = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        let put = |rel: &str, t: std::time::SystemTime| {
+            let p = d.join(rel);
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_modified(t).unwrap();
+            p
+        };
+        let gone = [put("tmp/export-1-0.zip", hours), put("tmp/subs-1-0.srt", old), put("tmp/burn-1-0.mp4", old), put("thumbs/cam-5.12-0.part", old), put("thumbs/ai/cam-1/2.12-1.part", old)];
+        let kept = [put("tmp/subs-1-1.srt", hours), put("tmp/burn-1-1.mp4", hours), put("tmp/other.bin", old), put("thumbs/cam-5.jpg", old), put("thumbs/cam-6.12-2.part", std::time::SystemTime::now())];
+        let busy = super::TempInUse::new(put("tmp/export-1-1.zip", hours));
+        super::sweep_temp_files(&d, true);
+        for p in &gone {
+            assert!(!p.exists(), "{}", p.display());
+        }
+        for p in kept.iter().chain([&busy.path().to_path_buf()]) {
+            assert!(p.exists(), "{}", p.display());
+        }
+        // Without the pictures: tmp/ only.
+        let part = put("thumbs/cam-7.12-3.part", old);
+        super::sweep_temp_files(&d, false);
+        assert!(part.exists());
+        // In use no more: the file goes with it.
+        let p = busy.path().to_path_buf();
+        drop(busy);
+        assert!(!p.exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -16,6 +16,8 @@ use std::time::Duration;
 
 const FPS: u32 = 30;
 const MAX_WIDTH: u32 = 1280;
+/// The masks note of a time-lapse made without masks.
+const NO_MASKS: &str = "none";
 
 /// A child process that is stopped and reaped if still held when dropped
 /// (an early return on an error must not leave ffmpeg running).
@@ -67,6 +69,18 @@ fn output_size(w: u32, h: u32) -> (u32, u32) {
     (ow, oh)
 }
 
+/// The decoder's filters for one pass: `masks` on the picture as recorded,
+/// then `fit`, then the camera's text when it is burned into pictures. The
+/// clip shows the recording at `start_ms + t * speed` (t: its own time), so
+/// its clock is sped up by `speed` for the text.
+fn frame_filter(masks: &str, fit: &str, cfg: Option<&CameraConfig>, start_ms: i64, speed: u32) -> String {
+    let mut vf = crate::privacy::chain(masks, fit);
+    if let Some(t) = cfg.and_then(|c| crate::privacy::text_filter(c, crate::privacy::Clock::Pts { base_s: start_ms as f64 / 1000.0 })) {
+        vf = format!("{vf},setpts=PTS*{speed},{t}");
+    }
+    vf
+}
+
 impl Engine {
     pub fn timelapse_dir(&self) -> PathBuf {
         self.data_dir.join("timelapse")
@@ -74,6 +88,36 @@ impl Engine {
 
     pub fn timelapse_path(&self, camera_slug: &str, date: NaiveDate) -> PathBuf {
         self.timelapse_dir().join(camera_slug).join(format!("{date}.mp4"))
+    }
+
+    /// Beside a time-lapse: the privacy masks burned into it (see
+    /// privacy::masks_revision; NO_MASKS when made without any). Every
+    /// time-lapse made since 0.11.1 has one.
+    fn timelapse_masks_path(&self, camera_slug: &str, date: NaiveDate) -> PathBuf {
+        self.timelapse_dir().join(camera_slug).join(format!("{date}.masks"))
+    }
+
+    /// A time-lapse made with other privacy masks than the camera has now: it
+    /// may show what they hide, so it is not served. One without a note was
+    /// made before notes were kept: which masks it has cannot be told, so for
+    /// a camera with masks it counts as old too (made again, it is served).
+    pub fn timelapse_masks_old(&self, camera_slug: &str, date: NaiveDate) -> bool {
+        // (With the masks of cameras removed under the name that apply to that day.)
+        let Some(cfg) = self.picture_cfg_at(camera_slug, day_bounds(date).0) else { return false };
+        let rev = crate::privacy::masks_revision(&cfg);
+        if rev.is_empty() {
+            return false;
+        }
+        match std::fs::read_to_string(self.timelapse_masks_path(camera_slug, date)) {
+            Ok(r) => r.trim() != rev,
+            Err(_) => true,
+        }
+    }
+
+    /// Delete a time-lapse (and its masks note).
+    pub fn remove_timelapse(&self, camera_slug: &str, date: NaiveDate) {
+        let _ = std::fs::remove_file(self.timelapse_path(camera_slug, date));
+        let _ = std::fs::remove_file(self.timelapse_masks_path(camera_slug, date));
     }
 
     /// Make (or remake) one camera's time-lapse for `date`. Blocking; takes
@@ -145,11 +189,19 @@ impl Engine {
         let mut cur = from;
         let mut pictures = 0usize;
         let fit = format!("scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2,format=yuv420p");
+        // Privacy masks on each picture as recorded; the camera's text with
+        // each picture's own time.
+        // (Also those of cameras removed under its name, for what they recorded that day.)
+        let look = self.picture_cfg_at(camera, from);
+        let masks = look.as_ref().map(crate::privacy::camera_mask_filter).unwrap_or_default();
         // Normally one pass; another only where the recording's format changed.
         while cur < to {
             let Some(clip) = crate::ingest::splice::VirtualClip::plan_trick(&segs, cur, to, speed, FRAME_MS)? else { break };
+            let vf = frame_filter(&masks, &fit, look.as_ref(), clip.start_ms, speed);
             let mut dec = crate::child::ffmpeg()
-                .args(["-hide_banner", "-loglevel", "error", "-i", "-", "-vf", &fit, "-vsync", "0", "-f", "rawvideo", "-"])
+                .args(["-hide_banner", "-loglevel", "error", "-i", "-", "-vf", &vf])
+                .args(crate::ffmpeg_bin::passthrough_args())
+                .args(["-f", "rawvideo", "-"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -200,6 +252,13 @@ impl Engine {
         let _ = std::fs::remove_file(&dest);
         std::fs::rename(&tmp, &dest)?;
         partial.1 = true;
+        // Which masks are in it (a later mask change makes it one not served).
+        // (Always written, "none" without masks: no note means from before.)
+        let rev = look.as_ref().map(crate::privacy::masks_revision).unwrap_or_default();
+        let note = self.timelapse_masks_path(cam, date);
+        if let Err(e) = std::fs::write(&note, if rev.is_empty() { NO_MASKS } else { rev.as_str() }) {
+            warn!("time-lapse: {camera} {date}: {e}");
+        }
         info!("time-lapse: {camera} {date}: {pictures} pictures, {:.1} MB", std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) as f64 / 1048576.0);
         Ok(dest)
     }
@@ -275,7 +334,7 @@ pub fn timelapse_loop(engine: Arc<Engine>) {
             let oldest = now.date_naive() - chrono::Duration::days(tl.keep_days as i64);
             for (s, d, _, busy) in engine.timelapses() {
                 if d < oldest && !busy {
-                    let _ = std::fs::remove_file(engine.timelapse_path(&s, d));
+                    engine.remove_timelapse(&s, d);
                 }
             }
         }
@@ -294,6 +353,51 @@ mod tests {
         assert_eq!(output_size(4608, 1728), (1280, 480));
         assert_eq!(output_size(640, 360), (640, 360));
         assert_eq!(output_size(1001, 563), (1000, 562));
+    }
+
+    #[test]
+    fn frames_get_masks_first_and_text_on_the_recordings_clock() {
+        let mut c: CameraConfig = toml::from_str("name = \"Porch\"\nurl = \"rtsp://192.0.2.10/s\"").unwrap();
+        assert_eq!(frame_filter("drawbox=m", "scale=fit", Some(&c), 1_700_000_000_000, 300), "drawbox=m,scale=fit");
+        c.overlay_text = Some("{short} {time}".into());
+        let f = frame_filter("drawbox=m", "scale=fit", Some(&c), 1_700_000_000_000, 300);
+        if !crate::privacy::drawtext_available() {
+            // (No ffmpeg, or one that can't draw text: the frames come without the text.)
+            assert_eq!(f, "drawbox=m,scale=fit");
+            return;
+        }
+        assert!(f.starts_with("drawbox=m,scale=fit,setpts=PTS*300,drawtext="), "{f}");
+        assert!(f.contains("Porch %{pts\\:localtime\\:1700000000.000\\:%T}"), "{f}");
+        assert_eq!(frame_filter("", "scale=fit", None, 0, 1), "scale=fit");
+    }
+
+    #[test]
+    fn a_time_lapse_is_served_only_with_the_masks_the_camera_has() {
+        let dir = std::env::temp_dir().join(format!("amber-tl-masks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = Engine::for_test(toml::from_str("[[cameras]]\nname = \"Porch\"\nurl = \"rtsp://192.0.2.10/s\"\nmask_mode = \"recording\"\nprivacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]\n").unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = dir.clone();
+        let d = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        std::fs::create_dir_all(e.timelapse_dir().join("porch")).unwrap();
+        let note = e.timelapse_masks_path("porch", d);
+        // No note: made before notes were kept; which masks it has is not known.
+        assert!(e.timelapse_masks_old("porch", d));
+        // Made without masks ("none"), or with other ones: old.
+        std::fs::write(&note, NO_MASKS).unwrap();
+        assert!(e.timelapse_masks_old("porch", d));
+        std::fs::write(&note, "0123456789ab").unwrap();
+        assert!(e.timelapse_masks_old("porch", d));
+        // With these masks (whatever their level): served.
+        let cfg = e.picture_cfg("porch").unwrap();
+        std::fs::write(&note, crate::privacy::masks_revision(&cfg)).unwrap();
+        assert!(!e.timelapse_masks_old("porch", d));
+        e.config.lock().unwrap().cameras[0].mask_mode = Some("screen".into());
+        assert!(!e.timelapse_masks_old("porch", d));
+        // A camera without masks: any.
+        e.config.lock().unwrap().cameras[0].privacy_masks.clear();
+        let _ = std::fs::remove_file(&note);
+        assert!(!e.timelapse_masks_old("porch", d));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

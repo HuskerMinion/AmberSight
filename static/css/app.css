@@ -917,6 +917,9 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
 .air-cap, .air-again { padding: 4px 6px; font-size: var(--fs-s); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .air-again { border-top: 1px dashed var(--line); }
 .air-err { color: var(--bad); }
+.air-errdetail { margin: 0 0 var(--s2); color: var(--muted); font-size: 12px; }
+.air-errdetail summary { cursor: pointer; }
+.air-errdetail pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow: auto; }
 .air-chip { border-radius: 10px; padding: 0 7px; border: 1px solid var(--line); font-size: var(--fs-s); white-space: nowrap; }
 .air-chip.air-hit { background: var(--ok-soft); border-color: var(--ok); }
 .air-chip.air-low { background: rgba(224,177,58,.18); border-color: #e0b13a; }
@@ -1260,14 +1263,28 @@ body.pane-remote #dkProfile { display: none !important; }
 .pane-bar { display: flex; align-items: center; gap: var(--s2); padding: 4px var(--s2); border-bottom: 1px solid var(--line); background: var(--surface); }
 .pane-bar select { font-weight: 600; }
 
-/* A camera's own text on the picture (live view) */
-.ovltext { position: absolute; z-index: 3; max-width: calc(100% - 16px); padding: 1px 6px; border-radius: 3px; background: rgba(0,0,0,.5); color: #fff; font-size: calc(12px * var(--ts)); line-height: 1.4; white-space: pre; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
-.ovltext.pos-top-left { top: 6px; left: 8px; }
-.ovltext.pos-top-right { top: 6px; right: 8px; }
-.ovltext.pos-bottom-left { bottom: 22px; left: 8px; }
-.ovltext.pos-bottom-right { bottom: 22px; right: 8px; }
-.ovltext.big { font-size: calc(16px * var(--ts)); }
-.ovltext.big.pos-bottom-left, .ovltext.big.pos-bottom-right { bottom: 10px; }
+/* Privacy masks drawn over a camera's video (masks.js): solid black, above
+   the picture, under the pills and text; never caught by the pointer. */
+.pmask { position: absolute; z-index: 3; overflow: hidden; pointer-events: none; }
+.pmask[hidden] { display: none; }
+.pmask > i { position: absolute; background: #000; }
+/* A masked camera's player: our full-screen button (the browser's own would
+   show the video without the masks), and its box filling the screen. */
+.pmask-fs { position: absolute; z-index: 4; top: 8px; right: 8px; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: rgba(12,15,19,.6); color: #fff; cursor: pointer; opacity: .8; }
+.pmask-fsbox:has(> .ovltext.pos-top-right) > .pmask-fs { top: auto; bottom: 52px; }
+.pmask-fs:hover, .pmask-fs:focus-visible { opacity: 1; background: rgba(12,15,19,.8); }
+.pmask-fs:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pmask-fsbox:fullscreen { width: 100vw; height: 100vh; max-width: none; max-height: none; aspect-ratio: auto; border-radius: 0; border: 0; background: #000; }
+.pmask-fsbox:-webkit-full-screen { width: 100vw; height: 100vh; max-width: none; max-height: none; aspect-ratio: auto; border-radius: 0; border: 0; background: #000; }
+
+/* A camera's own text on the picture (live view and playback) */
+.ovltext { position: absolute; z-index: 4; max-width: calc(100% - 16px); padding: 1px 6px; border-radius: 3px; background: rgba(0,0,0,.5); color: #fff; font-size: calc(12px * var(--ts)); line-height: 1.4; white-space: pre; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.ovltext.pos-top-left { top: calc(6px + var(--ott, 0px)); left: calc(8px + var(--otl, 0px)); }
+.ovltext.pos-top-right { top: calc(6px + var(--ott, 0px)); right: calc(8px + var(--otr, 0px)); }
+.ovltext.pos-bottom-left { bottom: calc(22px + var(--otb, 0px)); left: calc(8px + var(--otl, 0px)); }
+.ovltext.pos-bottom-right { bottom: calc(22px + var(--otb, 0px)); right: calc(8px + var(--otr, 0px)); }
+.ovltext.ovltext-big { font-size: calc(16px * var(--ts)); }
+.ovltext.ovltext-big.pos-bottom-left, .ovltext.ovltext-big.pos-bottom-right { bottom: calc(10px + var(--otb, 0px)); }
 
 /* Help: "?" next to a page's tabs, the help popup, search */
 .helpq { margin-left: auto; align-self: center; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); font-weight: 600; font-size: calc(13px * var(--ts)); text-decoration: none; flex: none; }
@@ -1310,7 +1327,8 @@ html[data-evthumb="l"] { --evthumb: 280px; }
 
 /* Time-lapse tab */
 .tl-days { margin: var(--s2) 0 var(--s3); }
-.tl-player { max-width: 1100px; }
+/* As wide as fits the window's height (16:9), centered. */
+.tl-player { max-width: min(100%, max(480px, calc((100vh - 250px) * 16 / 9))); margin-inline: auto; }
 .tl-player video { width: 100%; background: #000; border-radius: var(--r2); display: block; }
 .tl-player .row { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); margin-top: var(--s2); }
 .tl-set { max-width: 1100px; margin-top: var(--s5); }
@@ -1757,3 +1775,5 @@ body[data-tab="help"] #dock, body[data-tab="timelapse"] #dock, body[data-tab="di
 @media (max-width: 600px) { .startbanner { bottom: 76px; text-align: left; } }
 body.popout .startbanner, body.pane .startbanner { display: none; }
 .upd-warn { margin: var(--s3) 0; padding-left: 1.2em; color: var(--muted); font-size: var(--fs-s); display: flex; flex-direction: column; gap: 6px; }
+/* phones: the full-size text stays small enough to keep clear of the arrows */
+@media (max-width: 600px) { .ovltext.ovltext-big { font-size: calc(12px * var(--ts)); max-width: calc(100% - 96px); } }

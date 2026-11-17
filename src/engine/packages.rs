@@ -227,7 +227,12 @@ pub(super) fn on_frame(engine: &Arc<Engine>, handle: &Arc<CameraHandle>, camera:
 /// An event for a delivery or a pickup: Events, timeline, alerts, MQTT.
 fn announce(engine: &Engine, handle: &CameraHandle, camera: &str, label: &str, jpeg: &[u8], at: i64) {
     let id = format!("{}-{}-{}", slug(camera), at, if label == "package" { "pkg" } else { "pkgoff" });
-    let thumb = std::fs::write(engine.data_dir.join("thumbs").join(format!("{id}.jpg")), jpeg).is_ok();
+    // (Masks and the camera's text, as every event picture.)
+    let pic = match engine.picture_cfg(camera) {
+        Some(c) => super::clip::event_picture(&c, jpeg.to_vec(), at * 1000),
+        None => jpeg.to_vec(),
+    };
+    let thumb = !pic.is_empty() && std::fs::write(engine.data_dir.join("thumbs").join(format!("{id}.jpg")), pic).is_ok();
     info!("camera '{camera}': {label}");
     engine.record_event(
         Event {
@@ -599,8 +604,10 @@ pub fn scan(cfg: &crate::config::Config, camera: &str, hours: i64) -> anyhow::Re
         let root = if r.folder.is_empty() { data.clone() } else { folders.iter().find(|f| f.name == r.folder).map(|f| f.path.clone()).unwrap_or(data.clone()) };
         root.join(&r.path)
     };
+    let look = crate::privacy::camera_cfg(cfg, camera);
+    let masks = look.as_ref().map(crate::privacy::camera_mask_filter).unwrap_or_default();
     let pic = |at_ms: i64| -> Option<RgbImage> {
-        let j = super::playback::still_jpeg(&db, &slug(camera), at_ms, &resolve).ok()??;
+        let j = super::playback::still_jpeg(&db, &slug(camera), at_ms, &masks, &resolve).ok()??;
         let img = image::load_from_memory(&j).ok()?.to_rgb8();
         let h = (width as f32 * img.height() as f32 / img.width() as f32).round() as u32;
         Some(image::imageops::resize(&img, width, h, image::imageops::FilterType::Triangle))
@@ -632,7 +639,7 @@ pub fn scan(cfg: &crate::config::Config, camera: &str, hours: i64) -> anyhow::Re
                 continue;
             }
             people.push(b);
-            let Ok(bytes) = std::fs::read(data.join("thumbs").join("ai").join(id).join(format!("{}.jpg", c["n"].as_i64().unwrap_or(-1)))) else { continue };
+            let Ok(bytes) = crate::privacy::read_masked(&data.join("thumbs").join("ai").join(id).join(format!("{}.jpg", c["n"].as_i64().unwrap_or(-1))), look.as_ref()) else { continue };
             let Ok(img) = image::load_from_memory(&bytes).map(|i| i.to_rgb8()) else { continue };
             carry = carry.max(judge.carrying(&img, &b)?);
         }

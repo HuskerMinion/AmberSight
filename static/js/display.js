@@ -17,8 +17,9 @@
 
 import { api, bus, esc, sleep, setTheme, themeMode } from './core.js';
 import { startLive, startJpeg } from './player.js';
+import { watchMasks, refreshMasks } from './masks.js';
 import { initWake, wakeSupported, keepAwake } from './wake.js';
-import { cleanSettings, chooseCams, fitGrid, inWindow, updateActivity, bigNow, shiftAt } from './display_kit.js';
+import { cleanSettings, chooseCams, fitGrid, inWindow, updateActivity, bigNow, shiftAt, maskSig } from './display_kit.js';
 
 const KEY = 'ambs.display.v1';
 const PAIR_BY_KEY = 'ambs.display.pairBy';   // when this display must be paired again (unix s)
@@ -210,8 +211,16 @@ async function poll() {
     const sig = shown.map(c => c.id + ':' + c.name).join(',') + '|' + S.grid + '|' + S.names;
     if (sig !== gridSig) buildGrid(sig);
     else for (const c of shown) updateTile(c);
+    // A big view whose camera's masks changed starts again (refreshBig opens it anew).
+    for (const [id, p] of [...panes]) {
+      const c = shown.find(x => x.id === id);
+      if (c && maskSig(c) !== p.maskSig) closePane(id);
+    }
     updateActivity(act, shown, S, Date.now(), 0);
     refreshBig(Date.now());
+    // The masks as just read, over every video on the page (a mask added while a
+    // camera shows as video is drawn at once).
+    refreshMasks();
   } catch (e) {
     fails++; stats.fails++;
     if (!stats.downSince) stats.downSince = Date.now();
@@ -278,18 +287,18 @@ function updateTile(c) {
   const t = tiles.get(c.id);
   if (!t) return;
   t.cam = c;
-  const mode = tileMode(c);
-  if (c.online || mode !== 'live') t.offSince = 0; else if (!t.offSince) t.offSince = Date.now();
+  const mode = tileMode(c) + '|' + maskSig(c);
+  if (c.online || !mode.startsWith('live|')) t.offSince = 0; else if (!t.offSince) t.offSince = Date.now();
   if (mode === t.mode) return;
   dropMedia(t);
   t.mode = mode;
-  if (mode === 'live') {
+  if (mode.startsWith('live|')) {
     t.player = mountPlayer(t.frame, c, S.grid === 'sub' || c.remote ? 'sub' : 'light', (m) => { t.media = m; });
     return;
   }
   const ph = document.createElement('div');
   ph.className = 'dsp-ph';
-  ph.innerHTML = mode === 'asleep' ? '<span><svg class="ic"><use href="#i-moon"/></svg>Asleep</span>' : '<span>Off</span>';
+  ph.innerHTML = mode.startsWith('asleep|') ? '<span><svg class="ic"><use href="#i-moon"/></svg>Asleep</span>' : '<span>Off</span>';
   t.frame.appendChild(ph);
   t.media = ph;
 }
@@ -297,7 +306,10 @@ function updateTile(c) {
 // Live pictures into `frame`: JPEG frames ('light'), or video ('sub' / 'main') falling back to
 // JPEG frames when the browser cannot play the stream. setMedia(el) is told each element shown.
 function mountPlayer(frame, c, q, setMedia) {
-  const holder = { player: null, stop() { if (this.player) this.player.stop(); this.player = null; } };
+  // The camera's privacy masks over its video (the pictures come masked). The
+  // watcher asks for the camera as last read, so a mask change is drawn too.
+  const masks = watchMasks(frame, () => cams.find(x => x.id === c.id) || c);
+  const holder = { player: null, stop() { masks.stop(); if (this.player) this.player.stop(); this.player = null; } };
   const jpeg = () => {
     const img = document.createElement('img');
     img.className = 'dsp-media'; img.alt = c.name; img.decoding = 'async';
@@ -324,7 +336,7 @@ function dropTile(t) { dropMedia(t); t.el.onclick = null; }
 // "Offline" on a tile whose camera has been down for a while (its player keeps trying).
 function paintTilesOffline(now) {
   for (const t of tiles.values()) {
-    const off = t.mode === 'live' && t.offSince && now - t.offSince > OFFLINE_AFTER;
+    const off = t.mode.startsWith('live|') && t.offSince && now - t.offSince > OFFLINE_AFTER;
     if (t.offEl.hidden === !off) continue;
     t.offEl.hidden = !off;
     t.offEl.textContent = off ? 'Offline' : '';
@@ -356,6 +368,7 @@ function openPane(id) {
   el.innerHTML = '<div class="dsp-frame"></div><div class="dsp-plabel dsp-shift"><i class="dsp-dot"></i><span class="dsp-pname"></span><span class="dsp-why"></span></div><div class="dsp-bar" hidden><i></i></div>';
   const p = { el, frame: el.firstChild, media: null, player: null, label: el.children[1], bar: el.children[2].firstChild, barUntil: 0 };
   p.label.querySelector('.dsp-pname').textContent = c.short_name || c.name;
+  p.maskSig = maskSig(c);
   p.player = mountPlayer(p.frame, c, S.big === 'main' && !c.remote ? 'main' : 'sub', (m) => { p.media = m; });
   el.onclick = () => {
     // Tapped: back to the grid, and this camera stays there until its activity has stopped.

@@ -129,7 +129,8 @@ pub async fn recent(State(engine): State<Arc<Engine>>, axum::Extension(access): 
 }
 
 pub async fn img(State(engine): State<Arc<Engine>>, axum::Extension(access): axum::Extension<Access>, AxPath(id): AxPath<i64>) -> Response {
-    match blocking(move || engine.db.plate_img(id)).await {
+    // (A plate cut out before its camera's masks changed is not shown: see privacy::crop_shown.)
+    match blocking(move || Ok(engine.db.plate_img(id)?.filter(|(cam, j)| crate::privacy::crop_shown(j, engine.picture_cfg(cam).as_ref())))).await {
         // A camera the caller may not see answers as if it does not exist.
         Ok(Some((cam, jpeg))) if access.can_slug(&cam) => Response::builder()
             .header(header::CONTENT_TYPE, "image/jpeg")

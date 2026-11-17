@@ -252,19 +252,50 @@ fn media_files(job: &Job, protected: &[String]) -> Vec<(String, PathBuf, u64)> {
             }
         }
     };
+    // Pictures kept before a camera's privacy masks were set or changed are
+    // masked first (as when they are shown), or left out. (A re-masked file
+    // is new, so it goes with the next copy.) Clips are copied as recorded,
+    // like the recordings: this is a backup of AmberSight's own data.
+    // When the settings cannot be read, or an event's camera cannot be
+    // told, its masks are unknown: its pictures are left out (never copied
+    // as they are). A camera no longer set up: as they are.
+    let cams: Option<crate::config::Config> = match toml::from_str(job.config_text) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("off-site copy: the settings could not be read ({e}); event pictures are left out this time");
+            None
+        }
+    };
+    let masked_ok = |id: &str, p: &Path| match &cams {
+        Some(c) if p.is_file() => {
+            let ev = job.db.get_event(id).ok().flatten().map(|e| e.camera);
+            match crate::privacy::event_camera(c, ev.as_deref(), id) {
+                crate::privacy::EventCamera::Camera(cam) => crate::privacy::mask_file(p, Some(&cam)),
+                crate::privacy::EventCamera::Gone => true,
+                crate::privacy::EventCamera::Unknown => false,
+            }
+        }
+        Some(_) => true,
+        None => false,
+    };
     for id in protected.iter().filter(|i| safe_id(i)) {
         if job.cfg.clips {
             add(format!("clips/{id}.mp4"), job.data_dir.join("clips").join(format!("{id}.mp4")));
         }
         if job.cfg.pictures {
-            add(format!("thumbs/{id}.jpg"), job.data_dir.join("thumbs").join(format!("{id}.jpg")));
+            let thumb = job.data_dir.join("thumbs").join(format!("{id}.jpg"));
+            if masked_ok(id, &thumb) {
+                add(format!("thumbs/{id}.jpg"), thumb);
+            }
             let dir = job.data_dir.join("thumbs").join("ai").join(id);
             let mut names: Vec<String> = std::fs::read_dir(&dir)
                 .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| safe_id(n)).collect())
                 .unwrap_or_default();
             names.sort();
             for n in names {
-                add(format!("thumbs/ai/{id}/{n}"), dir.join(&n));
+                if masked_ok(id, &dir.join(&n)) {
+                    add(format!("thumbs/ai/{id}/{n}"), dir.join(&n));
+                }
             }
         }
     }
@@ -767,6 +798,36 @@ mod tests {
         let referenced: HashSet<String> = ["clips/a.mp4.enc".to_string()].into();
         let protected: HashSet<String> = ["b".to_string()].into();
         assert_eq!(media_to_delete(&remote, &referenced, &protected), ["clips/c.mp4.enc", "thumbs/ai/d/1.jpg.enc"]);
+    }
+
+    /// Pictures whose masks cannot be told are left out, never copied as they are.
+    #[test]
+    fn pictures_with_unknown_masks_are_left_out() {
+        let tmp = std::env::temp_dir().join(format!("ambs-offsite-masks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let data = tmp.join("data");
+        std::fs::create_dir_all(data.join("clips")).unwrap();
+        std::fs::create_dir_all(data.join("thumbs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        db.insert_event(&crate::engine::Event { id: "gone-1".into(), camera_id: 0, camera: "Gone".into(), start: 1, end: 2, score: 0.5, clip: None, thumb: None, objects: vec![], protect: true }).unwrap();
+        for id in ["gone-1", "nobody-1"] {
+            for p in [data.join("clips").join(format!("{id}.mp4")), data.join("thumbs").join(format!("{id}.jpg"))] {
+                std::fs::write(&p, b"x").unwrap();
+                std::fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(600)).unwrap();
+            }
+        }
+        let cfg = OffsiteConfig { enabled: true, kind: "folder".into(), folder: tmp.join("dest").to_string_lossy().into(), clips: true, pictures: true, ..Default::default() };
+        let st = store::open(&cfg).unwrap();
+        let ids = vec!["gone-1".to_string(), "nobody-1".to_string()];
+        let names = |text: &str| -> Vec<String> {
+            let job = Job { cfg: &cfg, config_text: text, db: &db, data_dir: &data, store: st.as_ref(), params: crypt::TEST_PARAMS, server: "t".into(), progress: &|_| {} };
+            media_files(&job, &ids).into_iter().map(|(k, ..)| k).collect()
+        };
+        // A camera no longer set up: as it is; no event and no camera fits the id: left out.
+        assert_eq!(names("[server]\nport = 3\n"), ["clips/gone-1.mp4", "thumbs/gone-1.jpg", "clips/nobody-1.mp4"]);
+        // Settings that cannot be read: no pictures at all (the clips go).
+        assert_eq!(names("[server\nport = "), ["clips/gone-1.mp4", "clips/nobody-1.mp4"]);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

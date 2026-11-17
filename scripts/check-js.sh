@@ -17,4 +17,5 @@ done
 # Unit tests of the pure modules.
 node scripts/test-camaddr.mjs || bad=1
 node scripts/test-display.mjs || bad=1
+node scripts/test-masks.mjs || bad=1
 exit $bad

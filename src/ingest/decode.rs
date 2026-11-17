@@ -34,6 +34,12 @@ const HW_STALL_FRAMES: u64 = 40;
 /// replaced by software decoding.
 const HW_ERROR_BURST: u32 = 30;
 
+/// Whether a hardware decoder that has run this long and given this many
+/// pictures has run well enough to forget the camera's earlier failures.
+fn healthy(ran: Duration, pictures: u64) -> bool {
+    ran >= crate::hwdecode::HEALTHY_RUN && pictures > 0
+}
+
 /// What went wrong with a hardware decoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Trouble {
@@ -216,6 +222,27 @@ pub struct DecoderStats {
 struct ErrWatch {
     first: std::sync::Mutex<Option<String>>,
     burst: std::sync::atomic::AtomicBool,
+    /// It said the system would not start another thread (a process limit,
+    /// not the card).
+    spawn_limit: std::sync::atomic::AtomicBool,
+}
+
+impl ErrWatch {
+    /// One line of the decoder's stderr (not empty).
+    fn see(&self, line: &str) {
+        let mut f = self.first.lock().unwrap();
+        if f.is_none() {
+            *f = crate::hwdecode::reason_from_stderr(line);
+        }
+        if crate::proclimit::is_spawn_limit_line(line) {
+            self.spawn_limit.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Why it failed when that was the process limit (in words), else None.
+    fn limit_reason(&self) -> Option<String> {
+        self.spawn_limit.load(Ordering::SeqCst).then(crate::proclimit::limit_words_now)
+    }
 }
 
 /// One running ffmpeg process plus its two I/O threads.
@@ -236,6 +263,8 @@ pub struct FrameDecoder {
     codec: Codec,
     fps: u32,
     scale: u32,
+    /// Privacy mask filter drawn on every picture (empty: none).
+    masks: String,
     param_sets: Vec<u8>,
     pipe: Option<Pipeline>,
     out_tx: Option<SyncSender<Vec<u8>>>,
@@ -252,6 +281,9 @@ pub struct FrameDecoder {
     hw_failed: bool,
     /// Why the hardware decoder was replaced.
     hw_reason: Option<String>,
+    /// The Status note for it: how often that way failed for this camera
+    /// and when it is tried again.
+    hw_note: Option<String>,
     /// The hardware decoder that was replaced, to blame once software
     /// decoding of the same stream works: (spec, why, pictures out then).
     blame: Option<(String, String, u64)>,
@@ -262,6 +294,9 @@ pub struct FrameDecoder {
     in_since_out: u64,
     /// The camera, for the log and Status.
     camera: String,
+    /// The hardware decoder has run `hwdecode::HEALTHY_RUN` well, and the
+    /// camera's earlier failures of that way were forgotten.
+    hw_ok_noted: bool,
 }
 
 /// The filter that brings decoded pictures from the graphics card into
@@ -307,7 +342,9 @@ pub fn hw_input_args(spec: &str, codec: Option<Codec>) -> Result<Vec<String>> {
     }
 }
 
-fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>) -> Result<Vec<String>> {
+/// `masks`: privacy mask filter ([`crate::privacy::mask_filter`]), drawn on
+/// the analysed pictures (empty: none).
+fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>, masks: &str) -> Result<Vec<String>> {
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error"].map(String::from).into();
     if let Some(spec) = hw {
         a.extend(hw_input_args(spec, Some(codec))?);
@@ -340,6 +377,12 @@ fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>) -> Result<V
     }
     if scale > 0 {
         vf.push_str(&format!(",scale={scale}:-2"));
+    }
+    // (In memory, after the card's pictures came back, and on the small
+    // picture: the boxes are sized from it.)
+    if !masks.is_empty() {
+        vf.push(',');
+        vf.push_str(masks);
     }
     a.extend(["-vf".to_string(), vf]);
     a.extend(["-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "8", "-"].map(String::from));
@@ -408,10 +451,11 @@ impl Pipeline {
         fps: u32,
         scale: u32,
         hw: Option<&str>,
+        masks: &str,
         out_tx: SyncSender<Vec<u8>>,
         counters: Arc<Counters>,
     ) -> Result<Self> {
-        let args = ffmpeg_args(codec, fps, scale, hw)?;
+        let args = ffmpeg_args(codec, fps, scale, hw, masks)?;
         let mut child = crate::child::ffmpeg()
             .args(&args)
             .stdin(Stdio::piped())
@@ -438,12 +482,7 @@ impl Pipeline {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    {
-                        let mut f = w.first.lock().unwrap();
-                        if f.is_none() {
-                            *f = crate::hwdecode::reason_from_stderr(&line);
-                        }
-                    }
+                    w.see(&line);
                     if window.elapsed() > Duration::from_secs(60) {
                         window = Instant::now();
                         n = 0;
@@ -517,6 +556,27 @@ impl Pipeline {
         self.exited_ms.load(Ordering::SeqCst) == u64::MAX
     }
 
+    /// Whether it ended because it was told to from outside: AmberSight is
+    /// stopping, or ffmpeg got a signal (a service stop signals every process
+    /// of the service). Not a failure of the decoder.
+    fn stopped_from_outside(&mut self) -> bool {
+        if crate::child::stopping() {
+            return true;
+        }
+        if self.alive() {
+            return false;
+        }
+        // (Its output closed a moment before it exits.)
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(st)) => return crate::child::ended_by_signal(&st),
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                _ => return false,
+            }
+        }
+    }
+
     /// Close stdin, give ffmpeg a moment to finish, then kill it.
     fn shutdown(mut self) {
         self.input.take(); // writer sees a closed queue and drops stdin
@@ -549,14 +609,21 @@ impl FrameDecoder {
     /// `"vaapi:/dev/dri/renderD129"` or `"qsv"`; if that ffmpeg exits within a
     /// second of starting, a software decoder takes over transparently.
     pub fn start(codec: Codec, extra_data: &[u8], fps: u32, scale: u32, hwaccel: Option<String>) -> Result<Self> {
+        Self::start_masked(codec, extra_data, fps, scale, hwaccel, String::new())
+    }
+
+    /// As [`FrameDecoder::start`], with privacy masks (`masks`, a filter
+    /// from [`crate::privacy::mask_filter`]) blacked out in every picture.
+    pub fn start_masked(codec: Codec, extra_data: &[u8], fps: u32, scale: u32, hwaccel: Option<String>, masks: String) -> Result<Self> {
         let param_sets = parameter_sets_annexb(codec, extra_data)?;
         let (out_tx, frames) = mpsc::sync_channel(OUTPUT_QUEUE);
         let counters = Arc::new(Counters::default());
-        let pipe = Pipeline::spawn(codec, fps, scale, hwaccel.as_deref(), out_tx.clone(), counters.clone())?;
+        let pipe = Pipeline::spawn(codec, fps, scale, hwaccel.as_deref(), &masks, out_tx.clone(), counters.clone())?;
         Ok(FrameDecoder {
             codec,
             fps,
             scale,
+            masks,
             param_sets,
             pipe: Some(pipe),
             out_tx: Some(out_tx),
@@ -568,11 +635,13 @@ impl FrameDecoder {
             replay: Vec::new(),
             hw_failed: false,
             hw_reason: None,
+            hw_note: None,
             blame: None,
             seen_out: 0,
             seen_out_at: Instant::now(),
             in_since_out: 0,
             camera: String::new(),
+            hw_ok_noted: false,
         })
     }
 
@@ -585,6 +654,12 @@ impl FrameDecoder {
     /// Why the hardware decoder was replaced by software decoding.
     pub fn hw_reason(&self) -> Option<&str> {
         self.hw_reason.as_deref()
+    }
+
+    /// The Status note after a fallback: "VAAPI on ... failed twice (...);
+    /// trying it again at 10:42".
+    pub fn hw_note(&self) -> Option<&str> {
+        self.hw_note.as_deref()
     }
 
     /// Decoded JPEG frames (SOI..next SOI), at most `fps` per second.
@@ -736,10 +811,22 @@ impl FrameDecoder {
     /// what it was sent when it failed at once). Returns whether it switched
     /// at once (`Some(true)`: the input was replayed) or mid-stream.
     fn maybe_fall_back(&mut self) -> Result<Option<bool>> {
-        let Some((why, blamable)) = self.hw_trouble() else { return Ok(None) };
+        let Some((why, blamable)) = self.hw_trouble() else {
+            self.note_healthy();
+            return Ok(None);
+        };
+        // Stopped from outside (AmberSight is stopping, or ffmpeg was sent a
+        // signal): nothing to blame or switch; the caller sees the decoder gone.
+        if self.pipe.as_mut().is_some_and(|p| p.stopped_from_outside()) {
+            return Ok(None);
+        }
         let Some(old) = self.pipe.take() else { return Ok(None) };
         let early = old.started.elapsed() < HW_FALLBACK_WINDOW;
         let spec = old.hw.clone().unwrap_or_default();
+        // Out of threads: the system's limit, not the card. Not counted
+        // against the way (the camera's move back is looked at as usual).
+        let limit = old.errs.limit_reason();
+        let why = limit.clone().unwrap_or(why);
         old.shutdown();
         self.hw_failed = true;
         tracing::info!(
@@ -748,8 +835,15 @@ impl FrameDecoder {
             crate::hwdecode::describe(&spec)
         );
         self.hw_reason = Some(why.clone());
+        // This camera leaves that way alone for a while (15 minutes at
+        // first, longer each time it fails again); the card itself is blamed
+        // for every camera only once software decoding works (`settle_blame`).
+        self.hw_note = Some(match &limit {
+            Some(words) => words.clone(),
+            None => crate::hwdecode::note_camera_failure(&self.camera, &spec, Some(self.codec), &why),
+        });
         let out_tx = self.out_tx.clone().context("decoder stopped")?;
-        let new = Pipeline::spawn(self.codec, self.fps, self.scale, None, out_tx, self.counters.clone())?;
+        let new = Pipeline::spawn(self.codec, self.fps, self.scale, None, &self.masks, out_tx, self.counters.clone())?;
         if early {
             if let Some(tx) = new.input.as_ref() {
                 for c in self.replay.drain(..) {
@@ -760,10 +854,30 @@ impl FrameDecoder {
             self.replay.clear();
         }
         // (A burst of errors moves only this camera to the processor; the
-        // card stays in use for the others.)
+        // card stays in use for the others. So does a card that was out of
+        // memory: it may have room again soon, and the headroom guard keeps
+        // Auto off a full NVIDIA card.)
+        // (Out-of-memory wording on any way, Quick Sync included, is never blamed on the whole
+        // card; whether it counts toward this camera giving the way up is memory_trouble.)
+        let blamable = blamable && limit.is_none() && !crate::hwdecode::memory_words(&why);
         self.blame = blamable.then(|| (spec, why, self.counters.jpegs_out.load(Ordering::Relaxed)));
         self.pipe = Some(new);
         Ok(Some(early))
+    }
+
+    /// A hardware decoder that has run `hwdecode::HEALTHY_RUN` and still gives
+    /// pictures: the camera's earlier failures of that way are forgotten, so
+    /// only failures in a row lead to giving the way up.
+    fn note_healthy(&mut self) {
+        if self.hw_ok_noted || self.camera.is_empty() {
+            return;
+        }
+        let Some(pipe) = self.pipe.as_ref() else { return };
+        let Some(spec) = pipe.hw.as_deref() else { return };
+        if healthy(pipe.started.elapsed(), self.counters.jpegs_out.load(Ordering::Relaxed)) {
+            self.hw_ok_noted = true;
+            crate::hwdecode::note_camera_ok(&self.camera, spec, Some(self.codec));
+        }
     }
 
     /// Software decoding of the same stream works where the card failed:
@@ -954,10 +1068,10 @@ mod tests {
         );
         assert!(hw_input_args("bogus", None).is_err());
         // Pictures are copied back after the frame-rate filter.
-        let a = ffmpeg_args(Codec::H264, 5, 640, Some("vaapi:/dev/dri/renderD129")).unwrap();
+        let a = ffmpeg_args(Codec::H264, 5, 640, Some("vaapi:/dev/dri/renderD129"), "").unwrap();
         let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
         assert_eq!(vf, "fps=5,hwdownload,format=nv12|p010le,scale=640:-2");
-        let a = ffmpeg_args(Codec::H264, 5, 640, None).unwrap();
+        let a = ffmpeg_args(Codec::H264, 5, 640, None, "").unwrap();
         assert!(!a.iter().any(|x| x.contains("hw")), "{a:?}");
     }
 
@@ -1012,8 +1126,72 @@ mod tests {
         assert!(d.hw_fallback_used(), "fell back");
         assert!(!d.using_hwaccel());
         assert!(d.hw_reason().is_some());
+        assert!(d.hw_note().is_some_and(|n| n.contains("trying it again at")), "{:?}", d.hw_note());
         assert!(got > 0, "software decoding made pictures");
         d.stop();
+    }
+
+    #[test]
+    fn privacy_masks_are_drawn_after_the_card_and_the_scaling() {
+        let m = crate::privacy::mask_filter(&[crate::config::ZoneRect { x: 0.5, y: 0.5, w: 0.25, h: 0.25 }]);
+        let a = ffmpeg_args(Codec::H264, 5, 640, Some("vaapi:/dev/dri/renderD129"), &m).unwrap();
+        let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
+        assert_eq!(vf, &format!("fps=5,hwdownload,format=nv12|p010le,scale=640:-2,{m}"));
+        let a = ffmpeg_args(Codec::H264, 5, 0, None, &m).unwrap();
+        assert_eq!(a[a.iter().position(|x| x == "-vf").unwrap() + 1], format!("fps=5,{m}"));
+    }
+
+    /// Real ffmpeg: every picture of a masked decoder is black in the mask
+    /// (the sample is ffmpeg's colour-bar test picture), also after a
+    /// hardware decoder that cannot start was replaced.
+    #[test]
+    fn a_masked_decoder_gives_masked_pictures() {
+        if std::process::Command::new(crate::ffmpeg_bin::program()).arg("-version").output().is_err() {
+            return;
+        }
+        let (rec, frames) = sample_h264();
+        let masks = crate::privacy::mask_filter(&[crate::config::ZoneRect { x: 0.5, y: 0.6, w: 0.25, h: 0.3 }]);
+        for hw in [None, Some("vaapi:/dev/dri/renderD999".to_string())] {
+            let mut d = FrameDecoder::start_masked(Codec::H264, &rec, 10, 160, hw.clone(), masks.clone()).unwrap();
+            let mut got: Vec<Vec<u8>> = Vec::new();
+            for _ in 0..6 {
+                for (f, key) in &frames {
+                    d.push(f, *key).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    while let Ok(j) = d.frames().try_recv() {
+                        got.push(j);
+                    }
+                }
+                if got.len() > 2 {
+                    break;
+                }
+            }
+            d.stop();
+            assert!(!got.is_empty(), "pictures ({hw:?})");
+            for j in &got {
+                let img = image::load_from_memory(j).unwrap().to_luma8();
+                let (w, h) = img.dimensions();
+                assert_eq!(w, 160);
+                let inside = img.get_pixel(w * 5 / 8, h * 3 / 4).0[0];
+                let outside = img.get_pixel(w / 16, h / 2).0[0];
+                assert!(inside < 25 && outside > 40, "inside {inside}, outside {outside} ({hw:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_decoder_out_of_threads_is_not_a_card_failure() {
+        let w = ErrWatch::default();
+        w.see("[h264 @ 0x1] hwaccel initialisation returned error.");
+        assert!(w.limit_reason().is_none(), "a card complaint alone");
+        w.see("pthread_create() failed: Resource temporarily unavailable");
+        w.see("[vist#0:0/h264 @ 0x1] Error while opening decoder: Resource temporarily unavailable");
+        let why = w.limit_reason().expect("the process limit");
+        assert!(why.starts_with("the system would not start another process or thread"), "{why}");
+        assert!(w.first.lock().unwrap().is_some(), "the first complaint is still kept");
+        let other = ErrWatch::default();
+        other.see("[tcp @ 0x1] Resource temporarily unavailable");
+        assert!(other.limit_reason().is_none());
     }
 
     #[test]
@@ -1021,6 +1199,10 @@ mod tests {
         assert!(Trouble::Stopped.blames_card());
         assert!(Trouble::Stalled.blames_card());
         assert!(!Trouble::ErrorBurst.blames_card());
+        // Forgetting earlier failures: only after a long run that gave pictures.
+        assert!(healthy(crate::hwdecode::HEALTHY_RUN, 1));
+        assert!(!healthy(crate::hwdecode::HEALTHY_RUN - Duration::from_secs(1), 1000));
+        assert!(!healthy(crate::hwdecode::HEALTHY_RUN * 2, 0));
     }
 
     #[test]

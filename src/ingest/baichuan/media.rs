@@ -243,6 +243,20 @@ pub fn info_start_time(data: &[u8], i: usize) -> Option<chrono::NaiveDateTime> {
     chrono::NaiveDate::from_ymd_opt(1900 + b[0] as i32, b[1] as u32, b[2] as u32)?.and_hms_opt(b[3] as u32, b[4] as u32, b[5] as u32)
 }
 
+/// The end time in an info header at `i` (bytes 24..30, as the start time).
+pub fn info_end_time(data: &[u8], i: usize) -> Option<chrono::NaiveDateTime> {
+    info_start_time(data, i + 6)
+}
+
+/// The first info header in `data` (its start and end), if one is whole.
+pub fn first_info_times(data: &[u8]) -> Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> {
+    let i = data.windows(4).position(|w| w == b"1001" || w == b"1002")?;
+    if data.len() < i + 32 {
+        return None;
+    }
+    Some((info_start_time(data, i)?, info_end_time(data, i)?))
+}
+
 /// Most unparsed bytes a Demux keeps between pushes (a 4K keyframe is well under).
 const MAX_HELD: usize = 16 << 20;
 /// Largest extra-header length a video frame may declare (real ones are 0 or a few bytes).
@@ -438,6 +452,12 @@ mod demux_tests {
         assert_eq!(d.clip_start.unwrap().to_string(), "2026-11-11 10:40:22");
         assert_eq!(info_start_time(&h, 0).unwrap().to_string(), "2026-11-11 10:40:22");
         assert!(info_start_time(&h[..20], 0).is_none(), "a short header gives no time");
+        assert_eq!(info_end_time(&h, 0).unwrap().to_string(), "2026-11-11 10:40:52");
+        let mut lead = vec![0u8; 5];
+        lead.extend_from_slice(&h);
+        let (a, b) = first_info_times(&lead).unwrap();
+        assert_eq!((a.to_string(), b.to_string()), ("2026-11-11 10:40:22".into(), "2026-11-11 10:40:52".into()));
+        assert!(first_info_times(&lead[..30]).is_none(), "not whole yet");
     }
 
     #[test]

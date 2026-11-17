@@ -30,9 +30,10 @@ pub(super) fn wants_native(cfg: &CameraConfig) -> bool {
     if crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
         return true;
     }
-    // Masks and the overlay change the picture: that needs re-encoding,
-    // which the ffmpeg pipeline does.
-    if cfg.overlay || !cfg.privacy_masks.is_empty() {
+    // Masks burned into the recordings and burned-in text change the
+    // picture: that needs re-encoding, which the ffmpeg pipeline does.
+    // Masks only on screen and in pictures leave the stream as it is.
+    if cfg.overlay || cfg.mask_in_recording() {
         return false;
     }
     // Capture devices and the screen are always read by ffmpeg, even with
@@ -50,6 +51,13 @@ pub(super) fn wants_native(cfg: &CameraConfig) -> bool {
                 || crate::ingest::push::is_push_url(&cfg.url)
         }
     }
+}
+
+/// The built-in reader never records a camera whose masks are to be burned
+/// into its recordings (it copies the stream as it is). Such a camera only
+/// gets here when it has no ffmpeg reader (pushed, battery): fail closed.
+pub(super) fn native_must_not_record(cfg: &CameraConfig) -> bool {
+    cfg.mask_in_recording()
 }
 
 /// No frames for this long means the camera stalled: reconnect.
@@ -304,7 +312,17 @@ struct SessionPlan {
     /// Why the sub stream is not used although it is set (shown with the
     /// decoding note).
     sub_note: Option<String>,
+    /// The camera's place on the NVIDIA card (see `NvdecSlot`).
+    nvdec: NvdecSlot,
+    /// Privacy masks drawn on every decoded picture (a filter; empty: none).
+    masks: String,
 }
+
+/// The camera's place on the NVIDIA card while its motion decoder runs
+/// there. Owned by the worker, not the session: a reconnect or a stream
+/// change keeps it until the new decoder has started (and takes it over or
+/// lets it go), so a camera on a nearly full card stays there.
+type NvdecSlot = Arc<std::sync::Mutex<Option<crate::hwdecode::NvdecHold>>>;
 
 #[derive(Clone, Copy)]
 enum RecordPlan {
@@ -345,6 +363,9 @@ impl std::error::Error for DamagedPacket {}
 
 pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine: Arc<Engine>) {
     let slug_name = slug(&cfg.name);
+    if cfg.record && native_must_not_record(&cfg) {
+        warn!("camera '{}': {}; nothing is recorded", cfg.name, crate::config::NO_RECORDING_MASKS);
+    }
     let (_, folder_root) = engine.record_folder(&cfg);
     let seg_dir = folder_root.join("cameras").join(&slug_name).join("segments");
     let clips_dir = engine.data_dir.join("clips");
@@ -376,10 +397,19 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
     // The macOS Local Network note was logged for this outage.
     let mut said_blocked = false;
     let mut last_damaged_log: Option<std::time::Instant> = None;
+    let nvdec: NvdecSlot = Arc::default();
+    // Its place is kept through reconnects, not a long outage (see
+    // `hwdecode::HOLD_THROUGH`).
+    let mut outage = crate::hwdecode::Outage::default();
     handle.state.write().unwrap().ingest = "native";
 
     loop {
-        if !handle.active.load(Ordering::Relaxed) {
+        // (Before `active` is looked at: see Engine::stop_for_rename.)
+        handle.parked.store(false, Ordering::SeqCst);
+        if !handle.active.load(Ordering::SeqCst) {
+            handle.parked.store(true, Ordering::SeqCst);
+            // Disabled: its decoder is gone, and so is its place on the card.
+            nvdec.lock().unwrap().take();
             let in_slot = engine.camera(handle.id).is_some_and(|h| Arc::ptr_eq(&h, &handle));
             if !in_slot {
                 return;
@@ -409,6 +439,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 st.online = false;
                 st.offline_since = None;
                 drop(st);
+                nvdec.lock().unwrap().take();
                 if close {
                     // The session ended with an error (stream dropped, no
                     // reconnect before the awake time ran out): the open
@@ -435,6 +466,9 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             st.sleeping = false;
         }
 
+        if outage.lapsed(std::time::Instant::now()) {
+            nvdec.lock().unwrap().take();
+        }
         let (motion_cfg, storage) = {
             let c = engine.config.lock().unwrap();
             (c.motion.for_camera(&cfg), c.storage.clone())
@@ -470,6 +504,10 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             sub: sub_url.as_deref().map(creds),
             record: match (cfg.record, cfg.record_motion_only) {
                 (false, _) => None,
+                // Masks to be burned into the recordings, which this reader
+                // cannot do (a pushed or battery camera): nothing rather than
+                // the unmasked picture (Status says why: mask_settings).
+                _ if native_must_not_record(&cfg) => None,
                 (true, false) if cfg.record_sub && sub_url.is_some() => {
                     Some(RecordPlan::SubAndEvents { segment_seconds, pre_roll: motion_cfg.pre_roll, post_roll: motion_cfg.post_roll })
                 }
@@ -489,6 +527,8 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             on_demand: cfg.on_demand,
             sub_copy: storage.sub_copy,
             sub_note: if sub_watch.trying() { Some("trying the sub stream again".into()) } else { sub_watch.off.clone() },
+            nvdec: nvdec.clone(),
+            masks: crate::privacy::camera_mask_filter(&cfg),
         };
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -603,6 +643,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         });
         engine.live_sessions.fetch_sub(1, Ordering::Relaxed);
         handle.decode.lock().unwrap().stopped();
+        outage.ended(got_video, std::time::Instant::now());
         if idle_stop {
             // Going back to sleep: an event still open (a battery camera's
             // awake time ran out) ends now, and waiting clips are built.
@@ -744,6 +785,9 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             let until = std::time::Instant::now() + backoff;
             while std::time::Instant::now() < until && handle.active.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(500));
+                if outage.lapsed(std::time::Instant::now()) {
+                    nvdec.lock().unwrap().take();
+                }
             }
             backoff = (backoff * 2).min(AUTH_RETRY_MAX);
             continue;
@@ -783,6 +827,9 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let mut next_probe = std::time::Instant::now() + PROBE_EVERY;
         while std::time::Instant::now() < until && handle.active.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(250));
+            if outage.lapsed(std::time::Instant::now()) {
+                nvdec.lock().unwrap().take();
+            }
             if let Some(addr) = &probe_addr {
                 if std::time::Instant::now() >= next_probe {
                     if port_watch.on_probe(port_open(addr)) {
@@ -964,10 +1011,7 @@ async fn main_task(
     main_played.store(true, Ordering::Relaxed);
     info!("camera '{}': native stream playing ({})", handle.state.read().unwrap().name, redact_url(plan.main.url.clone()));
     let mut sink = OpenSink::new(engine, &plan.slug);
-    let mut decoder: Option<FrameDecoder> = None;
-    let mut seen_drops = 0u64;
-    // The decoder started before the graphics card test finished.
-    let mut dec_pending = false;
+    let mut motion = MotionDec::new("main", plan.nvdec.clone());
     let mut main_noted = false;
     // Latest RTCP sender report per track (video, audio): (rtp ticks, NTP
     // epoch seconds). They align audio with video in the recordings; kept
@@ -998,7 +1042,7 @@ async fn main_task(
                     if let Some(mut old) = sink.take() {
                         finish_sink(&mut old, engine, &plan.slug);
                     }
-                    decoder = None;
+                    motion.reset();
                     live = None;
                     main_noted = false;
                     shared.stop();
@@ -1019,19 +1063,7 @@ async fn main_task(
                 }
                 share_video(&s, &shared, plan.with_audio, ticks + i64::from(cts), key, &data);
                 if let Some(tx) = &jpeg_tx {
-                    if key && dec_pending && crate::hwdecode::probe_done() {
-                        decoder = None;
-                    }
-                    if decoder.is_none() && key {
-                        decoder = start_decoder(&s, plan, handle, "main", &mut dec_pending)?;
-                        seen_drops = 0;
-                    }
-                    if let Some(d) = decoder.as_mut() {
-                        let _ = d.push(&data, key);
-                        note_drops(&handle, d, &mut seen_drops);
-                        note_decode(handle, d);
-                        forward_jpegs(d, tx);
-                    }
+                    motion.feed(&s, plan, handle, &data, key, tx)?;
                 }
                 if sink.is_none() && key {
                     if let (Some(rec), Some(tracks)) = (plan.record, build_tracks(&s)?) {
@@ -1149,9 +1181,7 @@ async fn decode_only_task(
         Some(RecordPlan::Continuous { segment_seconds }) if plan.sub_copy => Some(segment_seconds),
         _ => None,
     };
-    let mut decoder: Option<FrameDecoder> = None;
-    let mut seen_drops = 0u64;
-    let mut dec_pending = false;
+    let mut motion = MotionDec::new("sub", plan.nvdec.clone());
     let mut live: Option<LiveMuxer> = None;
     let mut sink = OpenSink::new(engine, &plan.slug);
     let shared = handle.restream_sub.clone();
@@ -1184,7 +1214,7 @@ async fn decode_only_task(
         }
         if let MediaItem::Video { ticks, cts, data, key, new_params } = item {
             if new_params {
-                decoder = None;
+                motion.reset();
                 live = None;
                 shared.stop();
                 if let Some(mut old) = sink.take() {
@@ -1198,19 +1228,7 @@ async fn decode_only_task(
                 l.push_video(ticks, cts, &data, key);
             }
             share_video(&s, &shared, plan.with_audio, ticks + i64::from(cts), key, &data);
-            if key && dec_pending && crate::hwdecode::probe_done() {
-                decoder = None;
-            }
-            if decoder.is_none() && key {
-                decoder = start_decoder(&s, plan, handle, "sub", &mut dec_pending)?;
-                seen_drops = 0;
-            }
-            if let Some(d) = decoder.as_mut() {
-                let _ = d.push(&data, key);
-                note_drops(&handle, d, &mut seen_drops);
-                note_decode(handle, d);
-                forward_jpegs(d, &jpeg_tx);
-            }
+            motion.feed(&s, plan, handle, &data, key, &jpeg_tx)?;
             // The sub-stream recording is extra: if writing it fails, only it
             // stops (for a minute), never the session and its main recording.
             let retry_ok = sub_failed.is_none_or(|t: std::time::Instant| t.elapsed() > Duration::from_secs(60));
@@ -1330,38 +1348,164 @@ async fn next_item(s: &mut OpenStream, stop: &AtomicBool) -> anyhow::Result<Opti
     }
 }
 
-/// Start the motion decoder: on the graphics card when the camera's
-/// setting and the start-up test allow it (`pending`: the test had not
-/// finished; the caller starts again once it has).
-fn start_decoder(s: &OpenStream, plan: &SessionPlan, handle: &CameraHandle, stream: &'static str, pending: &mut bool) -> anyhow::Result<Option<FrameDecoder>> {
-    let Some(v) = s.video_params()? else { return Ok(None) };
-    let codec = if v.h265 { Codec::H265 } else { Codec::H264 };
-    // (Never waits for the test: this runs on the camera's async task; a
-    // decoder started while it runs is started again once it is done.)
-    let r = crate::hwdecode::resolve(plan.hwaccel.as_deref(), Some(codec), Duration::ZERO);
-    *pending = r.pending;
-    let name = handle.state.read().unwrap().name.clone();
-    let d = FrameDecoder::start(codec, &v.extra_data, plan.fps, plan.scale, r.spec.clone())?.with_camera(&name);
-    let mut dec = handle.decode.lock().unwrap();
-    dec.stream = Some(stream);
-    dec.codec = Some(crate::hwdecode::codec_text(v.h265));
-    dec.width = v.width;
-    dec.height = v.height;
-    dec.gpu = r.spec.as_deref().map(crate::hwdecode::describe);
-    dec.note = super::ffpath::join_notes(r.why_not, plan.sub_note.as_ref());
-    if stream == "main" {
-        dec.main = Some((v.width, v.height, crate::hwdecode::codec_text(v.h265)));
-    }
-    Ok(Some(d))
+/// How often a motion decoder looks whether it should run elsewhere: a
+/// way that failed for this camera is due to be tried again, a way that
+/// failed for every camera is free again, or Auto would now pick another.
+const DEC_RECHECK: Duration = Duration::from_secs(60);
+
+/// The motion decoder of one stream. It starts at a keyframe (a hardware
+/// one at its turn: `hwdecode::reserve_start`) and starts again at a
+/// keyframe on another way when the graphics card test finishes, the
+/// Hardware decoding setting changes, or a recheck finds a different way.
+struct MotionDec {
+    stream: &'static str,
+    d: Option<FrameDecoder>,
+    /// What it was started with (None: the processor).
+    spec: Option<String>,
+    codec: Option<Codec>,
+    /// Started while the graphics card test ran.
+    pending: bool,
+    generation: u64,
+    recheck: std::time::Instant,
+    /// The start time reserved for a hardware decoder.
+    start_at: Option<std::time::Instant>,
+    /// Its move to the processor has been noted.
+    fell_noted: bool,
+    seen_drops: u64,
+    /// Its place on the NVIDIA card while it decodes there (the headroom
+    /// guard keeps it there). Kept over a new decoder start (new stream
+    /// parameters, a move, a reconnect) until that decoder has started.
+    hold: NvdecSlot,
 }
 
-/// A decoder that left the graphics card is shown as decoding on the processor.
-fn note_decode(handle: &CameraHandle, d: &FrameDecoder) {
-    if d.hw_fallback_used() {
-        let mut dec = handle.decode.lock().unwrap();
-        if let Some(was) = dec.gpu.take() {
-            dec.note = Some(format!("hardware decoding ({was}) stopped working ({}); using the processor", d.hw_reason().unwrap_or("failed")));
+impl MotionDec {
+    fn new(stream: &'static str, hold: NvdecSlot) -> Self {
+        MotionDec {
+            stream,
+            d: None,
+            spec: None,
+            codec: None,
+            pending: false,
+            generation: crate::hwdecode::generation(),
+            recheck: std::time::Instant::now() + DEC_RECHECK,
+            start_at: None,
+            fell_noted: false,
+            seen_drops: 0,
+            hold,
         }
+    }
+
+    /// New stream parameters: a new decoder at the next keyframe (the
+    /// camera keeps its place on the card until then).
+    fn reset(&mut self) {
+        self.d = None;
+        self.start_at = None;
+    }
+
+    fn feed(&mut self, s: &OpenStream, plan: &SessionPlan, handle: &CameraHandle, data: &[u8], key: bool, tx: &mpsc::SyncSender<Vec<u8>>) -> anyhow::Result<()> {
+        if key && self.d.is_some() && self.should_move(plan, handle) {
+            self.d = None;
+        }
+        if self.d.is_none() && key {
+            self.start(s, plan, handle)?;
+        }
+        let Some(d) = self.d.as_mut() else { return Ok(()) };
+        let _ = d.push(data, key);
+        note_drops(handle, d, &mut self.seen_drops);
+        if d.hw_fallback_used() && !self.fell_noted {
+            // Shown as decoding on the processor; Auto may have another way
+            // ready at once, so look again soon.
+            self.fell_noted = true;
+            self.hold.lock().unwrap().take();
+            self.recheck = std::time::Instant::now() + Duration::from_secs(5);
+            let mut dec = handle.decode.lock().unwrap();
+            if let Some(was) = dec.gpu.take() {
+                dec.note = Some(match d.hw_note() {
+                    Some(n) => format!("{n}; using the processor until then"),
+                    None => format!("hardware decoding ({was}) stopped working ({}); using the processor", d.hw_reason().unwrap_or("failed")),
+                });
+            }
+        }
+        forward_jpegs(d, tx);
+        Ok(())
+    }
+
+    /// Whether the decoder should start again on another way (looked at
+    /// when due only).
+    fn should_move(&mut self, plan: &SessionPlan, handle: &CameraHandle) -> bool {
+        let now = std::time::Instant::now();
+        let generation = crate::hwdecode::generation();
+        let changed = generation != self.generation;
+        if !changed && now < self.recheck && !(self.pending && crate::hwdecode::probe_done()) {
+            return false;
+        }
+        self.generation = generation;
+        self.recheck = now + DEC_RECHECK;
+        let running = if self.d.as_ref().is_some_and(|d| d.hw_fallback_used()) { None } else { self.spec.clone() };
+        let name = handle.state.read().unwrap().name.clone();
+        // (Never waits for the test: this runs on the camera's async task.
+        // Only a look: `start` takes the card's place when it moves.)
+        let r = crate::hwdecode::resolve(&name, plan.hwaccel.as_deref(), self.codec, Duration::ZERO);
+        if !crate::hwdecode::worth_moving(running.as_deref(), r.spec.as_deref(), changed, self.codec) {
+            self.pending = r.pending;
+            // (The note says how it decodes now: only when that is what resolve says too.)
+            if r.spec == running {
+                handle.decode.lock().unwrap().note = super::ffpath::join_notes(r.why_not, plan.sub_note.as_ref());
+            }
+            return false;
+        }
+        let say = |s: &Option<String>| s.as_deref().map(crate::hwdecode::describe).unwrap_or_else(|| "the processor".into());
+        info!("camera '{name}': motion decoding ({} stream) moves from {} to {}", self.stream, say(&running), say(&r.spec));
+        true
+    }
+
+    /// Start the decoder: on the graphics card when the camera's setting,
+    /// the server's preference and the start-up test allow it.
+    fn start(&mut self, s: &OpenStream, plan: &SessionPlan, handle: &CameraHandle) -> anyhow::Result<()> {
+        let Some(v) = s.video_params()? else { return Ok(()) };
+        let codec = if v.h265 { Codec::H265 } else { Codec::H264 };
+        let name = handle.state.read().unwrap().name.clone();
+        let r = crate::hwdecode::resolve(&name, plan.hwaccel.as_deref(), Some(codec), Duration::ZERO);
+        let now = std::time::Instant::now();
+        if r.spec.is_some() {
+            // Hardware decoders start one after another, a little apart.
+            let at = *self.start_at.get_or_insert_with(|| crate::hwdecode::reserve_start(now));
+            if at > now {
+                return Ok(());
+            }
+        }
+        self.start_at = None;
+        let d = match FrameDecoder::start_masked(codec, &v.extra_data, plan.fps, plan.scale, r.spec.clone(), plan.masks.clone()) {
+            Ok(d) => d.with_camera(&name),
+            Err(e) => {
+                self.hold.lock().unwrap().take();
+                return Err(e);
+            }
+        };
+        // The new decoder takes the place over (the old one is let go only
+        // after: the camera is never off the list in between).
+        let h = crate::hwdecode::started(&name, &r);
+        *self.hold.lock().unwrap() = h;
+        self.spec = r.spec.clone();
+        self.codec = Some(codec);
+        self.pending = r.pending;
+        self.generation = crate::hwdecode::generation();
+        self.recheck = now + DEC_RECHECK;
+        self.fell_noted = false;
+        self.seen_drops = 0;
+        let mut dec = handle.decode.lock().unwrap();
+        dec.stream = Some(self.stream);
+        dec.codec = Some(crate::hwdecode::codec_text(v.h265));
+        dec.width = v.width;
+        dec.height = v.height;
+        dec.gpu = r.spec.as_deref().map(crate::hwdecode::describe);
+        dec.hw_setting = Some(if r.camera_setting { "camera" } else { "server" });
+        dec.note = super::ffpath::join_notes(r.why_not, plan.sub_note.as_ref());
+        if self.stream == "main" {
+            dec.main = Some((v.width, v.height, crate::hwdecode::codec_text(v.h265)));
+        }
+        self.d = Some(d);
+        Ok(())
     }
 }
 
@@ -1559,6 +1703,24 @@ mod tests {
         }
         std::future::pending::<()>().await;
         Ok(())
+    }
+
+    #[test]
+    fn the_place_on_the_card_outlives_a_new_stream_and_a_reconnect() {
+        let slot: NvdecSlot = Arc::default();
+        *slot.lock().unwrap() = Some(crate::hwdecode::hold_for_test("NativeKeep"));
+        // New stream parameters: the decoder goes, the place stays until the
+        // next one starts.
+        let mut m = MotionDec::new("sub", slot.clone());
+        m.reset();
+        assert!(slot.lock().unwrap().is_some());
+        // The session ends (reconnect): the worker's slot keeps it.
+        drop(m);
+        assert!(crate::hwdecode::held_for_test("NativeKeep"));
+        // The next session's decoder on another way lets it go.
+        let _m = MotionDec::new("main", slot.clone());
+        *slot.lock().unwrap() = None;
+        assert!(!crate::hwdecode::held_for_test("NativeKeep"));
     }
 
     #[tokio::test]
@@ -1764,5 +1926,45 @@ mod tests {
         assert!(is_packet_error(pkt));
         assert!(!is_packet_error("Unable to connect to RTSP server: connection refused"));
         assert!(!is_packet_error("RTSP framing error: bad header\n\nconn: x\nmsg: y"));
+    }
+}
+
+#[cfg(test)]
+mod mask_routing_tests {
+    use super::*;
+
+    fn cam(url: &str, extra: &str) -> CameraConfig {
+        toml::from_str(&format!("name = \"a\"\nurl = \"{url}\"\n{extra}")).unwrap()
+    }
+    const MASK: &str = "privacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]";
+
+    #[test]
+    fn only_masks_in_the_recordings_or_burned_text_need_ffmpeg() {
+        let rtsp = "rtsp://192.0.2.1/x";
+        assert!(wants_native(&cam(rtsp, "")));
+        assert!(wants_native(&cam(rtsp, &format!("mask_mode = \"screen\"\n{MASK}"))), "screen masks stay on the built-in reader");
+        assert!(!wants_native(&cam(rtsp, &format!("mask_mode = \"recording\"\n{MASK}"))));
+        assert!(!wants_native(&cam(rtsp, MASK)), "masks from before the level: as before, re-encoded");
+        assert!(!wants_native(&cam(rtsp, "overlay = true")));
+        assert!(!wants_native(&cam(rtsp, &format!("ingest = \"native\"\nmask_mode = \"recording\"\n{MASK}"))), "the built-in reader is never used for them, whatever ingest says");
+        // Still "masked" for sharing (the shared stream is the camera's own).
+        assert!(crate::restream::http::masked(&cam(rtsp, &format!("mask_mode = \"screen\"\n{MASK}"))));
+        assert!(crate::restream::http::blocker(&cam(rtsp, &format!("mask_mode = \"screen\"\n{MASK}"))).is_some());
+        let mut ok = cam(rtsp, &format!("mask_mode = \"screen\"\nshare_unmasked = true\n{MASK}"));
+        assert!(crate::restream::http::blocker(&ok).is_some(), "not noted for what it was given");
+        crate::restream::http::settle_consent(None, &mut ok);
+        assert!(crate::restream::http::blocker(&ok).is_none());
+    }
+
+    #[test]
+    fn pushed_and_battery_cameras_never_record_unmasked_for_recording_masks() {
+        for url in ["push://yard", "baichuan://192.0.2.9?uid=TESTUID000000001"] {
+            let rec = cam(url, &format!("mask_mode = \"recording\"\n{MASK}"));
+            assert!(wants_native(&rec), "{url}: no ffmpeg reader for it");
+            assert!(native_must_not_record(&rec), "{url}");
+            assert!(!native_must_not_record(&cam(url, &format!("mask_mode = \"screen\"\n{MASK}"))), "{url}");
+        }
+        // An RTSP camera at the recording level never reaches the built-in reader.
+        assert!(native_must_not_record(&cam("rtsp://192.0.2.1/x", &format!("mask_mode = \"recording\"\n{MASK}"))));
     }
 }

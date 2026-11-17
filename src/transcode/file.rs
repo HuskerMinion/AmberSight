@@ -16,41 +16,103 @@ pub enum Input {
     File(std::path::PathBuf),
 }
 
+/// What is burned into a converted recording besides the scaling: the
+/// privacy masks (never dropped), and a time subtitle track added from an
+/// SRT file. `keep_times`: every frame keeps its own time (fast and
+/// backwards clips, whose frames are not evenly spaced).
+#[derive(Default, Clone, Copy)]
+pub struct Extra<'a> {
+    pub mask: Option<&'a str>,
+    pub subs: Option<&'a std::path::Path>,
+    pub keep_times: bool,
+}
+
 /// The ffmpeg arguments for a recording: `seek_ms` into it, as fragmented
 /// MP4 with a keyframe (and fragment) every two seconds. `caption`: a
 /// drawtext filter burned in (a download; decoded in software).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn args(e: &Encoder, hw_decode: bool, t: &Target, fps: f64, depth: u8, file: Option<&std::path::Path>, seek_ms: i64, limit_ms: Option<i64>, caption: Option<&str>) -> Vec<String> {
-    let hw_decode = hw_decode && caption.is_none();
+    args_with(e, hw_decode, t, fps, depth, file, seek_ms, limit_ms, caption, Extra::default())
+}
+
+/// `args` with masks, a subtitle track or kept frame times (`Extra`). With
+/// masks or a caption the frames are decoded in software and the threads
+/// are capped as for a recording (see engine::ffpath).
+#[allow(clippy::too_many_arguments)]
+pub fn args_with(e: &Encoder, hw_decode: bool, t: &Target, fps: f64, depth: u8, file: Option<&std::path::Path>, seek_ms: i64, limit_ms: Option<i64>, caption: Option<&str>, x: Extra) -> Vec<String> {
+    let burn: Vec<&str> = [x.mask, caption].into_iter().flatten().filter(|f| !f.is_empty()).collect();
+    let burn = (!burn.is_empty()).then(|| burn.join(","));
+    let hw_decode = hw_decode && burn.is_none();
+    let budget = crate::engine::ffpath::thread_budget_now();
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error"].iter().map(|s| s.to_string()).collect();
+    if burn.is_some() {
+        a.extend(crate::engine::ffpath::graph_thread_args());
+    }
     a.extend(super::device_args(e, hw_decode));
     let ss = format!("{:.3}", seek_ms.max(0) as f64 / 1000.0);
+    // A pipe cannot seek: ffmpeg decodes and drops the frames before the
+    // moment. With a subtitle track that is done by trim filters: ffmpeg's
+    // output -ss drops the first subtitles without moving the rest. With
+    // something burned in, too: the burned clock (drawtext's pts) then starts
+    // at 0 at the moment, as it does for a file (input -ss), so a caption's
+    // base is always the time of the first frame sent (`start + seek_ms`).
+    let mut trim = false;
     match file {
         Some(p) => {
             if seek_ms > 0 {
                 a.extend(["-ss".to_string(), ss.clone()]);
             }
+            if burn.is_some() {
+                a.extend(crate::engine::ffpath::decode_thread_args(budget));
+            }
             a.extend(["-i".to_string(), p.to_string_lossy().into_owned()]);
+            if let Some(s) = x.subs {
+                a.extend(["-i".to_string(), s.to_string_lossy().into_owned()]);
+            }
         }
         None => {
+            if burn.is_some() {
+                a.extend(crate::engine::ffpath::decode_thread_args(budget));
+            }
             a.extend(["-f", "mp4", "-i", "pipe:0"].iter().map(|s| s.to_string()));
-            // A pipe cannot seek: frames before the moment are decoded and
-            // dropped (the clip starts at the keyframe before it).
-            if seek_ms > 0 {
-                a.extend(["-ss".to_string(), ss]);
+            if let Some(s) = x.subs {
+                a.extend(["-i".to_string(), s.to_string_lossy().into_owned()]);
+                trim = seek_ms > 0;
+            } else if seek_ms > 0 && burn.is_some() {
+                trim = true;
+            } else if seek_ms > 0 {
+                a.extend(["-ss".to_string(), ss.clone()]);
             }
         }
     }
     if let Some(l) = limit_ms.filter(|l| *l > 0) {
         a.extend(["-t".to_string(), format!("{:.3}", l as f64 / 1000.0)]);
     }
-    a.extend(["-map", "0:v:0", "-map", "0:a:0?", "-c:a", "copy"].iter().map(|s| s.to_string()));
-    let vf = match caption {
+    a.extend(["-map", "0:v:0", "-map", "0:a:0?"].iter().map(|s| s.to_string()));
+    if trim {
+        a.extend(["-af".to_string(), format!("atrim=start={ss},asetpts=PTS-STARTPTS"), "-c:a".to_string(), "aac".to_string()]);
+    } else {
+        a.extend(["-c:a".to_string(), "copy".to_string()]);
+    }
+    if x.subs.is_some() {
+        a.extend(["-map", "1:0", "-c:s", "mov_text"].iter().map(|s| s.to_string()));
+    }
+    let mut vf = match &burn {
         Some(c) => super::caption_filters(e, t, c),
         None => super::filters(e, hw_decode, t, depth),
     };
+    if trim {
+        vf = format!("trim=start={ss},setpts=PTS-STARTPTS,{vf}");
+    }
     a.extend(["-vf".to_string(), vf]);
+    if x.keep_times {
+        a.extend(crate::ffmpeg_bin::passthrough_args().map(String::from));
+    }
     a.extend(super::encoder_args(e, t, fps, false));
+    if burn.is_some() {
+        a.extend(crate::engine::ffpath::encode_thread_args(Some(e), budget));
+    }
     a.extend(["-f", "mp4", "-movflags", "empty_moov+default_base_moof+frag_keyframe+skip_trailer", "pipe:1"].iter().map(|s| s.to_string()));
     a
 }
@@ -80,6 +142,13 @@ pub struct Job {
     /// software), and its place is held until the end.
     pub caption: Option<String>,
     pub download: Option<super::DownloadSlot>,
+    /// Privacy masks (drawbox filters) burned in: unlike the caption, never
+    /// left out on a retry; a conversion that cannot draw them fails.
+    pub mask: Option<String>,
+    /// A time subtitle track (its file is removed when the job ends).
+    pub subs: Option<super::masked::SubsFile>,
+    /// Frames keep their own times (fast and backwards clips).
+    pub keep_times: bool,
 }
 
 /// An ffmpeg that has written nothing by then has failed (the next way is
@@ -189,7 +258,7 @@ pub fn stream(job: Job) -> axum::body::Body {
 fn run(job: Job, sink: Sink) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
-    let Job { input, target, encoders, software_after, slot, lease, fps, depth, src_codec, seek_ms, media_ms, limit_ms, what, camera, mut caption, download } = job;
+    let Job { input, target, encoders, software_after, slot, lease, fps, depth, src_codec, seek_ms, media_ms, limit_ms, what, camera, mut caption, download, mask, subs, keep_times } = job;
     // A download holds one of the server's few places: one that goes too slowly
     // (or not at all) is ended in time (see `download_deadline`).
     let deadline = download.as_ref().map(|_| std::time::Instant::now() + download_deadline(media_ms));
@@ -201,8 +270,8 @@ fn run(job: Job, sink: Sink) {
     let listed = super::list_active(what, &camera, target, Box::new(move || if g2.load(Ordering::Relaxed) { 0 } else { 1 }));
     let mut slot = slot;
     let mut ways = super::live::attempts(&encoders);
-    if caption.is_some() {
-        // (Captions are drawn on frames in memory.)
+    if caption.is_some() || mask.is_some() {
+        // (Captions and masks are drawn on frames in memory.)
         ways.retain(|w| !w.1);
     }
     let mut i = 0;
@@ -231,7 +300,8 @@ fn run(job: Job, sink: Sink) {
             Input::File(p) => Some(p.as_path()),
             Input::Clip(_) => None,
         };
-        let a = args(&e, hw_decode, &target, fps, depth, file, seek_ms, limit_ms, caption.as_deref());
+        let extra = Extra { mask: mask.as_deref(), subs: subs.as_ref().map(|s| s.path()), keep_times };
+        let a = args_with(&e, hw_decode, &target, fps, depth, file, seek_ms, limit_ms, caption.as_deref(), extra);
         let mut child = match crate::child::ffmpeg().args(&a).stdin(if file.is_some() { Stdio::null() } else { Stdio::piped() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(err) => {
@@ -363,6 +433,7 @@ fn run(job: Job, sink: Sink) {
     drop(lease);
     drop(download);
     drop(listed);
+    drop(subs);
 }
 
 /// How long a fitted download may take in all: three times its length, and
@@ -462,8 +533,11 @@ mod tests {
         // Decoded in software (drawtext works on frames in memory), encoded on the card.
         assert!(!a.iter().any(|x| x == "-hwaccel"), "{a:?}");
         assert_eq!(at("-c:v"), Some("h264_qsv"));
-        assert_eq!(at("-vf"), Some(format!("scale=1920:1080:flags=bilinear,{caption},format=nv12,hwupload=extra_hw_frames=16").as_str()));
-        assert_eq!((at("-ss"), at("-t")), (Some("1.500"), Some("60.000")));
+        // (Piped, with a seek: the frames before it are trimmed before the
+        // caption, whose clock then starts at the moment.)
+        assert_eq!(at("-vf"), Some(format!("trim=start=1.500,setpts=PTS-STARTPTS,scale=1920:1080:flags=bilinear,{caption},format=nv12,hwupload=extra_hw_frames=16").as_str()));
+        assert_eq!((at("-ss"), at("-t")), (None, Some("60.000")));
+        assert_eq!(at("-af"), Some("atrim=start=1.500,asetpts=PTS-STARTPTS"));
         assert_eq!(at("-b:v"), Some(format!("{}k", t.bitrate_kbps).as_str()));
         // In software: the plain format, no upload.
         let a = super::args(&Encoder::software(), false, &t, 25.0, 10, None, 0, Some(60_000), Some(&caption));
@@ -493,6 +567,61 @@ mod tests {
         assert_eq!(job(vec![hw.clone()], true), std::time::Duration::from_secs(3 * 15 + 15));
         assert_eq!(job(vec![Encoder::software()], false), std::time::Duration::from_secs(15 + 15));
     }
+    /// What is burned in sees the first frame sent at time 0, piped or from
+    /// a file, with a seek or not: the burned clock's base is the moment the
+    /// download starts (`start + seek`), never the keyframe before it.
+    #[test]
+    fn burned_text_starts_its_clock_at_the_seek() {
+        use crate::transcode::{Encoder, OutCodec, Target};
+        let dir = std::env::temp_dir().join(format!("amber-burnclock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("in.mp4");
+        // 6 s, a keyframe every 4 s: a seek to 2.5 s decodes from 0.
+        let ok = crate::child::ffmpeg()
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=6", "-c:v", "libx264", "-g", "40", "-pix_fmt", "yuv420p"])
+            .args(["-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4"])
+            .arg(&src)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("skipped: no ffmpeg with libx264");
+            return;
+        }
+        let t = Target { codec: OutCodec::H264, width: 160, height: 120, fps: None, bitrate_kbps: 300 };
+        let sw = Encoder::software();
+        let subs = dir.join("t.srt");
+        std::fs::write(&subs, "1\n00:00:00,000 --> 00:00:10,000\nx\n\n").unwrap();
+        for (file, with_subs) in [(true, false), (false, false), (false, true)] {
+            let x = super::Extra { mask: Some("drawbox=x=0:y=0:w=8:h=8:color=black:t=fill"), subs: with_subs.then_some(subs.as_path()), keep_times: false };
+            let mut a = super::args_with(&sw, false, &t, 10.0, 8, file.then_some(src.as_path()), 2500, Some(2000), Some("showinfo"), x);
+            // (showinfo logs each frame's time: at info level.)
+            a[2] = "info".into();
+            let n = a.len();
+            a[n - 1] = dir.join("out.mp4").to_string_lossy().into_owned();
+            a.insert(0, "-y".into());
+            let mut cmd = crate::child::ffmpeg();
+            cmd.args(&a).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+            cmd.stdin(if file { std::process::Stdio::null() } else { std::process::Stdio::piped() });
+            let mut child = cmd.spawn().unwrap();
+            if !file {
+                use std::io::Write;
+                let mut i = child.stdin.take().unwrap();
+                let b = std::fs::read(&src).unwrap();
+                std::thread::spawn(move || {
+                    let _ = i.write_all(&b);
+                });
+            }
+            let o = child.wait_with_output().unwrap();
+            let err = String::from_utf8_lossy(&o.stderr);
+            let times: Vec<f64> = err.lines().filter_map(|l| l.split("pts_time:").nth(1)).filter_map(|r| r.split_whitespace().next()?.parse().ok()).collect();
+            assert!(o.status.success() && !times.is_empty(), "file {file} subs {with_subs}: {err}");
+            assert!(times[0].abs() < 0.15, "file {file} subs {with_subs}: the first frame burned at {} s, not 0", times[0]);
+            assert!(times.len() <= 21, "file {file} subs {with_subs}: {} frames for 2 s", times.len());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn captions_are_dropped_only_for_a_font_or_drawtext_failure() {
         let f = super::caption_failed;

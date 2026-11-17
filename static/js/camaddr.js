@@ -253,3 +253,14 @@ export function brandPort(cur, brand, scheme) {
   const usual = p === '' || BRANDS.some(x => String(x.port) === p) || Object.values(DEFAULT_PORT).some(x => String(x) === p);
   return usual && (scheme || 'rtsp') === 'rtsp' ? String(brand.port) : p;
 }
+// A battery camera's "Look at the card" choices for its catch_up_every (minutes, as a
+// string): a period set in the config file (60 to 1440) is offered as it is, so the form
+// shows it and saving keeps it.
+export function catchUpOptions(every) {
+  const opts = [['60', 'about hourly, while the camera is awake'], ['180', 'every 3 hours, while awake'], ['360', 'every 6 hours, while awake'], ['0', 'only after a restart, a reconnect or a missed push']];
+  const m = Number(every);
+  if (!opts.some(o => o[0] === every) && m > 0) {
+    opts.splice(opts.length - 1, 0, [every, (m % 60 ? 'every ' + m + ' minutes' : 'every ' + (m / 60) + ' hours') + ', while awake']);
+  }
+  return opts;
+}

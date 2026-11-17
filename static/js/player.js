@@ -27,12 +27,13 @@ const badAudio = new Set();
 // Does the browser know this camera's sound cannot be played? (The speaker button says so.)
 export function noSound(camId) { for (const k of badAudio) if (k.startsWith(camId + '/')) return true; return false; }
 
-// Plays /api/live/:id/ws?q=main|sub (a WebSocket carrying fragmented MP4) into <video>.
+// Plays /api/live/:id/ws?q=main|sub&draws=masks (a WebSocket carrying fragmented MP4) into <video>.
 // A WebSocket, not a streaming fetch: browsers allow only six HTTP connections per
 // server, and a grid of streams would take them all and stall every other request.
 // onFallback() is called when MSE playback is impossible (unsupported codec, stream
 // not running) on the first attempt. Authentication is the session cookie, which the
-// WebSocket handshake carries.
+// WebSocket handshake carries. Every caller draws the camera's privacy masks
+// over `video` (watchMasks in masks.js) or keeps it off screen (the speaker).
 export function startLive(video, camId, q, onFallback) {
   const st = { stopped: false, ctrl: null, url: null, first: true, tries: 0, cur: null, now: false, errs: 0, lastErr: 0, wait: 0, ac: null };
   // (Listeners on the video are dropped with the session or the player that added them: a
@@ -57,7 +58,10 @@ export function startLive(video, camId, q, onFallback) {
     if (!video.classList.contains('spkhidden')) video.poster = '/api/snapshot/' + camId + '?t=' + Date.now();
     camStep(camId, 'ask');
     if (st.tries) camCount(camId, 'retries');
-    const info = await api('/api/live/' + camId + '/info');
+    // draws=masks: this app draws a camera's privacy masks over the video
+    // (masks.js), so the server offers the stream as it is. Without it, a
+    // camera masked "on screen" is offered as masked pictures only.
+    const info = await api('/api/live/' + camId + '/info?draws=masks');
     // A camera without a separate sub stream serves its main stream for 'sub' (and the
     // other way round); the server picks the same one.
     const s = info[q] || info[q === 'sub' ? 'main' : 'sub'];
@@ -83,7 +87,7 @@ export function startLive(video, camId, q, onFallback) {
     const sb = ms.addSourceBuffer(mime);
     const queue = [];
     let gotData = false;
-    const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/live/' + camId + '/ws?q=' + q + (quiet ? '&audio=0' : ''));
+    const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/live/' + camId + '/ws?q=' + q + '&draws=masks' + (quiet ? '&audio=0' : ''));
     sock.binaryType = 'arraybuffer';
     st.ctrl = sock;
     st.cur = { sock, quiet, noAudio };

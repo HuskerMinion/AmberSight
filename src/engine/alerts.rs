@@ -33,6 +33,13 @@ pub struct AlertOver {
 }
 
 impl Engine {
+    /// An event's picture to send out (MQTT, email): the camera's privacy
+    /// masks blacked out when it was kept before they were set or changed.
+    pub(super) fn event_picture_to_send(&self, ev: &Event) -> Option<Vec<u8>> {
+        let t = ev.thumb.as_deref().filter(|t| !t.is_empty() && !t.contains(['/', '\\']))?;
+        crate::privacy::read_masked(&self.data_dir.join("thumbs").join(format!("{t}.jpg")), self.picture_cfg(&ev.camera).as_ref()).ok()
+    }
+
     /// classic NVR-style alerts: webhook JSON POST + optional Telegram message.
     /// Uses system curl (handles https); warns if curl is unavailable.
     pub(super) fn fire_alert(&self, ev: &Event) {
@@ -45,11 +52,7 @@ impl Engine {
         // MQTT always reports the event (Home Assistant sensors stay accurate);
         // notifications obey the throttle.
         if let Some(m) = self.mqtt.get() {
-            let jpeg = ev
-                .thumb
-                .as_deref()
-                .filter(|t| !t.is_empty())
-                .and_then(|t| std::fs::read(self.data_dir.join("thumbs").join(format!("{t}.jpg"))).ok());
+            let jpeg = self.event_picture_to_send(ev);
             m.publish_event(ev, jpeg);
         }
         // A camera with a quiet rule waits a moment for its pictures to be checked.
@@ -211,7 +214,9 @@ impl Engine {
         }
         let thumb_key = ev.thumb.clone().unwrap_or("".into());
         let thumb_path = self.data_dir.join("thumbs").join(format!("{}.jpg", thumb_key));
-        let have_thumb = !thumb_key.is_empty() && std::fs::exists(&thumb_path).unwrap_or(false);
+        // (The file is passed on by its path: a picture kept before the camera's
+        // privacy masks were set or changed is masked first, or not sent.)
+        let have_thumb = !thumb_key.is_empty() && std::fs::exists(&thumb_path).unwrap_or(false) && crate::privacy::mask_file(&thumb_path, self.picture_cfg(&ev.camera).as_ref());
         // Browser notifications: tapping one opens this camera at the alert;
         // the picture is fetched by the browser itself (signed in).
         let push_msg = push.then(|| {
@@ -381,11 +386,7 @@ impl Engine {
         if !want_mail {
             return;
         }
-        let jpeg = ev
-            .thumb
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .and_then(|t| std::fs::read(self.data_dir.join("thumbs").join(format!("{t}.jpg"))).ok());
+        let jpeg = self.event_picture_to_send(ev);
         {
             let (alerts, ev) = (alerts.clone(), ev.clone());
             thread::spawn(move || {

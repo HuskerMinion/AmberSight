@@ -92,5 +92,14 @@ eq([...a2.keys()], [1], 'gone cameras dropped');
 // Burn-in steps go round.
 eq([K.shiftAt(0), K.shiftAt(9), K.shiftAt(-1)], [[0, 0], [0, 0], [6, -6]], 'shift steps');
 
+// The mask key: same masks, same key; any change (boxes, level, revision) a new one.
+const mc = { id: 1, privacy_masks: [{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }], mask_mode: 'screen', mask_rev: 'a1' };
+eq(K.maskSig(mc) === K.maskSig({ ...mc }), true, 'mask key stable');
+eq(K.maskSig(mc) === K.maskSig({ id: 1 }), false, 'mask added changes the key');
+eq(K.maskSig(mc) === K.maskSig({ ...mc, mask_mode: 'recording' }), false, 'mask level changes the key');
+eq(K.maskSig(mc) === K.maskSig({ ...mc, mask_rev: 'b2' }), false, 'mask revision changes the key');
+eq(K.maskSig(mc) === K.maskSig({ ...mc, privacy_masks: [{ x: 0.1, y: 0.1, w: 0.3, h: 0.2 }] }), false, 'mask box changes the key');
+eq(K.maskSig(null), '', 'no camera');
+
 console.log(bad ? 'display: ' + bad + ' of ' + n + ' checks FAILED' : 'display: all ' + n + ' checks passed');
 process.exit(bad ? 1 : 0);

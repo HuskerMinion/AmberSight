@@ -84,12 +84,12 @@
 /* the speaker control moves up out of the REC / clock pills */
 .frame .spk, .frame .spk.above, #lightContent .spk { bottom: 36px; left: 6px; }
 /* the camera's own overlay text keeps clear of the pills */
-.frame .ovltext.pos-top-left { top: 36px; left: 6px; }
-.frame .ovltext.pos-top-right { top: 40px; right: 6px; }
-.frame .ovltext.pos-bottom-left { bottom: 36px; left: 6px; }
-.frame .ovltext.pos-bottom-right { bottom: 36px; right: 6px; }
-#lightContent .ovltext.big.pos-top-right { top: 40px; right: 6px; }
-#lightContent .ovltext.big.pos-bottom-left, #lightContent .ovltext.big.pos-bottom-right { bottom: 38px; }
+.frame .ovltext.pos-top-left { top: calc(36px + var(--ott, 0px)); left: calc(6px + var(--otl, 0px)); }
+.frame .ovltext.pos-top-right { top: calc(40px + var(--ott, 0px)); right: calc(6px + var(--otr, 0px)); }
+.frame .ovltext.pos-bottom-left { bottom: calc(36px + var(--otb, 0px)); left: calc(6px + var(--otl, 0px)); }
+.frame .ovltext.pos-bottom-right { bottom: calc(36px + var(--otb, 0px)); right: calc(6px + var(--otr, 0px)); }
+#lightContent .ovltext.ovltext-big.pos-top-right { top: calc(40px + var(--ott, 0px)); right: calc(6px + var(--otr, 0px)); }
+#lightContent .ovltext.ovltext-big.pos-bottom-left, #lightContent .ovltext.ovltext-big.pos-bottom-right { bottom: calc(38px + var(--otb, 0px)); }
 
 /* narrow tiles (many cameras, phones): fewer pills */
 @container (max-width: 250px) {
@@ -279,6 +279,9 @@ header { min-width: 0; }
 #status { flex: 0 1 auto; min-width: 0; }
 .healthchip { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .healthchip .hctext { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.healthchip.compact { flex: none; overflow: visible; }
+#status:has(.healthchip.compact) { flex: none; }
+.healthchip.compact .hctext { max-width: none; overflow: visible; text-overflow: clip; }
 .healthchip .ic, .hdr-right > .btn, .usermenu { flex: none; }
 .lamp, .clock { flex: none; }
 

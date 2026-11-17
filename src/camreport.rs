@@ -668,13 +668,42 @@ fn install_kind() -> String {
 }
 
 fn system() -> Value {
+    system_with(&crate::proclimit::read(), std::thread::available_parallelism().map(|n| n.get()).ok())
+}
+
+/// The "This server" part with the process limits and processor count given
+/// (the limits are left out when none could be read).
+fn system_with(limits: &crate::proclimit::ProcLimits, cores: Option<usize>) -> Value {
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "os": os_name(),
         "arch": std::env::consts::ARCH,
         "install": install_kind(),
         "ffmpeg": crate::ffmpeg_bin::status(),
+        "cpu_cores": cores,
+        "process_limits": if limits.is_empty() { Value::Null } else { limits.to_json() },
     })
+}
+
+/// "cgroup pids.max 100, in use 97; ulimit -u 63000" from the report's JSON
+/// (None when no limit could be read).
+fn process_limits_line(sys: &Value) -> Option<String> {
+    let l = &sys["process_limits"];
+    if l.is_null() {
+        return None;
+    }
+    let limits = crate::proclimit::ProcLimits {
+        pids_max: l["pids_max"].as_str().map(String::from),
+        pids_current: l["pids_current"].as_u64(),
+        nproc: l["nproc_limit"].as_str().map(String::from),
+    };
+    limits.report_line()
+}
+
+/// The settings that put a camera on the ffmpeg pipeline, for the report:
+/// (overlay on, number of privacy masks).
+fn picture_settings(cfg: &CameraConfig) -> (bool, usize) {
+    (cfg.overlay, cfg.privacy_masks.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +771,9 @@ fn settings(cfg: &CameraConfig) -> Value {
         "username": set(!cfg.username.is_empty()),
         "password": set(!cfg.password.is_empty()),
         "ingest_setting": cfg.ingest,
+        "overlay": picture_settings(cfg).0,
+        "privacy_masks": picture_settings(cfg).1,
+        "mask_mode": (!cfg.privacy_masks.is_empty()).then(|| cfg.mask_level()),
         "onvif_host": crate::onvif::host_from_rtsp_url(&cfg.url),
         "onvif_port": cfg.onvif_port,
         "reolink_channel": cfg.reolink_channel,
@@ -830,6 +862,7 @@ pub async fn make(cfg: CameraConfig, live: Live) -> (String, String) {
     };
 
     let (ends, fallback) = recorded(&cfg.name);
+    let fallback_words = fallback.as_ref().map(|f| crate::engine::health::plain_error(&f.1)).filter(|w| !w.is_empty());
     let mut report = json!({
         "report": "AmberSight camera report",
         "made": chrono::Utc::now().to_rfc3339(),
@@ -839,6 +872,7 @@ pub async fn make(cfg: CameraConfig, live: Live) -> (String, String) {
         "camera": settings(&cfg),
         "state": {
             "ingest": live.ingest,
+            "ffmpeg_reason": crate::engine::ffpath::why_ffmpeg(&cfg, &live.ingest, fallback_words.as_deref()),
             "fallback_reason": fallback.as_ref().map(|f| f.1.clone()),
             "fallback_at": when(fallback.map(|f| f.0)),
             "online": live.online,
@@ -888,16 +922,26 @@ fn summary(r: &Value) -> String {
     let sys = &r["system"];
     let _ = writeln!(t, "== This server ==");
     let _ = writeln!(t, "AmberSight {} on {} ({}), {}", s(&sys["version"]), s(&sys["os"]), s(&sys["arch"]), s(&sys["install"]));
-    let _ = writeln!(t, "ffmpeg: {}\n", s(&sys["ffmpeg"]));
+    let _ = writeln!(t, "ffmpeg: {}", s(&sys["ffmpeg"]));
+    if !sys["cpu_cores"].is_null() {
+        let _ = writeln!(t, "Processor cores: {}", s(&sys["cpu_cores"]));
+    }
+    if let Some(l) = process_limits_line(sys) {
+        let _ = writeln!(t, "Process and thread limits: {l}");
+    }
+    let _ = writeln!(t);
     let c = &r["camera"];
     let _ = writeln!(t, "== Camera settings ==");
-    for k in ["name", "enabled", "url", "sub_url", "username", "password", "ingest_setting", "onvif_host", "onvif_port", "reolink_channel", "uid", "on_demand", "record", "record_motion_only", "record_sub", "direct", "audio", "fps", "scale", "hwaccel", "motion", "trigger"] {
+    for k in ["name", "enabled", "url", "sub_url", "username", "password", "ingest_setting", "overlay", "privacy_masks", "mask_mode", "onvif_host", "onvif_port", "reolink_channel", "uid", "on_demand", "record", "record_motion_only", "record_sub", "direct", "audio", "fps", "scale", "hwaccel", "motion", "trigger"] {
         if !c[k].is_null() {
             let _ = writeln!(t, "{k}: {}", s(&c[k]));
         }
     }
     let st = &r["state"];
     let _ = writeln!(t, "\n== Now ==");
+    if !st["ffmpeg_reason"].is_null() {
+        let _ = writeln!(t, "Why ffmpeg: {}", s(&st["ffmpeg_reason"]));
+    }
     let _ = writeln!(t, "Read by: {}{}", s(&st["ingest"]), if st["fallback_reason"].is_null() { String::new() } else { format!(" (fallback since {}: {})", s(&st["fallback_at"]), s(&st["fallback_reason"])) });
     let _ = writeln!(t, "Online: {}  sleeping: {}  reconnects: {}  frames: {}", s(&st["online"]), s(&st["sleeping"]), s(&st["reconnects"]), s(&st["frames"]));
     let _ = writeln!(t, "Last error: {} ({})", s(&st["last_error"]), s(&st["last_error_at"]));
@@ -1158,6 +1202,37 @@ mod tests {
         let (_, text) = make(c, l).await;
         assert!(text.contains("skipped for hub cameras"), "{text}");
         assert!(t0.elapsed() < Duration::from_secs(4), "it must not wait for the camera");
+    }
+
+    #[test]
+    fn the_report_names_what_puts_a_camera_on_ffmpeg() {
+        let mut c = cfg("rtsp://192.0.2.9/main");
+        c.overlay = true;
+        assert_eq!(picture_settings(&c), (true, 0));
+        let w = crate::engine::ffpath::why_ffmpeg(&c, "ffmpeg", None).unwrap();
+        assert!(w.contains("burn it into recordings"), "{w}");
+        let j = settings(&c);
+        assert_eq!(j["overlay"], true);
+        assert_eq!(j["privacy_masks"], 0);
+        assert!(j["mask_mode"].is_null());
+        c.privacy_masks = vec![crate::config::ZoneRect { x: 0.0, y: 0.0, w: 0.1, h: 0.1 }];
+        c.mask_mode = Some("screen".into());
+        assert_eq!(settings(&c)["mask_mode"], "screen");
+        assert!(crate::engine::ffpath::why_ffmpeg(&cfg("rtsp://192.0.2.9/main"), "native", None).is_none());
+    }
+
+    #[test]
+    fn the_report_shows_process_limits_and_leaves_them_out_when_unreadable() {
+        let l = crate::proclimit::ProcLimits { pids_max: Some("100".into()), pids_current: Some(97), nproc: Some("63000".into()) };
+        let sys = system_with(&l, Some(24));
+        assert_eq!(sys["process_limits"]["pids_max"], "100");
+        assert_eq!(sys["cpu_cores"], 24);
+        assert_eq!(process_limits_line(&sys).unwrap(), "cgroup pids.max 100, in use 97; ulimit -u 63000");
+        let none = system_with(&Default::default(), None);
+        assert!(none["process_limits"].is_null() && process_limits_line(&none).is_none());
+        let r = json!({ "system": sys, "camera": {}, "state": { "ffmpeg_reason": "its ingest setting is \"ffmpeg\"" } });
+        let t = summary(&r);
+        assert!(t.contains("Process and thread limits: cgroup pids.max 100, in use 97") && t.contains("Processor cores: 24") && t.contains("Why ffmpeg: its ingest"), "{t}");
     }
 
     #[test]

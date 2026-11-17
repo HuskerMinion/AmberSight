@@ -102,7 +102,7 @@ function syncHealth(s) {
       const first = offOnly.length ? offOnly[0].name + ' is offline' : warns.length ? (((health && health.short) || [])[0] || cap(warns[0])) : off[0].name + ' is offline';
       txt = first + (n > 1 ? ' +' + (n - 1) + ' more' : '');
       // (When the chip is too narrow for the words: the count alone, never a cut-off name.)
-      compact = n === 1 ? (off.length ? '1 offline' : '1 problem') : n + ' problems';
+      compact = !warns.length ? offOnly.length + ' offline' : n === 1 ? '1 problem' : n + ' problems';
       tip = [].concat(offOnly.map(c => c.name + ' is offline'), warns.map(cap)).join('\n') + '\nClick to see what to do.';
     }
   }
@@ -116,12 +116,38 @@ function syncHealth(s) {
   b.hidden = !lvl;
   if (!lvl) return;
   b.className = 'healthchip ' + (lvl === 'fault' ? 'fault' : lvl === 'info' ? 'info' : '');
-  const hct = b.querySelector('.hctext');
-  hct.textContent = txt;
-  if (compact && hct.scrollWidth > hct.clientWidth + 1) hct.textContent = compact;
-  b.title = state.isAdmin ? tip : tip.replace(/\n?Click to [^\n]*$/, '');
+  b._full = txt; b._compact = compact;
+  fitHealth();
+  // The full words are always in the tooltip (the first problem on top when the chip shows a count).
+  const t = (compact ? txt + '\n' : '') + tip;
+  b.title = state.isAdmin ? t : t.replace(/\n?Click to [^\n]*$/, '');
   b.classList.toggle('noclick', !state.isAdmin);
   b.setAttribute('aria-label', txt);
+}
+
+// The chip shows its words when they fit, else an icon and a count ("1 offline"): never a cut-off word.
+// Starts from the full words every time, so it also grows back when room returns.
+let healthFitting = false;
+function fitHealth() {
+  const b = $('healthChip');
+  if (!b || b.hidden || !b._full || healthFitting) return;
+  healthFitting = true;
+  const hct = b.querySelector('.hctext');
+  b.classList.remove('compact');
+  hct.textContent = b._full;
+  if (b._compact && (hct.scrollWidth > hct.clientWidth + 1 || b.scrollWidth > b.clientWidth + 1)) {
+    hct.textContent = b._compact;
+    b.classList.add('compact');
+  }
+  healthFitting = false;
+}
+if (typeof ResizeObserver === 'function') {
+  let w = 0;
+  const hdr = document.querySelector('header');
+  if (hdr) new ResizeObserver(() => {
+    const nw = hdr.clientWidth;
+    if (nw !== w) { w = nw; requestAnimationFrame(fitHealth); }
+  }).observe(hdr);
 }
 
 function syncShieldBtn() {

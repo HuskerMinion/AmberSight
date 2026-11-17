@@ -204,7 +204,11 @@ impl Engine {
             if out.iter().any(|(e, _)| e == ev) {
                 continue;
             }
-            if let Ok(b) = std::fs::read(self.data_dir.join("thumbs").join(format!("{th}.jpg"))) {
+            if th.contains(['/', '\\']) {
+                continue;
+            }
+            // (The camera's privacy masks blacked out when it was kept before they were set or changed.)
+            if let Ok(b) = crate::privacy::read_event_picture(&self.config, &self.db, th, &self.data_dir.join("thumbs").join(format!("{th}.jpg"))) {
                 // A thumbnail is small; anything big is left out of the email.
                 if b.len() <= 300_000 {
                     out.push((ev.clone(), b));

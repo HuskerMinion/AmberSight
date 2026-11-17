@@ -20,7 +20,10 @@ pub(super) struct AiCheck {
     pub at_ms: i64,
     /// Everything seen down to REVIEW_FLOOR.
     pub seen: Vec<Detection>,
+    /// One plain line (see `ai_gpu::plain_error`); a card error stays one.
     pub error: Option<String>,
+    /// The longer text, cleaned of file paths and host names.
+    pub error_detail: Option<String>,
     pub frame: Vec<u8>,
     /// For each of `seen`: an object that has not moved (parked, or in a
     /// remembered spot), which does not count.
@@ -377,6 +380,7 @@ impl AiOutcome {
                 "offset_ms": c.at_ms - start_ms,
                 "frame": !c.frame.is_empty(),
                 "error": c.error,
+                "error_detail": c.error_detail,
                 "seen": c.seen,
                 "parked": c.parked,
                 "spot": c.spot,
@@ -487,7 +491,9 @@ pub(super) fn maybe_check(engine: &Engine, cfg: &CameraConfig, state: &mut AiSta
         }
         Err(e) => {
             warn!("camera '{}': AI check failed: {e:#}", cfg.name);
-            check.error = Some(format!("{e:#}"));
+            let raw = format!("{e:#}");
+            check.error = Some(super::ai_gpu::plain_error(&raw));
+            check.error_detail = Some(super::ai_gpu::clean_error(&raw)).filter(|d| check.error.as_deref() != Some(d.as_str()));
         }
     }
     state.log.push(check);
@@ -508,12 +514,12 @@ impl Engine {
     /// Detect objects with the built-in model, or the configured AI server.
     pub fn ai_detect(&self, jpeg: &[u8], min_score: f32) -> anyhow::Result<Vec<Detection>> {
         let ticket = crate::telemetry::AiTicket::begin();
-        let r = self.ai_detect_inner(jpeg, min_score);
+        let r = self.ai_detect_guarded(jpeg, min_score);
         ticket.finish(r.is_ok());
         r
     }
 
-    fn ai_detect_inner(&self, jpeg: &[u8], min_score: f32) -> anyhow::Result<Vec<Detection>> {
+    pub(super) fn ai_detect_inner(&self, jpeg: &[u8], min_score: f32) -> anyhow::Result<Vec<Detection>> {
         if let Some(d) = self.detector() {
             return d.detect(jpeg, min_score);
         }

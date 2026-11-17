@@ -17,6 +17,7 @@ import { exportDialog } from './export.js';
 import { createZoom } from './zoom.js';
 import { openCalendar, closeCalendar } from './calendar.js';
 import * as Bm from './bookmarks.js';
+import { paintMasks, maskRevQ, maskRev } from './masks.js';
 
 const WIN = 5 * 60000;           // playback window per request
 const FIRST_WIN = 60000;         // the first window after a click: fewer recordings to open, so it starts sooner
@@ -176,7 +177,7 @@ async function loadData() {
   // just shows none.)
   const sig = api('/api/signals?from=' + a + '&to=' + b).then(sig => {
     if (!fresh()) return;
-    D.sig = (sig.signals || []).filter(x => x.on || x.spans.length).slice(0, SIG_MAX);
+    D.sigAll = (sig.signals || []).filter(x => x.on || x.spans.length);
     draw();
   });
   // Bookmarks (flags on the strip).
@@ -230,7 +231,8 @@ function loadStrips() {
   for (const name of shownNames()) {
     const c = state.cams.find(x => x.name === name);
     if (!c || c.remote) continue;
-    const key = from + '/' + step + '/' + n;
+    // (The masks' revision too: a strip made before a mask change is asked for again.)
+    const key = from + '/' + step + '/' + n + '/' + maskRev(c);
     stripWant.set(name, key);
     const cur = strips.get(name);
     if ((cur && cur.key === key) || stripBusy.has(name + key) || (stripFailed.get(name + key) || 0) > Date.now()) continue;
@@ -241,7 +243,7 @@ async function fetchStrip(name, key, from, step, n) {
   stripBusy.add(name + key);
   let objUrl = null;
   try {
-    const url = '/api/filmstrip?camera=' + enc(name) + '&from=' + from + '&step=' + step + '&n=' + n + '&w=' + (dataSaver() ? 112 : 160) + '&quiet=1';
+    const url = '/api/filmstrip?camera=' + enc(name) + '&from=' + from + '&step=' + step + '&n=' + n + '&w=' + (dataSaver() ? 112 : 160) + maskRevQ(state.cams.find(x => x.name === name)) + '&quiet=1';
     const r = await fetch(url, { credentials: 'same-origin' });
     // None (nothing recorded) or busy: do not ask again for a while.
     if (!r.ok || r.status === 204) { stripFailed.set(name + key, Date.now() + (r.status === 503 ? 5000 : 30000)); return; }
@@ -585,7 +587,8 @@ async function askPic(p, at) {
   const ac = pc.ac = new AbortController();
   const t0 = performance.now();
   const low = S.solo === null || dataSaver();
-  const url = '/api/playback/picture?camera=' + enc(p.cam.name) + '&at=' + Math.floor(at) + (low ? '&quality=low' : '') + (pc.have !== null ? '&have=' + pc.have : '') + '&quiet=1';
+  // draws=masks: the tile draws the camera's privacy masks over these pictures (masks.js).
+  const url = '/api/playback/picture?camera=' + enc(p.cam.name) + '&at=' + Math.floor(at) + '&draws=masks' + (low ? '&quality=low' : '') + (pc.have !== null ? '&have=' + pc.have : '') + '&quiet=1';
   // A failed ask (the server restarting after an update, the network gone):
   // try again after 1 s, then 2, 4, up to 8 s. Fast pictures stay on.
   const later = () => { pc.netFails++; pc.retryAt = Date.now() + Math.min(8000, 1000 * 2 ** (pc.netFails - 1)); };
@@ -636,7 +639,10 @@ async function askPic(p, at) {
               try { fixed = pic = new VideoFrame(frame, { visibleRect: { x: 0, y: 0, width: sz[0], height: sz[1] }, displayWidth: sz[0], displayHeight: sz[1] }); } catch (e) { pic = frame; }
             }
             if (cv.width !== pic.displayWidth || cv.height !== pic.displayHeight) { cv.width = pic.displayWidth; cv.height = pic.displayHeight; }
-            cv.getContext('2d').drawImage(pic, 0, 0, cv.width, cv.height);
+            const g = cv.getContext('2d');
+            g.drawImage(pic, 0, 0, cv.width, cv.height);
+            // The camera's privacy masks, painted into the picture (asked with draws=masks).
+            paintMasks(g, cv.width, cv.height, camFromId(p.cam.id) || p.cam);
             if (fixed) fixed.close();
             pc.drawn = true; pc.pending = null;
             pc.have = want.wall; pc.wall = want.wall; pc.shownFor = want.at;
@@ -744,8 +750,11 @@ function mountPlayer(frame, cam) {
   pills.innerHTML = '<div class="ptop"><div class="pill ptl"><span class="nm"></span></div></div><div class="pbot"><div class="pill pbr"></div></div>';
   pills.querySelector('.nm').textContent = Live.camLabel(cam);
   frame.appendChild(pills);
+  // The camera's text on the picture, with the time of the recording shown.
+  // (Its privacy masks: the tile's watcher in live.js covers these videos.)
+  const ot = Live.addOverlayText(frame, cam, { big: S.solo !== null, at: () => S.playhead, live: () => S.live });
   const p = {
-    cam, el, tm: pills.querySelector('.pbr'), msg: el.querySelector('.tlnone'), cv: el.querySelector('.tlstrip'), cvKey: '', cur: 0, failUntil: 0, shownIdx: -1,
+    cam, el, ot, tm: pills.querySelector('.pbr'), msg: el.querySelector('.tlnone'), cv: el.querySelector('.tlstrip'), cvKey: '', cur: 0, failUntil: 0, shownIdx: -1,
     slots: [...vids].map(v => ({ v, start: 0, end: 0, ready: false, loading: false, since: 0, gen: 0, k: 1 })),
   };
   // Scroll to zoom, drag to pan, double-click: as in the full view, when
@@ -753,7 +762,7 @@ function mountPlayer(frame, cam) {
   createZoom(el, { box: true, on: () => S.solo !== null });
   players.add(p);
   tickPlayer(p);
-  return { el, stop() { pills.remove(); players.delete(p); stopLive(p); stopPic(p); if (p.bx) p.bx.remove(); p.slots.forEach(resetSlot); } };
+  return { el, stop() { pills.remove(); if (ot) ot.remove(); players.delete(p); stopLive(p); stopPic(p); if (p.bx) p.bx.remove(); p.slots.forEach(resetSlot); } };
 }
 
 // q: 'low' = the sub stream where it was recorded (starts fast), 'full' =
@@ -799,7 +808,8 @@ async function load(p, si, fromMs, q, up, win, twall) {
     if (s.up) { if (s.q === 'low') p.noDownTo = fromMs + 60000; else p.noUpTo = fromMs + 60000; resetSlot(s); } else p.failUntil = Date.now() + 3000;
   };
   if (to - fromMs < 1500) return fail();
-  const url = '/api/playback?camera=' + enc(p.cam.name) + '&from=' + fromMs + '&to=' + to + (s.rev ? '&reverse=1' : (s.q === 'low' || dataSaver() ? '&quality=low' : '') + (k > 1 ? '&speed=' + k + '&frame_ms=' + fm : ''));
+  // draws=masks: the tile draws the camera's privacy masks over this video (masks.js).
+  const url = '/api/playback?camera=' + enc(p.cam.name) + '&from=' + fromMs + '&to=' + to + '&draws=masks' + (s.rev ? '&reverse=1' : (s.q === 'low' || dataSaver() ? '&quality=low' : '') + (k > 1 ? '&speed=' + k + '&frame_ms=' + fm : ''));
   let r;
   // A ranged 1-byte probe returns where the clip really starts (x-clip-start-ms).
   const ac = s.abort = new AbortController();
@@ -851,7 +861,7 @@ function paintTime(p) {
   const d = new Date(S.playhead), n = new Date();
   const day = d.toDateString() === n.toDateString() ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ';
   const text = day + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
-  if (p.tm.textContent !== text) p.tm.textContent = text;
+  if (p.tm.textContent !== text) { p.tm.textContent = text; if (p.ot) Live.paintOverlayText(p.ot); }
 }
 function tickVideo(p) {
   // Another server's camera: its recordings are there, not here.
@@ -1453,11 +1463,15 @@ function drawNow() {
   wantStrips();
   $('tlSpans').innerHTML = spansHtml(W);
   // Signal lanes under the alerts: a door, an alarm, a camera's input.
-  const lanes = D.sig || [];
+  // (A signal made by a camera shows under that camera only; the rest under all.)
+  const shown = new Set(shownNames());
+  const lanes = (D.sigAll || []).filter(g => !g.camera || shown.has(g.camera)).slice(0, SIG_MAX);
   // (The strip's own height comes from the page style: shorter on a phone on its side.)
   const base = parseFloat(getComputedStyle(area).getPropertyValue('--tl-h')) || 96;
   const sh = base + lanes.length * SIG_LANE + (lanes.length ? 4 : 0);
   if (area.style.height !== sh + 'px') { area.style.height = sh + 'px'; trackDockHeight(); }
+  // The playhead's time bubble sits above the lanes, clear of their names.
+  area.style.setProperty('--tl-sig', (sh - base) + 'px');
   $('tlSigs').innerHTML = lanes.map((g, i) => {
     const top = base + i * SIG_LANE;
     const bars = g.spans.filter(sp => sp[1] >= from && sp[0] <= to).map(sp => {

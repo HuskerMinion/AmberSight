@@ -1230,6 +1230,7 @@ pub async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+    crate::child::set_stopping();
 }
 
 /// Run the server until `shutdown` resolves, then stop the cameras cleanly

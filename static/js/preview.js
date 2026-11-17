@@ -4,7 +4,8 @@
 // debounced, one at a time, and rounded to the second so the browser's cache
 // answers repeats.
 
-import { enc, fmtWall } from './core.js';
+import { enc, fmtWall, state } from './core.js';
+import { maskRevQ } from './masks.js';
 
 const WIDTH = 240;
 const DEBOUNCE_MS = 90;
@@ -39,10 +40,12 @@ async function fetchNext() {
   if (busy || !want) return;
   const w = want;
   const sec = Math.floor(w.ms / 1000) * 1000;
-  const key = w.cam + '|' + sec;
+  // (With the masks' revision: a picture made before a mask change is not shown again.)
+  const rev = maskRevQ(state.cams.find(x => x.name === w.cam));
+  const key = w.cam + '|' + sec + rev;
   if (key === shownKey) return;
   busy = true;
-  const url = '/api/preview?camera=' + enc(w.cam) + '&at=' + sec + '&w=' + WIDTH;
+  const url = '/api/preview?camera=' + enc(w.cam) + '&at=' + sec + '&w=' + WIDTH + rev;
   try {
     const r = await fetch(url, { credentials: 'same-origin' });
     if (want && r.ok) {

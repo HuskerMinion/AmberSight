@@ -51,6 +51,26 @@ port = 8090
 # enabled = true
 # port = 8554
 
+# HARDWARE DECODING for motion detection, for cameras whose own hwaccel is Auto
+# (Settings > System > Hardware; it applies at once, without a restart).
+# "auto": an NVIDIA card (NVDEC) first, then Intel Quick Sync (Gen12+ Intel; VAAPI
+# first on older Intel), then VAAPI on Intel or AMD, among the ways that passed a
+# test decode at start; else the processor. "nvidia": the same order. "intel":
+# Intel/AMD first, NVIDIA last. "off": the processor. Quick Sync on Linux needs Intel's
+# GPU runtime (libmfx-gen1.2 on Debian/Ubuntu, intel-vpl-gpu-rt on Fedora); without it
+# Gen12+ Intel uses VAAPI, which fails on some cameras ("Failed to sync surface").
+# Auto keeps video memory free on the NVIDIA card for other programs (the AI, a local
+# language model): a camera starts or moves onto NVDEC only while the card keeps
+# nvidia_min_free_mb free after it (a decoder takes about 300 MB; 16 cameras took 2.9 GB).
+# When there is no room Auto uses the next way (Intel, then the processor), says why in the
+# camera's note, and moves the camera back once there is 1 GB more than that free. Read with
+# nvidia-smi (if it is not found there is no check). 0 turns this off. "intel" is guarded
+# too (cameras whose Intel/AMD way fails go to NVIDIA only while there is room, else the
+# processor). "nvidia" and a camera's own hwaccel = "cuda" ignore it.
+# [hwdecode]
+# prefer = "auto"
+# nvidia_min_free_mb = 1536
+
 # TRANSCODING for players that cannot decode a stream as it is (a TV whose
 # decoder stops at 4096 wide, a phone without H.265): an app that sends what
 # it can decode gets the stream re-encoded to the largest size it takes, on
@@ -284,11 +304,13 @@ post_roll = 10          # seconds of footage after the trigger
 # # How RTSP video travels: "auto" (TCP; a camera that answers "461 Unsupported
 # # Transport" is asked again over UDP, and UDP is kept for it), "tcp" or "udp".
 # # transport = "auto"
-# # Hardware decoding for motion detection. Unset = Auto: on Linux, VAAPI on the
-# # first graphics card (render node) that passed a test decode at start, else the
-# # processor; a card that fails later is replaced by the processor at once.
-# # Windows and macOS: Auto uses the processor. Or "off", "vaapi",
-# # "vaapi:/dev/dri/renderD130", "qsv", "qsv:/dev/dri/renderD128".
+# # Hardware decoding for motion detection. Unset = Auto: the [hwdecode] prefer
+# # order over the ways that passed a test decode at start, else the processor. A
+# # way that fails later is replaced at once and tried again after 15 minutes (later
+# # each time, up to 4 hours); after a second failure in a row (no 30 minutes of good
+# # running in between) that camera leaves it until a restart or a [hwdecode] change.
+# # Out-of-memory failures are only waited out. Or "off", "cuda" (NVIDIA NVDEC),
+# # "vaapi", "vaapi:/dev/dri/renderD130", "qsv", "qsv:/dev/dri/renderD128".
 # # hwaccel = "off"
 # # Record into a [[storage.folders]] entry instead of data_dir.
 # # folder = "main"
@@ -315,13 +337,17 @@ post_roll = 10          # seconds of footage after the trigger
 # record = true
 # motion = true
 # enabled = false
-# # Text on the picture in the live view (drawn by the browser, no server
-# # cost). Fill-ins: {name} {short} {site} {date} {time}. Corner: top-left,
-# # top-right, bottom-left (default) or bottom-right.
+# # Text on the picture: drawn by the web app over live view and playback
+# # (playback with the recording's own time), and put into snapshots, event
+# # pictures and time-lapse frames; no re-encoding. Fill-ins: {name} {short}
+# # {site} {date} {time} {v:NAME}. Corner: top-left, top-right, bottom-left
+# # (default) or bottom-right.
 # # overlay_text = "{short} {date} {time}"
 # # overlay_pos = "bottom-left"
-# # Also burn that text into the recordings. This re-encodes the camera's
-# # video (much more CPU); without overlay_text it burns name, date and time.
+# # Also burn that text into the recordings themselves. This re-encodes the
+# # camera's video (about one processor core per 4K camera, or the graphics
+# # card); without overlay_text it burns name, date and time. Off is enough for
+# # the text to show everywhere in AmberSight.
 # overlay = false
 # # Map source audio track into segments when present (direct mode keeps
 # # audio via -c copy regardless).
@@ -342,8 +368,29 @@ post_roll = 10          # seconds of footage after the trigger
 # # Also start recording on other cameras when this one sees motion:
 # # also_trigger = ["Side Yard", "group:Outside"]
 
-# # Privacy masks: rectangles blacked out in recordings, live view and snapshots.
-# # Cameras with masks (or overlay = true) are re-encoded, which costs CPU.
+# # Privacy masks: rectangles blacked out (0..1 of the picture).
+# # mask_mode = "screen": hidden on screen and in pictures. The apps draw the
+# #   masks over the video; snapshots, event pictures, AI and motion frames,
+# #   downloads and event copies to a folder have them burned in. The recordings
+# #   on disk (and event clips in off-site copies) and shared RTSP streams still
+# #   contain the area, and anyone who can watch the camera could get the
+# #   unmasked video with a modified app. Costs nothing (no re-encoding).
+# # mask_mode = "recording": hidden in recordings too. The video is re-encoded
+# #   (about one processor core per 4K camera, or the graphics card); the only
+# #   level that protects the files, from the moment it is on: recordings made
+# #   before (or before the masks changed) stay unmasked on disk and are masked
+# #   when they leave (downloads, exports, event copies, apps that do not draw
+# #   masks). Not for pushed or battery cameras; filling gaps from the camera's
+# #   card is off for such cameras.
+# # Masked downloads, event copies and playback for apps that do not draw masks
+# # are converted on the server ([transcode]): quick on a graphics encoder,
+# # slow on the processor (H.264, up to 1080p). Adding or changing masks turns
+# # off share_unmasked (RTSP sharing) until it is confirmed again.
+# # Default: "screen" for masks added from 0.11.1 on; a camera that already had
+# # masks before is set to "recording" once at upgrade.
+# # The camera's own privacy mask (Reolink, Dahua/Amcrest, Hikvision...) is
+# # better still: the area never leaves the camera.
+# # mask_mode = "screen"
 # # [[cameras.privacy_masks]]
 # # x = 0.0
 # # y = 0.0

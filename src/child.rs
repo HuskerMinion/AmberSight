@@ -3,6 +3,40 @@
 //! Windows they are placed in a job object that closes with the process.
 
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set once AmberSight was told to stop. A service stop (systemd) signals
+/// every process of the service, ffmpeg included, so a child that ends now
+/// was stopped from outside: not a failure of what it was doing.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// AmberSight is stopping (see `STOPPING`).
+pub fn set_stopping() {
+    STOPPING.store(true, Ordering::SeqCst);
+}
+
+/// Whether AmberSight was told to stop.
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::SeqCst)
+}
+
+/// Whether an ffmpeg ended because it was sent a signal: it catches SIGTERM
+/// and SIGINT and then exits with 255 (it uses that code for nothing else);
+/// a signal it does not catch shows as such. SIGKILL is left out: that is
+/// AmberSight's own `kill` of a stuck decoder, or the system out of memory.
+pub fn ended_by_signal(st: &std::process::ExitStatus) -> bool {
+    if st.code() == Some(255) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = st.signal() {
+            return sig == libc::SIGTERM || sig == libc::SIGINT || sig == libc::SIGHUP;
+        }
+    }
+    false
+}
 
 /// An `ffmpeg` command that will not outlive this process.
 pub fn ffmpeg() -> Command {
@@ -126,5 +160,42 @@ mod curl_tests {
             curl_config(&args),
             "-s\n-m \"10\"\n-H \"Authorization: Bearer t\\\"x\"\n--form-string \"message=a\\nb\"\nurl = \"https://api.example/bot123:ABC/send\"\n"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod signal_tests {
+    use super::ended_by_signal;
+    use std::process::Command;
+
+    fn exit_of(script: &str) -> std::process::ExitStatus {
+        Command::new("sh").args(["-c", script]).status().unwrap()
+    }
+
+    #[test]
+    fn a_stop_signal_is_told_from_a_failure() {
+        // ffmpeg's own code after catching SIGTERM/SIGINT.
+        assert!(ended_by_signal(&exit_of("exit 255")));
+        assert!(!ended_by_signal(&exit_of("exit 1")));
+        assert!(!ended_by_signal(&exit_of("exit 0")));
+        // A program that does not catch it.
+        assert!(ended_by_signal(&exit_of("kill -TERM $$")));
+        // AmberSight's own kill of a stuck decoder (or the system out of memory) is not.
+        assert!(!ended_by_signal(&exit_of("kill -KILL $$")));
+    }
+
+    #[test]
+    fn ffmpeg_sent_sigterm_counts_as_stopped_from_outside() {
+        let Ok(mut c) = Command::new(crate::ffmpeg_bin::program())
+            .args(["-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10", "-f", "null", "-"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+        else {
+            return; // (no ffmpeg here)
+        };
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+        let st = c.wait().unwrap();
+        assert!(ended_by_signal(&st), "{st}");
     }
 }

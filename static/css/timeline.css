@@ -3,7 +3,7 @@
 /* ---- playhead: white (amber stays the brand), with a time bubble ---- */
 .tlhead { background: var(--text); box-shadow: 0 0 0 1px color-mix(in srgb, var(--surface) 70%, transparent); }
 .tlhead::before { background: var(--text); }
-.tlhead #tlHeadT { position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); padding: 1px 6px; border-radius: 4px; background: var(--text); color: var(--surface); font-size: var(--fs-s); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 15px; white-space: nowrap; pointer-events: none; }
+.tlhead #tlHeadT { position: absolute; bottom: calc(3px + var(--tl-sig, 0px)); left: 50%; transform: translateX(-50%); padding: 1px 6px; border-radius: 4px; background: var(--text); color: var(--surface); font-size: var(--fs-s); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 15px; white-space: nowrap; pointer-events: none; }
 .tlhead #tlHeadT[data-edge="l"] { transform: translateX(-2px); }
 .tlhead #tlHeadT[data-edge="r"] { transform: translateX(calc(-100% + 2px)); }
 

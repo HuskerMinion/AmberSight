@@ -129,5 +129,16 @@ for (const c of cases) {
   eq(A.addrProblems({ host: '192.0.2.60', port: '', uid: ' 95270000abcdefgh ' }, 'battery'), [], 'a uid is trimmed and may be typed in lower case');
 }
 
+// A battery camera's card-look period: one set in the config file is offered as it is.
+{
+  const vals = e => A.catchUpOptions(e).map(o => o[0]);
+  eq(vals('60'), ['60', '180', '360', '0'], 'the usual periods');
+  eq(vals('0'), ['60', '180', '360', '0'], 'no periodic looks');
+  eq(vals('120'), ['60', '180', '360', '120', '0'], 'a period from the config file is kept');
+  eq(A.catchUpOptions('120')[3][1], 'every 2 hours, while awake', 'its label in hours');
+  eq(A.catchUpOptions('90')[3][1], 'every 90 minutes, while awake', 'or in minutes');
+  eq(A.catchUpOptions('1440')[3][1], 'every 24 hours, while awake', 'the longest');
+}
+
 console.log(bad ? bad + ' of ' + n + ' camaddr checks failed' : 'camaddr: all ' + n + ' checks passed');
 process.exit(bad ? 1 : 0);

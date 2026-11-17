@@ -1269,7 +1269,7 @@ function discoveryPage(el) {
       for (const v of vs) {
         for (const c of (v.cams || [])) {
           if (!c.pick || c.added) continue;
-          const body = Object.assign({ record: true, motion: true, enabled: true, overlay: true, audio: true }, c.base,
+          const body = Object.assign({ record: true, motion: true, enabled: true, audio: true }, c.base,
             { name: (c.name || '').trim() || c.base.name, username: v.username, password: v.password || '' });
           try { await addCameraConfig(body); c.added = true; ok++; }
           catch (e) { fail.push(body.name + ': ' + (e.body ? tryMsg(e.body) : e.message)); }

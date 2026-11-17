@@ -40,7 +40,9 @@ function paintList() {
   } else if (cam && (all.length || data.enabled)) {
     h += '<p class="hint">No time-lapse of ' + esc(cam) + ' yet.</p>';
   }
-  if (cur) {
+  if (cur && cur.masks_old) {
+    h += '<p class="hint">This time-lapse was made before the camera\'s privacy masks were set or changed, so it is not shown.' + (state.isAdmin ? ' Make it again with Make now.' : '') + '</p>';
+  } else if (cur) {
     const url = '/api/timelapse/' + enc(cur.slug) + '/' + cur.date;
     h += '<div class="tl-player"><video controls playsinline preload="metadata" src="' + url + '"></video>' +
       '<div class="row"><span class="hint">' + esc(cam) + ' · ' + esc(prettyDay(cur.date)) + ' · ' + fmtSize(cur.bytes) + '</span><a class="btn" href="' + url + '?download=1" download>Download</a></div></div>';

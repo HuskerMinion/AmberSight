@@ -157,6 +157,8 @@ body[data-tab="settings"] #dock { display: none; }
 .sp-rec b { color: var(--accent); font-weight: 600; }
 .sp-more { margin: var(--s4) 0 0; }
 .sp-how { margin: var(--s2) 0 0; max-width: 70ch; }
+.sp-how p { margin: 0 0 var(--s2); }
+.sp-how p:last-child { margin-bottom: 0; }
 .sp-note { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; padding: var(--s3) var(--s4); margin: 0 0 var(--s3); border: 1px solid var(--line2); border-left-width: 4px; border-radius: var(--r2); background: var(--surface); }
 .sp-note-t { flex: 1; min-width: 220px; line-height: 1.45; }
 .sp-note.warn { border-color: var(--warn); }
@@ -288,3 +290,12 @@ body[data-tab="settings"] #dock { display: none; }
 .dsa-code input { font: 600 18px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; width: 12ch; }
 .dsa-card { border: 1px solid var(--line2); border-radius: var(--r2); background: var(--surface2); padding: var(--s3) var(--s4); margin: var(--s3) 0; max-width: 520px; }
 .dsa-who { margin-bottom: var(--s1); }
+
+/* System > Hardware: the decoding summary, per-camera list and test results */
+.hw-now { margin: var(--s3) 0 var(--s2); font-weight: 600; }
+.hw-cams, .hw-tests { list-style: none; margin: var(--s2) 0; padding: 0; }
+.hw-cams li, .hw-tests li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px var(--s3); padding: 6px 0; border-bottom: 1px solid var(--line2); overflow-wrap: anywhere; }
+.hw-cams li:last-child, .hw-tests li:last-child { border-bottom: 0; }
+.hw-tests li > span { flex: 1 1 260px; }
+.hw-cams .hint { flex-basis: 100%; margin: 0; }
+.hw-gpu { color: var(--text); }

@@ -78,6 +78,15 @@ pub fn gpu_note() -> Option<String> {
     None
 }
 
+/// Say why the AI is on the processor now (the card gave errors while running).
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+pub fn set_gpu_note(note: Option<String>) {
+    *GPU_NOTE.lock().unwrap() = note;
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub fn set_gpu_note(_note: Option<String>) {}
+
 /// The AI runtime allows one environment per process: make it once, share it
 /// (switching models makes a new session in the same environment).
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]

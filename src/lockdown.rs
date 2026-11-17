@@ -216,6 +216,17 @@ pub fn release_args(dir: &Path) -> Vec<String> {
     vec![dir.to_string_lossy().into_owned(), "/inheritance:e".into()]
 }
 
+/// A temp file name no other read in this process uses at the same time. (The
+/// clock alone is not enough: two folders read at once could get the same
+/// name, and one would be judged by the other's permissions.)
+#[cfg_attr(not(windows), allow(dead_code))]
+fn unique_temp(prefix: &str) -> PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    std::env::temp_dir().join(format!("{prefix}-{}-{n}-{t}.txt", std::process::id()))
+}
+
 /// The signed-in account, when it is neither SYSTEM nor a computer account.
 pub fn account_to_keep(domain: Option<&str>, user: Option<&str>) -> Option<String> {
     let user = user.filter(|u| !u.is_empty() && !u.ends_with('$') && !u.eq_ignore_ascii_case("SYSTEM"))?;
@@ -236,7 +247,20 @@ pub fn icacls_exe() -> PathBuf {
 }
 
 pub fn current_account() -> Option<String> {
-    account_to_keep(std::env::var("USERDOMAIN").ok().as_deref(), std::env::var("USERNAME").ok().as_deref())
+    let domain = std::env::var("USERDOMAIN").ok();
+    let computer = std::env::var("COMPUTERNAME").ok();
+    account_to_keep(local_domain(domain.as_deref(), computer.as_deref()), std::env::var("USERNAME").ok().as_deref())
+}
+
+/// The domain part for icacls. A Windows OpenSSH session sets USERDOMAIN to
+/// the workgroup ("WORKGROUP"), which is no account domain ("No mapping
+/// between account names and security IDs"): a local account is
+/// COMPUTERNAME\user then.
+fn local_domain<'a>(domain: Option<&'a str>, computer: Option<&'a str>) -> Option<&'a str> {
+    match domain {
+        Some(d) if d.eq_ignore_ascii_case("WORKGROUP") => computer.filter(|c| !c.is_empty()).or(domain),
+        _ => domain,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1027,7 +1051,16 @@ mod sys {
     }
 
     pub fn read_aces(dir: &Path) -> Result<Vec<Ace>, String> {
-        let tmp = std::env::temp_dir().join(format!("ambersight-acl-{}-{}.txt", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        // Made by us first, as in grant_users: the temporary folder is writable by every
+        // account, and a file planted under this name (or a link) would otherwise be what is
+        // read back. icacls /save writes over a file that is already there, so creating it
+        // first is no obstacle; one that exists already is refused here.
+        let tmp = super::unique_temp("ambersight-acl");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| format!("could not make a temporary file to read the folder's permissions: {e}"))?;
         let out = icacls(&[dir.to_string_lossy().into_owned(), "/save".into(), tmp.to_string_lossy().into_owned(), "/c".into()]).map_err(|e| format!("could not run icacls: {e}"));
         let bytes = std::fs::read(&tmp);
         let _ = std::fs::remove_file(&tmp);
@@ -1075,12 +1108,13 @@ mod sys {
     /// run, except for text files) on those that lack it. Files only.
     fn grant_users(dir: &Path, only: &dyn Fn(&str) -> bool) -> anyhow::Result<()> {
         // (A name nobody can guess, made by us first: the temporary folder is writable by every account.)
-        let tmp = std::env::temp_dir().join(format!("ambersight-files-{}-{}.txt", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        let tmp = super::unique_temp("ambersight-files");
         std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         let pattern = dir.join("*").to_string_lossy().into_owned();
-        icacls(&[pattern, "/save".into(), tmp.to_string_lossy().into_owned(), "/c".into()])?;
+        let saved = icacls(&[pattern, "/save".into(), tmp.to_string_lossy().into_owned(), "/c".into()]);
         let bytes = std::fs::read(&tmp);
         let _ = std::fs::remove_file(&tmp);
+        saved?;
         let pairs = parse_save_pairs(&decode_icacls_save(&bytes?));
         // The program first; one failure does not stop the rest. Only real files (a folder
         // that happens to be called x.dll is not one).
@@ -1138,7 +1172,13 @@ mod sys {
 
     fn run(args: &[String]) -> anyhow::Result<()> {
         let out = icacls(args)?;
-        anyhow::ensure!(out.status.success(), "icacls failed: {}", String::from_utf8_lossy(&out.stdout).trim());
+        // (icacls says which file failed and why on stderr; stdout only has the counts.)
+        anyhow::ensure!(
+            out.status.success(),
+            "icacls failed: {} {}",
+            String::from_utf8_lossy(&out.stderr).trim(),
+            String::from_utf8_lossy(&out.stdout).trim()
+        );
         Ok(())
     }
 }
@@ -1375,6 +1415,21 @@ mod tests {
     }
 
     #[test]
+    fn a_workgroup_is_not_the_account_domain() {
+        assert_eq!(local_domain(Some("WORKGROUP"), Some("PC1")), Some("PC1"));
+        assert_eq!(local_domain(Some("workgroup"), Some("PC1")), Some("PC1"));
+        assert_eq!(local_domain(Some("CONTOSO"), Some("PC1")), Some("CONTOSO"));
+        assert_eq!(local_domain(Some("WORKGROUP"), None), Some("WORKGROUP"));
+        assert_eq!(local_domain(None, Some("PC1")), None);
+    }
+
+    #[test]
+    fn temp_names_differ_when_made_at_once() {
+        let names: std::collections::HashSet<PathBuf> = (0..1000).map(|_| unique_temp("x")).collect();
+        assert_eq!(names.len(), 1000);
+    }
+
+    #[test]
     fn account_to_keep_skips_system() {
         assert_eq!(account_to_keep(Some("PC"), Some("bob")), Some(r"PC\bob".into()));
         assert_eq!(account_to_keep(None, Some("bob")), Some("bob".into()));
@@ -1543,7 +1598,8 @@ mod tests {
         let keep = current_account();
         assert!(keep.is_some(), "the test account is an ordinary user");
         assert_eq!(protect(&dir, Kind::Recording, keep.as_deref()).unwrap(), Outcome::Tightened);
-        assert_eq!(folder_state(&dir).0, "private");
+        let st = folder_state(&dir);
+        assert_eq!(st.0, "private", "{st:?}; entries now: {:?}", sys::read_aces(&dir));
         // A file below got the change through inheritance.
         assert!(!acl_is_open(&sys::read_aces(&dir.join("sub").join("f.txt")).unwrap()));
         // The inherited entry for this account was copied: it can still use the folder, and files below.
@@ -1585,7 +1641,10 @@ mod tests {
         }
         assert_eq!(kind_state(&prog, Kind::Program).0, "open");
         assert_eq!(protect(&prog, Kind::Program, keep.as_deref()).unwrap(), Outcome::Tightened);
-        assert_eq!(kind_state(&prog, Kind::Program).0, "private");
+        // (On failure, say what the folder's entries are: CI failed here once, 2026-11-16, and
+        // passed on a re-run; the entries tell a wrong read from a real gap.)
+        let st = kind_state(&prog, Kind::Program);
+        assert_eq!(st.0, "private", "{st:?}; entries now: {:?}", sys::read_aces(&prog));
         let has_users = |f: &str| sys::read_aces(&prog.join(f)).unwrap().iter().any(|a| matches!(a.sid.as_str(), "BU" | "S-1-5-32-545"));
         for f in ["ambersight.exe", "DirectML.dll", "ffmpeg.exe"] {
             assert!(has_users(f), "{f} must be readable by Users");

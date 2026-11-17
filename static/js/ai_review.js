@@ -10,6 +10,7 @@ const mayFix = (r) => {
   return state.isAdmin || (can('camera_detection') && !!c && !c.remote);
 };
 import { registerAdminPage } from './admin.js';
+import { maskRevQ } from './masks.js';
 
 const pct = (s) => Math.round(s * 100) + '%';
 const errText = (e) => (e && e.body) ? e.body : (e && e.message) || String(e);
@@ -166,8 +167,11 @@ function explain(r) {
     case 'ai_failed': {
       const err = (checks.find(c => c.error) || {}).error || '';
       out.head = 'AI could not check this event, so it was treated as if AI were off' + (v.alert && v.alert.sent ? ' (the alert was sent).' : '.');
-      out.lines.push('The error: ' + esc(err));
-      out.lines.push('Check ' + where + ': the model may need downloading again, or the AI server may be down.');
+      // (One plain line from the server; the full text is in Frames and details.)
+      out.lines.push('The error: ' + esc(err) + '.');
+      // A graphics card error is retried by itself (later, or on the processor).
+      if (/graphics card/i.test(err)) out.lines.push('AmberSight looks at this event\'s pictures again in a few minutes; if the card keeps failing, the AI runs on the processor for a while. Another program using the card\'s memory is a common cause.');
+      else out.lines.push('Check ' + where + ': the model may need downloading again, or the AI server may be down.');
       break;
     }
     case 'alerts_off': {
@@ -180,6 +184,7 @@ function explain(r) {
         alert_interval: 'an alert for ' + nm + ' had just been sent (the pause between alerts)',
         notify_objects: 'what AI saw is not among the objects ' + nm + ' notifies for',
         notify_area: 'it was in an area of ' + nm + ' that never notifies',
+        from_card: 'it was imported later from ' + nm + '\'s own card, too long after it happened to notify',
       }[why];
       out.head = 'AI confirmed ' + esc(listAnd(v.labels || [])) + ', but no alert was sent: ' + (reason ? reason + '.' : 'alerts were off for ' + nm + ' at the time (its alert setting, schedule, a notification pause, its "Notify me for" objects, or Disarmed).');
       break;
@@ -199,7 +204,7 @@ function explain(r) {
 }
 
 // One frame card with the AI's boxes.
-function frameCard(id, c, v, again) {
+function frameCard(id, c, v, again, rev) {
   const min = v.min_score, wanted = v.wanted || [];
   const why = new Map((c.seen || []).map((d, i) => [d, (c.spot && c.spot[i]) || ((c.parked && c.parked[i]) ? 'parked' : '')]));
   const cls = (d) => why.get(d) ? 'faint' : wanted.includes(d.label) ? (d.score >= min ? 'hit' : 'low') : (d.score >= min ? 'other' : 'faint');
@@ -209,7 +214,7 @@ function frameCard(id, c, v, again) {
   const chips = seen.length ? seen.map(d => '<span class="air-chip air-' + cls(d) + '">' + esc(d.label) + ' ' + pct(d.score) + tag(d) + '</span>').join('') : '<span class="muted">nothing</span>';
   const re = again ? '<div class="air-again"><b>Today:</b> ' + ((again.seen || []).length ? again.seen.slice().sort((a, b) => b.score - a.score).map(d => '<span class="air-chip air-' + cls(d) + '">' + esc(d.label) + ' ' + pct(d.score) + '</span>').join('') : '<span class="muted">nothing</span>') + '</div>' : '';
   return '<div class="air-frame"><div class="air-img">' +
-    (c.frame ? '<img loading="lazy" src="/api/events/' + encodeURIComponent(id) + '/ai/' + c.n + '" alt="">' : '<div class="air-noimg">frame not kept</div>') +
+    (c.frame ? '<img loading="lazy" src="/api/events/' + encodeURIComponent(id) + '/ai/' + c.n + (rev || '') + '" alt="">' : '<div class="air-noimg">frame not kept</div>') +
     '<svg viewBox="0 0 100 100" preserveAspectRatio="none">' + boxes + '</svg></div>' +
     '<div class="air-cap"><span class="muted">+' + secs(Math.max(0, c.offset_ms)) + '</span> ' + (c.error ? '<span class="air-err">' + esc(c.error) + '</span>' : chips) + '</div>' + re + '</div>';
 }
@@ -225,10 +230,12 @@ export async function openAiReview(eventId) {
     const x = explain(r), v = r.review;
     let h = '<div class="air-head air-' + (r.summary ? r.summary.kind : 'none') + '">' + x.head + '</div>';
     if (x.lines.length) h += '<ul class="air-lines">' + x.lines.map(l => '<li>' + l + '</li>').join('') + '</ul>';
+    const det = v && (v.checks || []).map(c => c.error_detail).find(Boolean);
+    if (det) h += '<details class="air-errdetail"><summary>Full error text</summary><pre>' + esc(det) + '</pre></details>';
     if (x.fixes.length && mayFix(r)) h += '<div class="air-fixes">' + x.fixes.map((f, i) => '<button class="btn" data-fix="' + i + '">' + f.label + '</button>').join('') + '</div>';
     if (v && (v.checks || []).length) {
       h += '<div class="air-legend"><span class="air-chip air-hit">counts</span><span class="air-chip air-low">wanted, not sure enough</span><span class="air-chip air-other">not on the alert list</span><span class="air-chip air-faint">faint guess</span></div>';
-      h += '<div class="air-grid">' + v.checks.map(c => frameCard(r.event.id, c, v, again && again.find(a => a.n === c.n))).join('') + '</div>';
+      h += '<div class="air-grid">' + v.checks.map(c => frameCard(r.event.id, c, v, again && again.find(a => a.n === c.n), maskRevQ(state.cams.find(x => x.name === r.event.camera), '?'))).join('') + '</div>';
       if (state.isAdmin && v.checks.some(c => c.frame)) h += '<div class="row"><button class="btn" data-recheck>' + ic('swap') + ' Check these frames again with today\'s AI</button><span class="hint">After switching models or changing settings: nothing is saved.</span></div>';
     }
     const body = d.querySelector('[data-air]');

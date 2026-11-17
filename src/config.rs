@@ -503,9 +503,9 @@ pub struct CameraConfig {
     /// reader and ffmpeg use it.
     #[serde(default = "default_transport", skip_serializing_if = "is_default_transport")]
     pub transport: String,
-    /// Hardware video decode for motion analysis: unset or "auto" (Linux:
-    /// VAAPI on a render node that passed the start-up test, else the
-    /// processor; Windows and macOS: the processor), "off", "vaapi",
+    /// Hardware video decode for motion analysis: unset or "auto" (the
+    /// server-wide `[hwdecode] prefer` order over the ways that passed the
+    /// start-up test, else the processor), "off", "cuda", "vaapi",
     /// "vaapi:/dev/dri/renderD130", "qsv" or "qsv:/dev/dri/renderD128"
     /// (see hwdecode/).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -535,6 +535,17 @@ pub struct CameraConfig {
     /// cameras with a card only (engine/card_fill.rs). Off by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fill_from_card: bool,
+    /// Battery cameras: look on the camera's own card for motion recordings
+    /// AmberSight has no event for (a missed push, AmberSight down) and import
+    /// them as events (engine/card_catchup.rs). Unset: on for battery cameras.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up_from_card: Option<bool>,
+    /// How often (minutes) the card is looked at besides after a start, a
+    /// reconnect or a missed push: while the camera is awake anyway, and a
+    /// wake of its own at most every three times this. Unset: 60; 0: only
+    /// after those; otherwise at least 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up_every: Option<u32>,
     /// Device credentials for the stream itself (separate from app users).
     /// Injected into the URL as scheme://user:pass@host when username is set
     /// and the URL has no userinfo yet. On PUT, an empty password keeps the
@@ -562,6 +573,10 @@ pub struct CameraConfig {
     /// confirmed that the shared video shows the picture without them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub share_unmasked: bool,
+    /// What `share_unmasked` was confirmed for (restream::http::consent_rev
+    /// of the masks and text then); written by the server, not by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_unmasked_rev: Option<String>,
     /// Record triad: record=false -> off; record_motion_only=true -> only
     /// while motion is active; otherwise continuous.
     #[serde(default)]
@@ -652,11 +667,17 @@ pub struct CameraConfig {
     /// Optional per-camera motion sensitivity; falls back to [motion].sensitivity.
     #[serde(default)]
     pub sensitivity: Option<f64>,
-    /// Privacy masks: rectangles blacked out in recordings, live view and
-    /// snapshots. A camera with masks (or the overlay) is re-encoded, which
-    /// costs CPU.
+    /// Privacy masks: rectangles blacked out on screen and in every picture
+    /// the server makes; with `mask_mode = "recording"` also burned into the
+    /// recordings (re-encoded, which costs CPU).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub privacy_masks: Vec<ZoneRect>,
+    /// How far the privacy masks go: "screen" (on screen and in pictures; the
+    /// recordings are the camera's own stream) or "recording" (burned into
+    /// the recordings too). Unset with masks: "recording" (masks from before
+    /// this setting existed stay in the recordings); see `mask_level`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_mode: Option<String>,
     /// Polygon zones, combined with the rectangles: motion counts inside any
     /// zone (rectangle or polygon) and never inside an ignore zone of either kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1327,6 +1348,26 @@ impl PowerSwitch {
 /// Notification services a camera can choose from.
 pub const ALERT_CHANNELS: &[&str] = &["push", "email", "telegram", "ntfy", "pushover", "webhook", "home_assistant", "image_post", "action"];
 
+/// Why a pushed or battery camera cannot have its masks in the recordings.
+pub const NO_RECORDING_MASKS: &str = "Privacy masks: \"Hide in recordings too\" is not possible for a pushed or battery camera (its video does not go through ffmpeg, which burns the masks in). Choose \"Hide on screen and in pictures\", or use the camera's own privacy mask";
+
+/// What the 0.11.1 settings change did to a config (see `Config::migrate_masks`).
+#[derive(Debug, Default, PartialEq)]
+pub struct MaskMigration {
+    /// Cameras whose masks (from before the level existed) were given
+    /// `mask_mode = "recording"`.
+    pub kept_in_recording: Vec<String>,
+    /// Pushed or battery cameras whose masks were given "screen": nothing
+    /// ever burned masks into their recordings.
+    pub screen_only: Vec<String>,
+}
+
+impl MaskMigration {
+    pub fn changed(&self) -> bool {
+        !self.kept_in_recording.is_empty() || !self.screen_only.is_empty()
+    }
+}
+
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
@@ -1342,6 +1383,107 @@ impl CameraConfig {
             .filter(|u| !u.is_empty())
             .map(str::to_string)
             .or_else(|| crate::ingest::baichuan::parse_url(&self.url).and_then(|(_, u)| u))
+    }
+
+    /// How far the privacy masks go: "screen" or "recording". Unset (or a
+    /// value not understood) on a camera with masks counts as "recording":
+    /// never less masking than asked for. Unset without masks: "screen".
+    pub fn mask_level(&self) -> &'static str {
+        match self.mask_mode.as_deref().map(str::trim) {
+            Some("screen") => "screen",
+            Some("recording") => "recording",
+            None if self.privacy_masks.is_empty() => "screen",
+            _ => "recording",
+        }
+    }
+
+    /// The masks are burned into this camera's recordings (re-encoded).
+    pub fn mask_in_recording(&self) -> bool {
+        !self.privacy_masks.is_empty() && self.mask_level() == "recording"
+    }
+
+    /// A pushed or battery (Baichuan) camera: its pictures come from inside
+    /// AmberSight, never from an ffmpeg reader, so nothing can burn masks or
+    /// text into its recordings.
+    pub fn no_ffmpeg_reader(&self) -> bool {
+        crate::ingest::push::is_push_url(&self.url) || crate::ingest::baichuan::is_baichuan_url(&self.url)
+    }
+
+    /// Masks saved without a level: "screen" for masks that are new
+    /// (`before` had none, or there is no `before`), the level they had for
+    /// masks the camera already had (never less than before).
+    pub fn settle_mask_mode(&mut self, before: Option<&CameraConfig>) {
+        if let Some(m) = self.mask_mode.as_mut() {
+            *m = m.trim().to_string();
+        }
+        if self.mask_mode.as_deref().is_some_and(str::is_empty) {
+            self.mask_mode = None;
+        }
+        if self.privacy_masks.is_empty() || self.mask_mode.is_some() {
+            return;
+        }
+        let level = match before.filter(|b| !b.privacy_masks.is_empty()) {
+            Some(b) => b.mask_level(),
+            None => "screen",
+        };
+        self.mask_mode = Some(level.to_string());
+    }
+
+    /// The mask level as read from the config file, made one there is and
+    /// one this camera can do; returns what was changed (for the log), None
+    /// when nothing was. Case and spaces are tidied ("Screen" is "screen");
+    /// a word that is not a level is "recording" (never less masking than
+    /// asked for); "recording" on a pushed or battery camera, which nothing
+    /// can burn masks into, is "screen" (its recordings never had them, and
+    /// its video is treated as unmasked everywhere anyway).
+    pub fn sanitize_mask_mode(&mut self) -> Option<String> {
+        let Some(raw) = self.mask_mode.clone() else { return None };
+        let low = raw.trim().to_ascii_lowercase();
+        let mut level = match low.as_str() {
+            "" => None,
+            "screen" | "recording" => Some(low.clone()),
+            _ => Some("recording".to_string()),
+        };
+        let mut why = match &level {
+            Some(l) if *l != low => Some(format!("mask_mode \"{raw}\" is not \"screen\" or \"recording\"; its masks are burned into the recordings")),
+            _ => None,
+        };
+        if level.as_deref() == Some("recording") && !self.privacy_masks.is_empty() && self.no_ffmpeg_reader() {
+            level = Some("screen".to_string());
+            why = Some(format!("mask_mode \"{raw}\" is not possible for a pushed or battery camera (nothing can burn masks into its video); \"screen\" is used"));
+        }
+        if level.as_deref() == Some(raw.as_str()) {
+            return None;
+        }
+        self.mask_mode = level;
+        Some(why.unwrap_or_else(|| format!("mask_mode \"{raw}\" read as \"{}\"", self.mask_mode.as_deref().unwrap_or("(none)"))))
+    }
+
+    /// The mask level is one there is, and one this camera can do.
+    pub fn check_mask_mode(&self) -> Result<(), String> {
+        match self.mask_mode.as_deref().map(str::trim) {
+            None | Some("screen") | Some("recording") => {}
+            Some(_) => return Err("Privacy masks: the level is \"screen\" (hide on screen and in pictures) or \"recording\" (hide in recordings too)".into()),
+        }
+        if self.mask_in_recording() && self.no_ffmpeg_reader() {
+            return Err(NO_RECORDING_MASKS.into());
+        }
+        Ok(())
+    }
+
+    /// Whether catching up from the card is on (battery cameras only).
+    pub fn catch_up_on(&self) -> bool {
+        self.battery_uid().is_some() && self.catch_up_from_card.unwrap_or(true)
+    }
+
+    /// Minutes between catch-up checks (0: only after a start, a reconnect or
+    /// a missed push); never under an hour.
+    pub fn catch_up_minutes(&self) -> u32 {
+        match self.catch_up_every {
+            None => 60,
+            Some(0) => 0,
+            Some(n) => n.clamp(60, 24 * 60),
+        }
     }
 
     /// The folder event clips are also saved to, when that is on.
@@ -2312,6 +2454,9 @@ pub struct Config {
     /// Re-encoding for players that cannot decode a stream as it is (see transcode/).
     #[serde(default, skip_serializing_if = "crate::transcode::TranscodeConfig::is_default")]
     pub transcode: crate::transcode::TranscodeConfig,
+    /// What Auto hardware decoding (motion) prefers (see hwdecode/).
+    #[serde(default, skip_serializing_if = "crate::hwdecode::HwDecodeConfig::is_default")]
+    pub hwdecode: crate::hwdecode::HwDecodeConfig,
     /// Looking for new versions on GitHub (see update.rs).
     #[serde(default, skip_serializing_if = "crate::update::UpdateConfig::is_default")]
     pub update: crate::update::UpdateConfig,
@@ -2469,6 +2614,11 @@ impl Config {
             if let (_, Some(w)) = crate::hwdecode::sanitized(c.hwaccel.as_deref()) {
                 tracing::warn!("{path}: camera '{}': {w}; Auto is used", c.name);
             }
+            // A level not understood or not possible for the camera: corrected
+            // in memory (saved with the next change), and said.
+            if let Some(w) = c.sanitize_mask_mode() {
+                tracing::warn!("{path}: camera '{}': {w}", c.name);
+            }
         }
         // A name listed twice by hand becomes one account: the one that could sign
         // in. Nothing can then bring the other back, with whatever rights it has.
@@ -2482,6 +2632,12 @@ impl Config {
             tracing::warn!("{path}: {w}");
         }
         crate::transcode::set_config(&cfg.transcode);
+        let (prefer, w) = cfg.hwdecode.sanitized();
+        if let Some(w) = w {
+            tracing::warn!("{path}: {w}");
+        }
+        crate::hwdecode::set_prefer(prefer);
+        crate::hwdecode::set_min_free_mb(cfg.hwdecode.nvidia_min_free_mb);
         // A push server entry that is not a host name, or one past the
         // most allowed, is left out (and said).
         for w in cfg.push.sanitize_at_load() {
@@ -2549,6 +2705,38 @@ impl Config {
         self.server.users = kept;
         dropped.dedup();
         dropped
+    }
+
+    /// Masks from before the mask level existed get one written down, so the
+    /// settings say what is done: "recording" (what they always did), or
+    /// "screen" for pushed and battery cameras (whose recordings never had
+    /// them; "recording" would stop them recording). Only cameras with masks
+    /// and no level change, so running it again changes nothing.
+    pub fn migrate_masks(&mut self) -> MaskMigration {
+        let mut m = MaskMigration::default();
+        for c in self.cameras.iter_mut().filter(|c| !c.privacy_masks.is_empty() && c.mask_mode.as_deref().is_none_or(|v| v.trim().is_empty())) {
+            if c.no_ffmpeg_reader() {
+                c.mask_mode = Some("screen".into());
+                m.screen_only.push(c.name.clone());
+            } else {
+                c.mask_mode = Some("recording".into());
+                m.kept_in_recording.push(c.name.clone());
+            }
+        }
+        m
+    }
+
+    /// Text that was burned into the recordings of cameras without masks is
+    /// drawn on screen instead (0.11.1): `overlay` goes off for them. Returns
+    /// their names. The caller makes sure this runs once (cameras with masks
+    /// keep their overlay; they re-encode for the masks anyway).
+    pub fn migrate_overlay(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in self.cameras.iter_mut().filter(|c| c.overlay && c.privacy_masks.is_empty()) {
+            c.overlay = false;
+            out.push(c.name.clone());
+        }
+        out
     }
 
     /// Motion settings for the camera named `camera` (its overrides over [motion]).
@@ -3066,5 +3254,55 @@ mod f32_tests {
         }
         let j = serde_json::to_string(&T { a: 0.7, b: Some(0.35) }).unwrap();
         assert_eq!(j, r#"{"a":0.7,"b":0.35}"#);
+    }
+}
+
+#[cfg(test)]
+mod mask_mode_tests {
+    use super::{CameraConfig, Config};
+
+    fn cam(url: &str, extra: &str) -> CameraConfig {
+        toml::from_str(&format!("name = \"c\"\nurl = \"{url}\"\nprivacy_masks = [{{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }}]\n{extra}")).unwrap()
+    }
+
+    #[test]
+    fn a_mask_level_read_from_the_file_is_one_there_is_and_one_the_camera_can_do() {
+        let rtsp = "rtsp://192.0.2.10/s";
+        let fixed = |url: &str, mode: &str| {
+            let mut c = cam(url, &format!("mask_mode = {mode:?}"));
+            let w = c.sanitize_mask_mode();
+            (c.mask_mode, w.is_some())
+        };
+        assert_eq!(fixed(rtsp, "screen"), (Some("screen".into()), false));
+        assert_eq!(fixed(rtsp, "recording"), (Some("recording".into()), false));
+        assert_eq!(fixed(rtsp, " Screen "), (Some("screen".into()), true));
+        assert_eq!(fixed(rtsp, "RECORDING"), (Some("recording".into()), true));
+        assert_eq!(fixed(rtsp, "both"), (Some("recording".into()), true), "never less than asked for");
+        assert_eq!(fixed(rtsp, ""), (None, true));
+        // Pushed and battery cameras: nothing can burn them into the video.
+        assert_eq!(fixed("push://porch", "recording"), (Some("screen".into()), true));
+        assert_eq!(fixed("baichuan://192.0.2.9?uid=TESTUID000000001", "Recording"), (Some("screen".into()), true));
+        assert_eq!(fixed("push://porch", "nonsense"), (Some("screen".into()), true));
+        assert_eq!(fixed("push://porch", "screen"), (Some("screen".into()), false));
+        let mut none = cam(rtsp, "");
+        assert_eq!(none.sanitize_mask_mode(), None);
+        assert_eq!(none.mask_mode, None);
+        // Corrected cameras pass the check the API makes.
+        let mut p = cam("push://porch", "mask_mode = \"recording\"");
+        assert!(p.check_mask_mode().is_err());
+        p.sanitize_mask_mode();
+        assert!(p.check_mask_mode().is_ok());
+    }
+
+    #[test]
+    fn loading_the_file_corrects_the_mask_level() {
+        let dir = std::env::temp_dir().join(format!("amber-maskmode-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "[[cameras]]\nname = \"Pushed\"\nurl = \"push://pushed\"\nmask_mode = \"recording\"\nprivacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]\n\n[[cameras]]\nname = \"Cap\"\nurl = \"rtsp://192.0.2.10/s\"\nmask_mode = \"Screen\"\nprivacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]\n").unwrap();
+        let c = Config::load(p.to_str().unwrap()).unwrap();
+        assert_eq!(c.cameras[0].mask_mode.as_deref(), Some("screen"));
+        assert_eq!(c.cameras[1].mask_mode.as_deref(), Some("screen"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

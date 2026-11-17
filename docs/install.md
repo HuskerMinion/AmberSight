@@ -488,11 +488,111 @@ If a firewall is on, open port 8090:
 | Logs | `journalctl --user -u ambersight -f` (also Settings > System > Logs) |
 | Remove the service | `./ambersight service uninstall` |
 
+### Hardware decoding for motion detection
+
+Motion detection decodes each camera's picture (the sub stream when the camera has one). On a
+graphics card that takes most of that work off the processor. **Settings > System > Hardware**
+has one setting for the whole server, **Hardware decoding**, which saves when you change it and
+applies within seconds, without a restart:
+
+| Choice | What it does |
+|---|---|
+| Auto (recommended) | An NVIDIA card first (NVDEC), then Intel Quick Sync, then VAAPI on Intel or AMD; the processor when none works |
+| Prefer NVIDIA | NVIDIA first (today the same order as Auto) |
+| Prefer Intel / AMD | The built-in or Intel/AMD graphics first, the NVIDIA card last (for example when the NVIDIA card is busy with the AI) |
+| Off | The processor |
+
+At start AmberSight decodes a short H.264 and H.265 sample with each way it finds and compares
+the pictures with the processor's; a way that fails is never used by Auto, and the page's
+**Start-up test** list says why. On Intel chips of Gen12 and later (Tiger Lake, Rocket Lake,
+Alder Lake, Arc and newer) Quick Sync is tried before VAAPI: VAAPI decoding on those chips can
+fail with *Failed to sync surface*; on older Intel chips VAAPI comes first. **Per camera** on the
+same page shows what each camera uses now and why, for example *NVIDIA (NVDEC)*, *Intel Quick
+Sync on /dev/dri/renderD128* or *processor: VAAPI on /dev/dri/renderD128 failed 3 times (...);
+trying it again at 10:42*.
+
+A decoder that fails while running (it stops, stalls or reports a burst of errors) is replaced at
+once by the next way that works, or the processor. That camera tries the failed way again after
+15 minutes, and later each time it fails again (30 minutes, an hour, up to 4 hours). If it fails
+a second time in a row, that camera leaves it until AmberSight restarts or a Hardware setting
+changes (the preference or **Keep free on the NVIDIA card**; its note says so), since a way that
+fails twice on one camera's stream keeps failing on it. "In a row" means without half an hour
+of good running in between: a decoder that runs well for 30 minutes clears the camera's earlier
+failures of that way, and so does a failure more than 6 hours after the one before. A failure
+because the card's memory was full (an error that says out of memory, such as
+`CUDA_ERROR_OUT_OF_MEMORY` or *Cannot allocate memory*) never makes a camera leave a way: it is
+only waited out, since the card may have room later. Other allocation errors (Quick Sync's
+*memory allocation error*, VAAPI's *Failed to allocate ... surface*) count as usual. A decoder
+that could not start because the system would not start another process or thread (see
+[Cameras fail with "Resource temporarily unavailable"](#cameras-fail-with-resource-temporarily-unavailable-process-limit))
+is not counted against the card at all. A way that stopped while the
+processor then decoded the same stream fine is left alone by every camera for an hour; the other
+ways (another card, or Quick Sync instead of VAAPI) stay in use.
+
+A camera's own **Hardware decoding** (camera settings, More settings) overrides the server
+setting: Off, NVIDIA (NVDEC), VAAPI or Quick Sync, and which card when there are several.
+
+What each way needs:
+
+- **NVIDIA (NVDEC):** NVIDIA's driver (`nvidia-smi` lists the card) and an ffmpeg built with
+  CUDA/NVDEC (`ffmpeg -hwaccels` lists `cuda`; the Debian, Ubuntu and Fedora RPM Fusion builds do).
+  No CUDA toolkit is needed for decoding. Works on Linux and Windows.
+- **Intel Quick Sync and VAAPI:** Linux, the account AmberSight runs as in the `render` group, and
+  the media driver (`intel-media-va-driver` / `intel-media-driver` for Intel; Mesa's VAAPI driver
+  for AMD).
+- **Intel Quick Sync** also needs Intel's GPU runtime, which is a separate package and is not
+  installed with the media driver. Install it on Gen12 and later Intel (Tiger Lake, Rocket Lake,
+  Alder Lake, Arc and newer), then restart AmberSight:
+
+  ```sh
+  sudo apt install libmfx-gen1.2        # Debian, Ubuntu
+  sudo dnf install intel-vpl-gpu-rt     # Fedora
+  ```
+
+  Without it Quick Sync fails the start-up test (the Hardware page says *Intel's Quick Sync
+  runtime is missing*) and those chips fall back to VAAPI, which on some cameras fails within
+  minutes with *Failed to sync surface* and moves them to another way or the processor. Seen on a
+  Rocket Lake (UHD 750) with Amcrest IP8M-2496E-V2 cameras: VAAPI failed on them every time,
+  Quick Sync decoded them without errors. The Docker image includes it.
+- Windows: Auto uses an NVIDIA card when it passed the test, and otherwise the processor. macOS:
+  the processor.
+
+Auto also looks after the NVIDIA card's video memory. Each NVDEC decoder takes about 150 to
+300 MB (16 cameras took 2.9 GB), which can starve the AI or another program on the same card
+(a local language model, for example). This applies under **Prefer Intel / AMD** too, where
+cameras whose Intel or AMD way fails would otherwise all land on the NVIDIA card. A camera starts or moves onto NVDEC only while the card
+keeps **Keep free on the NVIDIA card** (default 1536 MB) free after it, plus about 300 MB for
+the new decoder. When there is no room the camera uses the next way (Intel, then the
+processor) and its note says why ("NVIDIA card memory is nearly full (14.9 of 16.3 GB used);
+using ..."). About once a minute Auto looks again, and moves the camera back once there is room
+for the decoder plus 1 GB more than that. Cameras already on the card stay, also when a Hardware
+setting changes and through short reconnects or a stream change (new resolution or codec); a
+camera gives up its place when it is turned off, a battery camera falls asleep, its decoder
+moves to another way, or it has been offline for more than about 2 minutes (its memory is free
+then, so other cameras may use it; when it comes back it is judged like a new camera). A camera read with ffmpeg (`ingest = "ffmpeg"`, or one the built-in reader
+could not play) decodes in the same ffmpeg that records it, so moving it to another way (any
+move Auto makes, including this move back) restarts its recording briefly; with the built-in
+reader only its motion decoder moves. The free memory is
+read with `nvidia-smi` (installed with NVIDIA's driver; if it is not found there is no check,
+and the Hardware page says so). **Prefer NVIDIA** and a camera's own NVIDIA setting ignore the
+check; 0 turns it off. The card checked is the first one `nvidia-smi` lists, the one NVDEC
+uses.
+
+In the config file: `[hwdecode] prefer = "auto"` (or `"nvidia"`, `"intel"`, `"off"`) and
+`nvidia_min_free_mb = 1536`.
+
 ### Linux: an NVIDIA card for the AI
 
 On a 64-bit Intel/AMD Linux computer with an NVIDIA graphics card, the built-in AI runs on the
 card (CUDA): checks take a few milliseconds instead of tens to hundreds on the processor, and
 the Large model keeps up with many cameras. Without it everything still works on the processor.
+
+If the card gives errors while the AI runs (typically it is out of video memory because another
+program took it), the checks that failed are not lost: the saved pictures of an event whose checks
+all failed are looked at again after 1, 5 and 15 minutes, and what they show is added to the event
+and its AI review (no alert is sent for it then). After three errors in a row within a minute the
+AI runs on the processor for 5 minutes (Settings > System > Hardware says so), then tries the card
+again.
 
 It needs three things:
 
@@ -632,6 +732,130 @@ works like an app, including notifications. On iPhone this needs iOS 16.4 or new
 
 **Home Assistant:** AmberSight can show up in Home Assistant through MQTT. See Help > Home
 Assistant and MQTT.
+
+---
+
+## Privacy masks and text on the picture
+
+A **privacy mask** blacks out part of a camera's picture: a neighbor's window, a path that is not
+yours. Draw one in **Edit zones** (admins: pick **Privacy mask** and drag a rectangle). One choice
+covers all of a camera's masks:
+
+| | Hide on screen and in pictures (default) | Hide in recordings too |
+|---|---|---|
+| Live, playback, event clips in AmberSight's apps | black (the app draws it) | black (in the video) |
+| Another app or player (no masks drawn) | black: still pictures for live, a masked conversion for playback | black (older recordings: a masked conversion) |
+| A linked server's view | black (its app draws it) | black |
+| Snapshots, event pictures, time-lapse, AI and motion | black | black |
+| Downloaded clips, exports, event copies to a folder | black (burned in) | black (older recordings: burned in) |
+| Recordings on disk | **not masked** | black from the switch on; **older recordings stay unmasked** |
+| Off-site backup | pictures black; event clips **as recorded** (not masked) | pictures black; event clips as recorded |
+| RTSP stream sharing | **not masked** (only after you confirm) | not shared (the camera is read by ffmpeg) |
+| Cost | none: the camera's stream is kept as it is | re-encoding: about one processor core per 4K camera, or the graphics card |
+
+**Hide on screen and in pictures** keeps the camera's own stream, so it costs nothing. AmberSight's
+apps draw the black areas over the video, and every picture AmberSight makes has them burned in.
+The video itself is not changed: anyone who can watch the camera (a viewer account, a display's
+device token) could get the unmasked video with a modified app, and the files on disk show the
+whole picture. Use it to keep the area off your screens, not to keep it from the people who can
+watch the camera.
+
+**Hide in recordings too** re-encodes the video with the masks (on the graphics card when it has a
+video encoder that passed the test at start, else on the processor). It is the only level that
+protects the files on disk, and only from the moment it is on: recordings made before the switch
+(or before the masks were last changed) stay on disk as they were, unmasked or with the old masks.
+They are masked whenever they leave: downloads, exports, event copies to a folder, and apps that do
+not draw masks get a masked conversion. They go as recordings age out. If the masking cannot run,
+the camera records nothing rather than unmasked video, and Status says why. Gaps are not filled
+from the camera's SD card for such a camera (the card holds unmasked video). It is not available
+for pushed or battery cameras: AmberSight has no way to re-encode their video, so only Hide on
+screen and in pictures can be chosen for them.
+
+**Use the camera's own privacy mask first** if it has one: Reolink, Dahua/Amcrest and Hikvision
+cameras do (in the camera's own web page or app). The area never leaves the camera, it costs
+nothing here, and it covers everything at once.
+
+**Downloads:** a clip or export you download always has the camera's masks burned in, because the
+file leaves AmberSight (with Hide on screen and in pictures, and for recordings made before Hide in
+recordings too was on, that is one re-encode of the clip). A download carries the time as a
+subtitle track a player can show; the exception is an event clip that needs nothing burned in and
+is sent from its saved clip file as it is, which has no subtitle track. **Burn the text into this
+clip** (next to where clips are saved) also draws the camera's text into the file; that re-encodes
+the clip, so it takes longer. Burned-in clock text follows a change to or from daylight saving
+time inside the clip.
+
+**Conversions cost time on a server without a graphics encoder.** Masked downloads, masked event
+copies, and playback for apps that do not draw masks (another player, or an older version of the
+Android app) are re-encoded on the server, on the graphics card when it has a video encoder that
+passed the test at start. Without one they run on the processor, as H.264 at up to 1080p, and they
+are slow: a long clip or a 4K camera can take a good while, and only one runs at a time
+(`max_software` in `[transcode]`). When every conversion slot is busy, or the account is already
+converting as many videos as `max_per_user` allows, the server answers "busy, try again shortly"
+rather than sending the video without the masks; with video conversion turned off
+(`[transcode] encoder = "off"`), or for the demo account (never converted), masked playback and
+masked downloads are refused with a plain reason. Apps that draw the masks themselves
+(the web app, newer app versions) need no conversion for watching.
+
+**Event copies to a folder** (camera settings, Recording, **Also save event clips to**) are files
+that leave AmberSight too: with Hide on screen and in pictures each copied clip is re-encoded with
+the masks burned in. When that cannot be done (video conversion turned off, the encoders busy for
+long), the copy is tried again a few times and then left out, never copied without the masks; the
+camera's copy status says so.
+
+**Off-site backup** copies AmberSight's own data, so that it can be restored: the settings, the
+database, and the clips and pictures of protected events. Pictures are masked as everywhere else.
+Event clips are copied as they are on disk: for a camera at Hide on screen and in pictures (and
+for recordings made before Hide in recordings too was on) they show the whole picture, like the
+recordings. The backup is AmberSight's own copy for restoring, not a file to hand out: set an
+encryption passphrase for off-site copies, and use Hide in recordings too for a camera whose
+footage must never leave unmasked from now on.
+
+**Pictures from before a change:** event pictures, AI frames and tamper alert pictures saved
+before a camera's masks were set or changed are blacked out the next time they are shown or sent.
+Face and plate pictures saved before the change are no longer shown, and the tamper watch takes
+its reference pictures again (it learns the camera's view again). A time-lapse made with other
+masks is not shown; make it again (**Make now**).
+
+**Sharing:** a masked camera is shared over RTSP only after you turn on **I understand: share it
+without the mask** for it. With Hide on screen and in pictures, the shared stream shows the whole
+picture. Adding masks or changing them turns that consent off again, so the camera stops being
+shared until you confirm once more. A camera at Hide in recordings too is read by ffmpeg and
+cannot be shared over RTSP.
+
+**Text on the picture** (camera settings, Audio & text): the app draws your text over live view and
+playback (playback shows the recording's own date and time), and it is put into snapshots, event
+pictures and time-lapse frames, at no cost. **Also burn it into recordings** makes it part of the
+video files too, which re-encodes the camera's video; leave it off unless the files must carry it.
+
+**Upgrading to 0.11.1:** a camera that already had privacy masks keeps them in the recordings
+(Hide in recordings too), so nothing becomes less private. Change it in Edit zones if the screen
+level is enough. A camera that burned its text into the recordings and had no masks now has the
+text drawn instead (no re-encoding); Status lists those cameras once. Turn **Also burn it into
+recordings** back on for any camera whose files must carry the text.
+
+Also after the upgrade: when a camera's masks went into its recordings is not known, so the
+recordings it made before the upgrade count as unmasked. They get the masks burned in when they
+are downloaded, exported, copied to a folder or watched in an app that does not draw the masks
+(a conversion, slower). Face and plate pictures of cameras that had masks are no longer shown
+(the new ones are), and the tamper watch learns those cameras' view again. A confirmation to
+share a masked camera over RTSP holds for the masks it has now; changing its masks or text in
+config.toml by hand asks for it again.
+
+**Removing or renaming a masked camera:** its recordings, and the pictures and time-lapses made
+from them, keep its masks until they age out, also if you later give another camera its name
+(that camera's own recordings get only its own masks; the old ones get both). The same holds for a
+camera you take out of config.toml or rename there while AmberSight is stopped: the next start
+keeps the masks it had for its recordings. A rename stops the camera's recorder for a moment
+first (up to 10 seconds), so the file it was writing goes with it under the new name. Recordings
+stay in the folder of the old name on disk. If you give a new camera the old name within about
+a minute (one segment length plus 60 seconds), its recordings from that minute also get the
+renamed camera's masks.
+
+**Which recordings count as masked:** with Hide in recordings too, only a recording the camera's
+masking recorder wrote while AmberSight was running counts as having the masks in the file. A
+recording found on disk any other way counts as unmasked and is masked when it leaves: ones from
+before the upgrade, ones the start-up indexing finds again, and ones made after the moment an
+older database backup was taken, if you restore one.
 
 ---
 
@@ -810,8 +1034,9 @@ works (or why not).
 The motion message has no password (the cameras cannot send one), so AmberSight takes it only from
 the camera's own address. That is why the camera needs a fixed IP address.
 
-Privacy masks and burned-in text are not applied to these cameras: their recordings and live view
-show the whole picture.
+Privacy masks work at the Hide on screen and in pictures level only (see [Privacy masks and text
+on the picture](#privacy-masks-and-text-on-the-picture)): the apps draw them and the pictures have
+them, but the recordings show the whole picture. Burned-in text is not applied to these cameras.
 
 **What happens on motion:** the camera wakes and sends its message; AmberSight marks motion on the
 timeline, connects (2–3 s), records the live picture, and lets the camera sleep again about 30 s
@@ -821,6 +1046,45 @@ and adds it in front. The Wake button and opening the camera's live view also wa
 anything asking for its picture (`/api/snapshot`, an MJPEG or RTSP viewer, a Home Assistant camera
 entity): each request keeps it awake for another idle time. While it is awake it sends no motion
 messages. The log line `waking up for ...` says what woke it.
+
+**Events AmberSight missed (catching up from the card):** the camera records to its card even when
+AmberSight never hears about the motion (push off in the app, a DNS or Wi-Fi problem, AmberSight
+stopped or updating). AmberSight lists the card's recordings of the last 12 hours (without
+downloading them), and each one it has no event or recording for is downloaded and becomes an
+ordinary event: recording, thumbnail, AI check. It is marked **from card** in the event list, and
+its recording shows with the thin amber "from the card" line on the timeline. An event that ended
+more than 5 minutes before it was imported sends **no notification** (no push, email or other
+alert channel): it is history by then. The camera's Recording settings show a line such as
+"Imported 2 events from the card at 07:40."
+
+Each look wakes the camera, so AmberSight looks only:
+
+- once after AmberSight starts (when the camera is next awake anyway, or one wake 5 minutes after
+  the start);
+- after the camera could not be reached and is back;
+- a few minutes after a motion message that brought no recording;
+- otherwise about once an hour, and only while the camera is awake anyway; if it stays asleep, one
+  wake of its own every 3 hours. A camera whose card lists nothing three times in a row is no
+  longer woken for it, and neither is one whose card could not be listed three times in a row
+  (it stopped answering, or its answers made no sense) until it reconnects or AmberSight restarts.
+
+Never twice within 15 minutes. One look imports at most 5 recordings (150 MB, 15 minutes); the rest
+come at the next look. Downloads run at about half real time, so the camera stays awake for about
+two minutes per minute of video imported. Recordings from times the camera was disarmed, switched
+off, not recording or with motion off (as AmberSight saw it then, or as the profile schedule says)
+are left on the card, and so are recordings from before a daylight-saving change. It is on by
+default for battery cameras (Settings > Cameras > the camera > Recording, **Import missed events
+from the camera's card**). In `config.toml`:
+
+```toml
+catch_up_from_card = false   # off for this camera (on by default for battery cameras)
+catch_up_every = 180         # minutes between looks while awake (at least 60; 0 = only after a
+                             # start, a reconnect or a missed motion message)
+```
+
+The card has no file list these cameras answer, so AmberSight asks the camera for its recordings
+one at a time from a moment on, reading only each one's first bytes; a look of 12 hours takes a few
+seconds per recording. Tested on a Reolink Argus 2; other battery models are not tested yet.
 
 ---
 
@@ -850,7 +1114,8 @@ happens:
   spinning recordings drive can take longer).
 - If the update changes the database, a copy of it is saved first, if there is room, in the `backups` folder of the
   data folder (`pre-upgrade-v<old version>-<date>/ambersight.db`; the two newest are kept; skipped
-  with a warning when the drive is nearly full). Going back to the older version afterwards is not
+  with a warning when the drive is nearly full). The copy is the database file copied as it is, which on a
+  big database on a spinning drive can add a minute or more to the restart. Going back to the older version afterwards is not
   recommended: it runs, but warns, and ignores the newer parts. To really go back, restore that
   copy with the older program.
 
@@ -1036,6 +1301,16 @@ Without `trusted_proxies`, everyone behind the proxy shares one address as descr
 for a password sent directly by a program (HTTP Basic or RTSP) is once per account and network, so
 behind a proxy that is not listed it sees only one network.
 
+### Cameras fail with "Resource temporarily unavailable" (process limit)
+
+The camera's note says the system would not start another process or thread, or ffmpeg prints
+`pthread_create() failed` or `Error while opening decoder: Resource temporarily unavailable`
+(then `error code: -22`). The server hit a limit on processes and threads. In a Docker container
+it is usually `--pids-limit` (see [docker.md](docker.md#cameras-fail-with-resource-temporarily-unavailable));
+as a service, `ulimit -u` or systemd's `TasksMax`. It mostly happens to cameras read by ffmpeg
+(burned-in text, privacy masks hidden in recordings, or `ingest = "ffmpeg"`), 4K ones first. Raise the limit, or let the
+camera use the built-in reader. The camera report shows the limit and what is in use.
+
 ### Recordings on a merged drive (Unraid, mergerfs)
 
 At a start, AmberSight skips a camera's folder when its modified time has not changed since
@@ -1086,6 +1361,12 @@ by default; for a folder there, take that away, for example (in an Administrator
 - **The copy folder is not responding.** A copy has been running for minutes: a network share or a
   drive stopped answering. Other cameras' copies to other folders carry on, and recording is not
   affected.
+- **"The privacy masks could not be burned in, so it was not copied".** The camera's masks are set
+  to Hide on screen and in pictures (or the event was recorded before Hide in recordings too was
+  on), so the copy is re-encoded with them, and that failed three times (video conversion is off
+  in Settings, or the encoders stayed busy). Turn video conversion on, or set the masks to Hide in
+  recordings too (recordings made from then on are masked already and are copied as they are).
+  The server log has the details.
 - A renamed camera saves into a new folder; its old folder is no longer trimmed by **Keep copies**.
   In Docker the file names use the container's time zone (`TZ`).
 
@@ -1178,7 +1459,7 @@ anything that was revoked since.
 |---|---|
 | The page does not open from another device | The firewall step for your system; use the computer's IP address; the service is running (`service status`). |
 | A camera stays offline | Its address, user name and password; that it is on the same network; that RTSP is turned on in the camera's own settings. Status and Settings > System > Logs give the reason in plain words (for example "the camera has no stream at that address (404)" means a wrong stream path: see the [camera guide](cameras.md)). A camera that only streams over UDP: set Transport to Auto or UDP in its settings. On macOS, "No route to host" means Local Network access is blocked (macOS step 4). Still stuck: save its **Camera report** (Settings > Cameras > the camera > Network) and attach it to a bug report. |
-| One camera uses a lot of processor time | Usually a large (4K) camera without a sub stream, or burned-in text or privacy masks. Status notes a missing sub stream and **Find the sub stream** looks for one. On Linux, an Intel or AMD graphics card decodes for motion detection when the camera's Hardware decoding is Auto (the default); Status shows GPU or CPU per camera. |
+| One camera uses a lot of processor time | Usually a large (4K) camera without a sub stream, or burned-in text or privacy masks. Status notes a missing sub stream and **Find the sub stream** looks for one. A graphics card (NVIDIA, Intel or AMD) decodes for motion detection when the camera's Hardware decoding is Auto (the default; see [Hardware decoding](#hardware-decoding-for-motion-detection)); Settings > System > Hardware shows what each camera uses and why. |
 | "ffmpeg was not found" (Linux) | Install ffmpeg (Linux step 1), then restart the service. |
 | The browser warns about the certificate | Choose "Trust this server" in the account menu on that device. |
 | A linked server or capture helper says `invalid peer certificate: MalformedNameConstraint` | The private certificate authority made earlier lists a computer name that is not a valid network name (for example a name ending in a hyphen, like `pc-`). Settings > System > Logs says so at start. New certificate authorities leave such names out. To replace the old one: stop AmberSight, delete `ca.pem`, `ca-key.pem`, `ca.json`, `cross.pem`, `cert.pem`, `key.pem` and `server.json` in the `tls` folder of the data folder, and start it again. Every device must then "Trust this server" again and linked servers must be linked again. Or open the server by its IP address instead. |

@@ -52,7 +52,8 @@ pub async fn list(State(engine): State<Arc<Engine>>, Query(q): Query<ListQ>) -> 
 }
 
 pub async fn img(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<i64>) -> Response {
-    match blocking(move || engine.db.face_img(id)).await {
+    // (A face cut out before its camera's masks changed is not shown: see privacy::crop_shown.)
+    match blocking(move || Ok(engine.db.face_img(id)?.filter(|(cam, j)| crate::privacy::crop_shown(j, engine.picture_cfg(cam).as_ref())))).await {
         Ok(Some((_, jpeg))) => Response::builder()
             .header(header::CONTENT_TYPE, "image/jpeg")
             // Not kept by the browser: a deleted face must not linger there.

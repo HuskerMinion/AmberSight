@@ -843,7 +843,9 @@ a viewer app can ignore. The fields useful to a viewer:
 | `motion` | bool | Motion detected right now |
 | `motion_enabled` | bool | The camera's motion-detection **setting** (`motion` above is motion happening now) |
 | `ai_last` | object or null | The last wanted object the AI saw live: `{"label": "person", "score": 0.87, "age_ms": 1200}` (`age_ms` = how long ago). `null` until one is seen. |
-| `zone_polys`, `ignore_polys`, `privacy_masks` | arrays | Detection zones and ignore areas drawn as polygons (`{"points": [[x, y], ...]}`), and privacy masks as rectangles (`{"x", "y", "w", "h"}`). All coordinates are fractions of the picture (0 to 1). A viewer app can usually ignore them. |
+| `zone_polys`, `ignore_polys`, `privacy_masks` | arrays | Detection zones and ignore areas drawn as polygons (`{"points": [[x, y], ...]}`), and privacy masks as rectangles (`{"x", "y", "w", "h"}`). All coordinates are fractions of the picture (0 to 1). A viewer app can ignore the zones; **an app that plays video and sends `draws=masks` must draw `privacy_masks`** (see [Privacy masks](#privacy-masks-drawsmasks)). |
+| `mask_mode` | `"screen"` or `"recording"` | How far the camera's privacy masks reach. `"screen"`: the camera's stream is kept as it is and apps draw the masks (pictures the server makes are masked); `"recording"`: the video is re-encoded with the masks (live, recordings, everything is masked). Meaningful only when `privacy_masks` is not empty (a camera without masks says `"screen"`). Always one of the two for this server's cameras; a camera from a linked server has `null` when that server sends none. Set it with `PUT /api/cameras/:id` (admin); another value is **400**, and `"recording"` for a pushed or battery camera is **400** `{"error": "Privacy masks: \"Hide in recordings too\" is not possible for a pushed or battery camera (its video does not go through ffmpeg, which burns the masks in). Choose \"Hide on screen and in pictures\", or use the camera's own privacy mask"}`. Masks saved without a mode get `"screen"` when they are new, and keep the level they had otherwise; a camera that had masks before 0.11.1 was set to `"recording"` once (a pushed or battery one to `"screen"`). |
+| `mask_rev` | string | A short tag that changes whenever the masks or `mask_mode` change; `""` without masks. Put it in the address of any picture of the camera your app keeps in a cache (`&m=<mask_rev>` on `/api/preview`, `/api/filmstrip`, `/api/events/:id/ai/:n`, `/api/smart/pic/:pic`; the server ignores it), so a picture made before a mask change is not shown from the cache. |
 | `named_zones` | array | Alert zones for loitering and line crossing (see "Alert zones" under Events). Each: `name`, `kind` (`area` or `line`), `points` (`[[x, y], ...]`, fractions of the picture; an area has 3 or more, a line 2 or more, first to last point), `enabled`, `labels` (objects that count, e.g. `["person"]`), `seconds` (area: time inside before it is loitering), `direction` (line: `ab` = along the arrow, called "in"; `ba` = "out"; `both`), `alert` (send notifications), `ignore_parked` (default true: vehicles parked for minutes do not count), `record` (save events with a clip), `schedule` (`"HH:MM-HH:MM"` or absent). Saved with the camera's other settings (names must differ, at most 24 per camera). A viewer app can usually ignore them. |
 | `zones_occupied` | string[] | Names of the alert areas someone is loitering in right now. |
 | `audio` | bool | Audio is recorded for this camera. Whether the **live** stream has audio comes from `/api/live/:id/info`. |
@@ -858,13 +860,14 @@ a viewer app can ignore. The fields useful to a viewer:
 | `alert_labels` | list or null | "Notify only for" objects (`person`, `vehicle`, `animal`, or labels such as `car`, `dog`); `null` = every object. Other objects are still detected, recorded, searchable and sent to MQTT; they just send no notification. Rules and zone alerts are not filtered, and doorbell presses (`visitor`), sounds (`sound`) and packages (`package`, `package picked up`) always notify, also when other labels are present. With AI on, an event with no object stays silent; with AI off, it notifies, since nothing could have named an object. Set it with the camera's settings (`PUT /api/cameras/:id`, the same field). |
 | `alerts_paused`, `alerts_paused_until` | bool, int or null | Notifications paused; end time in epoch seconds, `null` = until resumed |
 | `packages` | bool | Package detection on |
-| `overlay_text`, `overlay_pos` | string or null | Optional caption the web app draws over live video (placeholders `{name} {short} {site} {date} {time}`, and `{v:NAME}` for an overlay variable) and its corner |
+| `overlay_text`, `overlay_pos` | string or null | Optional caption the web app draws over live video and playback (placeholders `{name} {short} {site} {date} {time}`, and `{v:NAME}` for an overlay variable) and its corner. Over playback the web app fills `{date}` and `{time}` with the recording's own time (from `x-clip-start-ms` plus the position played) and leaves `{v:NAME}` empty (its value is today's). The server puts the text into snapshots, event pictures and time-lapse frames. |
+| `overlay` | bool | The text is also burned into the recordings (re-encoded). When `true`, the video already shows it: don't draw it again. |
 | `push_motion` | bool | A battery camera's motion push is in its window now (motion even before the picture arrives) |
 | `remote` | object | Present only on cameras from a linked server; see section 9 |
 | `copy_events_to`, `copy_events_keep_days`, `copy_events_only_confirmed`, `copy_events_status` | admin only | Event clips also saved to a folder; see "Event clips saved to a folder" under section 6. Left out for viewers. |
 | `no_sub_ok` | admin only; bool | `true`: this camera has no sub stream to add, so `GET /api/health` does not note that motion decodes its full-size stream. Set it with `PUT /api/cameras/:id`. |
-| `hwaccel` | admin only; string or null | How motion detection decodes: `null` (Auto), `"off"`, `"vaapi"`, `"vaapi:/dev/dri/renderD129"`, `"qsv"`, `"qsv:/dev/dri/renderD128"` (older pass-through names such as `"d3d11va"` are kept). Set it with `PUT /api/cameras/:id`; other values get 400. |
-| `decode` | admin only; object | How motion decoding runs now: `{"stream": "main" or "sub" or null (not running), "on": "gpu" or "cpu", "gpu": "VAAPI on /dev/dri/renderD129" or null, "codec", "width", "height", "note" (why not on the card, or null), "main": {"width", "height", "codec"} or null, "heavy_main": bool, "reencode", "reencode_hw", "encoder", "encoder_note"}`. `heavy_main`: there is no sub stream and motion decodes a main stream larger than about 1080p on the processor. `reencode`: on the ffmpeg pipeline, a text saying the full-size recording is re-encoded and why (burned-in text, privacy masks, Direct copy off), or null; `reencode_hw`: a hardware encoder does it; `encoder`: `"NVENC"`, `"VAAPI on /dev/dri/renderD129"`, `"libx264"` ...; `encoder_note`: why it is not on the graphics card, or null. |
+| `hwaccel` | admin only; string or null | How motion detection decodes: `null` (Auto: the server's `hwdecode.prefer`), `"off"`, `"cuda"` (NVIDIA NVDEC), `"vaapi"`, `"vaapi:/dev/dri/renderD129"`, `"qsv"`, `"qsv:/dev/dri/renderD128"` (older pass-through names such as `"d3d11va"` are kept). Set it with `PUT /api/cameras/:id`; other values get 400. |
+| `decode` | admin only; object | How motion decoding runs now: `{"stream": "main" or "sub" or null (not running), "on": "gpu" or "cpu", "gpu": "NVIDIA (NVDEC)", "Intel Quick Sync on /dev/dri/renderD128", "VAAPI on /dev/dri/renderD129" or null, "hw_setting": "server" (Auto, following `hwdecode.prefer`) or "camera" (its own `hwaccel`), "codec", "width", "height", "note" (why not on the card, or why not on a better way, e.g. "VAAPI on /dev/dri/renderD128 failed 3 times (...); trying it again at 10:42"; or null), "main": {"width", "height", "codec"} or null, "heavy_main": bool, "reencode", "reencode_hw", "encoder", "encoder_note"}`. `heavy_main`: there is no sub stream and motion decodes a main stream larger than about 1080p on the processor. `reencode`: on the ffmpeg pipeline, a text saying the full-size recording is re-encoded and why (burned-in text, privacy masks, Direct copy off), or null; `reencode_hw`: a hardware encoder does it; `encoder`: `"NVENC"`, `"VAAPI on /dev/dri/renderD129"`, `"libx264"` ...; `encoder_note`: why it is not on the graphics card, or null. |
 | `transport` | admin only; string | How RTSP video travels: `"auto"` (default: TCP; a camera that answers 461 Unsupported Transport is asked again over UDP, and UDP is kept for it until the server restarts), `"tcp"` or `"udp"`. Used by the built-in reader and ffmpeg. Set it with `PUT /api/cameras/:id`; other values get 400. |
 | `ffmpeg_why` | admin only; string or null | Why the camera is read by ffmpeg rather than the built-in reader, naming the setting to change where there is one (burned-in text, privacy masks, `ingest = "ffmpeg"`, a local device, or the built-in reader's automatic switch with its reason). `null` on the built-in reader. |
 
@@ -981,10 +984,26 @@ the camera's settings. Each `cameras[]` entry has `decode` (as in
 `GET /api/cameras`) and `ffmpeg`: the ffmpeg processes the camera runs now, in words (for
 example `["motion decoder (sub stream)", "live conversion"]`).
 
-`GET /api/hwdecode` (**admin**): the render nodes and what the start-up test of hardware decoding
-found: `{"auto_supported": bool (Linux), "tested": bool, "nodes": [{"path", "driver", "tests":
-[{"kind": "vaapi" or "qsv", "device", "codec": "h264" or "hevc", "ok", "reason", "ms"}]}], "auto":
-{"h264", "hevc"} (what Auto uses, e.g. "VAAPI on /dev/dri/renderD129", or null), "notes": […]}`.
+`GET /api/hwdecode` (**admin**): the Hardware decoding preference, the cards, what the start-up
+test of hardware decoding found, and how each camera decodes now: `{"prefer": "auto", "nvidia",
+"intel" or "off", "auto_supported": bool (Linux and Windows), "tested": bool, "nodes": [{"path",
+"driver", "gen12": true (Intel Gen12 or newer; left out otherwise), "tests": [{"kind": "vaapi" or
+"qsv", "device", "codec": "h264" or "hevc", "ok", "reason", "ms"}]}], "nvidia": {"present": bool,
+"tests": [{"kind": "cuda", "device": "", ...}], "memory": {"free_mb", "total_mb", "used_mb"} or
+null, "smi": "ok", "missing" (nvidia-smi not found: no memory check) or "unknown"},
+"nvidia_min_free_mb": int (what Auto keeps free on the card), "order": ["NVIDIA (NVDEC)", "Intel Quick Sync on
+/dev/dri/renderD128", ...] (what Auto tries, best first, for H.264), "auto": {"h264", "hevc"} (what
+Auto uses, or null), "notes": […], "cameras": [{"id", "name", "decode"}]}` (`decode` as in
+`GET /api/cameras`).
+
+The preference is the settings section `hwdecode`: `GET /api/settings` has `"hwdecode":
+{"prefer": "auto", "nvidia_min_free_mb": 1536}`, and `POST /api/settings` with `{"hwdecode":
+{"prefer": "intel"}}` changes it (other values get an error). `nvidia_min_free_mb` (0 to
+1000000; 0 = off) is the video memory Auto keeps free on the NVIDIA card: a camera starts or
+moves onto NVDEC only while that much, plus about 300 MB for the decoder, stays free; otherwise it
+uses the next way and its `decode.note` says why. `prefer: "nvidia"` and a camera's own `hwaccel:
+"cuda"` ignore it. It applies at once: decoders that follow Auto move to the new
+choice at their next keyframe (a camera on the ffmpeg pipeline starts its session again).
 
 `POST /api/cameras/:id/sub-suggest` (**admin**, no body): sub-stream addresses for a camera that
 has none, from its ONVIF profiles and from the usual addresses of common cameras (Reolink,
@@ -1022,6 +1041,128 @@ number on. Main keys:
 | `/api/live/:id` | MJPEG `multipart/x-mixed-replace; boundary=frame` | Simple image views | Polled at about 10 fps; for linked-server cameras it returns a single JPEG |
 | `/api/snapshot/:id` | Single JPEG | Thumbnails, posters | Latest analysis frame; 503 `no frame captured yet` if none |
 
+### Privacy masks: `draws=masks`
+
+A camera with `privacy_masks` and `mask_mode: "screen"` keeps its own stream: live video,
+recordings and clips are **not** masked in the video itself. Every picture the server makes is
+masked (`/jpeg`, MJPEG, snapshots, event thumbnails, timeline pictures, time-lapse frames), and so
+is every download. Video for playing in an app is served as it is only to a client that declares
+it draws the masks itself, with the query parameter **`draws=masks`**:
+
+- `GET /api/live/:id/info?draws=masks`, `/ws?...&draws=masks`, `/stream?...&draws=masks`
+- `GET /api/playback?...&draws=masks` (normal, fast and reverse)
+- `GET /api/playback/picture?...&draws=masks` (the keyframes of fast playback)
+- `GET /api/clips/:id?draws=masks`
+
+`draws` is a comma-separated list; it counts when it contains `masks` (any case). Without it,
+for such a camera:
+
+- `/api/live/:id/info` reports no fMP4 streams (`main` and `sub` are `null`, and nothing is
+  planned for `caps`) and `masked_needs_draw: true`. `/ws` and `/stream` (also `HEAD`) answer
+  **409** with a plain-text reason ("This camera's live video shows what its privacy masks cover
+  (they are hidden on screen only, or it is a pushed or battery camera): it is sent only to
+  players that draw the masks themselves (draws=masks). Use the live pictures
+  (/api/live/:id/jpeg), which are masked.").
+  Fall back to the JPEG feed (`/jpeg`, MJPEG), which is masked.
+- `/api/playback` (normal, fast and reverse) and `/api/clips/:id` send a masked conversion
+  instead of the recording: H.264 at the recording's size, made smaller to fit 1080p when it is
+  larger (or what `caps` asks for), the masks burned in, with `x-as-transcoded: 1` and
+  `x-as-masked: 1`. At normal speed it works like
+  a `caps` conversion (`x-as-why: masks`; `start` picks where it begins; a kept copy answers a
+  repeat and byte ranges, see [Best quality on every device](#best-quality-on-every-device-caps)).
+  Fast and reverse playback, and a window answered from an event's saved clip, are streamed as
+  they are made (`Accept-Ranges: none`). The timeline headers (`x-clip-start-ms`,
+  `x-clip-end-ms`, `x-clip-sub`, and for fast or reverse `x-clip-reverse`, `x-clip-frames`) are
+  sent as without masks. While every conversion slot is busy, the account is already converting
+  as many videos as its `max_per_user` limit allows, or the masks it needs cannot be read (see
+  removed cameras below), the answer is **503** with
+  `Retry-After` (seconds) and a plain reason: try again then. With video conversion turned off
+  (`[transcode] encoder = "off"`) the answer is **409** with a plain reason, and for the demo
+  account (whose videos are never converted) **403**: asking again will not help until that
+  changes. Never the video without the masks. On a server without a graphics encoder
+  the conversion runs on the processor (H.264, at most 1080p) and is slow: an app that can draw
+  the masks should send `draws=masks` instead.
+- `/api/playback/picture` sends the keyframe as a JPEG with the masks blacked out
+  (`Content-Type: image/jpeg`, `x-pic-format: jpeg`, `x-as-masked: 1`, `x-pic-ms`, `x-pic-sub`;
+  no `x-codec` or `x-desc`), instead of the stored picture. `have` works as before. **503**
+  `busy` while too many are being made.
+
+A camera without masks is not affected: `draws=masks` changes nothing for it. A camera at
+`mask_mode: "recording"` is masked in its video from the moment that level is on, so live video
+and its newer recordings need nothing; `/api/live/:id/info` has `masked_needs_draw: false`.
+Recordings made before the switch, or before its masks were last changed, are on disk as they
+were (unmasked, or with the old masks): those are treated like a `"screen"` camera's (played as
+they are only with `draws=masks`, else a masked conversion; downloads, exports and event copies
+burn the masks in). An app that draws `privacy_masks` over every video of a masked camera, of
+either level, needs to know nothing more.
+
+Upgrading from before 0.11.1: when a camera's masks first went into its recordings is not
+known, so a camera already masked in its recordings (`"recording"` after the upgrade) has all
+its recordings from before the first start of 0.11.1 treated as unmasked: they get the masks
+burned in whenever they leave without `draws=masks` (as above). Only what it records from then on
+is sent as it is.
+
+A recording counts as masked only when the camera's masking recorder wrote it while the server
+was running (the server notes the masks in that recording's index entry). Anything found on disk
+otherwise counts as unmasked: recordings from before the upgrade, ones the start-up indexing finds
+again, and ones made after a database backup that is later restored. Renaming a camera keeps what
+is noted for each of its recordings (they move to the new name).
+
+A removed camera's recordings stay until they age out, and so do the masks it had: its
+recordings (and those made under its name before it was removed, also after another camera is
+given that name) always leave with them burned in, `draws=masks` or not (no app has them to
+draw), and its event pictures, stills, previews, filmstrips and time-lapses of them have them
+blacked out (with a camera now under that name: its masks and the old ones). A camera taken out
+of config.toml by hand while the server was stopped keeps its masks the same way from the next
+start. When those masks cannot be read (a damaged
+database), playback, downloads and pictures of those recordings answer **503** (never the video
+without them), and their event pictures are sent all black. Cameras removed before 0.11.1 kept
+no masks: their recordings are sent as they are.
+
+Linked servers: `/link/cameras` carries each camera's `privacy_masks` and `mask_mode`, and the
+viewing server passes `draws=masks` on to `/link/live/:id/info` and `/link/live/:id/ws` only
+when its own player sent it, so the camera's server decides as above.
+
+An app that sends `draws=masks` **must** draw every rectangle in `privacy_masks` as solid black
+over the picture: the rectangles are fractions of the video's own frame, so map them onto the
+area the video is drawn in (after letterboxing, `object-fit`, and any zoom or pan), and round
+each edge outward to a whole pixel. Draw them on every video of the camera (live, playback, fast
+and reverse playback, event clips), including while the stream changes size. Draw nothing extra
+over pictures from the server: they are masked already (drawing again is harmless). The web app
+always sends `draws=masks` (static/js/masks.js does the drawing).
+
+This is a display convention, not access control: an account that can watch the camera can ask
+for the unmasked video. To keep the area from accounts that can watch the camera, the admin uses
+`mask_mode: "recording"` (the video itself is masked; `draws=masks` changes nothing then) or the
+camera's own privacy mask.
+
+`mask_mode: "recording"` cameras are masked in the video (they are re-encoded). If the masking
+cannot run, they record nothing rather than unmasked video; Status says why. A pushed or battery
+camera (no ffmpeg reader) cannot be set to `"recording"` (**400**).
+
+Downloads always have the masks burned in, `draws=masks` or not: `/api/playback?download=1`,
+`/api/clips/:id?download=1` and `/api/export`. See those for the subtitle track and `burn_text`.
+Pictures the server keeps (event thumbnails, AI review frames, tamper alert pictures) that
+were made before the camera's masks were set or changed are masked when they are next read (the
+masked areas blacked out). Face and plate pictures (`/api/faces/:id/img`,
+`/api/plates/:id/img`) cut before the change are no longer served or listed (where the masks
+fall in them is not known); this includes, after upgrading to 0.11.1, every face and plate
+picture of a camera that had masks, since none was noted with its masks before. Tamper reference
+pictures taken with other masks are not served and are taken again (the camera's view is learned
+again). A time-lapse made with other masks is not
+served (**409**, `masks_old: true` in `GET /api/timelapse`) until it is made again.
+
+Off-site backup copies event clips as they are on disk (for a `"screen"` camera, and for
+recordings from before `"recording"` was on, unmasked): it is AmberSight's own copy for restoring,
+protected by its passphrase. Pictures in it are masked.
+
+RTSP sharing: adding or changing a camera's privacy masks turns its `share_unmasked` off, so it
+is no longer shared until an admin confirms again (`unmasked` in `PUT /api/restream`). The server
+notes what the confirmation was given for (`share_unmasked_rev` in the config file, written by
+the server): masks or text changed in config.toml by hand while it was stopped need it again
+too (`unmasked_ok: false`). A confirmation from before 0.11.1 is noted for the masks the camera
+has at the first start of 0.11.1.
+
 ### `GET /api/live/:id/info`
 
 ```json
@@ -1045,10 +1186,16 @@ number on. Main keys:
   with `audio=0`. A stream without audio is the same either way.
 - `waking: true` means a battery camera is still connecting. Asking for `/info` wakes it. Ask
   again in about 1 s.
+- `masked_needs_draw`: `true` whenever the camera's masks are `"screen"` (with or without
+  `draws=masks`): its video shows what the masks cover, so a player must draw them. Asked
+  without `draws=masks`, `main` and `sub` are then `null`: ask again with `draws=masks` if your
+  app draws the masks, else use the JPEG feed. See [Privacy masks](#privacy-masks-drawsmasks).
 - Unknown camera: 404.
 
 ### `GET /api/live/:id/ws?q=main|sub` (WebSocket)
 
+- `draws=masks`: required for a camera whose masks are `"screen"` (else **409**); see
+  [Privacy masks](#privacy-masks-drawsmasks). The web app always sends it.
 - `q` defaults to `main`. If the requested stream is not running, the server falls back to the
   other one. Use `info[q] || info[other]` to know which codec you will get.
 - Every message is **binary**. The first message is the **init segment** (`ftyp`+`moov`). Next
@@ -1071,7 +1218,8 @@ number on. Main keys:
 The same bytes as the WebSocket, as one endless `Content-Type: video/mp4` body, with
 `Cache-Control: no-store` and header `X-Live-Mime: <mime with codecs>`. The response ends when
 the stream restarts or the client lags. Failure statuses: 404 for an unknown camera, 503
-`no live stream (camera offline or on the ffmpeg pipeline)`.
+`no live stream (camera offline or on the ffmpeg pipeline)`, and 409 for a camera whose masks
+are `"screen"` asked without `draws=masks` (see [Privacy masks](#privacy-masks-drawsmasks)).
 
 ### Best quality on every device: `caps`
 
@@ -1193,7 +1341,7 @@ used (or the one running):
 | `bitrate_kbps` | Target bit rate when transcoded, else `null` |
 | `source` | The stream as the camera sends it (`codec` `h264`, `hevc` or `other`) |
 | `encoder` | `nvenc`, `qsv`, `vaapi`, `videotoolbox`, `amf`, `x264`, `x265`, or `null` (untouched) |
-| `why` | `null` (untouched, it fits), `too_big`, `codec`, `fps` (why transcoded), `busy_fallback`, `off` (why not transcoded although it does not fit) |
+| `why` | `null` (untouched, it fits), `too_big`, `codec`, `fps` (why transcoded), `busy_fallback`, `off` (why not transcoded although it does not fit), `masks` (converted to burn in the camera's privacy masks; see [Privacy masks](#privacy-masks-drawsmasks)), `text` (a download converted for `burn_text=1`) |
 
 The video responses carry `X-AS-Codec` (`h264`/`hevc`), `X-AS-Width`, `X-AS-Height`,
 `X-AS-Transcoded` (`1`/`0`), and when they apply `X-AS-Encoder` and `X-AS-Why`.
@@ -1473,6 +1621,7 @@ duplicates by `id`.
 | `protect` | Locked against automatic deletion |
 | `review` | `"false_alarm"`, `"ok"`, or `null` (not reviewed). A person's verdict, not the AI's. |
 | `reviewed_at` | Epoch seconds when the verdict was set, or `null` |
+| `from_card` | `true` when the event was imported later from a battery camera's own card (AmberSight missed it live); absent otherwise |
 
 ### Alert zones: loitering and line crossing
 
@@ -1524,7 +1673,7 @@ the audit log.
 Returns a JPEG. 404 `no thumbnail`, or 400 `bad event id` if the id has characters other than
 letters, digits, `_` and `-`.
 
-### `GET /api/clips/:id[?quality=low][&download=1]`
+### `GET /api/clips/:id[?quality=low][&download=1][&draws=masks][&burn_text=1]`
 
 The event's video as `video/mp4`: from the event start minus pre-roll to the end plus post-roll.
 
@@ -1533,7 +1682,30 @@ The event's video as `video/mp4`: from the event start minus pre-roll to the end
   (before 0.2.0 it stopped at 8 MB, which Android's ExoPlayer took as the end of the file:
   clips over 8 MB failed with "Source error").
 - `quality=low` uses the sub stream where it was recorded (data saver).
-- `download=1` adds `Content-Disposition: attachment`.
+- `download=1` adds `Content-Disposition: attachment`. For a camera whose masks are
+  `"screen"` (or a clip recorded before a `"recording"` camera's masks were in its video), a
+  download always has them burned in, `draws=masks` or not (the file leaves AmberSight): one
+  conversion (on the graphics card when it has an encoder; else on the processor, slow), streamed
+  as it is made (no byte ranges), `x-as-masked: 1`, with a subtitle track (`mov_text`) giving the
+  wall-clock time each second; **503** with `Retry-After` while the encoders are busy or the
+  account is at its conversion limit, **409** with conversion turned off, **403** for the demo
+  account, never the clip without the masks. A download that is not converted is the clip as it is: one assembled from the recordings
+  (no saved clip file) carries the time as a subtitle track (3GPP timed text, `tx3g`), with no
+  conversion; one sent from the event's saved clip file is that file unchanged, **without** a
+  subtitle track.
+- `burn_text=1` (with `download=1`): the camera's text is drawn into the picture too: its
+  `overlay_text`, or `{short} {date} {time}` when it has none, with the recording's own date and
+  time. This converts the clip also for a camera without masks (slower).
+- `draws=masks`: this player draws the camera's privacy masks; see
+  [Privacy masks](#privacy-masks-drawsmasks). Without it a screen-masked camera's clip is a masked
+  conversion (H.264, at most 1080p; never the clip as it is): **503** with `Retry-After` while the
+  encoders are busy, **409** with conversion turned off, **403** for the demo account.
+- `x-clip-start-ms`: when the clip's first picture was recorded (epoch ms), on every answer that
+  plays the clip (also a `Range: bytes=0-0` probe, and the masked conversion; not on a converted
+  download). For a saved clip file it is that file's real start (it begins at the keyframe
+  before the pre-roll), not the event start less the pre-roll. The web app uses
+  it for the time in the text on the picture. A clip assembled from the recordings also sends
+  `x-clip-end-ms` and `x-clip-sub`.
 - `caps` (with `start`, `info=1`): transcoded when the clip does not fit the player; see
   [Best quality on every device](#best-quality-on-every-device-caps).
 - Errors: 404 `clip not found`, 500 `clip failed (details are in the server log)`.
@@ -1566,6 +1738,14 @@ When a bucket is used, events are grouped by camera and kind in each slot. Packa
 now get their own rows instead of being folded into a person row.
 Without a bucket, at most 20,000 rows come back, and `more: true` means there were more.
 Unconfirmed events on cameras set to hide them are always left out here.
+
+### Signal lanes: `/api/signals`
+
+A signal is a named on/off state (a door, an alarm, a camera's input) shown as a lane under the timeline.
+
+- `GET /api/signals?from=&to=` (ms; at most 31 days): `{"signals": [{"name", "on", "spans": [[from, to], ...], "camera"}]}`. `camera` is the name of the camera the signal belongs to, or `null`. The web timeline shows a signal with a camera only under that camera (and in views that include it); signals with `null` show under every camera. Apps can do the same. An account limited to some cameras does not get the lanes of cameras it may not see. Renaming a camera moves its lanes to the new name. Added after 0.11.0; older servers do not send `camera`, so treat a missing value as `null`.
+- `POST /api/signals` with `{"name": "Garage door", "state": "on"}` (any signed-in account). Optional `"camera": "Side Yard"` ties the signal to that camera; it must be the name of an existing camera the account may see, else **400** `no such camera`. Leave it out for a signal that is not about one camera. A signal made by a camera (a battery camera's motion, a camera's digital input) has its camera set by the server. An account limited to some cameras may name a camera only for a new signal (not one named `<camera> motion` / `<camera> input` after a camera it may not see) or for one that already belongs to a camera it may see; moving any other existing signal (one of another camera, or one shown for every camera) returns **403**. Without `camera`, such an account may set a signal shown for every camera, or one of a camera it may see; a signal of a camera it may not see (saved with it, or named `<camera> motion` / `<camera> input` after it, even a new one) returns **403** `this signal belongs to another camera; ask an admin`, and nothing changes. At most 200 signals: a new one past that returns **400** `too many signals (limit 200); remove some first`. A bad name returns **400** `give a name of 1 to 60 characters`.
+- `DELETE /api/signals/:name` (admin) removes a signal and its history.
 
 ### Timeline bookmarks: `/api/bookmarks`
 
@@ -1647,6 +1827,13 @@ what is sent and answers the bookmark. `DELETE /api/bookmarks/:id` answers `{"id
 `fixed_spot`, `camera_only`, `near_miss`, `other_object`, `nothing`. Other values may exist for cases not traced here. The
 frames the AI checked are at `/api/events/:id/ai/:n` (JPEG). `summary` and `review` are `null`
 for events without an AI check. The full `review` structure is internal and may change.
+A check that failed has `error`, one plain line ("the graphics card gave an error (CUDA)", or the
+first line of another error, cut short), and may have `error_detail`, the longer text; both have file
+paths cut to the file name and no host name, also for reviews saved before.
+
+An `ai_failed` event whose checks failed on the graphics card is looked at again later (after 1, 5 and 15
+minutes at most): its `review` then changes (checks get `late: true`, `confirmed` and `labels` are
+filled in, `alert.why` becomes `sent` or `ai_no_wanted`), the event may gain labels, and no alert is sent for it.
 
 `fixed_spot`: what the AI saw stood in a spot where the same kind of object had been seen in
 several earlier events, or where the owner marked an event "not a ..."; `summary.best_spot` is
@@ -2463,7 +2650,9 @@ the web app uses it directly as `<video src>`. Over HTTPS with the private CA, s
 | `speed` | no | 2–1024: fast playback (keyframes only, retimed) |
 | `frame_ms` | no | Fast playback: ms each picture shows, 100–1000 (default 100) |
 | `reverse` | no | `1`: the window played backwards. Capped at 10 s, scaled down to at most 960 px wide; `speed` is ignored. |
-| `download` | no | `1`: attachment, exactly the window, with the camera name and time as captions (normal speed only). With `caps`: made to fit the device, see below. |
+| `download` | no | `1`: attachment, exactly the window, with the camera name and time as captions (normal speed only). With `caps`: made to fit the device, see below. The camera's privacy masks are always burned in, and the file has a subtitle track with the wall-clock time. |
+| `burn_text` | no | With `download=1`: `1` also draws the camera's text on the picture into the video (re-encoded; slower). |
+| `draws=masks` | no | This player draws the camera's privacy masks (see [Privacy masks](#privacy-masks-drawsmasks)); needed for the camera's video as it is when its masks are `"screen"`. Ignored for downloads (always masked). |
 | `caps`, `start`, `info` | no | What the player decodes: transcoded when the recording does not fit, from `start`; `info=1` answers JSON. See [Best quality on every device](#best-quality-on-every-device-caps). With `download=1`, see below (`start` and `info` are not used there). |
 | `quiet` | no | `1`: when nothing is recorded in the window, answer `204` with the header `x-none: 1` instead of `404` (the web app uses this so a browser's console stays free of errors; `/api/filmstrip` and `/api/playback/picture` take it too) |
 
@@ -2556,7 +2745,18 @@ also takes the newer list filters `cameras`, `protect`, `objects` and `review` (
 there), or `ids=a,b,c` to export exactly those events (at most 200; none valid is **400**
 `no event ids given`). When any of these is used, only events the account may see are included
 and a camera name is not required. It returns `application/zip` (`ambersight-events.zip`): one MP4 per event plus `events.csv`.
+For a camera whose privacy masks are `"screen"`, each of its MP4s has the masks burned in, like
+any download (one conversion per clip, waiting up to two minutes for an encoder; a clip that
+cannot be converted is left out, its `clip` column saying why, never included without the
+masks), and carries the time as a subtitle track. The same goes for clips recorded before a
+`"recording"` camera's masks were in its video. Other clips are as recorded (one assembled from
+the recordings gets the subtitle track; a saved clip file goes in unchanged, without one). The
+export does not take `burn_text`.
 
+- One export converts only so much: past a per-export cap, the remaining events whose clips would
+  need a conversion go without their video (they are still listed in the CSV). A
+  smaller export, or downloading those clips one by one, gets them. Without a graphics encoder the
+  conversions run on the processor, so an export with many masked clips is slow.
 - Unconfirmed events are included.
 - At most **500** events (**200** when `ids` is used). After about **1 GB** of video, the remaining events are listed in the
   CSV without their video.
@@ -3044,6 +3244,73 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.11.1**
+
+- Privacy masks and text on the picture, without re-encoding by default. Cameras have
+  `mask_mode` (`"screen"` or `"recording"`) in `GET`/`PUT /api/cameras`; `"recording"` for a
+  pushed or battery camera is **400**. With `"screen"` the camera's stream is kept as it is: the
+  server masks every picture it makes and every download, and serves the video as it is only to
+  clients that send `draws=masks` and draw the masks themselves (`/api/live/:id/info`, `/ws`,
+  `/stream`, `/api/playback`, `/api/playback/picture`, `/api/clips/:id`). Without it `/info`
+  reports no fMP4 streams and `masked_needs_draw: true`, `/ws` and `/stream` answer **409**,
+  playback and clips are a masked conversion (H.264, at most 1080p; **503** with `Retry-After`
+  while the encoders are busy or the account is at its conversion limit, **409** with conversion
+  off, **403** for the demo account; headers
+  `x-as-masked: 1`), and fast-playback pictures come as masked JPEGs. See
+  [Privacy masks](#privacy-masks-drawsmasks). Downloads (`download=1`, `/api/export`) always have
+  the masks burned in and carry a wall-clock subtitle track (`mov_text`; `tx3g` on a download
+  assembled without conversion; none on a saved clip file sent unchanged); `burn_text=1` on `/api/playback?download=1` and
+  `/api/clips/:id?download=1` draws the text in too. `/api/clips/:id` sends `x-clip-start-ms`.
+  `/api/cameras` has `mask_rev` (put it in cached picture addresses as `&m=`). `/link/cameras`
+  carries `privacy_masks` and `mask_mode`. Pictures kept from before a mask change are masked
+  when read; a time-lapse made with other masks is not served (`masks_old`). A camera that had masks before is
+  set to `"recording"` once at upgrade; one with `overlay: true` and no masks is set to `false`
+  once (the text is drawn instead) and listed in a Status note. The web app draws
+  `overlay_text` over playback too, with the recording's own time.
+- AI review (`GET /api/events/:id/ai`, also `POST .../ai/recheck`): a failed check's `error` is one
+  plain line, with the longer text in `error_detail`; file paths are cut to the file name and
+  `hostname=` parts taken out, older reviews included.
+- Hardware decoding: a server-wide preference, settings section `hwdecode` (`{"prefer": "auto" |
+  "nvidia" | "intel" | "off"}`, in `GET`/`POST /api/settings`), applied without a restart. Auto
+  now uses NVIDIA NVDEC (camera `hwaccel` `"cuda"`, now also tested at start) and Intel Quick Sync
+  on Gen12+ Intel, on Linux and (NVDEC) Windows. `GET /api/hwdecode` has `prefer`, `nvidia`,
+  `order`, `nodes[].gen12` and `cameras`; `decode` (cameras, health) has `hw_setting`, and `gpu`
+  says "NVIDIA (NVDEC)" or "Intel Quick Sync on ..." (was "Quick Sync on ..."). A way that fails
+  while running is tried again by that camera after 15 minutes (longer each time, up to 4 hours);
+  after a second failure in a row (no 30 minutes of good running in between) that camera leaves
+  it until AmberSight restarts or `prefer` or `nvidia_min_free_mb` changes (the note says which).
+  A failure because the card ran out of memory is only waited out, never given up for. The NVIDIA memory check covers "intel" as well as "auto".
+- Battery cameras: events their card has that AmberSight missed are imported later. `GET
+  /api/events` events carry `from_card: true` (absent otherwise). Camera settings
+  `catch_up_from_card` (on by default for battery cameras) and `catch_up_every` (minutes, at least
+  60; 0 = only after a start, a reconnect or a missed push); `GET /api/cameras` (admin, battery
+  cameras only) has both as in effect plus `card_catchup_status` (`{state, text, last_check,
+  last_import, last_imported, imported}`, times in epoch ms; `null` until the first look); `GET
+  /api/health` cameras have `card_catchup`. An imported event older than 5 minutes sends no alert;
+  its AI review's `alert.why` is `"from_card"`. Its recording files are named
+  `<camera>-card-<ms>-rec-seg…` and count in `card_spans`.
+- Cameras on the ffmpeg pipeline that record all the time: `GET /api/playback` (also fast,
+  reverse and `/api/playback/picture`) and time-lapses now play their main-stream recordings.
+  Before, those were only in `GET /api/recordings` spans and the calendar, so playback answered
+  404 outside events (an event's clip file was played instead) and a time-lapse found "no
+  recordings". Their recording files are now named `<camera>-<ms>-seg…` like the built-in
+  reader's (`<camera>-<seconds>-seg…` before; such files keep their names and play the same).
+
+- Signals: `POST /api/signals` takes an optional `"camera"` naming an existing camera the account
+  may see (else **400** `no such camera`), and `GET /api/signals` lanes have `camera` and leave out
+  lanes of cameras the account may not see. Accounts limited to some cameras may not move or set
+  another camera's lane (**403**); past 200 signals a new one is **400** `too many signals (limit
+  200); remove some first`. See [Signal lanes](#signal-lanes-apisignals).
+- Camera report (`GET /api/cameras/:id/report`, admin): `camera.overlay`, `camera.privacy_masks`
+  (a count), `state.ffmpeg_reason` (why the camera is read by ffmpeg), `system.cpu_cores` and
+  `system.process_limits` (Linux: cgroup `pids.max`/`pids.current`, `ulimit -u`). A camera that
+  hits the system's process or thread limit says so in its note (`last_error`) in plain words.
+- Recordings of cameras on the ffmpeg pipeline get a keyframe every 2 s (1 s for an odd segment
+  length) instead of one per file. The folder sweep reads each camera folder in full about once a
+  week (sooner after something to fix), with no API change.
+- AI: a check that fails on the graphics card is done again after 1, 5 and 15 minutes; its AI
+  review's checks get `late: true` and `alert.why` changes from `ai_failed` to the result. After
+  three card errors in a row the AI runs on the processor for 5 minutes.
 **New in 0.11.0**
 
 - Display mode: `/display` is a full-screen page for a wall TV, a tablet or a spare monitor. New

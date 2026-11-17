@@ -29,6 +29,11 @@ const RETRY_AFTER_MS: i64 = 4 * 60_000;
 pub(super) fn spawn_lead_in(engine: Arc<Engine>, handle: Arc<CameraHandle>, push_ms: i64) {
     static LAST: std::sync::OnceLock<Mutex<std::collections::HashMap<String, i64>>> = std::sync::OnceLock::new();
     let Some(uid) = handle.cfg.read().unwrap().battery_uid() else { return };
+    // Masks to be burned into the recordings: the card's clip would come in
+    // without them (and the camera records nothing anyway: mask_settings).
+    if handle.cfg.read().unwrap().mask_in_recording() {
+        return;
+    }
     {
         let mut last = LAST.get_or_init(Default::default).lock().unwrap();
         if last.get(&uid).is_some_and(|&t| push_ms - t < SAME_EVENT_MS) {
@@ -142,7 +147,7 @@ fn live_recording(engine: &Engine, slug_name: &str, push_ms: i64) -> Result<i64,
 }
 
 fn lead_in(engine: &Arc<Engine>, handle: &Arc<CameraHandle>, push_ms: i64) -> Result<(), LeadIn> {
-    use anyhow::{anyhow, Context};
+    use anyhow::anyhow;
     let cfg = handle.cfg.read().unwrap().clone();
     let uid = cfg.battery_uid().ok_or_else(|| anyhow!("no camera uid"))?;
     let slug_name = slug(&cfg.name);
@@ -210,15 +215,45 @@ fn lead_in(engine: &Arc<Engine>, handle: &Arc<CameraHandle>, push_ms: i64) -> Re
     }
 
     // Write it like a live recording: AVCC frames into a triggered segment.
+    // (A rename of the camera waits for it; one that came first stopped the
+    // camera, and nothing is written into the folder it is leaving.)
+    let _writing = engine.writing_into(&cfg.name);
+    if !handle.active.load(std::sync::atomic::Ordering::SeqCst) || handle.cfg.read().unwrap().name != cfg.name {
+        return Err(anyhow!("the camera was changed or turned off meanwhile").into());
+    }
     let (_, folder_root) = engine.record_folder(&cfg);
     let seg_dir = folder_root.join("cameras").join(&slug_name).join("segments");
     std::fs::create_dir_all(&seg_dir).ok();
     let segment_seconds = engine.config.lock().unwrap().storage.segment_seconds;
+    let (segs, written) = write_frames(&seg_dir, &format!("{slug_name}-{clip_start_ms}-rec"), &demux, &frames, &keep, segment_seconds)?;
+    let secs = (keep.last().unwrap().0 - keep[0].0) as f64 / 1000.0;
+    for seg in segs {
+        engine.segment_closed(&slug_name, seg);
+    }
+    info!("camera '{}': added {secs:.1} s ({written} frames) of the camera's own recording from before the live recording began", cfg.name);
+    Ok(())
+}
+
+/// Write the `keep` frames of a card recording (as [`lead_in_frames`] picks
+/// them) like a live recording: AVCC frames into a triggered recording file
+/// `{prefix}-seg…` in `dir`, tick 0 dated by the first kept frame. Returns the
+/// closed files and how many frames went in.
+pub(super) fn write_frames(
+    dir: &std::path::Path,
+    prefix: &str,
+    demux: &Demux,
+    frames: &[Frame],
+    keep: &[(i64, usize)],
+    segment_seconds: u64,
+) -> anyhow::Result<(Vec<crate::ingest::recorder::SegmentInfo>, u64)> {
+    use anyhow::{anyhow, Context};
+    let first = keep.first().ok_or_else(|| anyhow!("no frames to write"))?;
+    std::fs::create_dir_all(dir).ok();
     let mut bridge = crate::ingest::baichuan::avcc::AvccBridge::new(demux.h265, demux.width, demux.height);
     let mut writer: Option<crate::ingest::recorder::SegmentWriter> = None;
-    let first_micros = frames[keep[0].1].micros;
+    let first_micros = frames[first.1].micros;
     let mut written = 0u64;
-    for &(_, i) in &keep {
+    for &(_, i) in keep {
         let f = &frames[i];
         let Some(bf) = bridge.push_frame(&f.annexb) else { continue };
         if writer.is_none() {
@@ -230,15 +265,8 @@ fn lead_in(engine: &Arc<Engine>, handle: &Arc<CameraHandle>, push_ms: i64) -> Re
                 width: v.width,
                 height: v.height,
             }];
-            // Tick 0 is the first kept frame: dated by when it was recorded.
-            let w = crate::ingest::recorder::SegmentWriter::new_recorded_at(
-                &seg_dir,
-                &format!("{slug_name}-{clip_start_ms}-rec"),
-                tracks,
-                segment_seconds,
-                keep[0].0 as f64 / 1000.0,
-            )
-            .context("starting the recording file")?;
+            let w = crate::ingest::recorder::SegmentWriter::new_recorded_at(dir, prefix, tracks, segment_seconds, first.0 as f64 / 1000.0)
+                .context("starting the recording file")?;
             writer = Some(w);
         }
         let ticks = f.micros.wrapping_sub(first_micros) as i64 * 9 / 100; // µs -> 90 kHz
@@ -247,15 +275,11 @@ fn lead_in(engine: &Arc<Engine>, handle: &Arc<CameraHandle>, push_ms: i64) -> Re
     }
     let mut w = writer.ok_or_else(|| anyhow!("no frames could be converted"))?;
     w.finish().context("finishing the recording")?;
-    let secs = (keep.last().unwrap().0 - keep[0].0) as f64 / 1000.0;
-    for seg in w.take_closed() {
-        engine.segment_closed(&slug_name, seg);
-    }
-    info!("camera '{}': added {secs:.1} s ({written} frames) of the camera's own recording from before the live recording began", cfg.name);
-    Ok(())
+    Ok((w.take_closed(), written))
 }
 
 /// The epoch ms of a header time `start` read on whichever of the clocks
+
 /// (offsets from UTC, s) puts it nearest `push_ms`; `None` if none is within
 /// 10 minutes of it.
 pub(super) fn clip_start_epoch_ms(start: chrono::NaiveDateTime, offsets: &[Option<i64>], push_ms: i64) -> Option<i64> {

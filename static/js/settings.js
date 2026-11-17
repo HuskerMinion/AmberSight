@@ -197,6 +197,114 @@ function watchdogPane(el) {
   });
 }
 
+/* ---------------------------------------------------------------- hardware decoding */
+
+// The server-wide Hardware decoding preference ([hwdecode] prefer): saved the moment it changes;
+// decoders on Auto move at their next keyframe. Below it, what each camera uses now (GET
+// /api/hwdecode, looked at again every 5 s while the page is open).
+const HW_PREFS = [
+  ['auto', 'Auto (recommended)'], ['nvidia', 'Prefer NVIDIA'], ['intel', 'Prefer Intel / AMD (Quick Sync, VAAPI)'], ['off', 'Off (processor)']];
+// "NVIDIA (NVDEC)" / "processor" for one camera's decode, and the why.
+function hwCamLine(c) {
+  const x = c.decode || {};
+  if (!x.stream) return { on: '', text: 'not running', why: '' };
+  const own = x.hw_setting === 'camera' ? ' (its own setting)' : '';
+  return x.on === 'gpu' ? { on: 'gpu', text: x.gpu + own, why: x.note || '' } : { on: 'cpu', text: 'processor' + own, why: x.note || '' };
+}
+function hwSummary(cams) {
+  const n = {};
+  cams.forEach(c => { const l = hwCamLine(c); if (l.on) n[l.text] = (n[l.text] || 0) + 1; });
+  const parts = Object.entries(n).sort((a, b) => b[1] - a[1]).map(([t, k]) => k + ' on ' + t);
+  return parts.length ? 'Now: ' + parts.join(', ') + '.' : 'No camera is decoding right now.';
+}
+// The NVIDIA card's video memory, and what Auto keeps free of it.
+function hwMemText(r) {
+  const n = r.nvidia;
+  if (!n || !n.present) return '';
+  const gb = (mb) => (mb / 1000).toFixed(1);
+  const keep = r.nvidia_min_free_mb > 0 ? 'Auto keeps ' + gb(r.nvidia_min_free_mb) + ' GB free before it adds a camera.' : 'The free-memory check is off.';
+  if (n.memory) return 'NVIDIA card memory: ' + gb(n.memory.used_mb) + ' of ' + gb(n.memory.total_mb) + ' GB used (' + gb(n.memory.free_mb) + ' GB free). ' + keep;
+  if (n.smi === 'missing') return 'NVIDIA card memory: nvidia-smi was not found, so Auto does not check for free memory.';
+  return 'NVIDIA card memory: reading...';
+}
+function hwTests(r) {
+  const out = [];
+  const say = (ts, ok) => ts.filter(t => t.ok === ok).map(t => t.codec === 'hevc' ? 'H.265' : 'H.264').join(' and ');
+  // One line per card; ways with the same result are said together ("VAAPI, Quick Sync: failed ...").
+  const line = (name, ts) => {
+    if (!ts || !ts.length) return;
+    const res = new Map();
+    [...new Set(ts.map(t => t.kind))].forEach(k => {
+      const mine = ts.filter(t => t.kind === k), ok = say(mine, true), bad = mine.filter(t => !t.ok);
+      const r = (ok ? 'decodes ' + ok : '') + (ok && bad.length ? '; ' : '') + (bad.length ? 'failed the test (' + (bad[0].reason || 'failed') + ')' : '');
+      const label = k === 'cuda' ? 'NVDEC' : k === 'qsv' ? 'Quick Sync' : 'VAAPI';
+      res.set(r, (res.get(r) || []).concat(label));
+    });
+    out.push('<li><b>' + esc(name) + '</b><span>' + [...res].map(([r, ways]) => esc(ways.join(', ') + ': ' + r)).join('<br>') + '</span></li>');
+  };
+  if (r.nvidia && r.nvidia.present) line('NVIDIA card', r.nvidia.tests);
+  (r.nodes || []).forEach(n => { if (n.driver !== 'nvidia') line(n.path + (n.driver ? ' (' + n.driver + ')' : ''), n.tests); });
+  return out.length ? '<ul class="hw-tests">' + out.join('') + '</ul>' : '<p class="hint">' + (r.tested ? 'No graphics card that can decode was found: motion detection decodes on the processor.' : 'The start-up test of the graphics cards is still running.') + '</p>';
+}
+function hardwarePane(el) {
+  let gone = false, timer = 0, busy = false;
+  const paint = (r) => {
+    const cams = r.cameras || [];
+    el.innerHTML = '<div class="sp-form">' +
+      lead('Where motion detection decodes the picture: on a graphics card, or on the processor.', 'Auto.') +
+      selectHtml('Hardware decoding', 'hwPrefer', HW_PREFS, r.prefer || 'auto') +
+      '<div class="hint fld-h">Auto tries an NVIDIA card first, then Intel Quick Sync (VAAPI on older Intel chips), then VAAPI on Intel or AMD, and uses the processor when none works. A camera with its own Hardware decoding setting keeps it. A change applies within seconds, without a restart.</div>' +
+      (r.nvidia && r.nvidia.present ? num('Keep free on the NVIDIA card', 'hwMinFree', r.nvidia_min_free_mb, 'min="0" max="1000000" step="100"', 'MB',
+        'Auto and Prefer Intel / AMD put a camera on the NVIDIA card only while this much video memory stays free after it (a decoder takes about 300 MB), so the AI and other programs on the card keep room. Cameras that did not fit use Intel or the processor and move back when there is 1 GB more. 0 turns the check off. Prefer NVIDIA and a camera\'s own NVIDIA setting ignore it.') : '') +
+      '<p class="hw-now" data-hwsum role="status">' + esc(hwSummary(cams)) + '</p>' +
+      '<p class="hint" data-hwmem>' + esc(hwMemText(r)) + '</p>' +
+      (r.order && r.order.length ? '<p class="hint">Order tried now: ' + esc(r.order.join(', ')) + '.</p>' : '') +
+      more('Per camera', '<ul class="hw-cams" data-hwcams>' + hwCamsHtml(cams) + '</ul>') +
+      more('Start-up test', hwTests(r)) +
+      how('<p>At start, each way (NVIDIA NVDEC, Intel Quick Sync, VAAPI) decodes a short H.264 and H.265 sample and its pictures are compared with the processor\'s; a way that fails is never used by Auto.</p>' +
+        '<p><b>Prefer NVIDIA</b> puts the NVIDIA card first with no memory check. <b>Prefer Intel / AMD</b> puts it last.</p>' +
+        '<p>When a way fails while running, that camera moves to the next way, or the processor, at once, and tries the failed way again after 15 minutes, then after longer waits (up to 4 hours). A second failure in a row (with no 30 minutes of good running between) makes it leave that way until AmberSight restarts or a setting on this page changes. The NVIDIA card running out of memory is only waited out.</p>' +
+        '<p>A camera keeps its place on the NVIDIA card through a short reconnect and gives it up after about 2 minutes offline.</p>' +
+        '<p><b>Linux:</b> Quick Sync on Intel Gen12 and newer needs Intel\'s GPU runtime (<code>sudo apt install libmfx-gen1.2</code> on Debian and Ubuntu, <code>intel-vpl-gpu-rt</code> on Fedora; then restart AmberSight). <b>Windows:</b> an NVIDIA card that passed the test, otherwise the processor. <b>macOS:</b> the processor.</p>' +
+        '<p><b>In the config:</b> <code>[hwdecode] prefer = &quot;auto&quot;</code> (or nvidia, intel, off) and <code>nvidia_min_free_mb = 1536</code>.</p>') +
+      '</div>';
+    const s = el.querySelector('[data-k="hwPrefer"]');
+    s.onchange = async () => {
+      s.disabled = true;
+      try { await postSettings({ hwdecode: { prefer: s.value } }); savedToast(); setTimeout(refresh, 2500); }
+      catch (e) { toast('Could not save: ' + errText(e)); }
+      s.disabled = false;
+    };
+    const f = el.querySelector('[data-k="hwMinFree"]');
+    if (f) f.onchange = async () => {
+      const v = Math.min(1000000, Math.max(0, parseInt(f.value, 10) || 0));
+      f.value = v;
+      try { await postSettings({ hwdecode: { nvidia_min_free_mb: v } }); savedToast(); setTimeout(refresh, 2500); }
+      catch (e) { toast('Could not save: ' + errText(e)); }
+    };
+  };
+  const hwCamsHtml = (cams) => cams.length ? cams.map(c => {
+    const l = hwCamLine(c);
+    return '<li><b>' + esc(c.name) + '</b><span class="' + (l.on === 'gpu' ? 'hw-gpu' : 'muted') + '">' + esc(l.text) + '</span>' + (l.why ? '<div class="hint">' + esc(l.why.charAt(0).toUpperCase() + l.why.slice(1)) + '</div>' : '') + '</li>';
+  }).join('') : '<li class="hint">No cameras.</li>';
+  const refresh = async () => {
+    if (gone || busy) return;
+    busy = true;
+    try {
+      const r = await api('/api/hwdecode');
+      if (gone) return;
+      const sum = el.querySelector('[data-hwsum]');
+      if (!sum) paint(r);
+      else { sum.textContent = hwSummary(r.cameras || []); el.querySelector('[data-hwmem]').textContent = hwMemText(r); el.querySelector('[data-hwcams]').innerHTML = hwCamsHtml(r.cameras || []); }
+    } catch (e) { if (!el.querySelector('[data-hwsum]')) el.innerHTML = '<p class="empty">Could not load: ' + esc(errText(e)) + '</p>'; }
+    finally { busy = false; }
+  };
+  el.innerHTML = '<p class="hint">Loading...</p>';
+  refresh();
+  timer = setInterval(refresh, 5000);
+  return () => { gone = true; clearInterval(timer); };
+}
+
 function hookPane(el) {
   mountForm(el, {
     html: (s) => lead('Optional. Runs a program of your own on each event picture to decide what is in it.', 'Leave this off unless you have your own detector. The built-in AI is under Detection &amp; alerts, Objects (AI).') +
@@ -407,8 +515,9 @@ const SECTIONS = [
     { id: 'servers', label: 'Servers', render: (el) => mountServers(el) },
     { id: 'detector', label: 'External detector', render: hookPane },
     { id: 'watchdog', label: 'Watchdog', render: watchdogPane }] },
-  { id: 'system', group: 'Admin', label: 'System', desc: 'Health and updates, logs, the audit trail and backups.', subs: [
-    adminSub('status', 'Status & updates', true), adminSub('logs', 'Logs', true), adminSub('audit', 'Audit', true), adminSub('backup', 'Backup', false, 'offsite')] },
+  { id: 'system', group: 'Admin', label: 'System', desc: 'Health and updates, logs, the audit trail, backups and hardware decoding.', subs: [
+    adminSub('status', 'Status & updates', true), adminSub('logs', 'Logs', true), adminSub('audit', 'Audit', true), adminSub('backup', 'Backup', false, 'offsite'),
+    { id: 'hardware', label: 'Hardware', render: hardwarePane }] },
 ];
 const GROUPS = ['Everyday', 'Optional', 'Admin'];
 
@@ -448,7 +557,7 @@ const HELP_TOPICS = {
   'detection/objects': 'admin-ai', 'smart/review': 'admin-aireview', 'smart/faces': 'admin-faces', 'smart/plates': 'admin-lpr', 'connections/detector': 'settings-odt',
   'detection/alerts': 'settings-alerts', 'detection/limits': 'settings-alerts', 'detection/summary': 'settings-digest', 'detection/rules': 'admin-alertrules',
   'schedules/profiles': 'admin-profiles', 'schedules/presence': 'admin-presence', 'connections/watchdog': 'settings-watchdog', 'connections/servers': 'settings-servers', 'connections/share': 'settings-share',
-  'users/users': 'admin-users', 'users/https': 'settings-https', 'users/displays': 'display-mode', 'system/status': 'admin-status', 'system/logs': 'admin-logs', 'system/audit': 'admin-audit',
+  'users/users': 'admin-users', 'users/https': 'settings-https', 'users/displays': 'display-mode', 'system/status': 'admin-status', 'system/logs': 'admin-logs', 'system/audit': 'admin-audit', 'system/hardware': 'settings-hardware',
 };
 const helpTopic = (sec, sub) => HELP_TOPICS[sec.id + '/' + sub.id] || 'settings';
 

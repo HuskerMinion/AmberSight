@@ -5,8 +5,11 @@
 import { api, esc, toast, openDlg, state, errText, liveSwitch, swHtml, fld, formBar, confirmDialog, confirmLeave, hasUnsaved } from './core.js';
 import { registerAdminPage } from './admin.js';
 import { lead, how, more, notice } from './sp_kit.js';
+import { allMasksRevQ } from './masks.js';
 
-const thumb = (id) => '<img class="lp-img" loading="lazy" src="/api/plates/' + id + '/img" alt="">';
+// (With the cameras' mask revisions: a plate picture the browser kept from before
+// a mask change is asked for again; the server leaves such old pictures out.)
+const thumb = (id) => '<img class="lp-img" loading="lazy" src="/api/plates/' + id + '/img' + allMasksRevQ(state.cams) + '" alt="">';
 const when = (ms) => new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const sw = swHtml;
 const nameOf = (p) => p.name ? '<b class="lp-known">' + esc(p.name) + '</b>' : '<b class="lp-unk">Unknown</b>';

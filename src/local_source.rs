@@ -678,6 +678,12 @@ dummy: Immediate exit requested
             "[in#0/gdigrab @ 000002b9ff5f2380] Failed to capture image (error 5)\n[out#0/image2 @ 0] Output file does not contain any stream\nError opening output files: Invalid argument",
             Os::Windows,
         );
-        assert!(e.contains("Failed to capture image"), "{e}");
+        // (Run in session 0 itself, as over Windows OpenSSH or as a service, the reason
+        // given is that one.)
+        if in_session_zero() {
+            assert_eq!(e, SESSION0_SCREEN);
+        } else {
+            assert!(e.contains("Failed to capture image"), "{e}");
+        }
     }
 }

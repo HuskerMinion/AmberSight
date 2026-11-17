@@ -61,6 +61,7 @@ mod cardfill;
 mod camreboot;
 mod dahua_login;
 mod camreport;
+mod proclimit;
 mod onvif_ptz;
 mod netinfo;
 mod service;
@@ -75,6 +76,7 @@ mod push_http;
 mod presence_http;
 mod snooze;
 mod web;
+mod privacy;
 #[cfg(test)]
 mod test_ports;
 

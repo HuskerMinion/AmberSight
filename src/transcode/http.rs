@@ -209,16 +209,23 @@ impl Ask {
 }
 
 /// Handle a request with `caps` (None: `info=1` alone, what is sent as it
-/// is). `info`: answer JSON.
-pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info: bool, ask: Ask, low: bool, user: String) -> Outcome {
+/// is). `info`: answer JSON. `mask`: privacy masks (drawbox filters) that
+/// must be burned in: the answer is always converted (or refused while the
+/// encoders are busy), never the recording as it is.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info: bool, ask: Ask, low: bool, user: String, mask: Option<String>) -> Outcome {
     let probe = ask == Ask::Headers;
     super::set_config(&engine.config.lock().unwrap().transcode);
     // A converted answer kept from before (this account, this recording, these caps): a repeat
     // or a Range is read from the copy; it needs no encoder and no place.
-    let cache = super::cache::global().filter(|_| caps.is_some() && !info && !probe);
+    let cache = super::cache::global().filter(|_| (caps.is_some() || mask.is_some()) && !info && !probe);
     let ckey = cache.map(|c| {
         c.set_limits(super::cache::Limits::from_config(&super::config()));
-        cache_key(&user, &src, caps.as_ref().unwrap(), low)
+        let k = cache_key(&user, &src, &caps.clone().unwrap_or_default(), low);
+        match &mask {
+            Some(m) => super::cache::key(&[&k, "masked", m]),
+            None => k,
+        }
     });
     // Found, or claimed: a second request for the same answer at the same
     // time waits for this one and reads its copy (one conversion, not two).
@@ -267,7 +274,14 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         Outcome::Untouched { low, headers }
     };
     let untouched_plan = Plan { source: o.desc.clone(), target: None, encoder: None, why: None, sent: None };
-    let Some((target, why)) = caps.as_ref().and_then(|c| super::decide(c, &o.desc)) else {
+    let decided = caps.as_ref().and_then(|c| super::decide(c, &o.desc));
+    // Masks to burn in: what the caps ask for, else the recording's own codec and size.
+    let decided = match (&mask, decided) {
+        (Some(_), Some((t, _))) => Some((t, Why::Masks)),
+        (Some(_), None) => Some((super::masked::forced_target(&o.desc), Why::Masks)),
+        (None, d) => d,
+    };
+    let Some((target, why)) = decided else {
         return untouched(low, untouched_plan, &o);
     };
     let caps = caps.unwrap_or_default();
@@ -290,7 +304,7 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     let busy = if super::is_unconverted(&user) {
         // (The demo account: never converted, as when the encoders are busy.)
         Some(Why::BusyFallback)
-    } else if !super::usable(&target) {
+    } else if mask.is_none() && !super::usable(&target) {
         // Too small to be worth making: the best there is instead.
         Some(why)
     } else if encoders.is_none() {
@@ -312,6 +326,10 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     };
     let encoders = encoders.unwrap_or_default();
     if let Some(w) = busy {
+        if mask.is_some() {
+            // (Never the recording as it is: it shows what the masks hide.)
+            return Outcome::Done(super::masked::refusal(w, Some(&user)));
+        }
         let (low, plan, sub) = fallback(w).await;
         return untouched(low, plan, sub.as_ref().unwrap_or(&o));
     }
@@ -337,6 +355,9 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     // not use up its starts.
     let reserved = super::user_lease(&user).and_then(|l| super::reserve(&encoders).map(|r| (l, r))).filter(|_| super::may_start(&user));
     let Some((lease, (encoders, slot))) = reserved else {
+        if mask.is_some() {
+            return Outcome::Done(super::masked::refusal(Why::BusyFallback, Some(&user)));
+        }
         let (low, plan, sub) = fallback(Why::BusyFallback).await;
         return untouched(low, plan, sub.as_ref().unwrap_or(&o));
     };
@@ -361,6 +382,9 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         camera: o.camera,
         caption: None,
         download: None,
+        mask: mask.clone(),
+        subs: None,
+        keep_times: false,
     };
     let first_wait = super::file::first_byte_wait(&job);
     let mut hs: Vec<(String, String)> = vec![
@@ -370,6 +394,9 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         ("x-as-duration-ms".into(), o.duration_ms.to_string()),
         ("x-as-media-duration-ms".into(), sent_ms.to_string()),
     ];
+    if mask.is_some() {
+        hs.push(("x-as-masked".into(), "1".into()));
+    }
     hs.extend(plan.headers().into_iter().chain(clip_headers).map(|(k, v)| (k.to_string(), v)));
     // Written to a kept copy as it is made; this answer reads from it too.
     let source = match &src {
@@ -406,15 +433,37 @@ fn busy(why: &'static str, retry_s: u32) -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, retry_s.to_string())], why).into_response()
 }
 
+/// What else a download carries besides fitting the device.
+#[derive(Default)]
+pub struct DownloadOpts {
+    /// Privacy masks (drawbox filters) to burn in: the download is always
+    /// converted (or refused while that cannot be done), never sent as it is.
+    pub mask: Option<String>,
+    /// Burn the camera's text (its `overlay_text`) into the picture.
+    pub text: Option<crate::config::CameraConfig>,
+}
+
+impl DownloadOpts {
+    /// Something must be burned in: the download is converted even when it
+    /// fits the device.
+    pub fn burns(&self) -> bool {
+        self.mask.is_some() || self.text.is_some()
+    }
+}
+
 /// A download fitted to the device (`download=1` with `caps`): when the
 /// window does not fit the device, it is converted to the codec and size
 /// `decide` picks, the camera and time burned into the picture (one encode).
-/// `Untouched`: it fits, or cannot be converted here (conversion off, too
-/// small): the caller sends today's download with these headers.
-/// `offset_s`: the local time zone's offset from UTC (seconds), for the
-/// captions' clock.
+/// With masks or text to burn in (`opts`), it is always converted (to the
+/// recording's own codec and size when it fits the device). A converted
+/// download also has the time subtitle track.
+/// `Untouched`: it fits and nothing is burned in, or it cannot be converted
+/// here (conversion off, too small; never with masks): the caller sends
+/// today's download with these headers.
+/// `offset_s`: the local time zone's offset from UTC (seconds) at an epoch
+/// ms, for the captions' clock.
 #[allow(clippy::too_many_arguments)]
-pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, caps: Caps, ask: Ask, low: bool, user: String, offset_s: i64) -> Outcome {
+pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, caps: Option<Caps>, ask: Ask, low: bool, user: String, offset_s: fn(i64) -> i64, opts: DownloadOpts) -> Outcome {
     super::set_config(&engine.config.lock().unwrap().transcode);
     let (e, cam) = (engine.clone(), camera.clone());
     let opened = tokio::task::spawn_blocking(move || e.playback_clip(&cam, from, to, low).map(|c| c.and_then(|c| probe_clip(&c).map(|d| (c, d))))).await;
@@ -425,15 +474,22 @@ pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, c
         Ok(Err(e)) => return Outcome::Done(crate::web::internal_error("download", &e)),
         Err(_) => return Outcome::Done((StatusCode::INTERNAL_SERVER_ERROR, "download error").into_response()),
     };
+    let masked = opts.mask.is_some();
     let as_is = |why: Option<Why>| Outcome::Untouched { low, headers: Plan { source: desc.clone(), target: None, encoder: None, why, sent: None }.headers() };
-    let Some((target, why)) = super::decide(&caps, &desc) else { return as_is(None) };
-    if !super::usable(&target) {
-        return as_is(Some(why));
-    }
+    let refuse = |why: Option<Why>| if masked { Outcome::Done(super::masked::refusal(why.unwrap_or(Why::Off), Some(&user))) } else { as_is(why) };
+    // Fitted to the device (with the camera and time burned in, as always), or only
+    // something burned in: the recording's own codec and size.
+    let fitted = caps.as_ref().and_then(|c| super::decide(c, &desc)).filter(|(t, _)| super::usable(t) || !opts.burns());
+    let (target, why, fit) = match fitted {
+        Some((t, w)) if !super::usable(&t) => return as_is(Some(w)),
+        Some((t, w)) => (t, if masked { Why::Masks } else { w }, true),
+        None if opts.burns() => (super::masked::forced_target(&desc), if masked { Why::Masks } else { Why::Text }, false),
+        None => return as_is(None),
+    };
     let codec = target.codec;
     let encoders = match tokio::task::spawn_blocking(move || super::encoders_for(codec)).await.ok().flatten() {
         None => return Outcome::Done(busy("the video encoders are still being checked; try again in a few seconds", 3)),
-        Some(v) if v.is_empty() => return as_is(Some(Why::Off)),
+        Some(v) if v.is_empty() => return refuse(Some(Why::Off)),
         Some(v) => v,
     };
     let (seek_ms, media_ms) = download_cut(clip.start_ms, clip.end_ms, from, to);
@@ -448,6 +504,9 @@ pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, c
         ("x-clip-sub".into(), (clip.sub as u8).to_string()),
         ("x-as-media-duration-ms".into(), media_ms.to_string()),
     ];
+    if masked {
+        hs.push(("x-as-masked".into(), "1".into()));
+    }
     let response = |hs: Vec<(String, String)>, body: axum::body::Body| {
         let mut b = Response::builder();
         for (k, v) in hs {
@@ -465,6 +524,9 @@ pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, c
         Ask::Resume(r) if r.is_none_or(|(a, _)| a > 0) => return Outcome::Done(no_byte_positions()),
         _ => {}
     }
+    if masked && super::is_unconverted(&user) {
+        return Outcome::Done(super::masked::never_converted());
+    }
     // Two at a time on the server, within the account's limit and the encoders' places; the
     // account's start is counted only once it has them all.
     let Some(hold) = super::reserve_download() else { return Outcome::Done(busy("two downloads are being converted already; try again shortly", 10)) };
@@ -476,8 +538,12 @@ pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, c
     }
     let plan = Plan { source: desc.clone(), target: Some(target), encoder: encoders.first().map(|e| e.name(codec).to_string()), why: Some(why), sent: None };
     hs.extend(plan.headers().into_iter().map(|(k, v)| (k.to_string(), v)));
-    // The captions' clock: ffmpeg counts each frame's time from the clip's first frame.
-    let caption = crate::engine::caption_drawtext(&camera, (clip.start_ms as f64 / 1000.0) + offset_s as f64);
+    // The captions' clock: ffmpeg counts each frame's time from the first frame
+    // sent (`start`: the seek is a trim filter before the burned-in text).
+    // (One base per stretch of one UTC offset: see clock_text.)
+    let clock = |make: &dyn Fn(f64) -> String| crate::engine::clock_text(start, media_ms, &offset_s, make);
+    let caption = [fit.then(|| clock(&|b| crate::engine::caption_drawtext(&camera, b))), opts.text.as_ref().map(|c| clock(&|b| crate::engine::overlay_download_drawtext(c, b)))].into_iter().flatten().collect::<Vec<_>>().join(",");
+    let subs = super::masked::subs_file(&engine, start, media_ms, &camera);
     let job = Job {
         target,
         software_after: slot.hardware && all_encoders.iter().any(|e| e.hw.is_none()),
@@ -492,11 +558,40 @@ pub async fn download(engine: Arc<Engine>, camera: String, from: i64, to: i64, c
         limit_ms: Some(media_ms),
         what: "download",
         camera,
-        caption: Some(caption),
+        caption: (!caption.is_empty()).then_some(caption),
         download: Some(hold),
         input: Input::Clip(clip),
+        mask: opts.mask,
+        subs,
+        keep_times: false,
     };
     Outcome::Done(response(hs, super::file::stream(job)))
+}
+
+/// An event clip downloaded with something burned in (`opts.burns()`): the
+/// masks, the camera's text, and the time subtitle track.
+pub async fn download_event(engine: Arc<Engine>, id: String, user: String, opts: DownloadOpts) -> Response {
+    let e = engine.clone();
+    let id2 = id.clone();
+    let mask = opts.mask.clone();
+    let text = opts.text.clone();
+    let built = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<super::masked::Burn>> {
+        let Some(ev) = e.db.get_event(&id2)? else { return Ok(None) };
+        super::masked::event_burn(&e, &ev, mask, text.as_ref())
+    })
+    .await;
+    let b = match built {
+        Ok(Ok(Some(b))) => b,
+        Ok(Ok(None)) => return (StatusCode::NOT_FOUND, "clip not found").into_response(),
+        Ok(Err(e)) => return crate::web::internal_error("clip", &e),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "clip error").into_response(),
+    };
+    let b = super::masked::Burn { download: true, ..b };
+    let mut hs = vec![("content-disposition".to_string(), format!("attachment; filename=\"{id}.mp4\""))];
+    if let Some(ms) = b.media_ms {
+        hs.push(("x-as-media-duration-ms".into(), ms.to_string()));
+    }
+    super::masked::stream(b, &user, hs).await
 }
 
 /// Everything that changes the converted output, hashed: the account, the recording, the
