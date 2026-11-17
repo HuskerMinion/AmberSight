@@ -70,10 +70,6 @@ pub struct Target {
     pub audio: bool,
 }
 
-/// Why a camera whose masks go into its recordings gets nothing from its
-/// card (the card's video would come in without them).
-pub const MASKED_CARD: &str = "Off while the privacy masks are set to \"Hide in recordings too\": the card's video has no masks, so it would add unmasked recordings.";
-
 /// The device channel in a Reolink stream path (`Preview_02_main`: 1).
 fn channel_in_path(url: &str) -> Option<u32> {
     let i = url.find("Preview_")? + "Preview_".len();
@@ -100,9 +96,6 @@ pub fn target(cfg: &CameraConfig) -> Result<Target, String> {
     }
     if c.record_motion_only {
         return Err("Needs continuous recording: a motion-only camera is meant to have holes.".into());
-    }
-    if c.mask_in_recording() {
-        return Err(MASKED_CARD.into());
     }
     let Some(host) = crate::onvif::host_from_rtsp_url(&c.url) else { return Err("The camera's address could not be read from its URL.".into()) };
     if c.username.is_empty() {
@@ -895,19 +888,6 @@ mod tests {
 
     fn cam(name: &str) -> CameraConfig {
         toml::from_str(&format!("name = \"{name}\"\nurl = \"rtsp://192.0.2.5:554/Preview_01_main\"\nusername = \"u\"\n")).unwrap()
-    }
-
-    #[test]
-    fn masks_in_the_recordings_turn_card_filling_off() {
-        let mut c = cam("Porch");
-        assert!(target(&c).is_ok());
-        c.privacy_masks = vec![crate::config::ZoneRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }];
-        c.mask_mode = Some("screen".into());
-        assert!(target(&c).is_ok(), "screen masks: the recordings are the camera's own stream anyway");
-        c.mask_mode = Some("recording".into());
-        assert_eq!(target(&c), Err(MASKED_CARD.to_string()));
-        c.mask_mode = None;
-        assert_eq!(target(&c), Err(MASKED_CARD.to_string()), "masks from before the level count as in the recordings");
     }
 
     #[test]

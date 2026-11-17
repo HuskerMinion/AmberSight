@@ -348,12 +348,6 @@ pub fn card_catchup_loop(engine: Arc<Engine>) {
     }
 }
 
-/// Why nothing is imported from this camera's card, when its masks go into
-/// its recordings (the card's clips have no masks).
-pub fn masked_skip(cfg: &CameraConfig) -> Option<&'static str> {
-    cfg.mask_in_recording().then_some(super::card_fill::MASKED_CARD)
-}
-
 /// One camera's turn.
 fn watch(engine: &Arc<Engine>, h: &Arc<CameraHandle>, seen: &mut HashMap<usize, Cadence>) {
     let cfg = h.cfg.read().unwrap().clone();
@@ -373,13 +367,6 @@ fn watch(engine: &Arc<Engine>, h: &Arc<CameraHandle>, seen: &mut HashMap<usize, 
         set_status(&cfg.name, |s| {
             s.state = "unavailable".into();
             s.text = "Recording is off for this camera.".into();
-        });
-        return;
-    }
-    if let Some(why) = masked_skip(&cfg) {
-        set_status(&cfg.name, |s| {
-            s.state = "unavailable".into();
-            s.text = why.into();
         });
         return;
     }
@@ -829,9 +816,7 @@ fn look_at(engine: &Arc<Engine>, cfg: &CameraConfig, from_ms: i64, to_ms: i64) -
     let start = clip.start_ms;
     let mut thumb: Vec<u8> = Vec::new();
     let max_checks = engine.config.lock().unwrap().ai.max_checks;
-    // (AI and the thumbnail see the camera's privacy masks blacked out.)
-    let masks = crate::privacy::camera_mask_filter(cfg);
-    let r = super::playback::clip_frames(clip, 2, 640, &masks, &mut |n, jpeg| {
+    let r = super::playback::clip_frames(clip, 2, 640, &mut |n, jpeg| {
         let at = start + n as i64 * 500;
         // The picture a second in (the object has come into view by then).
         if thumb.is_empty() && (n >= 2 || at >= to_ms) {
@@ -951,17 +936,6 @@ mod tests {
 
     fn cam(name: &str) -> CameraConfig {
         toml::from_str(&format!("name = \"{name}\"\nurl = \"baichuan://192.0.2.9?uid=TESTUID000000001\"\non_demand = true\n")).unwrap()
-    }
-
-    #[test]
-    fn masks_in_the_recordings_stop_catching_up() {
-        let mut c = cam("Shed");
-        assert_eq!(masked_skip(&c), None);
-        c.privacy_masks = vec![crate::config::ZoneRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }];
-        c.mask_mode = Some("screen".into());
-        assert_eq!(masked_skip(&c), None);
-        c.mask_mode = Some("recording".into());
-        assert!(masked_skip(&c).is_some_and(|w| w.contains("Hide in recordings too")));
     }
 
     #[test]

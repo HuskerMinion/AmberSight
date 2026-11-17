@@ -17,7 +17,6 @@ import { exportDialog } from './export.js';
 import { createZoom } from './zoom.js';
 import { openCalendar, closeCalendar } from './calendar.js';
 import * as Bm from './bookmarks.js';
-import { paintMasks, maskRevQ, maskRev } from './masks.js';
 
 const WIN = 5 * 60000;           // playback window per request
 const FIRST_WIN = 60000;         // the first window after a click: fewer recordings to open, so it starts sooner
@@ -231,8 +230,7 @@ function loadStrips() {
   for (const name of shownNames()) {
     const c = state.cams.find(x => x.name === name);
     if (!c || c.remote) continue;
-    // (The masks' revision too: a strip made before a mask change is asked for again.)
-    const key = from + '/' + step + '/' + n + '/' + maskRev(c);
+    const key = from + '/' + step + '/' + n;
     stripWant.set(name, key);
     const cur = strips.get(name);
     if ((cur && cur.key === key) || stripBusy.has(name + key) || (stripFailed.get(name + key) || 0) > Date.now()) continue;
@@ -243,7 +241,7 @@ async function fetchStrip(name, key, from, step, n) {
   stripBusy.add(name + key);
   let objUrl = null;
   try {
-    const url = '/api/filmstrip?camera=' + enc(name) + '&from=' + from + '&step=' + step + '&n=' + n + '&w=' + (dataSaver() ? 112 : 160) + maskRevQ(state.cams.find(x => x.name === name)) + '&quiet=1';
+    const url = '/api/filmstrip?camera=' + enc(name) + '&from=' + from + '&step=' + step + '&n=' + n + '&w=' + (dataSaver() ? 112 : 160) + '&quiet=1';
     const r = await fetch(url, { credentials: 'same-origin' });
     // None (nothing recorded) or busy: do not ask again for a while.
     if (!r.ok || r.status === 204) { stripFailed.set(name + key, Date.now() + (r.status === 503 ? 5000 : 30000)); return; }
@@ -587,8 +585,7 @@ async function askPic(p, at) {
   const ac = pc.ac = new AbortController();
   const t0 = performance.now();
   const low = S.solo === null || dataSaver();
-  // draws=masks: the tile draws the camera's privacy masks over these pictures (masks.js).
-  const url = '/api/playback/picture?camera=' + enc(p.cam.name) + '&at=' + Math.floor(at) + '&draws=masks' + (low ? '&quality=low' : '') + (pc.have !== null ? '&have=' + pc.have : '') + '&quiet=1';
+  const url = '/api/playback/picture?camera=' + enc(p.cam.name) + '&at=' + Math.floor(at) + (low ? '&quality=low' : '') + (pc.have !== null ? '&have=' + pc.have : '') + '&quiet=1';
   // A failed ask (the server restarting after an update, the network gone):
   // try again after 1 s, then 2, 4, up to 8 s. Fast pictures stay on.
   const later = () => { pc.netFails++; pc.retryAt = Date.now() + Math.min(8000, 1000 * 2 ** (pc.netFails - 1)); };
@@ -641,8 +638,6 @@ async function askPic(p, at) {
             if (cv.width !== pic.displayWidth || cv.height !== pic.displayHeight) { cv.width = pic.displayWidth; cv.height = pic.displayHeight; }
             const g = cv.getContext('2d');
             g.drawImage(pic, 0, 0, cv.width, cv.height);
-            // The camera's privacy masks, painted into the picture (asked with draws=masks).
-            paintMasks(g, cv.width, cv.height, camFromId(p.cam.id) || p.cam);
             if (fixed) fixed.close();
             pc.drawn = true; pc.pending = null;
             pc.have = want.wall; pc.wall = want.wall; pc.shownFor = want.at;
@@ -751,7 +746,6 @@ function mountPlayer(frame, cam) {
   pills.querySelector('.nm').textContent = Live.camLabel(cam);
   frame.appendChild(pills);
   // The camera's text on the picture, with the time of the recording shown.
-  // (Its privacy masks: the tile's watcher in live.js covers these videos.)
   const ot = Live.addOverlayText(frame, cam, { big: S.solo !== null, at: () => S.playhead, live: () => S.live });
   const p = {
     cam, el, ot, tm: pills.querySelector('.pbr'), msg: el.querySelector('.tlnone'), cv: el.querySelector('.tlstrip'), cvKey: '', cur: 0, failUntil: 0, shownIdx: -1,
@@ -808,8 +802,7 @@ async function load(p, si, fromMs, q, up, win, twall) {
     if (s.up) { if (s.q === 'low') p.noDownTo = fromMs + 60000; else p.noUpTo = fromMs + 60000; resetSlot(s); } else p.failUntil = Date.now() + 3000;
   };
   if (to - fromMs < 1500) return fail();
-  // draws=masks: the tile draws the camera's privacy masks over this video (masks.js).
-  const url = '/api/playback?camera=' + enc(p.cam.name) + '&from=' + fromMs + '&to=' + to + '&draws=masks' + (s.rev ? '&reverse=1' : (s.q === 'low' || dataSaver() ? '&quality=low' : '') + (k > 1 ? '&speed=' + k + '&frame_ms=' + fm : ''));
+  const url = '/api/playback?camera=' + enc(p.cam.name) + '&from=' + fromMs + '&to=' + to + (s.rev ? '&reverse=1' : (s.q === 'low' || dataSaver() ? '&quality=low' : '') + (k > 1 ? '&speed=' + k + '&frame_ms=' + fm : ''));
   let r;
   // A ranged 1-byte probe returns where the clip really starts (x-clip-start-ms).
   const ac = s.abort = new AbortController();

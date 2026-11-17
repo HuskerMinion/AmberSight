@@ -246,17 +246,14 @@ impl Engine {
 
     /// The picture behind a search result (JPEG).
     pub fn smart_pic(&self, id: i64, allowed: &dyn Fn(&str) -> bool) -> anyhow::Result<Option<Vec<u8>>> {
-        let Some((src, camera, at_ms)) = self.db.smart_src(id)? else { return Ok(None) };
+        let Some((src, camera, _)) = self.db.smart_src(id)? else { return Ok(None) };
         if !allowed(&camera) {
             return Ok(None);
         }
         if src.split(['/', '\\']).any(|p| p == ".." || p.is_empty()) {
             return Ok(None);
         }
-        // (Masked now when it was kept before the camera's masks were set or
-        // changed, or by a camera removed under its name.)
-        let cfg = self.picture_cfg_at(&camera, at_ms);
-        Ok(crate::privacy::read_masked(&self.data_dir.join("thumbs").join(src), cfg.as_ref()).ok())
+        Ok(std::fs::read(self.data_dir.join("thumbs").join(src)).ok())
     }
 }
 
@@ -297,10 +294,8 @@ fn pictures_of(engine: &Engine, id: &str, start_s: i64) -> Vec<(i64, String, Vec
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 fn index_event(engine: &Engine, m: &smart::SmartModels, id: &str, camera: &str, start_s: i64) -> anyhow::Result<usize> {
     let mut rows = Vec::new();
-    // (The pictures as they are shown: the camera's privacy masks blacked out.)
-    let cfg = engine.picture_cfg_at(camera, start_s.saturating_mul(1000));
     for (at, rel, seen) in pictures_of(engine, id, start_s) {
-        let Ok(bytes) = crate::privacy::read_masked(&engine.data_dir.join("thumbs").join(&rel), cfg.as_ref()) else { continue };
+        let Ok(bytes) = std::fs::read(engine.data_dir.join("thumbs").join(&rel)) else { continue };
         let Ok(img) = image::load_from_memory(&bytes).map(|i| i.to_rgb8()) else { continue };
         rows.push((camera.to_string(), at, rel.clone(), None, None, smart::to_bytes(&m.embed_image(&img)?)));
         let mut objs: Vec<&crate::ai::Detection> = seen.iter().filter(|d| d.score >= MIN_OBJECT_SCORE && OBJECT_LABELS.contains(&d.label.as_str())).collect();

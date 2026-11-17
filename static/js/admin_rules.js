@@ -5,7 +5,6 @@
 
 import { api, esc, toast, openDlg, state, enc, errText, liveSwitch, swHtml, fld, confirmDialog, savedToast } from './core.js';
 import { registerAdminPage } from './admin.js';
-import { maskRevQ } from './masks.js';
 import { lead, how, notice } from './sp_kit.js';
 
 const when = (ms) => new Date(ms).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -91,7 +90,7 @@ function rulesPage(el) {
       q('[data-pnote]').textContent = on + ' of the ' + items.length + ' best-scoring events would match at ' + pts(t) + ' or more' + (items.length < data.scanned ? ' (' + data.scanned + ' events in all; the median scored ' + pts(data.median || 0) + ')' : '') + '. Green ones match.';
       q('[data-plist]').innerHTML = items.map(i => {
         const b = i.box;
-        return '<div class="ar-pcard' + (i.score >= t ? ' on' : '') + '"><span class="fw-pic"><img loading="lazy" src="/api/smart/pic/' + i.pic + maskRevQ(state.cams.find(c => c.name === i.camera), '?') + '" alt="">' +
+        return '<div class="ar-pcard' + (i.score >= t ? ' on' : '') + '"><span class="fw-pic"><img loading="lazy" src="/api/smart/pic/' + i.pic + '" alt="">' +
           (b ? '<span class="smq-box" style="left:' + (b[0] * 100) + '%;top:' + (b[1] * 100) + '%;width:' + (b[2] * 100) + '%;height:' + (b[3] * 100) + '%"></span>' : '') + '</span>' +
           '<small><b>' + pts(i.score) + '</b> · ' + esc(i.camera) + '<br>' + esc(when(i.at_ms)) + '</small></div>';
       }).join('');

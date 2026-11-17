@@ -57,7 +57,7 @@ impl Engine {
                 // Continuous recording should close a segment at least every
                 // few segment lengths while the camera is online.
                 let online_for = st.online_since.map(|s| now - s).unwrap_or(0);
-                if st.online && run.record && !run.record_motion_only && !run.on_demand && online_for > 4 * seg_secs.max(10) && super::mask_settings::record_blocker(&run).is_none() {
+                if st.online && run.record && !run.record_motion_only && !run.on_demand && online_for > 4 * seg_secs.max(10) {
                     // A camera recording its main stream all the time: judge
                     // by that (a sub-stream copy still being written must not
                     // hide a main recording that stopped).
@@ -70,13 +70,6 @@ impl Engine {
                         warnings.push(w);
                     }
                 }
-            }
-            // Masks to be burned into recordings that cannot be: nothing is
-            // recorded rather than the unmasked picture.
-            if let (true, Some(w)) = (enabled, super::mask_settings::record_blocker(&run)) {
-                problem(format!("maskrec:{}", h.id), &w);
-                shorts.push(format!("{} records nothing", run.name));
-                warnings.push(w);
             }
             if enabled {
                 if let Some(skew) = st.clock_skew.filter(|s| s.abs() > 30.0) {
@@ -121,7 +114,7 @@ impl Engine {
                 }
             }
             // The ffmpeg pipeline re-encodes the full-size recording. A note
-            // when it is the owner's choice (burn-in, masks, Direct copy off);
+            // when it is the owner's choice (burn-in, Direct copy off);
             // a thing to check on the processor only when the camera fell back
             // to ffmpeg by itself.
             let on_ffmpeg = st.ingest.starts_with("ffmpeg");
@@ -240,7 +233,9 @@ impl Engine {
         // decoders that left the card while running.
         let mut notes = crate::hwdecode::notes();
         notes.extend(hw_notes);
-        // Text now drawn on screen instead of burned in (0.11.1), for a while.
+        // Privacy masks made ignore zones (0.11.2) and text now drawn on
+        // screen instead of burned in (0.11.1), for a while.
+        notes.extend(super::mask_settings::masks_note(&self.db, now * 1000));
         notes.extend(super::mask_settings::overlay_note(&self.db, now * 1000));
         // Camera notes carry a button: note_fixes[] = {note (index into notes), camera, kind}.
         let mut note_fixes: Vec<serde_json::Value> = Vec::new();

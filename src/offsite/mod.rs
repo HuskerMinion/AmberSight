@@ -252,50 +252,22 @@ fn media_files(job: &Job, protected: &[String]) -> Vec<(String, PathBuf, u64)> {
             }
         }
     };
-    // Pictures kept before a camera's privacy masks were set or changed are
-    // masked first (as when they are shown), or left out. (A re-masked file
-    // is new, so it goes with the next copy.) Clips are copied as recorded,
-    // like the recordings: this is a backup of AmberSight's own data.
-    // When the settings cannot be read, or an event's camera cannot be
-    // told, its masks are unknown: its pictures are left out (never copied
-    // as they are). A camera no longer set up: as they are.
-    let cams: Option<crate::config::Config> = match toml::from_str(job.config_text) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            tracing::warn!("off-site copy: the settings could not be read ({e}); event pictures are left out this time");
-            None
-        }
-    };
-    let masked_ok = |id: &str, p: &Path| match &cams {
-        Some(c) if p.is_file() => {
-            let ev = job.db.get_event(id).ok().flatten().map(|e| e.camera);
-            match crate::privacy::event_camera(c, ev.as_deref(), id) {
-                crate::privacy::EventCamera::Camera(cam) => crate::privacy::mask_file(p, Some(&cam)),
-                crate::privacy::EventCamera::Gone => true,
-                crate::privacy::EventCamera::Unknown => false,
-            }
-        }
-        Some(_) => true,
-        None => false,
-    };
+    // Clips and pictures are copied as they are, like the recordings: this
+    // is a backup of AmberSight's own data.
     for id in protected.iter().filter(|i| safe_id(i)) {
         if job.cfg.clips {
             add(format!("clips/{id}.mp4"), job.data_dir.join("clips").join(format!("{id}.mp4")));
         }
         if job.cfg.pictures {
             let thumb = job.data_dir.join("thumbs").join(format!("{id}.jpg"));
-            if masked_ok(id, &thumb) {
-                add(format!("thumbs/{id}.jpg"), thumb);
-            }
+            add(format!("thumbs/{id}.jpg"), thumb);
             let dir = job.data_dir.join("thumbs").join("ai").join(id);
             let mut names: Vec<String> = std::fs::read_dir(&dir)
                 .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| safe_id(n)).collect())
                 .unwrap_or_default();
             names.sort();
             for n in names {
-                if masked_ok(id, &dir.join(&n)) {
-                    add(format!("thumbs/ai/{id}/{n}"), dir.join(&n));
-                }
+                add(format!("thumbs/ai/{id}/{n}"), dir.join(&n));
             }
         }
     }
@@ -800,10 +772,10 @@ mod tests {
         assert_eq!(media_to_delete(&remote, &referenced, &protected), ["clips/c.mp4.enc", "thumbs/ai/d/1.jpg.enc"]);
     }
 
-    /// Pictures whose masks cannot be told are left out, never copied as they are.
+    /// An event's clip and pictures go as they are, its camera known or not.
     #[test]
-    fn pictures_with_unknown_masks_are_left_out() {
-        let tmp = std::env::temp_dir().join(format!("ambs-offsite-masks-{}", std::process::id()));
+    fn event_clips_and_pictures_go_as_they_are() {
+        let tmp = std::env::temp_dir().join(format!("ambs-offsite-media-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let data = tmp.join("data");
         std::fs::create_dir_all(data.join("clips")).unwrap();
@@ -823,10 +795,10 @@ mod tests {
             let job = Job { cfg: &cfg, config_text: text, db: &db, data_dir: &data, store: st.as_ref(), params: crypt::TEST_PARAMS, server: "t".into(), progress: &|_| {} };
             media_files(&job, &ids).into_iter().map(|(k, ..)| k).collect()
         };
-        // A camera no longer set up: as it is; no event and no camera fits the id: left out.
-        assert_eq!(names("[server]\nport = 3\n"), ["clips/gone-1.mp4", "thumbs/gone-1.jpg", "clips/nobody-1.mp4"]);
-        // Settings that cannot be read: no pictures at all (the clips go).
-        assert_eq!(names("[server\nport = "), ["clips/gone-1.mp4", "clips/nobody-1.mp4"]);
+        let all = ["clips/gone-1.mp4", "thumbs/gone-1.jpg", "clips/nobody-1.mp4", "thumbs/nobody-1.jpg"];
+        assert_eq!(names("[server]\nport = 3\n"), all);
+        // (The settings are not needed for them.)
+        assert_eq!(names("[server\nport = "), all);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

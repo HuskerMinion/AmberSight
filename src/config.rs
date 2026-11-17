@@ -569,14 +569,6 @@ pub struct CameraConfig {
     /// restream/); only while [restream] is enabled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub share: bool,
-    /// Share even though a privacy mask or text overlay is on: the admin
-    /// confirmed that the shared video shows the picture without them.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub share_unmasked: bool,
-    /// What `share_unmasked` was confirmed for (restream::http::consent_rev
-    /// of the masks and text then); written by the server, not by hand.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share_unmasked_rev: Option<String>,
     /// Record triad: record=false -> off; record_motion_only=true -> only
     /// while motion is active; otherwise continuous.
     #[serde(default)]
@@ -667,15 +659,14 @@ pub struct CameraConfig {
     /// Optional per-camera motion sensitivity; falls back to [motion].sensitivity.
     #[serde(default)]
     pub sensitivity: Option<f64>,
-    /// Privacy masks: rectangles blacked out on screen and in every picture
-    /// the server makes; with `mask_mode = "recording"` also burned into the
-    /// recordings (re-encoded, which costs CPU).
+    /// Privacy masks of 0.11.1 and before, read only so that the start can
+    /// make them ignore zones (`Config::move_masks_to_ignore`): AmberSight no
+    /// longer makes privacy masks (cameras have their own). Empty after
+    /// that, so never written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub privacy_masks: Vec<ZoneRect>,
-    /// How far the privacy masks go: "screen" (on screen and in pictures; the
-    /// recordings are the camera's own stream) or "recording" (burned into
-    /// the recordings too). Unset with masks: "recording" (masks from before
-    /// this setting existed stay in the recordings); see `mask_level`.
+    /// Their level in 0.11.1 ("screen" or "recording"): read only, cleared
+    /// with them, never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_mode: Option<String>,
     /// Polygon zones, combined with the rectangles: motion counts inside any
@@ -1348,24 +1339,47 @@ impl PowerSwitch {
 /// Notification services a camera can choose from.
 pub const ALERT_CHANNELS: &[&str] = &["push", "email", "telegram", "ntfy", "pushover", "webhook", "home_assistant", "image_post", "action"];
 
-/// Why a pushed or battery camera cannot have its masks in the recordings.
-pub const NO_RECORDING_MASKS: &str = "Privacy masks: \"Hide in recordings too\" is not possible for a pushed or battery camera (its video does not go through ffmpeg, which burns the masks in). Choose \"Hide on screen and in pictures\", or use the camera's own privacy mask";
+/// Most zones of one kind (rectangles, or polygons) a camera's settings
+/// save with.
+pub const MAX_ZONES: usize = 32;
+/// Most areas that don't notify (`alert_ignore_polys`) a camera's settings
+/// save with.
+pub const MAX_ALERT_IGNORE_AREAS: usize = 12;
 
-/// What the 0.11.1 settings change did to a config (see `Config::migrate_masks`).
-#[derive(Debug, Default, PartialEq)]
-pub struct MaskMigration {
-    /// Cameras whose masks (from before the level existed) were given
-    /// `mask_mode = "recording"`.
-    pub kept_in_recording: Vec<String>,
-    /// Pushed or battery cameras whose masks were given "screen": nothing
-    /// ever burned masks into their recordings.
-    pub screen_only: Vec<String>,
+/// Why a camera can no longer be given privacy masks (0.11.2).
+pub const MASKS_GONE: &str = "Privacy masks: AmberSight no longer makes its own. Use the camera's privacy mask (Reolink, Dahua/Amcrest and Hikvision cameras have one): the area never leaves the camera. An ignore zone keeps motion there from counting";
+
+/// What `Config::move_masks_to_ignore` did to one camera's privacy masks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MasksMoved {
+    pub name: String,
+    /// Its `overlay` before the move (put back when the settings could not
+    /// be saved).
+    pub overlay_was: bool,
+    /// Its text was burned into its recordings and is drawn on screen now.
+    pub text_off: bool,
+    /// Its sharing (RTSP) was turned off: its picture now shows what the
+    /// masks hid.
+    pub share_off: bool,
+    /// Masks with no room left among its ignore zones (`MAX_ZONES`).
+    pub no_zone: usize,
+    /// Masks with no room left among its areas that don't notify
+    /// (`MAX_ALERT_IGNORE_AREAS`).
+    pub no_area: usize,
 }
 
-impl MaskMigration {
-    pub fn changed(&self) -> bool {
-        !self.kept_in_recording.is_empty() || !self.screen_only.is_empty()
+/// A mask cut to the picture (0..1); one inside it is left as it is. None:
+/// it has no size there.
+fn inside_picture(m: &ZoneRect) -> Option<ZoneRect> {
+    if ![m.x, m.y, m.w, m.h].iter().all(|v| v.is_finite()) || m.w <= 0.0 || m.h <= 0.0 {
+        return None;
     }
+    let cut = |at: f64, len: f64| {
+        let from = at.max(0.0);
+        (from, if from == at && at + len <= 1.0 { len } else { (at + len).min(1.0) - from })
+    };
+    let ((x, w), (y, h)) = (cut(m.x, m.w), cut(m.y, m.h));
+    (w > 0.0 && h > 0.0).then_some(ZoneRect { x, y, w, h })
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -1385,90 +1399,28 @@ impl CameraConfig {
             .or_else(|| crate::ingest::baichuan::parse_url(&self.url).and_then(|(_, u)| u))
     }
 
-    /// How far the privacy masks go: "screen" or "recording". Unset (or a
-    /// value not understood) on a camera with masks counts as "recording":
-    /// never less masking than asked for. Unset without masks: "screen".
-    pub fn mask_level(&self) -> &'static str {
-        match self.mask_mode.as_deref().map(str::trim) {
-            Some("screen") => "screen",
-            Some("recording") => "recording",
-            None if self.privacy_masks.is_empty() => "screen",
-            _ => "recording",
-        }
-    }
-
-    /// The masks are burned into this camera's recordings (re-encoded).
-    pub fn mask_in_recording(&self) -> bool {
-        !self.privacy_masks.is_empty() && self.mask_level() == "recording"
-    }
-
     /// A pushed or battery (Baichuan) camera: its pictures come from inside
-    /// AmberSight, never from an ffmpeg reader, so nothing can burn masks or
-    /// text into its recordings.
+    /// AmberSight, never from an ffmpeg reader, so nothing ever burned text
+    /// into its recordings.
     pub fn no_ffmpeg_reader(&self) -> bool {
         crate::ingest::push::is_push_url(&self.url) || crate::ingest::baichuan::is_baichuan_url(&self.url)
     }
 
-    /// Masks saved without a level: "screen" for masks that are new
-    /// (`before` had none, or there is no `before`), the level they had for
-    /// masks the camera already had (never less than before).
-    pub fn settle_mask_mode(&mut self, before: Option<&CameraConfig>) {
-        if let Some(m) = self.mask_mode.as_mut() {
-            *m = m.trim().to_string();
-        }
-        if self.mask_mode.as_deref().is_some_and(str::is_empty) {
-            self.mask_mode = None;
-        }
-        if self.privacy_masks.is_empty() || self.mask_mode.is_some() {
-            return;
-        }
-        let level = match before.filter(|b| !b.privacy_masks.is_empty()) {
-            Some(b) => b.mask_level(),
-            None => "screen",
-        };
-        self.mask_mode = Some(level.to_string());
+    /// Clear what a page or app of 0.11.1 may still send about masks that
+    /// means nothing now: the mask level. ("Share without the mask" is not
+    /// read at all any more.)
+    pub fn clear_old_mask_fields(&mut self) {
+        self.mask_mode = None;
     }
 
-    /// The mask level as read from the config file, made one there is and
-    /// one this camera can do; returns what was changed (for the log), None
-    /// when nothing was. Case and spaces are tidied ("Screen" is "screen");
-    /// a word that is not a level is "recording" (never less masking than
-    /// asked for); "recording" on a pushed or battery camera, which nothing
-    /// can burn masks into, is "screen" (its recordings never had them, and
-    /// its video is treated as unmasked everywhere anyway).
-    pub fn sanitize_mask_mode(&mut self) -> Option<String> {
-        let Some(raw) = self.mask_mode.clone() else { return None };
-        let low = raw.trim().to_ascii_lowercase();
-        let mut level = match low.as_str() {
-            "" => None,
-            "screen" | "recording" => Some(low.clone()),
-            _ => Some("recording".to_string()),
-        };
-        let mut why = match &level {
-            Some(l) if *l != low => Some(format!("mask_mode \"{raw}\" is not \"screen\" or \"recording\"; its masks are burned into the recordings")),
-            _ => None,
-        };
-        if level.as_deref() == Some("recording") && !self.privacy_masks.is_empty() && self.no_ffmpeg_reader() {
-            level = Some("screen".to_string());
-            why = Some(format!("mask_mode \"{raw}\" is not possible for a pushed or battery camera (nothing can burn masks into its video); \"screen\" is used"));
+    /// A camera is never given privacy masks any more (0.11.2): a save
+    /// with any is refused (an old page, or another app).
+    pub fn check_no_masks(&self) -> Result<(), String> {
+        if self.privacy_masks.is_empty() {
+            Ok(())
+        } else {
+            Err(MASKS_GONE.into())
         }
-        if level.as_deref() == Some(raw.as_str()) {
-            return None;
-        }
-        self.mask_mode = level;
-        Some(why.unwrap_or_else(|| format!("mask_mode \"{raw}\" read as \"{}\"", self.mask_mode.as_deref().unwrap_or("(none)"))))
-    }
-
-    /// The mask level is one there is, and one this camera can do.
-    pub fn check_mask_mode(&self) -> Result<(), String> {
-        match self.mask_mode.as_deref().map(str::trim) {
-            None | Some("screen") | Some("recording") => {}
-            Some(_) => return Err("Privacy masks: the level is \"screen\" (hide on screen and in pictures) or \"recording\" (hide in recordings too)".into()),
-        }
-        if self.mask_in_recording() && self.no_ffmpeg_reader() {
-            return Err(NO_RECORDING_MASKS.into());
-        }
-        Ok(())
     }
 
     /// Whether catching up from the card is on (battery cameras only).
@@ -2614,11 +2566,6 @@ impl Config {
             if let (_, Some(w)) = crate::hwdecode::sanitized(c.hwaccel.as_deref()) {
                 tracing::warn!("{path}: camera '{}': {w}; Auto is used", c.name);
             }
-            // A level not understood or not possible for the camera: corrected
-            // in memory (saved with the next change), and said.
-            if let Some(w) = c.sanitize_mask_mode() {
-                tracing::warn!("{path}: camera '{}': {w}", c.name);
-            }
         }
         // A name listed twice by hand becomes one account: the one that could sign
         // in. Nothing can then bring the other back, with whatever rights it has.
@@ -2707,34 +2654,86 @@ impl Config {
         dropped
     }
 
-    /// Masks from before the mask level existed get one written down, so the
-    /// settings say what is done: "recording" (what they always did), or
-    /// "screen" for pushed and battery cameras (whose recordings never had
-    /// them; "recording" would stop them recording). Only cameras with masks
-    /// and no level change, so running it again changes nothing.
-    pub fn migrate_masks(&mut self) -> MaskMigration {
-        let mut m = MaskMigration::default();
-        for c in self.cameras.iter_mut().filter(|c| !c.privacy_masks.is_empty() && c.mask_mode.as_deref().is_none_or(|v| v.trim().is_empty())) {
-            if c.no_ffmpeg_reader() {
-                c.mask_mode = Some("screen".into());
-                m.screen_only.push(c.name.clone());
-            } else {
-                c.mask_mode = Some("recording".into());
-                m.kept_in_recording.push(c.name.clone());
+    /// AmberSight no longer makes privacy masks (0.11.2): each camera's masks
+    /// become ignore zones (motion there never counts, as before) and areas
+    /// that don't notify (ordinary object alerts there are not sent), and
+    /// the masks and their level are cleared. For a camera that had masks:
+    /// - a mask with no size, or outside the picture, hid nothing and goes;
+    ///   the rest are cut to the picture; a camera with only such masks is
+    ///   just cleaned (and logged);
+    /// - each list is filled while it has room (`MAX_ZONES`,
+    ///   `MAX_ALERT_IGNORE_AREAS`, so the zone editor still saves), each on
+    ///   its own; the masks without room in each are counted;
+    /// - sharing (RTSP) is turned off, confirmed in 0.11.1 or not (a
+    ///   confirmation could be for other masks): its picture now shows what
+    ///   the masks hid, so the owner turns it back on;
+    /// - text burned into its recordings (kept in 0.11.1 because it
+    ///   re-encoded for its masks anyway) is drawn on screen instead.
+    ///
+    /// Returns what was done, per camera. Running it again changes nothing.
+    pub fn move_masks_to_ignore(&mut self) -> Vec<MasksMoved> {
+        let mut out = Vec::new();
+        for c in self.cameras.iter_mut() {
+            let masks = std::mem::take(&mut c.privacy_masks);
+            c.clear_old_mask_fields();
+            if masks.is_empty() {
+                continue;
             }
+            let kept: Vec<ZoneRect> = masks.iter().filter_map(inside_picture).collect();
+            if kept.is_empty() {
+                tracing::info!("settings: {}'s privacy masks had no size inside the picture (they hid nothing); removed", c.name);
+                continue;
+            }
+            let (mut no_zone, mut no_area) = (0, 0);
+            for r in kept {
+                // (Its corners kept inside the picture against float noise.)
+                let (x1, y1) = ((r.x + r.w).min(1.0), (r.y + r.h).min(1.0));
+                let area = ZonePoly { points: vec![[r.x, r.y], [x1, r.y], [x1, y1], [r.x, y1]] };
+                if !c.alert_ignore_polys.contains(&area) {
+                    if c.alert_ignore_polys.len() < MAX_ALERT_IGNORE_AREAS {
+                        c.alert_ignore_polys.push(area);
+                    } else {
+                        no_area += 1;
+                    }
+                }
+                if !c.ignore_zones.contains(&r) {
+                    if c.ignore_zones.len() < MAX_ZONES {
+                        c.ignore_zones.push(r);
+                    } else {
+                        no_zone += 1;
+                    }
+                }
+            }
+            if no_zone > 0 {
+                tracing::warn!("settings: {no_zone} of {}'s privacy masks had no room as ignore zones (motion there now counts)", c.name);
+            }
+            if no_area > 0 {
+                tracing::warn!("settings: {no_area} of {}'s privacy masks had no room as areas that don't notify", c.name);
+            }
+            // (A pushed or battery camera never had its text burned in;
+            // turned off all the same, which changes nothing there.)
+            let overlay_was = c.overlay;
+            let text_off = c.overlay && !c.no_ffmpeg_reader();
+            c.overlay = false;
+            let share_off = c.share;
+            c.share = false;
+            out.push(MasksMoved { name: c.name.clone(), overlay_was, text_off, share_off, no_zone, no_area });
         }
-        m
+        out
     }
 
     /// Text that was burned into the recordings of cameras without masks is
-    /// drawn on screen instead (0.11.1): `overlay` goes off for them. Returns
-    /// their names. The caller makes sure this runs once (cameras with masks
-    /// keep their overlay; they re-encode for the masks anyway).
+    /// drawn on screen instead (0.11.1): `overlay` goes off. Returns the
+    /// names of those whose text was really burned in (not a pushed or
+    /// battery camera's). The caller makes sure this runs once, after
+    /// `move_masks_to_ignore` (which turned it off for cameras with masks).
     pub fn migrate_overlay(&mut self) -> Vec<String> {
         let mut out = Vec::new();
-        for c in self.cameras.iter_mut().filter(|c| c.overlay && c.privacy_masks.is_empty()) {
+        for c in self.cameras.iter_mut().filter(|c| c.overlay) {
             c.overlay = false;
-            out.push(c.name.clone());
+            if !c.no_ffmpeg_reader() {
+                out.push(c.name.clone());
+            }
         }
         out
     }
@@ -3258,51 +3257,37 @@ mod f32_tests {
 }
 
 #[cfg(test)]
-mod mask_mode_tests {
-    use super::{CameraConfig, Config};
+mod old_mask_tests {
+    use super::Config;
 
-    fn cam(url: &str, extra: &str) -> CameraConfig {
-        toml::from_str(&format!("name = \"c\"\nurl = \"{url}\"\nprivacy_masks = [{{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }}]\n{extra}")).unwrap()
-    }
-
+    /// A camera saved by 0.11.1 with every mask setting there was still
+    /// loads; the masks are there for the start to move, and nothing of
+    /// them is written back once they are moved.
     #[test]
-    fn a_mask_level_read_from_the_file_is_one_there_is_and_one_the_camera_can_do() {
-        let rtsp = "rtsp://192.0.2.10/s";
-        let fixed = |url: &str, mode: &str| {
-            let mut c = cam(url, &format!("mask_mode = {mode:?}"));
-            let w = c.sanitize_mask_mode();
-            (c.mask_mode, w.is_some())
-        };
-        assert_eq!(fixed(rtsp, "screen"), (Some("screen".into()), false));
-        assert_eq!(fixed(rtsp, "recording"), (Some("recording".into()), false));
-        assert_eq!(fixed(rtsp, " Screen "), (Some("screen".into()), true));
-        assert_eq!(fixed(rtsp, "RECORDING"), (Some("recording".into()), true));
-        assert_eq!(fixed(rtsp, "both"), (Some("recording".into()), true), "never less than asked for");
-        assert_eq!(fixed(rtsp, ""), (None, true));
-        // Pushed and battery cameras: nothing can burn them into the video.
-        assert_eq!(fixed("push://porch", "recording"), (Some("screen".into()), true));
-        assert_eq!(fixed("baichuan://192.0.2.9?uid=TESTUID000000001", "Recording"), (Some("screen".into()), true));
-        assert_eq!(fixed("push://porch", "nonsense"), (Some("screen".into()), true));
-        assert_eq!(fixed("push://porch", "screen"), (Some("screen".into()), false));
-        let mut none = cam(rtsp, "");
-        assert_eq!(none.sanitize_mask_mode(), None);
-        assert_eq!(none.mask_mode, None);
-        // Corrected cameras pass the check the API makes.
-        let mut p = cam("push://porch", "mask_mode = \"recording\"");
-        assert!(p.check_mask_mode().is_err());
-        p.sanitize_mask_mode();
-        assert!(p.check_mask_mode().is_ok());
-    }
-
-    #[test]
-    fn loading_the_file_corrects_the_mask_level() {
-        let dir = std::env::temp_dir().join(format!("amber-maskmode-load-{}", std::process::id()));
+    fn a_0_11_1_camera_with_every_mask_setting_still_loads() {
+        let dir = std::env::temp_dir().join(format!("amber-oldmasks-load-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
-        std::fs::write(&p, "[[cameras]]\nname = \"Pushed\"\nurl = \"push://pushed\"\nmask_mode = \"recording\"\nprivacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]\n\n[[cameras]]\nname = \"Cap\"\nurl = \"rtsp://192.0.2.10/s\"\nmask_mode = \"Screen\"\nprivacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]\n").unwrap();
-        let c = Config::load(p.to_str().unwrap()).unwrap();
-        assert_eq!(c.cameras[0].mask_mode.as_deref(), Some("screen"));
-        assert_eq!(c.cameras[1].mask_mode.as_deref(), Some("screen"));
+        std::fs::write(
+            &p,
+            "[[cameras]]\nname = \"Porch\"\nurl = \"rtsp://192.0.2.10/s\"\noverlay = true\nshare = true\nshare_unmasked = true\nshare_unmasked_rev = \"0123456789ab\"\nmask_mode = \"recording\"\nprivacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]\n\n[[cameras]]\nname = \"Shed\"\nurl = \"push://shedkey000001\"\nmask_mode = \"Screen\"\nprivacy_masks = [{ x = 0.5, y = 0.5, w = 0.2, h = 0.2 }]\n",
+        )
+        .unwrap();
+        let mut c = Config::load(p.to_str().unwrap()).unwrap();
+        assert_eq!(c.cameras.len(), 2);
+        assert_eq!(c.cameras[0].privacy_masks.len(), 1);
+        assert_eq!(c.cameras[0].mask_mode.as_deref(), Some("recording"));
+        assert!(c.cameras[0].share);
+        assert!(c.cameras[0].check_no_masks().is_err(), "not saved through the API as it is");
+        c.move_masks_to_ignore();
+        let text = c.to_toml().unwrap();
+        for gone in ["privacy_masks", "mask_mode", "share_unmasked"] {
+            assert!(!text.contains(gone), "{gone} written: {text}");
+        }
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.cameras[0].ignore_zones.len(), 1);
+        assert!(back.cameras.iter().all(|c| c.check_no_masks().is_ok()));
+        assert!(!back.cameras[0].share, "sharing off, confirmed in 0.11.1 or not");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

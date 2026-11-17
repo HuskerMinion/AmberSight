@@ -29,11 +29,6 @@ const RETRY_AFTER_MS: i64 = 4 * 60_000;
 pub(super) fn spawn_lead_in(engine: Arc<Engine>, handle: Arc<CameraHandle>, push_ms: i64) {
     static LAST: std::sync::OnceLock<Mutex<std::collections::HashMap<String, i64>>> = std::sync::OnceLock::new();
     let Some(uid) = handle.cfg.read().unwrap().battery_uid() else { return };
-    // Masks to be burned into the recordings: the card's clip would come in
-    // without them (and the camera records nothing anyway: mask_settings).
-    if handle.cfg.read().unwrap().mask_in_recording() {
-        return;
-    }
     {
         let mut last = LAST.get_or_init(Default::default).lock().unwrap();
         if last.get(&uid).is_some_and(|&t| push_ms - t < SAME_EVENT_MS) {

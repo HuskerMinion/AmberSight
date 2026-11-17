@@ -16,13 +16,11 @@ pub enum Input {
     File(std::path::PathBuf),
 }
 
-/// What is burned into a converted recording besides the scaling: the
-/// privacy masks (never dropped), and a time subtitle track added from an
-/// SRT file. `keep_times`: every frame keeps its own time (fast and
+/// What a converted recording carries besides the scaling and a caption: a
+/// time subtitle track added from an SRT file. `keep_times`: every frame keeps its own time (fast and
 /// backwards clips, whose frames are not evenly spaced).
 #[derive(Default, Clone, Copy)]
 pub struct Extra<'a> {
-    pub mask: Option<&'a str>,
     pub subs: Option<&'a std::path::Path>,
     pub keep_times: bool,
 }
@@ -36,13 +34,12 @@ pub fn args(e: &Encoder, hw_decode: bool, t: &Target, fps: f64, depth: u8, file:
     args_with(e, hw_decode, t, fps, depth, file, seek_ms, limit_ms, caption, Extra::default())
 }
 
-/// `args` with masks, a subtitle track or kept frame times (`Extra`). With
-/// masks or a caption the frames are decoded in software and the threads
+/// `args` with a subtitle track or kept frame times (`Extra`). With a
+/// caption the frames are decoded in software and the threads
 /// are capped as for a recording (see engine::ffpath).
 #[allow(clippy::too_many_arguments)]
 pub fn args_with(e: &Encoder, hw_decode: bool, t: &Target, fps: f64, depth: u8, file: Option<&std::path::Path>, seek_ms: i64, limit_ms: Option<i64>, caption: Option<&str>, x: Extra) -> Vec<String> {
-    let burn: Vec<&str> = [x.mask, caption].into_iter().flatten().filter(|f| !f.is_empty()).collect();
-    let burn = (!burn.is_empty()).then(|| burn.join(","));
+    let burn = caption.filter(|f| !f.is_empty()).map(str::to_string);
     let hw_decode = hw_decode && burn.is_none();
     let budget = crate::engine::ffpath::thread_budget_now();
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error"].iter().map(|s| s.to_string()).collect();
@@ -142,11 +139,8 @@ pub struct Job {
     /// software), and its place is held until the end.
     pub caption: Option<String>,
     pub download: Option<super::DownloadSlot>,
-    /// Privacy masks (drawbox filters) burned in: unlike the caption, never
-    /// left out on a retry; a conversion that cannot draw them fails.
-    pub mask: Option<String>,
     /// A time subtitle track (its file is removed when the job ends).
-    pub subs: Option<super::masked::SubsFile>,
+    pub subs: Option<super::burn::SubsFile>,
     /// Frames keep their own times (fast and backwards clips).
     pub keep_times: bool,
 }
@@ -258,7 +252,7 @@ pub fn stream(job: Job) -> axum::body::Body {
 fn run(job: Job, sink: Sink) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
-    let Job { input, target, encoders, software_after, slot, lease, fps, depth, src_codec, seek_ms, media_ms, limit_ms, what, camera, mut caption, download, mask, subs, keep_times } = job;
+    let Job { input, target, encoders, software_after, slot, lease, fps, depth, src_codec, seek_ms, media_ms, limit_ms, what, camera, mut caption, download, subs, keep_times } = job;
     // A download holds one of the server's few places: one that goes too slowly
     // (or not at all) is ended in time (see `download_deadline`).
     let deadline = download.as_ref().map(|_| std::time::Instant::now() + download_deadline(media_ms));
@@ -270,8 +264,8 @@ fn run(job: Job, sink: Sink) {
     let listed = super::list_active(what, &camera, target, Box::new(move || if g2.load(Ordering::Relaxed) { 0 } else { 1 }));
     let mut slot = slot;
     let mut ways = super::live::attempts(&encoders);
-    if caption.is_some() || mask.is_some() {
-        // (Captions and masks are drawn on frames in memory.)
+    if caption.is_some() {
+        // (Captions are drawn on frames in memory.)
         ways.retain(|w| !w.1);
     }
     let mut i = 0;
@@ -300,7 +294,7 @@ fn run(job: Job, sink: Sink) {
             Input::File(p) => Some(p.as_path()),
             Input::Clip(_) => None,
         };
-        let extra = Extra { mask: mask.as_deref(), subs: subs.as_ref().map(|s| s.path()), keep_times };
+        let extra = Extra { subs: subs.as_ref().map(|s| s.path()), keep_times };
         let a = args_with(&e, hw_decode, &target, fps, depth, file, seek_ms, limit_ms, caption.as_deref(), extra);
         let mut child = match crate::child::ffmpeg().args(&a).stdin(if file.is_some() { Stdio::null() } else { Stdio::piped() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
@@ -593,7 +587,7 @@ mod tests {
         let subs = dir.join("t.srt");
         std::fs::write(&subs, "1\n00:00:00,000 --> 00:00:10,000\nx\n\n").unwrap();
         for (file, with_subs) in [(true, false), (false, false), (false, true)] {
-            let x = super::Extra { mask: Some("drawbox=x=0:y=0:w=8:h=8:color=black:t=fill"), subs: with_subs.then_some(subs.as_path()), keep_times: false };
+            let x = super::Extra { subs: with_subs.then_some(subs.as_path()), keep_times: false };
             let mut a = super::args_with(&sw, false, &t, 10.0, 8, file.then_some(src.as_path()), 2500, Some(2000), Some("showinfo"), x);
             // (showinfo logs each frame's time: at info level.)
             a[2] = "info".into();

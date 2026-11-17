@@ -365,10 +365,8 @@ fn late_check(engine: &Arc<Engine>, job: &Job) -> anyhow::Result<bool> {
     }
     let dir = engine.ai_review_dir(&job.id);
     let mut results: Vec<(usize, Vec<crate::ai::Detection>)> = Vec::new();
-    // (Frames from before a mask change are masked now, as the AI must see them.)
-    let cam = engine.picture_cfg_at(&job.camera, job.start.saturating_mul(1000));
     for n in todo {
-        let Ok(jpeg) = crate::privacy::read_masked(&dir.join(format!("{n}.jpg")), cam.as_ref()) else { continue };
+        let Ok(jpeg) = std::fs::read(dir.join(format!("{n}.jpg"))) else { continue };
         match engine.ai_detect(&jpeg, 0.25) {
             Ok(d) => results.push((n, d)),
             Err(e) if is_gpu_error(&format!("{e:#}")) => return Ok(false),

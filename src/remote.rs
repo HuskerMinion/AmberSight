@@ -119,10 +119,6 @@ pub async fn share_cameras(State(engine): State<Arc<Engine>>, h: HeaderMap) -> R
                 "overlay_text": cfg.overlay_text,
                 "overlay_pos": cfg.overlay_pos,
                 "overlay": cfg.overlay,
-                // (The viewing server's page draws them over the live video.)
-                "privacy_masks": cfg.privacy_masks,
-                // (The level in force: masks from before the setting count as "recording".)
-                "mask_mode": (!cfg.privacy_masks.is_empty()).then(|| cfg.mask_level()),
             })
         })
         .collect();
@@ -178,13 +174,13 @@ pub async fn api_link_stats(
     }
 }
 
-/// `GET /link/live/:id/info` (`draws=masks`: the viewing server's player
-/// draws the camera's privacy masks; see live_http::StreamQ)
-pub async fn share_live_info(State(engine): State<Arc<Engine>>, h: HeaderMap, AxPath(id): AxPath<usize>, q: Query<crate::live_http::StreamQ>) -> Response {
+/// `GET /link/live/:id/info` (the viewing server's query is not used; a
+/// `draws=masks` from a 0.11.1 server is ignored)
+pub async fn share_live_info(State(engine): State<Arc<Engine>>, h: HeaderMap, AxPath(id): AxPath<usize>) -> Response {
     if let Err(r) = sharing_cam(&engine, &h, id) {
         return r;
     }
-    crate::live_http::live_info(State(engine), AxPath(id), Query(q.0.drawing_only()), None).await
+    crate::live_http::live_info(State(engine), AxPath(id), Query(crate::live_http::StreamQ::default()), None).await
 }
 
 /// `GET /link/live/:id/ws` (WebSocket, fMP4 fragments)
@@ -338,7 +334,6 @@ pub fn ui_cameras(engine: &Engine) -> Vec<serde_json::Value> {
             let name = name.as_str();
             let pos_ok = ["top-left", "top-right", "bottom-left", "bottom-right"];
             let opos = txt(&c["overlay_pos"], 16).filter(|p| pos_ok.contains(&p.as_str()));
-            let (masks, mask_mode) = remote_masks(c);
             out.push(serde_json::json!({
                 "id": id,
                 // Unique here (layouts and groups go by name), with the site shown as a badge.
@@ -355,8 +350,6 @@ pub fn ui_cameras(engine: &Engine) -> Vec<serde_json::Value> {
                 "overlay_text": txt(&c["overlay_text"], 120),
                 "overlay_pos": opos,
                 "overlay": flag(&c["overlay"]),
-                "privacy_masks": masks,
-                "mask_mode": mask_mode,
                 "ptz": false,
                 "record": false,
                 "motion": false,
@@ -368,28 +361,6 @@ pub fn ui_cameras(engine: &Engine) -> Vec<serde_json::Value> {
         }
     }
     out
-}
-
-/// A shown camera's privacy masks (at most 32 rectangles, each inside the
-/// picture) and their level, checked: the page draws them.
-pub(crate) fn remote_masks(c: &serde_json::Value) -> (Vec<serde_json::Value>, Option<&'static str>) {
-    let num = |v: &serde_json::Value| v.as_f64().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0));
-    let masks: Vec<serde_json::Value> = c["privacy_masks"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .take(32)
-        .filter_map(|m| {
-            let (x, y, w, h) = (num(&m["x"])?, num(&m["y"])?, num(&m["w"])?, num(&m["h"])?);
-            Some(serde_json::json!({ "x": x, "y": y, "w": w.min(1.0 - x), "h": h.min(1.0 - y) }))
-        })
-        .collect();
-    let mode = match c["mask_mode"].as_str() {
-        Some("recording") => Some("recording"),
-        Some("screen") => Some("screen"),
-        _ => None,
-    };
-    (masks, mode)
 }
 
 /// Remember local groups for a shown camera (`PUT /api/cameras/:id` with

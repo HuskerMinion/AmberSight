@@ -263,8 +263,6 @@ pub struct FrameDecoder {
     codec: Codec,
     fps: u32,
     scale: u32,
-    /// Privacy mask filter drawn on every picture (empty: none).
-    masks: String,
     param_sets: Vec<u8>,
     pipe: Option<Pipeline>,
     out_tx: Option<SyncSender<Vec<u8>>>,
@@ -342,9 +340,7 @@ pub fn hw_input_args(spec: &str, codec: Option<Codec>) -> Result<Vec<String>> {
     }
 }
 
-/// `masks`: privacy mask filter ([`crate::privacy::mask_filter`]), drawn on
-/// the analysed pictures (empty: none).
-fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>, masks: &str) -> Result<Vec<String>> {
+fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>) -> Result<Vec<String>> {
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error"].map(String::from).into();
     if let Some(spec) = hw {
         a.extend(hw_input_args(spec, Some(codec))?);
@@ -377,12 +373,6 @@ fn ffmpeg_args(codec: Codec, fps: u32, scale: u32, hw: Option<&str>, masks: &str
     }
     if scale > 0 {
         vf.push_str(&format!(",scale={scale}:-2"));
-    }
-    // (In memory, after the card's pictures came back, and on the small
-    // picture: the boxes are sized from it.)
-    if !masks.is_empty() {
-        vf.push(',');
-        vf.push_str(masks);
     }
     a.extend(["-vf".to_string(), vf]);
     a.extend(["-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "8", "-"].map(String::from));
@@ -451,11 +441,10 @@ impl Pipeline {
         fps: u32,
         scale: u32,
         hw: Option<&str>,
-        masks: &str,
         out_tx: SyncSender<Vec<u8>>,
         counters: Arc<Counters>,
     ) -> Result<Self> {
-        let args = ffmpeg_args(codec, fps, scale, hw, masks)?;
+        let args = ffmpeg_args(codec, fps, scale, hw)?;
         let mut child = crate::child::ffmpeg()
             .args(&args)
             .stdin(Stdio::piped())
@@ -609,21 +598,14 @@ impl FrameDecoder {
     /// `"vaapi:/dev/dri/renderD129"` or `"qsv"`; if that ffmpeg exits within a
     /// second of starting, a software decoder takes over transparently.
     pub fn start(codec: Codec, extra_data: &[u8], fps: u32, scale: u32, hwaccel: Option<String>) -> Result<Self> {
-        Self::start_masked(codec, extra_data, fps, scale, hwaccel, String::new())
-    }
-
-    /// As [`FrameDecoder::start`], with privacy masks (`masks`, a filter
-    /// from [`crate::privacy::mask_filter`]) blacked out in every picture.
-    pub fn start_masked(codec: Codec, extra_data: &[u8], fps: u32, scale: u32, hwaccel: Option<String>, masks: String) -> Result<Self> {
         let param_sets = parameter_sets_annexb(codec, extra_data)?;
         let (out_tx, frames) = mpsc::sync_channel(OUTPUT_QUEUE);
         let counters = Arc::new(Counters::default());
-        let pipe = Pipeline::spawn(codec, fps, scale, hwaccel.as_deref(), &masks, out_tx.clone(), counters.clone())?;
+        let pipe = Pipeline::spawn(codec, fps, scale, hwaccel.as_deref(), out_tx.clone(), counters.clone())?;
         Ok(FrameDecoder {
             codec,
             fps,
             scale,
-            masks,
             param_sets,
             pipe: Some(pipe),
             out_tx: Some(out_tx),
@@ -843,7 +825,7 @@ impl FrameDecoder {
             None => crate::hwdecode::note_camera_failure(&self.camera, &spec, Some(self.codec), &why),
         });
         let out_tx = self.out_tx.clone().context("decoder stopped")?;
-        let new = Pipeline::spawn(self.codec, self.fps, self.scale, None, &self.masks, out_tx, self.counters.clone())?;
+        let new = Pipeline::spawn(self.codec, self.fps, self.scale, None, out_tx, self.counters.clone())?;
         if early {
             if let Some(tx) = new.input.as_ref() {
                 for c in self.replay.drain(..) {
@@ -1068,10 +1050,10 @@ mod tests {
         );
         assert!(hw_input_args("bogus", None).is_err());
         // Pictures are copied back after the frame-rate filter.
-        let a = ffmpeg_args(Codec::H264, 5, 640, Some("vaapi:/dev/dri/renderD129"), "").unwrap();
+        let a = ffmpeg_args(Codec::H264, 5, 640, Some("vaapi:/dev/dri/renderD129")).unwrap();
         let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
         assert_eq!(vf, "fps=5,hwdownload,format=nv12|p010le,scale=640:-2");
-        let a = ffmpeg_args(Codec::H264, 5, 640, None, "").unwrap();
+        let a = ffmpeg_args(Codec::H264, 5, 640, None).unwrap();
         assert!(!a.iter().any(|x| x.contains("hw")), "{a:?}");
     }
 
@@ -1129,54 +1111,6 @@ mod tests {
         assert!(d.hw_note().is_some_and(|n| n.contains("trying it again at")), "{:?}", d.hw_note());
         assert!(got > 0, "software decoding made pictures");
         d.stop();
-    }
-
-    #[test]
-    fn privacy_masks_are_drawn_after_the_card_and_the_scaling() {
-        let m = crate::privacy::mask_filter(&[crate::config::ZoneRect { x: 0.5, y: 0.5, w: 0.25, h: 0.25 }]);
-        let a = ffmpeg_args(Codec::H264, 5, 640, Some("vaapi:/dev/dri/renderD129"), &m).unwrap();
-        let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
-        assert_eq!(vf, &format!("fps=5,hwdownload,format=nv12|p010le,scale=640:-2,{m}"));
-        let a = ffmpeg_args(Codec::H264, 5, 0, None, &m).unwrap();
-        assert_eq!(a[a.iter().position(|x| x == "-vf").unwrap() + 1], format!("fps=5,{m}"));
-    }
-
-    /// Real ffmpeg: every picture of a masked decoder is black in the mask
-    /// (the sample is ffmpeg's colour-bar test picture), also after a
-    /// hardware decoder that cannot start was replaced.
-    #[test]
-    fn a_masked_decoder_gives_masked_pictures() {
-        if std::process::Command::new(crate::ffmpeg_bin::program()).arg("-version").output().is_err() {
-            return;
-        }
-        let (rec, frames) = sample_h264();
-        let masks = crate::privacy::mask_filter(&[crate::config::ZoneRect { x: 0.5, y: 0.6, w: 0.25, h: 0.3 }]);
-        for hw in [None, Some("vaapi:/dev/dri/renderD999".to_string())] {
-            let mut d = FrameDecoder::start_masked(Codec::H264, &rec, 10, 160, hw.clone(), masks.clone()).unwrap();
-            let mut got: Vec<Vec<u8>> = Vec::new();
-            for _ in 0..6 {
-                for (f, key) in &frames {
-                    d.push(f, *key).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(30));
-                    while let Ok(j) = d.frames().try_recv() {
-                        got.push(j);
-                    }
-                }
-                if got.len() > 2 {
-                    break;
-                }
-            }
-            d.stop();
-            assert!(!got.is_empty(), "pictures ({hw:?})");
-            for j in &got {
-                let img = image::load_from_memory(j).unwrap().to_luma8();
-                let (w, h) = img.dimensions();
-                assert_eq!(w, 160);
-                let inside = img.get_pixel(w * 5 / 8, h * 3 / 4).0[0];
-                let outside = img.get_pixel(w / 16, h / 2).0[0];
-                assert!(inside < 25 && outside > 40, "inside {inside}, outside {outside} ({hw:?})");
-            }
-        }
     }
 
     #[test]

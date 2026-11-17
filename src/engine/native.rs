@@ -30,10 +30,9 @@ pub(super) fn wants_native(cfg: &CameraConfig) -> bool {
     if crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
         return true;
     }
-    // Masks burned into the recordings and burned-in text change the
-    // picture: that needs re-encoding, which the ffmpeg pipeline does.
-    // Masks only on screen and in pictures leave the stream as it is.
-    if cfg.overlay || cfg.mask_in_recording() {
+    // Burned-in text changes the picture: that needs re-encoding, which the
+    // ffmpeg pipeline does.
+    if cfg.overlay {
         return false;
     }
     // Capture devices and the screen are always read by ffmpeg, even with
@@ -51,13 +50,6 @@ pub(super) fn wants_native(cfg: &CameraConfig) -> bool {
                 || crate::ingest::push::is_push_url(&cfg.url)
         }
     }
-}
-
-/// The built-in reader never records a camera whose masks are to be burned
-/// into its recordings (it copies the stream as it is). Such a camera only
-/// gets here when it has no ffmpeg reader (pushed, battery): fail closed.
-pub(super) fn native_must_not_record(cfg: &CameraConfig) -> bool {
-    cfg.mask_in_recording()
 }
 
 /// No frames for this long means the camera stalled: reconnect.
@@ -314,8 +306,6 @@ struct SessionPlan {
     sub_note: Option<String>,
     /// The camera's place on the NVIDIA card (see `NvdecSlot`).
     nvdec: NvdecSlot,
-    /// Privacy masks drawn on every decoded picture (a filter; empty: none).
-    masks: String,
 }
 
 /// The camera's place on the NVIDIA card while its motion decoder runs
@@ -363,9 +353,6 @@ impl std::error::Error for DamagedPacket {}
 
 pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine: Arc<Engine>) {
     let slug_name = slug(&cfg.name);
-    if cfg.record && native_must_not_record(&cfg) {
-        warn!("camera '{}': {}; nothing is recorded", cfg.name, crate::config::NO_RECORDING_MASKS);
-    }
     let (_, folder_root) = engine.record_folder(&cfg);
     let seg_dir = folder_root.join("cameras").join(&slug_name).join("segments");
     let clips_dir = engine.data_dir.join("clips");
@@ -504,10 +491,6 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             sub: sub_url.as_deref().map(creds),
             record: match (cfg.record, cfg.record_motion_only) {
                 (false, _) => None,
-                // Masks to be burned into the recordings, which this reader
-                // cannot do (a pushed or battery camera): nothing rather than
-                // the unmasked picture (Status says why: mask_settings).
-                _ if native_must_not_record(&cfg) => None,
                 (true, false) if cfg.record_sub && sub_url.is_some() => {
                     Some(RecordPlan::SubAndEvents { segment_seconds, pre_roll: motion_cfg.pre_roll, post_roll: motion_cfg.post_roll })
                 }
@@ -528,7 +511,6 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             sub_copy: storage.sub_copy,
             sub_note: if sub_watch.trying() { Some("trying the sub stream again".into()) } else { sub_watch.off.clone() },
             nvdec: nvdec.clone(),
-            masks: crate::privacy::camera_mask_filter(&cfg),
         };
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -1475,7 +1457,7 @@ impl MotionDec {
             }
         }
         self.start_at = None;
-        let d = match FrameDecoder::start_masked(codec, &v.extra_data, plan.fps, plan.scale, r.spec.clone(), plan.masks.clone()) {
+        let d = match FrameDecoder::start(codec, &v.extra_data, plan.fps, plan.scale, r.spec.clone()) {
             Ok(d) => d.with_camera(&name),
             Err(e) => {
                 self.hold.lock().unwrap().take();
@@ -1930,41 +1912,20 @@ mod tests {
 }
 
 #[cfg(test)]
-mod mask_routing_tests {
+mod routing_tests {
     use super::*;
 
     fn cam(url: &str, extra: &str) -> CameraConfig {
         toml::from_str(&format!("name = \"a\"\nurl = \"{url}\"\n{extra}")).unwrap()
     }
-    const MASK: &str = "privacy_masks = [{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }]";
 
     #[test]
-    fn only_masks_in_the_recordings_or_burned_text_need_ffmpeg() {
+    fn only_burned_text_needs_ffmpeg() {
         let rtsp = "rtsp://192.0.2.1/x";
         assert!(wants_native(&cam(rtsp, "")));
-        assert!(wants_native(&cam(rtsp, &format!("mask_mode = \"screen\"\n{MASK}"))), "screen masks stay on the built-in reader");
-        assert!(!wants_native(&cam(rtsp, &format!("mask_mode = \"recording\"\n{MASK}"))));
-        assert!(!wants_native(&cam(rtsp, MASK)), "masks from before the level: as before, re-encoded");
         assert!(!wants_native(&cam(rtsp, "overlay = true")));
-        assert!(!wants_native(&cam(rtsp, &format!("ingest = \"native\"\nmask_mode = \"recording\"\n{MASK}"))), "the built-in reader is never used for them, whatever ingest says");
-        // Still "masked" for sharing (the shared stream is the camera's own).
-        assert!(crate::restream::http::masked(&cam(rtsp, &format!("mask_mode = \"screen\"\n{MASK}"))));
-        assert!(crate::restream::http::blocker(&cam(rtsp, &format!("mask_mode = \"screen\"\n{MASK}"))).is_some());
-        let mut ok = cam(rtsp, &format!("mask_mode = \"screen\"\nshare_unmasked = true\n{MASK}"));
-        assert!(crate::restream::http::blocker(&ok).is_some(), "not noted for what it was given");
-        crate::restream::http::settle_consent(None, &mut ok);
-        assert!(crate::restream::http::blocker(&ok).is_none());
-    }
-
-    #[test]
-    fn pushed_and_battery_cameras_never_record_unmasked_for_recording_masks() {
-        for url in ["push://yard", "baichuan://192.0.2.9?uid=TESTUID000000001"] {
-            let rec = cam(url, &format!("mask_mode = \"recording\"\n{MASK}"));
-            assert!(wants_native(&rec), "{url}: no ffmpeg reader for it");
-            assert!(native_must_not_record(&rec), "{url}");
-            assert!(!native_must_not_record(&cam(url, &format!("mask_mode = \"screen\"\n{MASK}"))), "{url}");
+        for url in ["push://yard-camera-0001", "baichuan://192.0.2.9?uid=TESTUID000000001"] {
+            assert!(wants_native(&cam(url, "")), "{url}: no ffmpeg reader for it");
         }
-        // An RTSP camera at the recording level never reaches the built-in reader.
-        assert!(native_must_not_record(&cam("rtsp://192.0.2.1/x", &format!("mask_mode = \"recording\"\n{MASK}"))));
     }
 }

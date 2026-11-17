@@ -813,22 +813,7 @@ enum Outcome {
     Fail(std::io::Error, String),
     /// The event's recordings could not be read (not the folder's fault).
     Source(String),
-    /// The camera's privacy masks could not be burned into the copy (it is
-    /// tried again a few times, then left out: never copied without them).
-    Masks(String),
 }
-
-/// An event's clip with the privacy masks (`mask`, drawbox filters) burned
-/// in and the time as a subtitle track, as a download has them. None: no
-/// recording of it. Waits a bounded time for an encoder and the conversion.
-pub(crate) fn masked_copy(engine: &Arc<Engine>, ev: &Event, mask: String) -> anyhow::Result<Option<crate::transcode::masked::Burned>> {
-    let Some(b) = crate::transcode::masked::event_burn(engine, ev, Some(mask), None)? else { return Ok(None) };
-    // (In the background: it yields the encoders to people watching.)
-    crate::transcode::masked::burn_to_file(engine, b, crate::transcode::masked::Priority::Background, &|| false, crate::transcode::masked::BURN_MAX_BYTES).map(Some)
-}
-
-/// Why a copy was left out after its masks could not be burned in.
-const MASKS_SKIP: &str = "the privacy masks could not be burned in, so it was not copied (see the server log)";
 
 /// Write `name` in `dir` through a `.part` file, from `fill` (whose own
 /// read errors are told apart from write errors).
@@ -896,7 +881,6 @@ fn copy_one(engine: &Arc<Engine>, job: &Job, now: i64) -> Outcome {
     }
     // The source first: an event with nothing recorded is not the folder's problem.
     enum Src {
-        /// (Also a conversion with the privacy masks burned in, in the tmp folder.)
         File(PathBuf, u64),
         Clip(crate::ingest::splice::VirtualClip),
     }
@@ -916,7 +900,7 @@ fn copy_one(engine: &Arc<Engine>, job: &Job, now: i64) -> Outcome {
             Err(e) => return Outcome::Source(format!("{e:#}")),
         },
     };
-    let mut size = match &src {
+    let size = match &src {
         Src::File(_, n) => *n,
         Src::Clip(c) => c.len(),
     };
@@ -930,36 +914,6 @@ fn copy_one(engine: &Arc<Engine>, job: &Job, now: i64) -> Outcome {
             return Outcome::Fail(std::io::Error::new(std::io::ErrorKind::StorageFull, "nearly full"), folder);
         }
     }
-    // A camera whose privacy masks are hidden on screen only records the
-    // whole picture: the copy leaves AmberSight, so it gets the masks burned
-    // in (one conversion, after the folder answered). Never the clip as recorded.
-    let mut _burned = None;
-    let src = match crate::transcode::masked::event_download_mask(engine, &ev) {
-        Err(_) => return Outcome::Masks("the privacy masks it needs could not be read".into()),
-        Ok(None) => src,
-        Ok(Some(mask)) => match {
-            // (A long conversion is not the folder failing to answer.)
-            st().status.entry(cfg.name.clone()).or_default().busy_since = None;
-            let r = masked_copy(engine, &ev, mask);
-            st().status.entry(cfg.name.clone()).or_default().busy_since = Some(Utc::now().timestamp());
-            r
-        } {
-            Ok(Some(b)) => {
-                size = b.size();
-                let src = Src::File(b.path().to_path_buf(), size);
-                // (The converted file is removed when the copy is done.)
-                _burned = Some(b);
-                src
-            }
-            Ok(None) => return Outcome::Skip("no recording covers it (recording off, or already deleted)".into()),
-            // Only waiting (the encoders, or another copy, stayed busy): later, not a try.
-            Err(e) if e.downcast_ref::<crate::transcode::masked::EncodersBusy>().is_some() => {
-                info!("event copies: {} waits for a free video encoder to burn in its privacy masks ({e}); trying again in a minute", ev.id);
-                return Outcome::Later(60);
-            }
-            Err(e) => return Outcome::Masks(format!("{e:#}")),
-        },
-    };
     let t = Local.timestamp_opt(ev.start, 0).earliest().unwrap_or_else(Local::now);
     let cam_name = safe_name(&cfg.name, "Camera");
     let day = t.format("%Y-%m-%d").to_string();
@@ -1020,8 +974,7 @@ fn copy_one(engine: &Arc<Engine>, job: &Job, now: i64) -> Outcome {
         if pic.is_file() {
             let jpg = format!("{}.jpg", mp4.trim_end_matches(".mp4"));
             let r = write_file(&day_dir, &jpg, |f| {
-                // (Masked now when it was kept before the camera's masks were set or changed.)
-                let b = crate::privacy::read_masked(&pic, Some(&cfg)).map_err(|e| WriteErr::Source(e.to_string()))?;
+                let b = std::fs::read(&pic).map_err(|e| WriteErr::Source(e.to_string()))?;
                 f.file.write_all(&b).map_err(WriteErr::Dest)
             });
             if r.is_err() {
@@ -1229,21 +1182,6 @@ fn worker(engine: Arc<Engine>) {
                 } else if let Some(j) = st.jobs.iter_mut().find(|j| j.id == job.id) {
                     j.tries = tries;
                     j.next_try = now + 60;
-                    st.dirty = true;
-                }
-            }
-            Outcome::Masks(detail) => {
-                // This event only; a little later (the encoders may be busy).
-                let tries = job.tries + 1;
-                warn!("event copies: the privacy masks could not be burned into {} ({detail}); try {tries} of {SOURCE_TRIES}", job.id);
-                if tries >= SOURCE_TRIES {
-                    drop_job(&mut st);
-                    let s = st.status.entry(job.camera.clone()).or_default();
-                    s.skipped += 1;
-                    s.last_skip = MASKS_SKIP.into();
-                } else if let Some(j) = st.jobs.iter_mut().find(|j| j.id == job.id) {
-                    j.tries = tries;
-                    j.next_try = now + 300;
                     st.dirty = true;
                 }
             }

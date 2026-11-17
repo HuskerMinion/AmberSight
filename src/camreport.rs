@@ -700,10 +700,10 @@ fn process_limits_line(sys: &Value) -> Option<String> {
     limits.report_line()
 }
 
-/// The settings that put a camera on the ffmpeg pipeline, for the report:
-/// (overlay on, number of privacy masks).
-fn picture_settings(cfg: &CameraConfig) -> (bool, usize) {
-    (cfg.overlay, cfg.privacy_masks.len())
+/// The setting that puts a camera on the ffmpeg pipeline, for the report:
+/// text burned into its recordings.
+fn picture_settings(cfg: &CameraConfig) -> bool {
+    cfg.overlay
 }
 
 // ---------------------------------------------------------------------------
@@ -771,9 +771,7 @@ fn settings(cfg: &CameraConfig) -> Value {
         "username": set(!cfg.username.is_empty()),
         "password": set(!cfg.password.is_empty()),
         "ingest_setting": cfg.ingest,
-        "overlay": picture_settings(cfg).0,
-        "privacy_masks": picture_settings(cfg).1,
-        "mask_mode": (!cfg.privacy_masks.is_empty()).then(|| cfg.mask_level()),
+        "overlay": picture_settings(cfg),
         "onvif_host": crate::onvif::host_from_rtsp_url(&cfg.url),
         "onvif_port": cfg.onvif_port,
         "reolink_channel": cfg.reolink_channel,
@@ -932,7 +930,7 @@ fn summary(r: &Value) -> String {
     let _ = writeln!(t);
     let c = &r["camera"];
     let _ = writeln!(t, "== Camera settings ==");
-    for k in ["name", "enabled", "url", "sub_url", "username", "password", "ingest_setting", "overlay", "privacy_masks", "mask_mode", "onvif_host", "onvif_port", "reolink_channel", "uid", "on_demand", "record", "record_motion_only", "record_sub", "direct", "audio", "fps", "scale", "hwaccel", "motion", "trigger"] {
+    for k in ["name", "enabled", "url", "sub_url", "username", "password", "ingest_setting", "overlay", "onvif_host", "onvif_port", "reolink_channel", "uid", "on_demand", "record", "record_motion_only", "record_sub", "direct", "audio", "fps", "scale", "hwaccel", "motion", "trigger"] {
         if !c[k].is_null() {
             let _ = writeln!(t, "{k}: {}", s(&c[k]));
         }
@@ -1208,16 +1206,12 @@ mod tests {
     fn the_report_names_what_puts_a_camera_on_ffmpeg() {
         let mut c = cfg("rtsp://192.0.2.9/main");
         c.overlay = true;
-        assert_eq!(picture_settings(&c), (true, 0));
+        assert!(picture_settings(&c));
         let w = crate::engine::ffpath::why_ffmpeg(&c, "ffmpeg", None).unwrap();
         assert!(w.contains("burn it into recordings"), "{w}");
         let j = settings(&c);
         assert_eq!(j["overlay"], true);
-        assert_eq!(j["privacy_masks"], 0);
-        assert!(j["mask_mode"].is_null());
-        c.privacy_masks = vec![crate::config::ZoneRect { x: 0.0, y: 0.0, w: 0.1, h: 0.1 }];
-        c.mask_mode = Some("screen".into());
-        assert_eq!(settings(&c)["mask_mode"], "screen");
+        assert!(j.get("privacy_masks").is_none() && j.get("mask_mode").is_none());
         assert!(crate::engine::ffpath::why_ffmpeg(&cfg("rtsp://192.0.2.9/main"), "native", None).is_none());
     }
 

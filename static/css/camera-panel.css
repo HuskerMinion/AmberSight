@@ -150,11 +150,6 @@
 .ze-seg button:disabled { opacity: .4; cursor: not-allowed; }
 .ze-note { padding: var(--s2) var(--s4); font-size: var(--fs-s); color: var(--text); background: var(--info-soft); border-bottom: 1px solid var(--line); flex: none; }
 .ze-note[hidden], .ze-polybar[hidden] { display: none; }
-.ze-ml { display: flex; flex-direction: column; gap: 4px; }
-.ze-ml p { margin: 0; }
-.ze-mlrow { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
-.ze-mlk { font-weight: 600; }
-.ze-ml .ze-seg { background: var(--surface); }
 .ze-polybar { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; justify-content: center; max-width: calc(100% - 16px);
   padding: 6px 8px; background: var(--surface); color: var(--text); border: 1px solid var(--line2); border-radius: var(--r2); box-shadow: var(--shadow); font-size: var(--fs-s); }
 .ze-polybar .btn { min-height: 30px; padding: 2px 10px; }
@@ -182,7 +177,6 @@
 .ze-sw { flex: none; width: 18px; height: 18px; border-radius: 4px; border: 2px solid var(--muted); box-sizing: border-box; }
 .ze-sw.de { background: rgba(255,255,255,.55); border-color: var(--text); }
 .ze-sw.ig { background: repeating-linear-gradient(45deg, #6b727b 0 3px, #b7bcc3 3px 6px); }
-.ze-sw.pm { background: rgba(0,0,0,.85); border-color: var(--text); }
 .ze-sub { list-style: none; margin: var(--s3) 0 var(--s1); padding: 0 8px; font-size: var(--fs-s); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .ze-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ze-del { flex: none; width: 36px; background: none; border: 0; color: var(--muted); font-size: 20px; cursor: pointer; border-radius: var(--r1); }

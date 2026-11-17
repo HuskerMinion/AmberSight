@@ -1977,15 +1977,9 @@ async fn list_cameras(
             v["onvif_port"] = cfg.onvif_port.into();
             v["uid"] = serde_json::json!(cfg.battery_uid());
             v["no_sub_ok"] = cfg.no_sub_ok.into();
-            // Polygon zones and privacy masks (rectangles above are the simple kind).
+            // Polygon zones (rectangles above are the simple kind).
             v["zone_polys"] = serde_json::json!(cfg.zone_polys);
             v["ignore_polys"] = serde_json::json!(cfg.ignore_polys);
-            v["privacy_masks"] = serde_json::json!(cfg.privacy_masks);
-            // How far they go ("screen" or "recording"): clients that draw them need it too.
-            v["mask_mode"] = cfg.mask_level().into();
-            // Changes with the masks: for picture addresses a browser keeps
-            // (previews, filmstrips), so a mask change is not hidden by its cache.
-            v["mask_rev"] = crate::privacy::revision(&cfg).into();
             // Named zones (loitering areas, crossing lines) and which areas have someone loitering now.
             v["named_zones"] = serde_json::json!(cfg.named_zones);
             v["zones_occupied"] = serde_json::json!(st.zones_occupied);
@@ -2126,8 +2120,8 @@ fn camera_clash(engine: &Engine, cam: &CameraConfig, except: Option<usize>) -> O
     None
 }
 
-/// Most zones of one kind (rectangles or polygons) and corners of one polygon.
-const MAX_ZONES: usize = 32;
+// Most zones of one kind (rectangles or polygons), and corners of one polygon.
+use crate::config::MAX_ZONES;
 const MAX_POINTS: usize = 64;
 
 /// Two settings values the same, numbers to within float noise (a value
@@ -2166,7 +2160,6 @@ fn check_camera_sizes(cam: &CameraConfig, old: Option<&CameraConfig>) -> Result<
     for (what, list, f) in [
         ("Zones", &cam.zones, (|c: &CameraConfig| serde_json::json!(c.zones)) as fn(&CameraConfig) -> serde_json::Value),
         ("Ignore zones", &cam.ignore_zones, |c: &CameraConfig| serde_json::json!(c.ignore_zones)),
-        ("Privacy masks", &cam.privacy_masks, |c: &CameraConfig| serde_json::json!(c.privacy_masks)),
     ] {
         if (list.len() > MAX_ZONES || !list.iter().all(rect_ok)) && changed(&f) {
             return Err(format!("{what}: at most {MAX_ZONES} rectangles, each inside the picture and not empty"));
@@ -2222,7 +2215,7 @@ fn check_camera_fields(cam: &crate::config::CameraConfig) -> Result<(), String> 
         return Err("Transport: auto, tcp or udp".into());
     }
     crate::engine::check_camera_urls(cam)?;
-    cam.check_mask_mode()?;
+    cam.check_no_masks()?;
     for (what, w) in [("Alert window", &cam.alert_schedule), ("No-motion watch window", &cam.no_motion_schedule)] {
         if w.as_deref().is_some_and(|t| !t.trim().is_empty() && crate::config::parse_schedule(t).is_none()) {
             return Err(format!("{what}: write it like 07:00-21:00"));
@@ -2233,10 +2226,10 @@ fn check_camera_fields(cam: &crate::config::CameraConfig) -> Result<(), String> 
             return Err("Notify only for: pick up to 30 objects".into());
         }
     }
-    if cam.alert_ignore_polys.len() > 12
+    if cam.alert_ignore_polys.len() > crate::config::MAX_ALERT_IGNORE_AREAS
         || cam.alert_ignore_polys.iter().any(|p| p.points.len() < 3 || p.points.len() > 64 || p.points.iter().any(|q| !(0.0..=1.0).contains(&q[0]) || !(0.0..=1.0).contains(&q[1])))
     {
-        return Err("Areas that don't notify: up to 12 areas, each with 3 or more corners inside the picture".into());
+        return Err(format!("Areas that don't notify: up to {} areas, each with 3 or more corners inside the picture", crate::config::MAX_ALERT_IGNORE_AREAS));
     }
     let names = crate::sound::labels::names();
     if let Some(bad) = cam.audio_sounds.iter().find(|s| !names.contains(&s.trim().to_lowercase().as_str())) {
@@ -2267,7 +2260,8 @@ async fn add_camera(
     Json(mut cam): Json<CameraConfig>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     cam.normalize_groups();
-    cam.settle_mask_mode(None);
+    // (A mask level or "share without the mask" from a page of 0.11.1 means nothing now.)
+    cam.clear_old_mask_fields();
     // Added from Discovery with a saved login: the page never had its password.
     if cam.password.is_empty() && !cam.username.is_empty() {
         if let Some(l) = engine.config.lock().unwrap().discovery_logins.iter().find(|l| l.username == cam.username.trim()) {
@@ -2462,7 +2456,7 @@ fn merge_camera_json(cur: &CameraConfig, body: serde_json::Value) -> Result<Came
 /// What an operator with the camera_detection right may change in a camera's
 /// settings: when and where motion counts, AI, and when and how it alerts.
 /// Never how the camera is reached (URLs, logins, ingest), where or whether it
-/// records, commands, folders, the watchdog, overlays, privacy masks, its name
+/// records, commands, folders, the watchdog, overlays, its name
 /// or groups, or turning it on or off.
 const OPERATOR_CAMERA_FIELDS: &[&str] = &[
     // Motion detection.
@@ -2583,7 +2577,10 @@ const RESTART_BUDGET_WINDOW: std::time::Duration = std::time::Duration::from_sec
 
 /// An operator's edit of `cur` with `body`, checked: the new settings, or the answer.
 fn operator_edit(cur: &CameraConfig, body: &serde_json::Value) -> Result<CameraConfig, (StatusCode, serde_json::Value)> {
-    let new = merge_camera_json(cur, body.clone()).map_err(|e| (StatusCode::BAD_REQUEST, serde_json::json!({ "error": e })))?;
+    let mut new = merge_camera_json(cur, body.clone()).map_err(|e| (StatusCode::BAD_REQUEST, serde_json::json!({ "error": e })))?;
+    // (A mask level or "share without the mask" sent by a page of 0.11.1
+    // means nothing now, as for an admin: not a setting changed.)
+    new.clear_old_mask_fields();
     let mut base = cur.clone();
     base.normalize_groups();
     // Nothing else (the same values sent back unchanged are fine).
@@ -2701,8 +2698,8 @@ async fn update_camera(
         Ok(c) => c,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
     };
-    // New masks without a level: "screen"; masks it had keep theirs.
-    cam.settle_mask_mode(Some(&cur));
+    // (A mask level or "share without the mask" from a page of 0.11.1 means nothing now.)
+    cam.clear_old_mask_fields();
     if cam.name.trim().is_empty() || cam.url.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2753,13 +2750,13 @@ async fn remove_camera(
     AxPath(id): AxPath<usize>,
 ) -> Json<serde_json::Value> {
     let e = engine.clone();
-    match tokio::task::spawn_blocking(move || e.try_remove_camera(id)).await {
-        Ok(Ok(true)) => {
+    match tokio::task::spawn_blocking(move || e.remove_camera(id)).await {
+        Ok(true) => {
             crate::helpers::sync_all(&engine);
             Json(serde_json::json!({ "result": "success" }))
         }
-        Ok(Ok(false)) => Json(serde_json::json!({ "error": "camera not found" })),
-        _ => Json(serde_json::json!({ "error": "the camera's privacy masks could not be kept for its recordings, so it was not removed (see the server log)" })),
+        Ok(false) => Json(serde_json::json!({ "error": "camera not found" })),
+        Err(_) => Json(serde_json::json!({ "error": "the camera could not be removed (see the server log)" })),
     }
 }
 
@@ -3136,12 +3133,7 @@ struct DownloadQ {
     /// With caps, "1": what would be sent, as JSON.
     #[serde(default)]
     info: String,
-    /// `masks`: this player draws the camera's privacy masks over the video
-    /// itself (the web page does). Without it, a camera masked on screen
-    /// only is sent with its masks burned in (converted). Downloads always
-    /// have them burned in.
-    #[serde(default)]
-    draws: Option<String>,
+    // (`draws=masks` from players of 0.11.1 is accepted and ignored.)
     /// With download, "1": the camera's text (overlay_text) burned into the
     /// picture (the download is converted).
     #[serde(default)]
@@ -3155,7 +3147,7 @@ fn flag_on(v: &str) -> bool {
 
 /// The camera's settings when its text is to be burned into a download.
 fn burn_text_cfg(engine: &Engine, camera: &str, on: &str) -> Option<crate::config::CameraConfig> {
-    flag_on(on).then(|| crate::transcode::masked::camera_cfg(engine, camera)).flatten()
+    flag_on(on).then(|| engine.picture_cfg(camera)).flatten()
 }
 
 /// `caps` of a request (None: not given or a download); Err: malformed.
@@ -3490,11 +3482,7 @@ async fn event_thumb(
         return (StatusCode::BAD_REQUEST, "bad event id").into_response();
     }
     let path = engine.data_dir.join("thumbs").join(format!("{id}.jpg"));
-    // A picture kept before the camera's privacy masks were set or changed
-    // is masked now, once (and kept that way).
-    let read = tokio::task::spawn_blocking(move || crate::privacy::read_event_picture(&engine.config, &engine.db, &id, &path))
-        .await
-        .unwrap_or_else(|_| Err(std::io::Error::other("task")));
+    let read = tokio::task::spawn_blocking(move || std::fs::read(&path)).await.unwrap_or_else(|_| Err(std::io::Error::other("task")));
     match read {
         Ok(bytes) => Response::builder()
             .header(header::CONTENT_TYPE, "image/jpeg")
@@ -3679,50 +3667,40 @@ async fn clip_file(
         Ok(c) => c,
         Err(r) => return r,
     };
-    // A clip that may show what its camera's masks cover leaves with them
-    // burned in (a download always; to watch, unless the player draws them).
-    // (And where a saved clip file starts: the start saved beside it.)
-    // An event that cannot be looked up is not sent: its masks are unknown.
-    let draws = crate::transcode::masked::draws_masks(dl.draws.as_deref());
+    // The event's camera, and where a saved clip file starts (the start
+    // saved beside it).
     let looked = {
         let (e, i) = (engine.clone(), id.clone());
         tokio::task::spawn_blocking(move || {
             let ev = e.db.get_event(&i)?;
             Ok::<_, anyhow::Error>(ev.map(|ev| {
-                let (a, b) = crate::transcode::masked::event_span(&e, &ev);
-                // (Only the one needed: a download always has them burned in.)
-                let mask = crate::transcode::masked::clip_view_mask(&e, &ev.camera, draws && !download, a, a, b);
-                (ev.camera, a, mask)
+                let (a, _) = e.clip_span_ms(&ev);
+                (ev.camera, a)
             }))
         })
         .await
     };
-    let (camera, file_start_ms, mask) = match looked {
+    let (camera, file_start_ms) = match looked {
         Ok(Ok(Some(v))) => v,
         Ok(Ok(None)) => return (StatusCode::NOT_FOUND, "clip not found").into_response(),
         Ok(Err(e)) => return internal_error("clip", &e),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "clip error").into_response(),
     };
-    let Ok(mask) = mask else { return crate::transcode::masked::unknown_response() };
     let file_start_ms = Some(file_start_ms);
     let user = caller.as_ref().map(|c| c.0 .0.clone()).unwrap_or_default();
     if download {
-        let opts = crate::transcode::http::DownloadOpts { mask: mask.clone(), text: burn_text_cfg(&engine, &camera, &dl.burn_text) };
+        let opts = crate::transcode::http::DownloadOpts { text: burn_text_cfg(&engine, &camera, &dl.burn_text) };
         if opts.burns() {
             return crate::transcode::http::download_event(engine.clone(), id, user, opts).await;
         }
     }
-    let mask = if download { None } else { mask };
-    if caps.is_some() || mask.is_some() || (dl.info == "1" && !download) {
+    if caps.is_some() || (dl.info == "1" && !download) {
         // What the player decodes: untouched when the clip fits, else
         // transcoded (from `start` ms into it). info=1: what, as JSON.
         let src = crate::transcode::http::ClipSrc::Event { id: id.clone(), offset: dl.start.unwrap_or(0).max(0) };
         let ask = ask_of(&req);
-        let masked = mask.is_some();
-        return match crate::transcode::http::handle(engine.clone(), src, caps, dl.info == "1", ask, dl.quality == "low", user, mask).await {
+        return match crate::transcode::http::handle(engine.clone(), src, caps, dl.info == "1", ask, dl.quality == "low", user).await {
             crate::transcode::http::Outcome::Done(r) => r,
-            // (Never the clip as it is when its masks must be burned in.)
-            crate::transcode::http::Outcome::Untouched { .. } if masked => crate::transcode::masked::busy("the conversion could not be planned"),
             crate::transcode::http::Outcome::Untouched { low, headers } => {
                 let r = if low || !path.is_file() {
                     virtual_clip_response(engine, id, false, low, req).await
@@ -3809,7 +3787,7 @@ async fn virtual_clip_response(engine: Arc<Engine>, id: String, download: bool, 
         let Some(c) = engine.virtual_clip_q(&ev, small)? else { return Ok(None) };
         // A download carries the time as a subtitle track (no conversion).
         let c = if download {
-            match c.clone().for_download(None, &ev.camera, &crate::transcode::masked::clock) {
+            match c.clone().for_download(None, &ev.camera, &crate::transcode::burn::clock) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!("clip {id}: no time subtitles: {e:#}");
@@ -4034,12 +4012,7 @@ struct PlaybackQ {
     /// "1": nothing recorded is answered 204 with x-none: 1 instead of 404.
     #[serde(default)]
     quiet: String,
-    /// `masks`: this player draws the camera's privacy masks over the video
-    /// itself (the web page does). Without it, a camera masked on screen
-    /// only is sent with its masks burned in (converted). Downloads always
-    /// have them burned in.
-    #[serde(default)]
-    draws: Option<String>,
+    // (`draws=masks` from players of 0.11.1 is accepted and ignored.)
     /// With download, "1": the camera's text (overlay_text) burned into the
     /// picture (the download is converted).
     #[serde(default)]
@@ -4198,10 +4171,7 @@ struct PictureQ {
     /// "1": nothing recorded is answered 204 with x-none: 1 instead of 404.
     #[serde(default)]
     quiet: String,
-    /// `masks`: this player draws the camera's privacy masks over the
-    /// picture itself (the web page does).
-    #[serde(default)]
-    draws: Option<String>,
+    // (`draws=masks` from players of 0.11.1 is accepted and ignored.)
 }
 
 /// `GET /api/playback/picture?camera=&at=<ms>`: the keyframe on screen at
@@ -4210,9 +4180,6 @@ struct PictureQ {
 /// means fewer pictures, never a blank one. Body: the picture as stored
 /// (length-prefixed NAL units); x-pic-ms (when it was recorded), x-codec
 /// (RFC 6381), x-desc (the avcC/hvcC record, base64).
-/// A camera whose privacy masks are hidden on screen only, asked without
-/// `draws=masks`: the keyframe as a JPEG with the masks blacked out
-/// (Content-Type image/jpeg, x-pic-format: jpeg, x-as-masked: 1; no x-codec).
 async fn playback_picture(State(engine): State<Arc<Engine>>, Query(q): Query<PictureQ>) -> Response {
     // (A moment before 1970 or after the year 3000 is a mistake, not a
     // recording: refused before any arithmetic on it.)
@@ -4223,37 +4190,11 @@ async fn playback_picture(State(engine): State<Arc<Engine>>, Query(q): Query<Pic
     let low = q.quality == "low";
     let cam = q.camera.clone();
     let quiet = q.quiet.clone();
-    let have = q.have;
-    let draws = crate::transcode::masked::draws_masks(q.draws.as_deref());
-    let r = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(crate::ingest::splice::KeyPicture, Option<Vec<u8>>, bool)>> {
-        // The masks to black out for a player that does not draw them.
-        // (The keyframe shown is at most 20 s before the moment: see picture_at.)
-        let mask = crate::transcode::masked::view_mask(&engine, &cam, draws, q.at.saturating_sub(20_000), q.at.saturating_add(1)).map_err(|_| anyhow::anyhow!("masks unknown"))?;
-        let Some(k) = engine.picture_at(&cam, q.at, low)? else { return Ok(None) };
-        let jpeg = match &mask {
-            Some(vf) if have != Some(k.wall_ms) => Some(crate::privacy::keyframe_jpeg(&k, vf)?),
-            _ => None,
-        };
-        Ok(Some((k, jpeg, mask.is_some())))
-    })
-    .await;
+    let r = tokio::task::spawn_blocking(move || engine.picture_at(&cam, q.at, low)).await;
     match r {
-        Ok(Ok(Some((k, jpeg, masked)))) => {
+        Ok(Ok(Some(k))) => {
             if q.have == Some(k.wall_ms) {
                 return StatusCode::NO_CONTENT.into_response();
-            }
-            if masked {
-                // (Never the picture as stored: it shows what the masks hide.)
-                let Some(jpeg) = jpeg else { return (StatusCode::INTERNAL_SERVER_ERROR, "picture error").into_response() };
-                return Response::builder()
-                    .header(header::CONTENT_TYPE, "image/jpeg")
-                    .header(header::CACHE_CONTROL, "no-store")
-                    .header("x-pic-ms", k.wall_ms.to_string())
-                    .header("x-pic-format", "jpeg")
-                    .header("x-as-masked", "1")
-                    .header("x-pic-sub", (k.sub as u8).to_string())
-                    .body(Body::from(jpeg))
-                    .unwrap();
             }
             use base64::Engine as _;
             Response::builder()
@@ -4271,7 +4212,6 @@ async fn playback_picture(State(engine): State<Arc<Engine>>, Query(q): Query<Pic
         }
         Ok(Ok(None)) => nothing_recorded(&quiet, "no recording"),
         Ok(Err(e)) if e.to_string() == "busy" => (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "1")], "busy").into_response(),
-        Ok(Err(e)) if e.to_string() == "masks unknown" => crate::transcode::masked::unknown_response(),
         Ok(Err(e)) => {
             tracing::warn!("picture: {}: {e:#}", q.camera);
             (StatusCode::INTERNAL_SERVER_ERROR, "picture error").into_response()
@@ -4298,37 +4238,18 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
     if download && q.check == "1" {
         return download_check(engine, camera, from, to, low).await;
     }
-    // A camera masked on screen only: a download always has the masks burned
-    // in; watching too, unless the player draws them (`draws=masks`).
     let user = caller.as_ref().map(|c| c.0 .0.clone()).unwrap_or_default();
-    // (Only the one needed, off the async threads: the database.)
-    let draws = crate::transcode::masked::draws_masks(q.draws.as_deref()) && !download;
-    let mask = {
-        let (e, c) = (engine.clone(), camera.clone());
-        match tokio::task::spawn_blocking(move || crate::transcode::masked::view_mask(&e, &c, draws, from, to)).await {
-            Ok(Ok(m)) => m,
-            _ => return crate::transcode::masked::unknown_response(),
-        }
-    };
-    let dl_opts = crate::transcode::http::DownloadOpts {
-        mask: if download { mask.clone() } else { None },
-        text: if download { burn_text_cfg(&engine, &camera, &q.burn_text) } else { None },
-    };
-    let view_mask = if download { None } else { mask.clone() };
-    let download_mask = if download { mask } else { None };
+    let dl_opts = crate::transcode::http::DownloadOpts { text: if download { burn_text_cfg(&engine, &camera, &q.burn_text) } else { None } };
     if download && trick.is_none() && !reverse && (q.caps.is_some() || dl_opts.burns()) {
         let caps = match q.caps.as_deref().map(crate::transcode::Caps::parse) {
             None => None,
             Some(Ok(c)) => Some(c),
             Some(Err(e)) => return (StatusCode::BAD_REQUEST, e).into_response(),
         };
-        let masked = dl_opts.mask.is_some();
-        match crate::transcode::http::download(engine.clone(), camera.clone(), from, to, caps, ask_of(&req), low, user.clone(), crate::transcode::masked::offset_s, dl_opts).await {
+        match crate::transcode::http::download(engine.clone(), camera.clone(), from, to, caps, ask_of(&req), low, user.clone(), crate::transcode::burn::offset_s, dl_opts).await {
             crate::transcode::http::Outcome::Done(r) => return r,
-            // (Nothing recorded there: answered below. Never the recording as
-            // it is when masks must be burned in.)
-            crate::transcode::http::Outcome::Untouched { headers, .. } if !masked => caps_headers = headers,
-            crate::transcode::http::Outcome::Untouched { .. } => {}
+            // (Nothing recorded there: answered below.)
+            crate::transcode::http::Outcome::Untouched { headers, .. } => caps_headers = headers,
         }
     }
     let caps = match caps_of(&q.caps, download || trick.is_some() || reverse) {
@@ -4337,8 +4258,7 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
     };
     let mut from = from;
     let plain = !(download || trick.is_some() || reverse);
-    let plain_download = download && trick.is_none() && !reverse;
-    if caps.is_some() || (view_mask.is_some() && plain) || (q.info == "1" && plain) {
+    if caps.is_some() || (q.info == "1" && plain) {
         // `start`: a moment (epoch ms) within the window; a value no
         // larger than the window's length is ms after its start; an
         // earlier moment is the window's start.
@@ -4349,11 +4269,8 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
         };
         let src = crate::transcode::http::ClipSrc::Window { camera: camera.clone(), from, to, start };
         let ask = ask_of(&req);
-        let masked = view_mask.is_some();
-        match crate::transcode::http::handle(engine.clone(), src, caps, q.info == "1", ask, low, user.clone(), view_mask.clone()).await {
+        match crate::transcode::http::handle(engine.clone(), src, caps, q.info == "1", ask, low, user.clone()).await {
             crate::transcode::http::Outcome::Done(r) => return r,
-            // (Never the recording as it is when its masks must be burned in.)
-            crate::transcode::http::Outcome::Untouched { .. } if masked => return crate::transcode::masked::busy("the conversion could not be planned"),
             crate::transcode::http::Outcome::Untouched { low: l, headers } => {
                 low = l;
                 caps_headers = headers;
@@ -4388,49 +4305,6 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
         tracing::info!("playback: {camera}: window {from} took {} ms to prepare{}", t0.elapsed().as_millis(), if low { " (sub stream)" } else { "" });
     }
     match built {
-        Ok(Ok(Some(clip))) if download_mask.is_some() || (view_mask.is_some() && !plain) => {
-            // Masks to burn in: a fast or backwards clip converted as it is
-            // sent (every picture keeps its time), with the same headers.
-            // (A download got here only when nothing covers the window for the
-            // conversion above; it is refused rather than sent unmasked.)
-            if download && plain_download {
-                return nothing_recorded(&q.quiet, "no recording covers that window");
-            }
-            let Some(desc) = crate::transcode::masked::probe_clip(&clip) else {
-                return crate::transcode::masked::busy("the recording could not be read for the conversion");
-            };
-            let mut headers = vec![
-                ("x-clip-start-ms".to_string(), clip.start_ms.to_string()),
-                ("x-clip-end-ms".to_string(), clip.end_ms.to_string()),
-                ("x-clip-sub".to_string(), (clip.sub as u8).to_string()),
-                ("x-clip-reverse".to_string(), (reverse as u8).to_string()),
-                ("x-clip-frames".to_string(), clip.frame_times.len().to_string()),
-            ];
-            if download {
-                headers.push(("content-disposition".to_string(), format!("attachment; filename=\"{}-{from}.mp4\"", crate::config::slug(&camera))));
-            }
-            let media_ms = trick_media_ms(clip.start_ms, clip.end_ms, clip.frame_times.len(), trick, frame_ms);
-            // `Range: bytes=0-0` or HEAD (the timeline reading the headers):
-            // answered from them, no conversion started.
-            if ask_of(&req) == crate::transcode::http::Ask::Headers {
-                return masked_headers_only(headers, media_ms);
-            }
-            let b = crate::transcode::masked::Burn {
-                input: crate::transcode::file::Input::Clip(clip),
-                desc,
-                camera: camera.clone(),
-                mask: if download { download_mask.clone() } else { view_mask.clone() },
-                caption: None,
-                subs: None,
-                seek_ms: 0,
-                limit_ms: None,
-                media_ms,
-                keep_times: true,
-                what: if reverse { "backwards" } else { "fast" },
-                download: false,
-            };
-            crate::transcode::masked::stream(b, &user, headers).await
-        }
         Ok(Ok(Some(clip))) => {
             // A download (the timeline's export): exactly the stretch asked
             // for, with the camera and time as captions.
@@ -4478,21 +4352,9 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
                         }
                     }
                     let name = format!("{}-{}.mp4", crate::config::slug(&camera), c.start_ms);
-                    // Masks to burn in (or the camera's text): the saved clip converted.
-                    let text = if download { burn_text_cfg(&engine2, &camera, &q.burn_text) } else { None };
-                    // (The saved clip may begin before the window.)
-                    let mask = match if download { download_mask.clone() } else { view_mask.clone() } {
-                        Some(m) => Some(m),
-                        None => {
-                            let (e, cam, (a, b, s)) = (engine2.clone(), camera.clone(), (c.start_ms.min(from), c.end_ms.max(to), c.start_ms));
-                            match tokio::task::spawn_blocking(move || crate::transcode::masked::clip_view_mask(&e, &cam, draws, s, a, b)).await {
-                                Ok(Ok(m)) => m,
-                                _ => return crate::transcode::masked::unknown_response(),
-                            }
-                        }
-                    };
-                    if mask.is_some() || text.is_some() {
-                        return event_clip_burned(&engine2, c, &camera, &name, download, mask, text, &user).await;
+                    // The camera's text to burn in: the saved clip converted.
+                    if let Some(text) = if download { burn_text_cfg(&engine2, &camera, &q.burn_text) } else { None } {
+                        return event_clip_burned(&engine2, c, &camera, &name, download, text, &user).await;
                     }
                     return event_clip_window(c, &name, download, req).await;
                 }
@@ -4503,61 +4365,6 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
         Ok(Err(e)) => internal_error("playback", &e),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "playback error").into_response(),
     }
-}
-
-/// How long a fast or backwards clip plays (ms), for its converted header:
-/// a fast clip's pictures each last `frame_ms` (its wall span sped up), a
-/// backwards one plays its span at normal speed. None: unknown.
-fn trick_media_ms(start_ms: i64, end_ms: i64, frames: usize, trick: Option<u32>, frame_ms: u32) -> Option<i64> {
-    let span = end_ms - start_ms;
-    let ms = match trick {
-        Some(_) if frames > 0 => frames as i64 * frame_ms as i64,
-        Some(sp) => span / sp.max(1) as i64,
-        None => span,
-    };
-    Some(ms).filter(|m| *m > 0)
-}
-
-#[cfg(test)]
-mod trick_media_tests {
-    #[test]
-    fn a_fast_clip_lasts_its_pictures_and_a_backwards_one_its_span() {
-        // 10 minutes at 60x, a picture every 250 ms: 40 pictures, 10 s.
-        assert_eq!(super::trick_media_ms(0, 600_000, 40, Some(60), 250), Some(10_000));
-        // Pictures not counted: the span sped up.
-        assert_eq!(super::trick_media_ms(0, 600_000, 0, Some(60), 250), Some(10_000));
-        assert_eq!(super::trick_media_ms(5_000, 65_000, 0, None, 250), Some(60_000));
-        assert_eq!(super::trick_media_ms(5_000, 5_000, 0, None, 250), None);
-    }
-
-    #[test]
-    fn a_probe_of_a_masked_conversion_has_its_headers_and_no_body() {
-        let r = super::masked_headers_only(vec![("x-clip-start-ms".into(), "1000".into())], Some(2_000));
-        let h = r.headers();
-        assert_eq!(h["content-length"], "0");
-        assert_eq!(h["x-as-masked"], "1");
-        assert_eq!(h["x-as-media-duration-ms"], "2000");
-        assert_eq!(h["x-clip-start-ms"], "1000");
-    }
-}
-
-/// The headers a masked conversion would be sent with, and no body (a
-/// probe: nothing is converted).
-fn masked_headers_only(headers: Vec<(String, String)>, media_ms: Option<i64>) -> Response {
-    let mut r = Response::builder()
-        .header(header::CONTENT_TYPE, "video/mp4")
-        .header(header::CACHE_CONTROL, "no-store")
-        .header(header::ACCEPT_RANGES, "none")
-        .header(header::CONTENT_LENGTH, "0")
-        .header("x-as-transcoded", "1")
-        .header("x-as-masked", "1");
-    if let Some(ms) = media_ms {
-        r = r.header("x-as-media-duration-ms", ms.to_string());
-    }
-    for (k, v) in headers {
-        r = r.header(k, v);
-    }
-    r.body(Body::empty()).unwrap()
 }
 
 /// `download=1&check=1`: would this export work? 204, or 404 with the reason.
@@ -4606,10 +4413,9 @@ fn event_clip_export_problem(c: &crate::engine::playback::EventClipAt, from: i64
 }
 
 /// A playback window answered from an event's saved clip file, converted to
-/// burn in the masks (or the camera's text): streamed, no byte ranges; a
-/// download also has the time subtitle track.
-#[allow(clippy::too_many_arguments)]
-async fn event_clip_burned(engine: &Arc<Engine>, c: crate::engine::playback::EventClipAt, camera: &str, name: &str, download: bool, mask: Option<String>, text: Option<crate::config::CameraConfig>, user: &str) -> Response {
+/// burn in the camera's text: streamed, no byte ranges; a download also has
+/// the time subtitle track.
+async fn event_clip_burned(engine: &Arc<Engine>, c: crate::engine::playback::EventClipAt, camera: &str, name: &str, download: bool, text: crate::config::CameraConfig, user: &str) -> Response {
     let path = c.path.clone();
     let desc = match tokio::task::spawn_blocking(move || crate::transcode::mp4::probe_file(&path)).await {
         Ok(Ok(Some(d))) => d,
@@ -4627,13 +4433,12 @@ async fn event_clip_burned(engine: &Arc<Engine>, c: crate::engine::playback::Eve
     if download {
         headers.push(("content-disposition".to_string(), format!("attachment; filename=\"{name}\"")));
     }
-    let b = crate::transcode::masked::Burn {
+    let b = crate::transcode::burn::Burn {
         input: crate::transcode::file::Input::File(c.path),
         desc,
         camera: camera.to_string(),
-        mask,
-        caption: text.as_ref().map(|t| crate::engine::clock_text(c.start_ms, c.end_ms - c.start_ms, &crate::transcode::masked::offset_s, &|b| crate::engine::overlay_download_drawtext(t, b))),
-        subs: if download { crate::transcode::masked::subs_file(engine, c.start_ms, media_ms.unwrap_or(0), camera) } else { None },
+        caption: Some(crate::engine::clock_text(c.start_ms, c.end_ms - c.start_ms, &crate::transcode::burn::offset_s, &|b| crate::engine::overlay_download_drawtext(&text, b))),
+        subs: if download { crate::transcode::burn::subs_file(engine, c.start_ms, media_ms.unwrap_or(0), camera) } else { None },
         seek_ms: 0,
         limit_ms: None,
         media_ms,
@@ -4641,7 +4446,7 @@ async fn event_clip_burned(engine: &Arc<Engine>, c: crate::engine::playback::Eve
         what: if download { "download" } else { "playback" },
         download,
     };
-    crate::transcode::masked::stream(b, user, headers).await
+    crate::transcode::burn::stream(b, user, headers).await
 }
 
 /// A playback window answered from an event's saved clip file (see
@@ -4919,8 +4724,7 @@ async fn timelapse_list(State(engine): State<Arc<Engine>>, axum::Extension(acces
         .filter(|(s, ..)| access.can_slug(s))
         .map(|(s, d, bytes, making)| {
             let name = names.iter().find(|(x, _)| *x == s).map(|(_, n)| n.clone()).unwrap_or_else(|| s.clone());
-            // masks_old: made before the camera's privacy masks were set or changed (not served).
-            serde_json::json!({ "slug": s, "camera": name, "date": d.to_string(), "bytes": bytes, "making": making, "masks_old": !making && engine.timelapse_masks_old(&s, d) })
+            serde_json::json!({ "slug": s, "camera": name, "date": d.to_string(), "bytes": bytes, "making": making })
         })
         .collect();
     Json(serde_json::json!({ "timelapses": list, "enabled": tl.enabled, "seconds": tl.seconds, "hour": tl.hour }))
@@ -4961,10 +4765,6 @@ async fn timelapse_file(
     let path = engine.timelapse_path(&cam, d);
     if !path.is_file() {
         return (StatusCode::NOT_FOUND, "no time-lapse for that day").into_response();
-    }
-    // Made before the camera's privacy masks were set or changed: never sent.
-    if engine.timelapse_masks_old(&cam, d) {
-        return (StatusCode::CONFLICT, [(header::CACHE_CONTROL, "no-store")], "This time-lapse was made before the camera's privacy masks were set or changed, so it is not shown. Make it again (Make now).").into_response();
     }
     let mut resp = match tower::ServiceExt::oneshot(ServeFile::new(path), req).await {
         Ok(r) => r.into_response(),
@@ -5075,11 +4875,10 @@ pub(crate) async fn snapshot(State(engine): State<Arc<Engine>>, caller: Option<a
     if frame.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, "no frame captured yet").into_response();
     }
-    // (The picture's privacy masks are already drawn by the decoder; the
-    // camera's text is burned in here, once per picture.)
-    let text = engine.picture_cfg(&name).and_then(|c| crate::privacy::text_filter(&c, crate::privacy::Clock::Live));
+    // (The camera's text is burned in here, once per picture.)
+    let text = engine.picture_cfg(&name).and_then(|c| crate::picture_text::text_filter(&c, crate::picture_text::Clock::Live));
     let frame = match text {
-        Some(vf) => tokio::task::spawn_blocking(move || crate::privacy::snapshot_with_text(id, seq, &frame, &vf)).await.unwrap_or_default(),
+        Some(vf) => tokio::task::spawn_blocking(move || crate::picture_text::snapshot_with_text(id, seq, &frame, &vf)).await.unwrap_or_default(),
         None => frame,
     };
     if frame.is_empty() {
@@ -6996,12 +6795,7 @@ async fn discover_preview(State(engine): State<Arc<Engine>>, Json(mut req): Json
     let Ok(_slot) = AT_ONCE.acquire().await else {
         return api_error(StatusCode::SERVICE_UNAVAILABLE, "busy");
     };
-    // An address of a camera with privacy masks: they are drawn here too.
-    let masks = {
-        let c = engine.config.lock().unwrap();
-        crate::privacy::camera_at_url(&c, preview_source(&req)).or_else(|| crate::privacy::camera_at_url(&c, &req.url)).map(crate::privacy::camera_mask_filter).unwrap_or_default()
-    };
-    let frame = tokio::task::spawn_blocking(move || grab_preview_masked(&input, &masks)).await.ok().flatten();
+    let frame = tokio::task::spawn_blocking(move || grab_preview(&input)).await.ok().flatten();
     match frame {
         Some(jpeg) => Response::builder()
             .header(header::CONTENT_TYPE, "image/jpeg")
@@ -7014,17 +6808,12 @@ async fn discover_preview(State(engine): State<Arc<Engine>>, Json(mut req): Json
 }
 
 fn grab_preview(input: &str) -> Option<Vec<u8>> {
-    grab_preview_masked(input, "")
-}
-
-/// As `grab_preview`, privacy masks `masks` (a filter) blacked out.
-fn grab_preview_masked(input: &str, masks: &str) -> Option<Vec<u8>> {
     use std::process::Stdio;
-    let vf = crate::privacy::chain(masks, "scale=320:-2");
+    let vf = "scale=320:-2";
     let mut child = crate::child::ffmpeg()
         .args(["-hide_banner", "-loglevel", "quiet"])
         .args(if input.starts_with("rtsp") { &["-rtsp_transport", "tcp"][..] } else { &[][..] })
-        .args(["-i", input, "-vf", &vf, "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "6", "-"])
+        .args(["-i", input, "-vf", vf, "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "6", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -8890,8 +8679,6 @@ mod operator_tests {
             (j!({"hwaccel": "vaapi"}), "hwaccel"),
             (j!({"ingest": "ffmpeg"}), "ingest"),
             (j!({"fps": 30}), "fps"),
-            (j!({"privacy_masks": [{"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}]}), "privacy_masks"),
-            (j!({"mask_mode": "screen"}), "mask_mode"),
             (j!({"also_trigger": ["Garage"]}), "also_trigger"),
             (j!({"overlay": true}), "overlay"),
             (j!({"overlay_text": "{v:x}"}), "overlay_text"),
@@ -8966,7 +8753,6 @@ mod operator_tests {
         for p in [
             serde_json::json!({"zones": [{"x": 0.9, "y": 0.1, "w": 0.2, "h": 0.1}]}),
             serde_json::json!({"ignore_zones": [{"x": -0.1, "y": 0.1, "w": 0.2, "h": 0.1}]}),
-            serde_json::json!({"privacy_masks": [{"x": 0.1, "y": 0.1, "w": 0.0, "h": 0.1}]}),
             serde_json::json!({"schedule": "08:00-17:00-x"}),
             serde_json::json!({"alert_schedule": "08:00-17:00-09:00"}),
             serde_json::json!({"schedule": "nonsense"}),
@@ -9100,28 +8886,19 @@ mod operator_tests {
     }
 
     #[tokio::test]
-    async fn mask_level_is_shown_to_viewers_and_refused_where_it_cannot_work() {
+    async fn cameras_have_no_masks_and_saving_masks_is_refused() {
         use axum::body::Body;
         use axum::http::{header, Request, StatusCode};
         use base64::Engine as _;
         use tower::ServiceExt;
         let mut cfg: crate::config::Config = toml::from_str("").unwrap();
-        for (name, admin) in [("ann", true), ("vic", false)] {
-            cfg.server.users.push(crate::config::UserConfig { username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: vec![], disabled: false, role: String::new(), perms: Default::default() });
-        }
+        cfg.server.users.push(crate::config::UserConfig { username: "ann".into(), password: crate::auth::hash_password("pw-ann-1"), admin: true, cameras: vec![], disabled: false, role: String::new(), perms: Default::default() });
         let e = crate::engine::Engine::for_test(cfg);
         let h = e.add_test_camera("Yard");
-        {
-            let mut c = h.cfg.write().unwrap();
-            c.url = "push://yard-camera-0001".into();
-            c.privacy_masks = vec![crate::config::ZoneRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }];
-            c.mask_mode = Some("screen".into());
-            e.config.lock().unwrap().cameras[0] = c.clone();
-        }
         let app = super::build_router(e.clone());
-        let call = |method: &str, path: &str, who: &str, body: &str| {
+        let call = |method: &str, path: &str, body: &str| {
             let b = Request::builder().method(method).uri(path).header(header::HOST, "localhost:8090").header(header::CONTENT_TYPE, "application/json")
-                .header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{who}:pw-{who}-1"))));
+                .header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("ann:pw-ann-1")));
             let req = b.body(Body::from(body.to_string())).unwrap();
             let app = app.clone();
             async move {
@@ -9131,60 +8908,102 @@ mod operator_tests {
                 (s, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
             }
         };
-        // A viewer gets the masks and their level (to draw them).
-        let (s, v) = call("GET", "/api/cameras", "vic", "").await;
+        let (s, v) = call("GET", "/api/cameras", "").await;
         assert_eq!(s, StatusCode::OK);
         let cam = v.as_array().map(|a| a[0].clone()).unwrap_or_else(|| v["cameras"][0].clone());
-        assert_eq!(cam["mask_mode"], "screen", "{v}");
-        assert_eq!(cam["privacy_masks"].as_array().map(Vec::len), Some(1));
-        // Only admins change it.
-        let (s, _) = call("PUT", "/api/cameras/0", "vic", r#"{"mask_mode":"recording"}"#).await;
-        assert!(s == StatusCode::FORBIDDEN || s == StatusCode::UNAUTHORIZED, "{s}");
-        // A pushed camera cannot burn masks into its recordings: a plain 400.
-        let (s, j) = call("PUT", "/api/cameras/0", "ann", r#"{"mask_mode":"recording"}"#).await;
+        assert_eq!(cam["name"], "Yard", "{v}");
+        for gone in ["privacy_masks", "mask_mode", "mask_rev"] {
+            assert!(cam.get(gone).is_none(), "{gone}: {cam}");
+        }
+        // Masks, changed or added: 400, saying to use the camera's own.
+        let masks = r#"[{"x":0.1,"y":0.1,"w":0.2,"h":0.2}]"#;
+        let (s, j) = call("PUT", "/api/cameras/0", &format!(r#"{{"privacy_masks":{masks}}}"#)).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
-        assert!(j["error"].as_str().unwrap_or("").contains("pushed or battery camera"), "{j}");
-        let (s, j) = call("PUT", "/api/cameras/0", "ann", r#"{"mask_mode":"everywhere"}"#).await;
+        assert_eq!(j["error"], crate::config::MASKS_GONE, "{j}");
+        assert!(h.cfg.read().unwrap().privacy_masks.is_empty(), "nothing was saved");
+        let (s, j) = call("POST", "/api/cameras", &format!(r#"{{"name":"Shed","url":"rtsp://192.0.2.7/s","privacy_masks":{masks}}}"#)).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
-        assert!(j["error"].as_str().unwrap_or("").contains("\"screen\""), "{j}");
-        assert_eq!(h.cfg.read().unwrap().mask_mode.as_deref(), Some("screen"), "nothing was saved");
+        assert_eq!(j["error"], crate::config::MASKS_GONE, "{j}");
+        assert_eq!(e.config.lock().unwrap().cameras.len(), 1, "not added");
+        // An empty list, or a level alone (an old page): saved, the level left out.
+        let (s, j) = call("PUT", "/api/cameras/0", r#"{"privacy_masks":[],"mask_mode":"recording"}"#).await;
+        assert_eq!(s, StatusCode::OK, "{j}");
+        assert_eq!(e.camera(0).unwrap().cfg.read().unwrap().mask_mode, None);
+        let (s, j) = call("PUT", "/api/cameras/0", r#"{"mask_mode":"everywhere"}"#).await;
+        assert_eq!(s, StatusCode::OK, "{j}");
+        assert_eq!(e.camera(0).unwrap().cfg.read().unwrap().mask_mode, None);
     }
 
-    #[test]
-    fn masks_saved_without_a_level() {
-        let rect = crate::config::ZoneRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
-        let plain: crate::config::CameraConfig = toml::from_str("name = \"a\"\nurl = \"rtsp://192.0.2.1/x\"").unwrap();
-        // New masks: "screen".
-        let mut new = plain.clone();
-        new.privacy_masks = vec![rect.clone()];
-        new.settle_mask_mode(Some(&plain));
-        assert_eq!(new.mask_mode.as_deref(), Some("screen"));
-        let mut added = new.clone();
-        added.mask_mode = None;
-        added.settle_mask_mode(None);
-        assert_eq!(added.mask_mode.as_deref(), Some("screen"));
-        // Masks it had keep their level, also one only implied (from before the setting).
-        let mut had = plain.clone();
-        had.privacy_masks = vec![rect.clone()];
-        let mut edit = had.clone();
-        edit.privacy_masks.push(rect.clone());
-        edit.settle_mask_mode(Some(&had));
-        assert_eq!(edit.mask_mode.as_deref(), Some("recording"));
-        // A level the page sends is kept (trimmed); a blank one is no level.
-        let mut sent = had.clone();
-        sent.mask_mode = Some(" screen ".into());
-        sent.settle_mask_mode(Some(&had));
-        assert_eq!(sent.mask_mode.as_deref(), Some("screen"));
-        let mut blank = new.clone();
-        blank.mask_mode = Some(String::new());
-        blank.settle_mask_mode(Some(&new));
-        assert_eq!(blank.mask_mode.as_deref(), Some("screen"));
-        // No masks: nothing to settle.
-        let mut none = plain.clone();
-        none.settle_mask_mode(None);
-        assert_eq!(none.mask_mode, None);
-        assert_eq!(none.mask_level(), "screen");
-        assert!(!none.mask_in_recording());
+    /// After the start moved a camera's masks (0.11.2), its zones still save
+    /// through the zone editor: the move keeps to the limits saving checks.
+    /// And an operator's save from a page of 0.11.1, which still sends the
+    /// mask level and "share without the mask", is no admin-only change.
+    /// ("share without the mask" is no setting any more: ignored.)
+    #[tokio::test]
+    async fn zones_save_after_the_masks_moved_and_an_old_page_saves_for_an_operator() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        let mut cfg: crate::config::Config = toml::from_str("").unwrap();
+        for (name, admin, role) in [("ann", true, ""), ("otto", false, "operator")] {
+            cfg.server.users.push(crate::config::UserConfig { username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: vec![], disabled: false, role: role.into(), perms: Default::default() });
+        }
+        let e = crate::engine::Engine::for_test(cfg);
+        let h = e.add_test_camera("Porch");
+        // As 0.11.1 left it: 20 ignore zones, 21 masks (one with no size,
+        // one outside the picture, one partly outside), shared and confirmed.
+        let mut old: crate::config::Config = toml::from_str("[[cameras]]\nname = \"Porch\"\nurl = \"rtsp://127.0.0.1/x\"\nshare = true\nshare_unmasked = true\nmask_mode = \"screen\"\n").unwrap();
+        let c = &mut old.cameras[0];
+        c.ignore_zones = (0..20).map(|i| crate::config::ZoneRect { x: 0.01 * i as f64, y: 0.0, w: 0.01, h: 0.01 }).collect();
+        c.privacy_masks = (0..18).map(|i| crate::config::ZoneRect { x: 0.04 * i as f64, y: 0.5, w: 0.03, h: 0.03 }).collect();
+        c.privacy_masks.extend([
+            crate::config::ZoneRect { x: 0.2, y: 0.2, w: 0.0, h: 0.1 },
+            crate::config::ZoneRect { x: 1.5, y: 0.2, w: 0.1, h: 0.1 },
+            crate::config::ZoneRect { x: 0.8, y: 0.8, w: 0.4, h: 0.4 },
+        ]);
+        let moved = old.move_masks_to_ignore();
+        assert_eq!((moved[0].no_zone, moved[0].no_area, moved[0].share_off), (7, 7, true), "{moved:?}");
+        let cam = old.cameras.remove(0);
+        assert_eq!((cam.ignore_zones.len(), cam.alert_ignore_polys.len()), (crate::config::MAX_ZONES, crate::config::MAX_ALERT_IGNORE_AREAS));
+        *h.cfg.write().unwrap() = cam.clone();
+        e.config.lock().unwrap().cameras[0] = cam.clone();
+        let app = super::build_router(e.clone());
+        let call = |who: &'static str, body: String| {
+            let req = Request::builder().method("PUT").uri("/api/cameras/0").header(header::HOST, "localhost:8090").header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{who}:pw-{who}-1"))))
+                .body(Body::from(body)).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let s = r.status();
+                let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+                (s, String::from_utf8_lossy(&b).into_owned())
+            }
+        };
+        // The zone editor removes one ignore zone, then one area: both save.
+        let mut zones = cam.ignore_zones.clone();
+        zones.remove(3);
+        let (s, b) = call("ann", serde_json::json!({ "ignore_zones": zones }).to_string()).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(e.camera(0).unwrap().cfg.read().unwrap().ignore_zones.len(), crate::config::MAX_ZONES - 1);
+        let mut areas = cam.alert_ignore_polys.clone();
+        areas.pop();
+        let (s, b) = call("ann", serde_json::json!({ "alert_ignore_polys": areas }).to_string()).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(e.camera(0).unwrap().cfg.read().unwrap().alert_ignore_polys.len(), crate::config::MAX_ALERT_IGNORE_AREAS - 1);
+        // An operator's save from an old page: the old fields are dropped, the zones saved.
+        zones.remove(0);
+        let body = serde_json::json!({ "ignore_zones": zones, "mask_mode": "recording", "share_unmasked": true }).to_string();
+        let (s, b) = call("otto", body).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let now = e.camera(0).unwrap().cfg.read().unwrap().clone();
+        assert_eq!(now.ignore_zones.len(), crate::config::MAX_ZONES - 2);
+        assert!(now.mask_mode.is_none(), "{:?}", now.mask_mode);
+        // A setting outside an operator's is still refused.
+        let (s, b) = call("otto", r#"{"mask_mode":"screen","record":false}"#.into()).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(b.contains("record") && !b.contains("mask_mode"), "{b}");
     }
 
     #[tokio::test]

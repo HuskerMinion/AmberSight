@@ -345,12 +345,12 @@ pub fn window_clip(
 
 /// Decode one frame of `clip` at `offset_s` seconds into a JPEG with ffmpeg,
 /// optionally scaled to `width` pixels wide. `pre`: filters on the picture
-/// as recorded, before the scaling (privacy masks, text; empty: none).
+/// as recorded, before the scaling (the camera's text; empty: none).
 fn extract_jpeg(clip: VirtualClip, offset_s: f64, width: Option<u32>, pre: &str) -> anyhow::Result<Vec<u8>> {
     use std::process::Stdio;
     let mut cmd = crate::child::ffmpeg();
     cmd.args(["-hide_banner", "-loglevel", "error", "-i", "-"]).args(["-ss", &format!("{offset_s:.3}")]);
-    let vf = crate::privacy::chain(pre, &width.map(|w| format!("scale={w}:-2")).unwrap_or_default());
+    let vf = crate::picture_text::chain(pre, &width.map(|w| format!("scale={w}:-2")).unwrap_or_default());
     if !vf.is_empty() {
         cmd.args(["-vf", &vf]);
     }
@@ -383,7 +383,7 @@ fn extract_jpeg(clip: VirtualClip, offset_s: f64, width: Option<u32>, pre: &str)
 }
 
 /// Frame at `at_ms` from a clip that starts at the preceding keyframe.
-/// `vf`: filters for the picture (privacy masks, text; empty: none).
+/// `vf`: filters for the picture (the camera's text; empty: none).
 pub fn still_jpeg(
     db: &Db,
     camera: &str,
@@ -435,8 +435,7 @@ pub const MAX_FILMSTRIP_FRAMES: u32 = 240;
 const MAX_FILMSTRIP_STEP_MS: i64 = 2 * 3600 * 1000;
 
 /// One picture every `step_ms` (keyframes only, the sub stream when there
-/// is one), `w` pixels wide (16:9 cells), laid out 12 to a row. `masks`:
-/// the camera's privacy mask filter, `rev` its revision (part of the cache key).
+/// is one), `w` pixels wide (16:9 cells), laid out 12 to a row.
 #[allow(clippy::too_many_arguments)]
 pub fn filmstrip(
     db: &Db,
@@ -445,11 +444,10 @@ pub fn filmstrip(
     step_ms: i64,
     n: u32,
     w: u32,
-    (masks, rev): (&str, &str),
     resolve: impl Fn(&SegmentRow) -> PathBuf,
 ) -> anyhow::Result<Option<Filmstrip>> {
     use std::sync::{Mutex, OnceLock};
-    type Key = (String, i64, i64, u32, u32, String);
+    type Key = (String, i64, i64, u32, u32);
     static CACHE: OnceLock<Mutex<std::collections::VecDeque<(Key, std::sync::Arc<Filmstrip>)>>> = OnceLock::new();
     static JOBS: Gate = Gate::new(FILMSTRIP_JOBS);
     let n = n.clamp(1, MAX_FILMSTRIP_FRAMES);
@@ -460,7 +458,7 @@ pub fn filmstrip(
     let from_ms = from_ms.clamp(0, Utc::now().timestamp_millis() + 86_400_000);
     let to_ms = from_ms + step_ms * n as i64;
     let cam = slug(camera);
-    let key = (cam.clone(), from_ms, step_ms, n, w, rev.to_string());
+    let key = (cam.clone(), from_ms, step_ms, n, w);
     let cache = CACHE.get_or_init(Default::default);
     // Spans still being recorded change; only cache what is over.
     let settled = to_ms < Utc::now().timestamp_millis() - 120_000;
@@ -487,8 +485,7 @@ pub fn filmstrip(
     let cols = k.min(12);
     let rows = k.div_ceil(cols);
     yield_to_playback();
-    // (Masks on each picture as recorded, before it is fitted into its cell.)
-    let vf = crate::privacy::chain(masks, &format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={cols}x{rows}"));
+    let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={cols}x{rows}");
     let jpeg = run_ffmpeg_jpeg(clip, &vf)?;
     let f = Filmstrip { jpeg, times, cols, w, h };
     if settled {
@@ -677,13 +674,13 @@ fn run_ffmpeg_reverse(clip: VirtualClip, cancelled: &dyn Fn() -> bool) -> anyhow
 /// while the next decodes). Decoding on the graphics card where it can
 /// (Windows D3D11, which also works for a service), else on the CPU.
 /// Returns how many frames there were.
-fn run_ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, masks: &str, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
+fn run_ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
     #[cfg(windows)]
     {
         use std::sync::atomic::{AtomicBool, Ordering};
         static HW_BROKEN: AtomicBool = AtomicBool::new(false);
         if !HW_BROKEN.load(Ordering::Relaxed) {
-            match ffmpeg_frames(clip.clone(), fps, width, masks, true, each) {
+            match ffmpeg_frames(clip.clone(), fps, width, true, each) {
                 Ok(n) => return Ok(n),
                 // (Only a start that made nothing: frames already handed on
                 // cannot be taken back.)
@@ -695,20 +692,19 @@ fn run_ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, masks: &str, each:
             }
         }
     }
-    ffmpeg_frames(clip, fps, width, masks, false, each)
+    ffmpeg_frames(clip, fps, width, false, each)
 }
 
 /// Decode `clip` into `fps` JPEGs a second (at most `width` wide), each handed
 /// to `each` as it comes (an error from `each` stops it and is returned).
-/// `masks`: privacy mask filter blacked out in each (empty: none).
-pub(crate) fn clip_frames(clip: VirtualClip, fps: u32, width: u32, masks: &str, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
-    run_ffmpeg_frames(clip, fps, width, masks, each)
+pub(crate) fn clip_frames(clip: VirtualClip, fps: u32, width: u32, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
+    run_ffmpeg_frames(clip, fps, width, each)
 }
 
-fn ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, masks: &str, hw: bool, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
+fn ffmpeg_frames(clip: VirtualClip, fps: u32, width: u32, hw: bool, each: &mut dyn FnMut(usize, &[u8]) -> anyhow::Result<()>) -> anyhow::Result<usize> {
     use std::io::Read;
     use std::process::Stdio;
-    let vf = crate::privacy::chain(&format!("fps={fps},scale='min({width},iw)':-2"), masks);
+    let vf = format!("fps={fps},scale='min({width},iw)':-2");
     let hwargs: &[&str] = if hw { &["-hwaccel", "d3d11va"] } else { &[] };
     let mut child = crate::child::ffmpeg()
         .args(["-hide_banner", "-loglevel", "error"])
@@ -811,18 +807,15 @@ pub const MAX_PREVIEW_WIDTH: u32 = 640;
 /// at or before `at_ms` (no decoding up to the exact moment), from the sub
 /// stream when it was recorded (much cheaper to decode), `width` wide.
 /// Returns the picture and the keyframe's time.
-/// `masks`: the camera's privacy mask filter, `rev` its revision (part of
-/// the cache key).
 pub fn preview_jpeg(
     db: &Db,
     camera: &str,
     at_ms: i64,
     width: u32,
-    (masks, rev): (&str, &str),
     resolve: impl Fn(&SegmentRow) -> PathBuf,
 ) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
     use std::sync::{Mutex, OnceLock};
-    type Entry = ((String, i64, u32, String), Vec<u8>);
+    type Entry = ((String, i64, u32), Vec<u8>);
     static CACHE: OnceLock<Mutex<std::collections::VecDeque<Entry>>> = OnceLock::new();
     const CACHE_LEN: usize = 400;
     static PREVIEWS: Gate = Gate::new(3);
@@ -831,7 +824,7 @@ pub fn preview_jpeg(
     let cam = slug(camera);
     let segs = sources_q(db, &cam, at_ms, at_ms + 1000, true, resolve)?;
     let Some(clip) = VirtualClip::plan_trick(&segs, at_ms, at_ms + 1000, 1, 100)? else { return Ok(None) };
-    let key = (cam, clip.start_ms, width, rev.to_string());
+    let key = (cam, clip.start_ms, width);
     let cache = CACHE.get_or_init(Default::default);
     if let Some((_, jpeg)) = cache.lock().unwrap().iter().find(|(k, _)| *k == key) {
         return Ok(Some((jpeg.clone(), clip.start_ms)));
@@ -839,7 +832,7 @@ pub fn preview_jpeg(
     let start = clip.start_ms;
     // Each one is an ffmpeg run: a few at a time.
     let Some(_slot) = PREVIEWS.enter(std::time::Duration::from_secs(5)) else { anyhow::bail!("busy") };
-    let jpeg = extract_jpeg(clip, 0.0, Some(width), masks)?;
+    let jpeg = extract_jpeg(clip, 0.0, Some(width), "")?;
     let mut c = cache.lock().unwrap();
     if c.len() >= CACHE_LEN {
         c.pop_front();
@@ -1008,16 +1001,12 @@ impl Engine {
     pub fn event_track(&self, id: &str, part: u32) -> anyhow::Result<Option<(u32, TrackFrames)>> {
         use std::sync::{Arc, Mutex, OnceLock};
         type Track = Arc<(u32, TrackFrames)>;
-        type Cache = Mutex<std::collections::VecDeque<((String, u32, String), Track)>>;
+        type Cache = Mutex<std::collections::VecDeque<((String, u32), Track)>>;
         static CACHE: OnceLock<Cache> = OnceLock::new();
         static JOBS: Gate = Gate::new(1);
         const FPS: i64 = 3;
         let cache = CACHE.get_or_init(Default::default);
-        // (What the AI saw changes with the camera's privacy masks.)
-        let ev_at = self.db.get_event(id)?.map(|e| (e.camera, track_window(e.start, e.end).0));
-        let look = ev_at.as_ref().and_then(|(c, from)| self.picture_cfg_at(c, *from));
-        let masks = look.as_ref().map(crate::privacy::camera_mask_filter).unwrap_or_default();
-        let key = (id.to_string(), part, look.as_ref().map(crate::privacy::revision).unwrap_or_default());
+        let key = (id.to_string(), part);
         let cached = || cache.lock().unwrap().iter().find(|(k, _)| *k == key).map(|(_, t)| (t.0, t.1.clone()));
         if let Some(t) = cached() {
             return Ok(Some(t));
@@ -1043,7 +1032,7 @@ impl Engine {
         let t0 = std::time::Instant::now();
         let mut out = Vec::new();
         let mut ai_time = std::time::Duration::ZERO;
-        run_ffmpeg_frames(clip, FPS as u32, if tiled.is_some() { 1920 } else { 640 }, &masks, &mut |n, jpeg| {
+        run_ffmpeg_frames(clip, FPS as u32, if tiled.is_some() { 1920 } else { 640 }, &mut |n, jpeg| {
             // The clip starts at the keyframe before the part: only its own frames.
             let t = start + (n as i64 * 1000) / FPS;
             if t < pf || t >= pt {
@@ -1131,51 +1120,35 @@ impl Engine {
         crate::ingest::splice::key_picture(&segs, at_ms)
     }
 
-    /// The camera's settings, for the pictures it makes now (privacy masks,
-    /// text). Pictures of its recordings: [`Engine::picture_cfg_at`].
+    /// The settings of the camera called `camera` (its name, else its
+    /// folder name), for the text burned into the pictures and downloads
+    /// made of it. None: no such camera any more.
     pub(crate) fn picture_cfg(&self, camera: &str) -> Option<CameraConfig> {
-        let set_up = crate::privacy::camera_cfg(&self.config.lock().unwrap(), camera);
-        // A camera removed with masks: the ones it had (see masked::gone_cfg).
-        set_up.or_else(|| crate::transcode::masked::gone_cfg(&self.db, camera))
-    }
-
-    /// The camera's settings for pictures made of its recordings from
-    /// `from_ms` on: also with the masks of cameras removed under its name
-    /// that apply to them (see masked::pictures_cfg).
-    pub(crate) fn picture_cfg_at(&self, camera: &str, from_ms: i64) -> Option<CameraConfig> {
-        let set_up = crate::privacy::camera_cfg(&self.config.lock().unwrap(), camera);
-        crate::transcode::masked::pictures_cfg(&self.db, set_up, camera, from_ms)
-    }
-
-    /// The privacy mask filter and its revision for pictures of the
-    /// camera's recordings from `from_ms` on (both empty without masks).
-    fn masks_of(&self, camera: &str, from_ms: i64) -> (String, String) {
-        self.picture_cfg_at(camera, from_ms).map(|c| (crate::privacy::camera_mask_filter(&c), crate::privacy::revision(&c))).unwrap_or_default()
+        let config = self.config.lock().unwrap();
+        let s = crate::config::slug(camera);
+        config.cameras.iter().find(|c| c.name == camera).or_else(|| config.cameras.iter().find(|c| crate::config::slug(&c.name) == s)).cloned()
     }
 
     pub fn filmstrip(&self, camera: &str, from_ms: i64, step_ms: i64, n: u32, w: u32) -> anyhow::Result<Option<Filmstrip>> {
-        let (masks, rev) = self.masks_of(camera, from_ms);
-        filmstrip(&self.db, camera, from_ms, step_ms, n, w, (&masks, &rev), |r| self.segment_path(r))
+        filmstrip(&self.db, camera, from_ms, step_ms, n, w, |r| self.segment_path(r))
     }
 
     pub fn preview_at(&self, camera: &str, at_ms: i64, width: u32) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
-        let (masks, rev) = self.masks_of(camera, at_ms);
-        preview_jpeg(&self.db, camera, at_ms, width, (&masks, &rev), |r| self.segment_path(r))
+        preview_jpeg(&self.db, camera, at_ms, width, |r| self.segment_path(r))
     }
 
-    /// A full-size picture of the recording at `at_ms`: privacy masks
-    /// blacked out, the camera's text burned in with that moment's time.
+    /// A full-size picture of the recording at `at_ms`: the camera's text
+    /// burned in with that moment's time.
     pub fn still_at(&self, camera: &str, at_ms: i64) -> anyhow::Result<Option<Vec<u8>>> {
-        let vf = self.picture_cfg_at(camera, at_ms).map(|c| crate::privacy::picture_filter(&c, crate::privacy::Clock::At(at_ms))).unwrap_or_default();
+        let vf = self.picture_cfg(camera).and_then(|c| crate::picture_text::text_filter(&c, crate::picture_text::Clock::At(at_ms))).unwrap_or_default();
         still_jpeg(&self.db, camera, at_ms, &vf, |r| self.segment_path(r))
     }
 
-    /// As [`Engine::still_at`] with the privacy masks only (no text): for AI
-    /// and text reading (plates, faces), which must not see the masked area
-    /// nor read the camera's own text as part of the picture.
-    pub fn still_masked_at(&self, camera: &str, at_ms: i64) -> anyhow::Result<Option<Vec<u8>>> {
-        let vf = self.picture_cfg_at(camera, at_ms).map(|c| crate::privacy::camera_mask_filter(&c)).unwrap_or_default();
-        still_jpeg(&self.db, camera, at_ms, &vf, |r| self.segment_path(r))
+    /// As [`Engine::still_at`] without the text: for AI and text reading
+    /// (plates, faces), which must not read the camera's own text as part
+    /// of the picture.
+    pub fn still_plain_at(&self, camera: &str, at_ms: i64) -> anyhow::Result<Option<Vec<u8>>> {
+        still_jpeg(&self.db, camera, at_ms, "", |r| self.segment_path(r))
     }
 }
 
@@ -1527,8 +1500,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The ffmpeg pipeline re-encoding a steady frame rate (burned-in text or
-    /// privacy masks) writes one sample duration per fragment (tfhd), none per
+    /// The ffmpeg pipeline re-encoding a steady frame rate (burned-in text)
+    /// writes one sample duration per fragment (tfhd), none per
     /// sample. Those fragments last their time: a still inside one is found,
     /// and a clip starts at the keyframe before the moment asked for and ends
     /// where its last fragment does.

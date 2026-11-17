@@ -41,10 +41,6 @@ pub struct Mon {
     /// The logged alert that is on.
     incident: Option<i64>,
     last: Option<(i64, Light, Verdict)>,
-    /// The privacy masks (privacy::masks_revision) the references were
-    /// taken with: other masks black out other parts of the picture, so
-    /// they are taken again.
-    rev: String,
 }
 
 pub type Board = Mutex<HashMap<usize, Mon>>;
@@ -68,38 +64,41 @@ fn incident_path(engine: &Engine, id: i64, which: &str) -> std::path::PathBuf {
     dir(engine).join(format!("inc-{id}-{which}.jpg"))
 }
 
-/// The masks a saved tamper picture was taken with (None: before they
-/// were noted, or not one of ours).
-fn pic_rev(jpeg: &[u8]) -> Option<String> {
-    crate::privacy::mark(jpeg)
-}
-
-/// `jpeg` noted as taken with masks `rev` (see `pic_rev`).
-fn with_rev(jpeg: &[u8], rev: &str) -> Vec<u8> {
-    crate::privacy::with_mark(jpeg, rev)
-}
-
-/// A saved tamper picture of camera `cfg` as it may be shown now: one taken
-/// with other masks than the camera has has them blacked out now (it is a
-/// whole picture, so they go where they belong). None: it could not be.
-fn shown_now(jpeg: Vec<u8>, cfg: &CameraConfig) -> Option<Vec<u8>> {
-    let rev = crate::privacy::masks_revision(cfg);
-    if rev.is_empty() || pic_rev(&jpeg).as_deref() == Some(rev.as_str()) {
-        return Some(jpeg);
+/// Whether a saved reference was taken while AmberSight blacked out the
+/// camera's privacy masks (0.11.1 noted them in a JPEG comment,
+/// `ambersight-masks:<revision>`): the pictures have no black boxes since
+/// 0.11.2, so it would no longer match and is taken again.
+fn taken_with_masks(jpeg: &[u8]) -> bool {
+    const MARK: &[u8] = b"ambersight-masks:";
+    // (Only the segments before the picture data are looked at.)
+    let mut i = 2;
+    while i + 4 <= jpeg.len() && jpeg[i] == 0xFF {
+        let kind = jpeg[i + 1];
+        if kind == 0xDA || kind == 0xD9 {
+            return false;
+        }
+        let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        if len < 2 || i + 2 + len > jpeg.len() {
+            return false;
+        }
+        if kind == 0xFE {
+            if let Some(rev) = jpeg[i + 4..i + 2 + len].strip_prefix(MARK) {
+                return !rev.is_empty();
+            }
+        }
+        i += 2 + len;
     }
-    crate::privacy::black_out_jpeg(&jpeg, &cfg.privacy_masks).ok()
+    false
 }
 
-/// The camera's saved references taken with masks `rev`; others (taken
-/// before a mask change, or before the masks were noted on a camera that has
-/// some) are deleted: they are taken again.
-fn load_refs(engine: &Engine, name: &str, rev: &str, m: &mut Mon) {
+/// The camera's saved references; one taken with AmberSight's privacy
+/// masks (see `taken_with_masks`) is deleted: it is taken again.
+fn load_refs(engine: &Engine, name: &str, m: &mut Mon) {
     m.loaded = true;
-    m.rev = rev.to_string();
     for light in [Light::Day, Light::Night] {
         let p = ref_path(engine, name, light);
         let Ok(jpeg) = std::fs::read(&p) else { continue };
-        if pic_rev(&jpeg).unwrap_or_default() != rev {
+        if taken_with_masks(&jpeg) {
             let _ = std::fs::remove_file(&p);
             continue;
         }
@@ -109,24 +108,10 @@ fn load_refs(engine: &Engine, name: &str, rev: &str, m: &mut Mon) {
     }
 }
 
-fn save_ref(engine: &Engine, name: &str, rev: &str, light: Light, jpeg: &[u8]) {
+fn save_ref(engine: &Engine, name: &str, light: Light, jpeg: &[u8]) {
     let d = dir(engine);
-    if std::fs::create_dir_all(&d).is_err() || std::fs::write(ref_path(engine, name, light), with_rev(jpeg, rev)).is_err() {
+    if std::fs::create_dir_all(&d).is_err() || std::fs::write(ref_path(engine, name, light), jpeg).is_err() {
         warn!("camera '{name}': could not save the {} reference picture", light.word());
-    }
-}
-
-/// Forget the camera's references (and delete them): taken again.
-fn drop_refs(engine: &Engine, name: &str, m: &mut Mon) {
-    m.refs.clear();
-    m.recent.clear();
-    m.judge.reset();
-    m.loaded = false;
-    if let Some(inc) = m.incident.take() {
-        let _ = engine.db.tamper_cleared(inc, Utc::now().timestamp());
-    }
-    for light in [Light::Day, Light::Night] {
-        let _ = std::fs::remove_file(ref_path(engine, name, light));
     }
 }
 
@@ -154,7 +139,6 @@ impl Engine {
         }
         // (Only once per look, not for every frame.)
         let cfg = handle.running.read().unwrap().clone();
-        let rev = crate::privacy::masks_revision(&cfg);
         let frame = handle.state.read().unwrap().latest_frame.clone();
         let frame = frame.as_slice();
         let Some(feat) = crate::tamper::features_jpeg(frame) else { return };
@@ -165,22 +149,16 @@ impl Engine {
         let action = {
             let mut b = self.tamper.lock().unwrap();
             let m = b.entry(handle.id).or_default();
-            // The masks changed: the references show other black areas than
-            // the pictures now, so they are taken again (no alert for that).
-            if m.loaded && m.rev != rev {
-                info!("camera '{}': privacy masks changed; tamper detection takes new reference pictures", cfg.name);
-                drop_refs(self, &cfg.name, m);
-            }
             if !m.loaded {
-                load_refs(self, &cfg.name, &rev, m);
+                load_refs(self, &cfg.name, m);
             }
             self.tamper_look(m, feat, frame, moving, now, tc.sensitivity(), tc.seconds())
         };
         match action {
             None => {}
-            Some(Action::Save { light, jpeg }) => save_ref(self, &cfg.name, &rev, light, &jpeg),
+            Some(Action::Save { light, jpeg }) => save_ref(self, &cfg.name, light, &jpeg),
             Some(Action::Clear { incident }) => self.tamper_cleared(handle, &cfg, incident, now),
-            Some(Action::Raise { kind, light, cur, reference, since }) => self.tamper_raised(handle, &cfg, kind, light, with_rev(&cur, &rev), with_rev(&reference, &rev), since),
+            Some(Action::Raise { kind, light, cur, reference, since }) => self.tamper_raised(handle, &cfg, kind, light, cur, reference, since),
         }
     }
 
@@ -311,10 +289,7 @@ impl Engine {
     /// light it shows). Returns which reference it replaced.
     pub fn tamper_set_reference(&self, id: usize) -> Result<Light, String> {
         let h = self.camera(id).ok_or("no such camera")?;
-        let (name, rev) = {
-            let c = h.running.read().unwrap();
-            (c.name.clone(), crate::privacy::masks_revision(&c))
-        };
+        let name = h.running.read().unwrap().name.clone();
         let frame = h.state.read().unwrap().latest_frame.clone();
         if frame.is_empty() {
             return Err("the camera has no picture right now".into());
@@ -326,12 +301,9 @@ impl Engine {
         let light = feat.light;
         let mut b = self.tamper.lock().unwrap();
         let m = b.entry(id).or_default();
-        if m.loaded && m.rev != rev {
-            drop_refs(self, &name, m);
-        }
-        save_ref(self, &name, &rev, light, &frame);
+        save_ref(self, &name, light, &frame);
         if !m.loaded {
-            load_refs(self, &name, &rev, m);
+            load_refs(self, &name, m);
         }
         m.refs.insert(light, Ref { feat, jpeg: frame, set_at: Utc::now().timestamp() });
         m.recent.clear();
@@ -351,16 +323,11 @@ impl Engine {
         let mut b = self.tamper.lock().unwrap();
         // The pictures are known once the camera has been watched; for a camera
         // not watched, say which are on disk.
-        let rev = crate::privacy::masks_revision(&cfg);
-        let on_disk = |light: Light| std::fs::read(ref_path(self, &cfg.name, light)).is_ok_and(|j| pic_rev(&j).unwrap_or_default() == rev);
+        let on_disk = |light: Light| std::fs::read(ref_path(self, &cfg.name, light)).is_ok_and(|j| !taken_with_masks(&j));
         let (refs, state, score, active, bad_for, light) = match b.get_mut(&id) {
             Some(m) => {
-                let rev = crate::privacy::masks_revision(&cfg);
-                if m.loaded && m.rev != rev {
-                    drop_refs(self, &cfg.name, m);
-                }
                 if !m.loaded {
-                    load_refs(self, &cfg.name, &rev, m);
+                    load_refs(self, &cfg.name, m);
                 }
                 let age = |l: Light| m.refs.get(&l).map(|r| serde_json::json!({ "set_at": r.set_at }));
                 let state = match (m.judge.active, &m.last) {
@@ -408,14 +375,13 @@ impl Engine {
         }))
     }
 
-    /// A reference picture (JPEG) of a camera.
-    /// (One taken with other masks than the camera has now is not shown: it
-    /// is being taken again.)
+    /// A reference picture (JPEG) of a camera. (One taken with AmberSight's
+    /// privacy masks is not shown: it is being taken again.)
     pub fn tamper_ref_jpeg(&self, id: usize, light: Light) -> Option<Vec<u8>> {
         let h = self.camera(id)?;
-        let cfg = h.running.read().unwrap().clone();
-        let jpeg = std::fs::read(ref_path(self, &cfg.name, light)).ok()?;
-        (pic_rev(&jpeg).unwrap_or_default() == crate::privacy::masks_revision(&cfg)).then_some(jpeg)
+        let name = h.running.read().unwrap().name.clone();
+        let jpeg = std::fs::read(ref_path(self, &name, light)).ok()?;
+        (!taken_with_masks(&jpeg)).then_some(jpeg)
     }
 
     /// A picture of a logged alert ("ref" or "cur") of this camera.
@@ -428,8 +394,7 @@ impl Engine {
         if self.db.tamper_owner(incident).ok().flatten()? != cfg.name {
             return None;
         }
-        // (Taken before the masks were changed: they are blacked out now.)
-        shown_now(std::fs::read(incident_path(self, incident, which)).ok()?, &cfg)
+        std::fs::read(incident_path(self, incident, which)).ok()
     }
 }
 
@@ -445,56 +410,42 @@ mod tests {
         out
     }
 
+    /// `jpeg` with a JPEG comment as 0.11.1 wrote it on the pictures it took
+    /// with the camera's privacy masks blacked out.
+    fn marked(jpeg: &[u8], rev: &str) -> Vec<u8> {
+        let body: Vec<u8> = b"ambersight-masks:".iter().chain(rev.as_bytes()).copied().collect();
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xFE];
+        out.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
     #[test]
-    fn references_and_alert_pictures_follow_the_masks() {
+    fn references_taken_with_masks_are_taken_again() {
         let dir = std::env::temp_dir().join(format!("amber-tamper-masks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut e = Engine::for_test(toml::from_str("").unwrap());
         Arc::get_mut(&mut e).unwrap().data_dir = dir.clone();
         let h = e.add_test_camera("Porch");
-        let set = |masks: &str| {
-            let c: CameraConfig = toml::from_str(&format!("name = \"Porch\"\nurl = \"rtsp://127.0.0.1/x\"\n{masks}")).unwrap();
-            *h.cfg.write().unwrap() = c.clone();
-            *h.running.write().unwrap() = c.clone();
-            c
-        };
-        let c = set("privacy_masks = [{ x = 0.0, y = 0.0, w = 0.5, h = 0.5 }]");
-        let rev = crate::privacy::masks_revision(&c);
-        save_ref(&e, "Porch", &rev, Light::Day, &picture());
-        // Taken with these masks: kept and shown.
+        // Taken now: kept and shown.
+        save_ref(&e, "Porch", Light::Day, &picture());
         let mut m = Mon::default();
-        load_refs(&e, "Porch", &rev, &mut m);
+        load_refs(&e, "Porch", &mut m);
         assert!(m.refs.contains_key(&Light::Day));
         assert!(e.tamper_ref_jpeg(h.id, Light::Day).is_some());
-        // The masks moved: not shown, and dropped when loaded (taken again).
-        let c2 = set("privacy_masks = [{ x = 0.5, y = 0.5, w = 0.5, h = 0.5 }]");
-        assert!(e.tamper_ref_jpeg(h.id, Light::Day).is_none());
+        // Taken by 0.11.1 with masks blacked out: not shown, dropped when loaded.
+        std::fs::write(ref_path(&e, "Porch", Light::Night), marked(&picture(), "0123456789ab")).unwrap();
+        assert!(e.tamper_ref_jpeg(h.id, Light::Night).is_none());
         let mut m = Mon::default();
-        load_refs(&e, "Porch", &crate::privacy::masks_revision(&c2), &mut m);
-        assert!(m.refs.is_empty());
-        assert!(!ref_path(&e, "Porch", Light::Day).exists());
-        // One from before the masks were noted, on a camera with masks: dropped too.
-        std::fs::write(ref_path(&e, "Porch", Light::Night), picture()).unwrap();
+        load_refs(&e, "Porch", &mut m);
+        assert!(!m.refs.contains_key(&Light::Night));
+        assert!(!ref_path(&e, "Porch", Light::Night).exists());
+        // One 0.11.1 took of a camera without masks (an empty mark): kept.
+        std::fs::write(ref_path(&e, "Porch", Light::Night), marked(&picture(), "")).unwrap();
         let mut m = Mon::default();
-        load_refs(&e, "Porch", &crate::privacy::masks_revision(&c2), &mut m);
-        assert!(m.refs.is_empty());
-        // ... and kept on a camera without masks.
-        std::fs::write(ref_path(&e, "Porch", Light::Night), picture()).unwrap();
-        let mut m = Mon::default();
-        load_refs(&e, "Porch", "", &mut m);
+        load_refs(&e, "Porch", &mut m);
         assert!(m.refs.contains_key(&Light::Night));
-        // A loaded camera whose masks change forgets its references.
-        let mut m = Mon::default();
-        load_refs(&e, "Porch", "", &mut m);
-        drop_refs(&e, "Porch", &mut m);
-        assert!(!m.loaded && m.refs.is_empty() && !ref_path(&e, "Porch", Light::Night).exists());
-        // An alert picture taken before the masks changed: the masks blacked out now.
-        let old = with_rev(&picture(), &rev);
-        let shown = shown_now(old.clone(), &c2).unwrap();
-        let img = image::load_from_memory(&shown).unwrap().to_luma8();
-        assert!(img.get_pixel(60, 44).0[0] < 30, "the new mask is black");
-        assert!(img.get_pixel(4, 4).0[0] > 120, "the rest as it was");
-        assert_eq!(shown_now(old.clone(), &c).unwrap(), old, "taken with these masks: as it is");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

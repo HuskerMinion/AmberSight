@@ -11,65 +11,10 @@ use std::sync::Arc;
 use super::{refresh, server, RestreamConfig};
 use crate::engine::Engine;
 
-/// A privacy mask (either level: the shared stream is the camera's own) or
-/// text overlay is on: the shared video (passed through as the camera sends
-/// it) shows the picture without them. (Wider than
-/// `transcode::masked::sends_unmasked`, which it includes: any mask at all,
-/// even one of no size, waits for the admin's word.)
-pub fn masked(cfg: &crate::config::CameraConfig) -> bool {
-    cfg.overlay || !cfg.privacy_masks.is_empty() || crate::transcode::masked::sends_unmasked(cfg)
-}
-
-/// Whether the admin's "share without the mask" confirmation no longer
-/// holds for `after` (the camera's new settings, from `before`): it was given
-/// for the masks and text the camera had, and new or other masks, or text
-/// turned on, may hide something else the shared stream would show.
-pub fn consent_lapses(before: &crate::config::CameraConfig, after: &crate::config::CameraConfig) -> bool {
-    after.share_unmasked && ((!after.privacy_masks.is_empty() && after.privacy_masks != before.privacy_masks) || (after.overlay && !before.overlay))
-}
-
-/// What the admin's "share without the mask" confirmation is given for:
-/// the camera's masks (any, even of no size) and whether text is burned in.
-/// Saved with it (`share_unmasked_rev`), so masks changed in the config file
-/// by hand while the server was stopped need it again.
-pub fn consent_rev(cfg: &crate::config::CameraConfig) -> String {
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(serde_json::to_string(&cfg.privacy_masks).unwrap_or_default().as_bytes());
-    h.update(if cfg.overlay { b"|text" as &[u8] } else { b"|" });
-    h.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect()
-}
-
-/// Whether the confirmation holds for the camera as it is now.
-pub fn consent_holds(cfg: &crate::config::CameraConfig) -> bool {
-    cfg.share_unmasked && cfg.share_unmasked_rev.as_deref() == Some(consent_rev(cfg).as_str())
-}
-
-/// Note what the confirmation in `cfg` (new settings, from `before`; None:
-/// a new camera) is for: given now (it was off) or still holding for the
-/// settings before (after [`consent_lapses`]): for these settings; one that
-/// did not hold before stays as it was (not renewed by an unrelated
-/// change); none: none. (Never what a client sent.)
-pub fn settle_consent(before: Option<&crate::config::CameraConfig>, cfg: &mut crate::config::CameraConfig) {
-    cfg.share_unmasked_rev = match before {
-        _ if !cfg.share_unmasked => None,
-        Some(b) if b.share_unmasked && !consent_holds(b) => b.share_unmasked_rev.clone(),
-        _ => Some(consent_rev(cfg)),
-    };
-}
-
-/// Why a camera's stream is not served now, if it is not: a masked camera
-/// waits for the admin's "share without the mask" confirmation (given for
-/// the masks and text it has now).
+/// Why a camera's stream cannot be shared, if it cannot. (Text the web
+/// app draws over the picture is not in the shared stream, which is the
+/// camera's own video as it sends it.)
 pub fn blocker(cfg: &crate::config::CameraConfig) -> Option<&'static str> {
-    if masked(cfg) && !consent_holds(cfg) {
-        return Some("A privacy mask or text overlay is on: the shared stream would show the picture without it. Confirm below to share it anyway");
-    }
-    hard_blocker(cfg)
-}
-
-/// Why a camera can never be shared, if it cannot.
-pub fn hard_blocker(cfg: &crate::config::CameraConfig) -> Option<&'static str> {
     if !crate::engine::reads_natively(cfg) {
         return Some("This camera is read by ffmpeg (not the built-in reader), which cannot be shared");
     }
@@ -113,10 +58,7 @@ fn status_json(engine: &Engine) -> serde_json::Value {
                 "slug": crate::config::slug(&c.name),
                 "share": c.share,
                 "has_sub": has_sub,
-                "blocked": hard_blocker(&c),
-                "masked": masked(&c),
-                "unmasked_ok": consent_holds(&c),
-                "waiting": blocker(&c),
+                "blocked": blocker(&c),
                 "main": stream_json(&h.restream_main),
                 "sub": has_sub.then(|| stream_json(&h.restream_sub)),
             })
@@ -145,11 +87,11 @@ pub struct Update {
     port: Option<u16>,
     /// Camera name -> shared or not. Cameras left out keep their setting.
     cameras: Option<std::collections::HashMap<String, bool>>,
-    /// Camera name -> share without its privacy mask / overlay (confirmed).
-    unmasked: Option<std::collections::HashMap<String, bool>>,
 }
 
-/// `PUT /api/restream {enabled?, port?, cameras?: {name: bool}, unmasked?: {name: bool}}`.
+/// `PUT /api/restream {enabled?, port?, cameras?: {name: bool}}`. (The
+/// `unmasked` map of 0.11.1, a confirmation to share a camera without its
+/// privacy masks, is ignored: there are none.)
 pub async fn put(State(engine): State<Arc<Engine>>, Json(u): Json<Update>) -> Response {
     let bad = |m: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": m }))).into_response();
     // Cameras whose session must start or stop reading the main stream.
@@ -166,7 +108,7 @@ pub async fn put(State(engine): State<Arc<Engine>>, Json(u): Json<Update>) -> Re
         if let Err(e) = RestreamConfig::check_port(new.port, &cfg.server) {
             return bad(e);
         }
-        for map in [&u.cameras, &u.unmasked].into_iter().flatten() {
+        if let Some(map) = &u.cameras {
             for name in map.keys() {
                 if !cfg.cameras.iter().any(|c| c.name == *name) {
                     return bad(format!("no camera named '{name}'"));
@@ -177,14 +119,6 @@ pub async fn put(State(engine): State<Arc<Engine>>, Json(u): Json<Update>) -> Re
             for c in cfg.cameras.iter_mut() {
                 if let Some(v) = map.get(&c.name) {
                     c.share = *v;
-                }
-            }
-        }
-        if let Some(map) = &u.unmasked {
-            for c in cfg.cameras.iter_mut() {
-                if let Some(v) = map.get(&c.name) {
-                    c.share_unmasked = *v;
-                    c.share_unmasked_rev = v.then(|| consent_rev(c));
                 }
             }
         }
@@ -200,13 +134,6 @@ pub async fn put(State(engine): State<Arc<Engine>>, Json(u): Json<Update>) -> Re
             if now_shared != was_shared {
                 h.cfg.write().unwrap().share = now_shared;
                 h.running.write().unwrap().share = now_shared;
-            }
-            if let Some(v) = u.unmasked.as_ref().and_then(|m| m.get(&name)).copied() {
-                for slot in [&h.cfg, &h.running] {
-                    let mut c = slot.write().unwrap();
-                    c.share_unmasked = v;
-                    c.share_unmasked_rev = v.then(|| consent_rev(&c));
-                }
             }
             let served = now_shared && blocker(&h.cfg.read().unwrap()).is_none();
             if (cfg.restream.enabled && served) != (was_on && was_served) && main_session_missing(h) {

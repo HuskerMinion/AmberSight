@@ -14,7 +14,7 @@ import { plan, BIG, STYLES } from './viewfit.js';
 import { mark } from './diag.js';
 import { isPhone, device } from './device.js';
 import { startLive, startJpeg, markFirstFrame } from './player.js';
-import { watchMasks, refreshMasks, paintMasks, fitRect } from './masks.js';
+import { fitRect } from './fit.js';
 export { startLive, startJpeg, noSound } from './player.js';
 import { openCameraDialog, setCameraEnabled, pauseAlertsDlg, resumeAlerts, pausedText, rebootDlg, canReboot } from './cameras.js';
 
@@ -245,7 +245,7 @@ let order = [];          // camera ids of the whole ordered list (all pages), us
 let cycleTimer = null;
 
 export function stopTiles() {
-  for (const id in liveTiles) { const t = liveTiles[id]; if (t.masks) t.masks.stop(); if (t.spk) t.spk.destroy(); if (t.zoom) t.zoom.destroy(); if (t.player) t.player.stop(); clearTimeout(t.sleepTimer); }
+  for (const id in liveTiles) { const t = liveTiles[id]; if (t.spk) t.spk.destroy(); if (t.zoom) t.zoom.destroy(); if (t.player) t.player.stop(); clearTimeout(t.sleepTimer); }
   liveTiles = {}; liveSig = null;
 }
 
@@ -587,8 +587,6 @@ function grabLast(t) {
     cv.width = Math.round(w * k); cv.height = Math.round(h * k);
     const cx = cv.getContext('2d');
     cx.drawImage(m, 0, 0, cv.width, cv.height);
-    // (A frame of the camera's own video: its privacy masks go into it too.)
-    if (m.tagName === 'VIDEO') paintMasks(cx, cv.width, cv.height, camFromId(t.camId));
     cv.className = 'lastcv';
     t.last = { cv, at: Date.now() };
   } catch (e) { /* not drawable */ }
@@ -1075,7 +1073,7 @@ export function renderLive() {
   }
   if (tlHook) tlHook.shown(shown.map(c => c.id));
   const sigCams = arrange ? shown.slice().sort((x, y) => x.id - y.id) : shown;
-  const sig = JSON.stringify([!!tlHook, smoothGrid(), style, soloId, page, per, !!arrange, sigCams.map(c => [c.id, c.enabled, c.name, c.short_name, c.groups, c.record, c.record_motion_only, c.record_sub, c.schedule, c.zones, c.ignore_zones, c.ingest, c.overlay_text, c.overlay_pos, c.overlay, c.privacy_masks, c.mask_mode])]);
+  const sig = JSON.stringify([!!tlHook, smoothGrid(), style, soloId, page, per, !!arrange, sigCams.map(c => [c.id, c.enabled, c.name, c.short_name, c.groups, c.record, c.record_motion_only, c.record_sub, c.schedule, c.zones, c.ignore_zones, c.ingest, c.overlay_text, c.overlay_pos, c.overlay])]);
   if (sig === liveSig) {
     for (const c of shown) if (liveTiles[c.id]) { setTileMedia(liveTiles[c.id], c); updateTile(liveTiles[c.id], c); }
     fitGrid();
@@ -1091,9 +1089,6 @@ export function renderLive() {
     frame.className = 'frame';
     // Large tiles (Focus styles) play the main stream; the rest the light sub stream.
     const t = { frame, tile, camId: c.id, player: null, media: null, mode: null, offSince: 0, wakeUntil: 0, big: shown.indexOf(c) < bigN };
-    // Privacy masks over the camera's video (live, and the timeline's
-    // recordings and fast/reverse playback in timeline mode).
-    t.masks = watchMasks(frame, () => camFromId(c.id) || c);
     setTileMedia(t, c);
     frame.addEventListener('contextmenu', (ev) => tileMenu(ev, c));
     // Zones and motion boxes sit on a layer the size of the picture itself
@@ -1371,10 +1366,8 @@ let fullPlayer = null;
 
 let fullSpk = null;
 let fullPills = null;   // corner pills + edge of the full view
-let fullMasks = null;   // privacy masks over the full view's video
 
 export function stopFull() {
-  if (fullMasks) { fullMasks.stop(); fullMasks = null; }
   if (fullSpk) { fullSpk.destroy(); fullSpk = null; }
   if (fullPlayer) { fullPlayer.stop(); fullPlayer = null; }
   clearInterval(window.__fullTimer);
@@ -1398,8 +1391,6 @@ function mountFull() {
   content.appendChild(video);
   $('lightbox').dataset.cam = String(fullCamId);
   const c = camFromId(fullCamId);
-  const camId = fullCamId;
-  fullMasks = watchMasks(content, () => camFromId(camId) || c);
   addOverlayText(content, c, { big: true });
   if (c) video.title = c.name;
   // Same pills and edge as the tiles (the name is in the toolbar above).
@@ -1609,7 +1600,7 @@ export function initLive() {
     lastQuality = q;
   });
   bus.on('layouts', () => { page = 0; if (arrange) finishArrange(false); renderLive(); armCycle(); });
-  bus.on('cameras', () => { camsRx = Date.now(); renderLive(); refreshMasks(); const fc = fullCamId !== null && camFromId(fullCamId); if (fc && fullPills) paintPills(fullPills, fc); });
+  bus.on('cameras', () => { camsRx = Date.now(); renderLive(); const fc = fullCamId !== null && camFromId(fullCamId); if (fc && fullPills) paintPills(fullPills, fc); });
   // Esc: stop arranging, else drop the tool, else clear the selection.
   window.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Escape' || ev.defaultPrevented || ev.timeStamp === escTs || !isActive('live') || fullCamId !== null) return;

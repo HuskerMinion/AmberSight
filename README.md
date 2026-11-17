@@ -33,7 +33,7 @@ More screenshots: [Screenshots](#screenshots).
 | | |
 |---|---|
 | <img src="docs/images/screenshots/2-timeline.jpg" alt="Timeline: all cameras in sync with alert markers"><br>**Timeline**: every camera in sync, alerts by kind, mark and export a clip | <img src="docs/images/screenshots/3-events.jpg" alt="Events: list beside the player"><br>**Events**: filter chips, list beside the player, the AI's verdict |
-| <img src="docs/images/screenshots/4-camera-panel.jpg" alt="Camera settings in a side panel over the live view"><br>**Camera settings**: a side panel over Live, with a live picture | <img src="docs/images/screenshots/5-zones.jpg" alt="Zones editor with live motion boxes"><br>**Zones**: detect and ignore zones, privacy masks, live motion |
+| <img src="docs/images/screenshots/4-camera-panel.jpg" alt="Camera settings in a side panel over the live view"><br>**Camera settings**: a side panel over Live, with a live picture | <img src="docs/images/screenshots/5-zones.jpg" alt="Zones editor with live motion boxes"><br>**Zones**: detect and ignore zones, live motion |
 | <img src="docs/images/screenshots/6-performance.jpg" alt="Performance charts and per-camera table"><br>**Performance**: the last hour of CPU, AI, network and disk | <img src="docs/images/screenshots/7-live-light.jpg" alt="Live view in the light theme"><br>**Light theme** |
 
 <p align="center"><img src="docs/images/screenshots/8-phone.jpg" alt="Live view on a phone" width="260"><br><b>On a phone</b></p>
@@ -225,14 +225,10 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   bush, a bin, a parked car) and stops alerting for them. Parked vehicles are ignored, package
   detection, face recognition, smart search by description (CLIP), and a
   loud-sound trigger.
-- **Zones and masks:** rectangle and polygon detect and ignore zones, and
-  privacy masks at two levels: hidden on screen and in pictures (drawn by the
-  apps and burned into snapshots, event pictures and downloads; the camera's
-  stream is kept as it is, so it costs nothing), or hidden in recordings too
-  (re-encoded, the only level that protects the files on disk, from the moment
-  it is on; older recordings are masked when they leave). Masked downloads and
-  playback for apps that do not draw masks are converted on the server: quick
-  with a graphics encoder, slow on the processor.
+- **Zones:** rectangle and polygon detect and ignore zones. AmberSight has no
+  privacy masks of its own: use the camera's own privacy mask (Reolink,
+  Dahua/Amcrest and Hikvision cameras have one), so the area never leaves the
+  camera. An ignore zone keeps motion there from counting.
 - **Text on the picture:** your own text with the date and time, drawn over
   live view and playback (with the recording's own time), put into snapshots and
   event pictures, and a time subtitle track in downloads (not in an event clip
@@ -266,7 +262,7 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   `intel-vpl-gpu-rt` on Fedora); without it Gen12+ Intel uses VAAPI, which fails
   on some cameras. Auto
   keeps video memory free on the NVIDIA card for the AI and other programs: past the limit
-  (1.5 GB by default) cameras use Intel or the processor and move back when there is room. Cameras with burned-in text or masks hidden in recordings
+  (1.5 GB by default) cameras use Intel or the processor and move back when there is room. Cameras with burned-in text
   use the sub stream for motion and re-encode recordings on the card's encoder.
   Status says when a large camera has no sub stream and offers to find one.
 - **Camera report:** a text file with what a camera sends and its recent
@@ -365,7 +361,7 @@ State topics: `<prefix>/<cam>/{motion,person,vehicle,animal,online,asleep}` (`ON
 **Live video.** Add the Generic Camera integration per camera, with the camera's numeric `id` from `/api/cameras` (8090 is the default port):
 
 - Still image URL: `http://user:pass@HOST:8090/api/snapshot/ID`
-- Stream source: `http://user:pass@HOST:8090/api/live/ID/stream` (fragmented MP4; add `?q=sub` for the sub stream). This works for cameras on the built-in reader (RTSP and HTTP-FLV URLs, the default); cameras re-encoded through ffmpeg (masks hidden in recordings, burned-in text, `ingest = "ffmpeg"`) have no live stream, and neither does a camera whose masks are hidden on screen only (the stream would show the masked area); use the MJPEG address for those.
+- Stream source: `http://user:pass@HOST:8090/api/live/ID/stream` (fragmented MP4; add `?q=sub` for the sub stream). This works for cameras on the built-in reader (RTSP and HTTP-FLV URLs, the default); cameras re-encoded through ffmpeg (burned-in text, `ingest = "ffmpeg"`) have no live stream; use the MJPEG address for those.
 
 HTTP Basic auth is accepted on these endpoints, so the credentials go in the URL. Use an account that can see the camera. Snapshot and stream requests wake a sleeping battery camera.
 

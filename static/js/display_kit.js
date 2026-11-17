@@ -153,10 +153,3 @@ export function shiftAt(step) {
   const P = [[0, 0], [6, 0], [6, 6], [0, 6], [-6, 6], [-6, 0], [-6, -6], [0, -6], [6, -6]];
   return P[((step % P.length) + P.length) % P.length];
 }
-
-// A camera's privacy masks as a short key (revision, level and the boxes): when
-// it changes, the display starts that camera's players again.
-export function maskSig(c) {
-  if (!c) return '';
-  return (c.mask_rev || '') + '|' + (c.mask_mode || '') + '|' + JSON.stringify(c.privacy_masks || []);
-}

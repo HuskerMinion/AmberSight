@@ -19,8 +19,6 @@ impl Engine {
         let mut rows: Vec<String> = Vec::new();
         rows.push("id,camera,start,end,score,objects,clip".to_string());
         let mut total: u64 = 0;
-        let mut burned = 0usize;
-        let mut left_out = 0usize;
         for ev in evs.iter() {
             if cancelled() {
                 return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "export cancelled"));
@@ -33,63 +31,17 @@ impl Engine {
                 rows.push(row("not included: export too large, choose a shorter time range"));
                 continue;
             }
-            let mask = match crate::transcode::masked::event_download_mask(self, ev) {
-                Ok(m) => m,
-                Err(_) => {
-                    rows.push(row(EXPORT_MASKS_UNKNOWN));
-                    continue;
-                }
-            };
-            if mask.is_some() && burned >= EXPORT_MAX_BURNED {
-                // Each conversion takes a while: an export makes only so many.
-                left_out += 1;
-                rows.push(row(EXPORT_BURNED_LEFT_OUT));
-                continue;
-            }
-            burned += usize::from(mask.is_some());
             let name = format!("{}.mp4", ev.id);
-            match mask {
-                // A clip that may show what the masks cover: them burned in
-                // (never the clip as recorded), at most what is left of the
-                // export's size, and copied into the zip from its file.
-                Some(mask) => {
-                    let left = EXPORT_MAX_BYTES.saturating_sub(total).max(1);
-                    let got = crate::transcode::masked::event_burn(self, ev, Some(mask), None)
-                        .and_then(|b| b.map(|b| crate::transcode::masked::burn_to_file(self, b, crate::transcode::masked::Priority::Export, cancelled, left)).transpose());
-                    match got {
-                        Ok(Some(f)) => {
-                            total += f.size();
-                            rows.push(row(&name));
-                            zip.add_file(&name, f.path())?;
-                        }
-                        Ok(None) => rows.push(row("no recording")),
-                        Err(e) if e.downcast_ref::<crate::transcode::masked::BurnCancelled>().is_some() => {
-                            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "export cancelled"));
-                        }
-                        Err(e) if e.downcast_ref::<crate::transcode::masked::BurnTooLarge>().is_some() => {
-                            total = EXPORT_MAX_BYTES;
-                            rows.push(row("not included: export too large, choose a shorter time range"));
-                        }
-                        Err(e) => {
-                            tracing::warn!("export: {}: the privacy masks could not be burned in: {e:#}", ev.id);
-                            rows.push(row("not included: the privacy masks could not be burned in (details are in the server log)"));
-                        }
-                    }
+            match self.export_clip_bytes(ev) {
+                // (A zip's offsets are 32-bit: one clip never takes it past them.)
+                Some(b) if total + b.len() as u64 > ZIP_HARD_MAX => rows.push(row("not included: export too large, choose a shorter time range")),
+                Some(b) => {
+                    total += b.len() as u64;
+                    rows.push(row(&name));
+                    zip.add(&name, &b)?;
                 }
-                None => match self.export_clip_bytes(ev) {
-                    // (A zip's offsets are 32-bit: one clip never takes it past them.)
-                    Some(b) if total + b.len() as u64 > ZIP_HARD_MAX => rows.push(row("not included: export too large, choose a shorter time range")),
-                    Some(b) => {
-                        total += b.len() as u64;
-                        rows.push(row(&name));
-                        zip.add(&name, &b)?;
-                    }
-                    None => rows.push(row("no recording")),
-                },
+                None => rows.push(row("no recording")),
             }
-        }
-        if left_out > 0 {
-            tracing::info!("export: {left_out} clips left out: at most {EXPORT_MAX_BURNED} get their privacy masks burned in per export");
         }
         rows.push("".into());
         zip.add("events.csv", rows.join("\n").as_bytes())?;
@@ -104,7 +56,7 @@ impl Engine {
             return Some(b);
         }
         let c = self.virtual_clip(ev).ok().flatten()?;
-        let c = match c.clone().for_download(None, &ev.camera, &crate::transcode::masked::clock) {
+        let c = match c.clone().for_download(None, &ev.camera, &crate::transcode::burn::clock) {
             Ok(d) => d,
             Err(e) => {
                 tracing::debug!("export: {}: no time subtitles: {e:#}", ev.id);
@@ -119,13 +71,8 @@ impl Engine {
 /// (store-only ZIP offsets are 32-bit).
 pub(crate) const EXPORT_MAX_EVENTS: usize = 500;
 const EXPORT_MAX_BYTES: u64 = 1 << 30;
-/// At most this many clips per export have their privacy masks burned in
-/// (each is a conversion); the rest are listed in events.csv as left out.
-pub(crate) const EXPORT_MAX_BURNED: usize = 50;
 /// The most a whole export may hold (its zip's offsets are 32-bit).
 const ZIP_HARD_MAX: u64 = (u32::MAX as u64) - (64 << 20);
-const EXPORT_MASKS_UNKNOWN: &str = "not included: the privacy masks it needs could not be read (details are in the server log)";
-const EXPORT_BURNED_LEFT_OUT: &str = "not included: an export burns the privacy masks into at most 50 clips; export fewer events at a time";
 
 /// One CSV field: quoted, quotes doubled, and a leading = + - @ neutralized
 /// so a spreadsheet does not run it as a formula.
@@ -154,26 +101,6 @@ impl<W: std::io::Write> ZipOut<W> {
     }
     pub(super) fn add(&mut self, name: &str, data: &[u8]) -> std::io::Result<()> {
         self.add_from(name, zip_crc32(data), data.len() as u64, &mut std::io::Cursor::new(data))
-    }
-
-    /// Add the file at `path`, read twice (its checksum, then its bytes)
-    /// rather than held in memory.
-    pub(super) fn add_file(&mut self, name: &str, path: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Read;
-        let mut f = std::fs::File::open(path)?;
-        let mut crc = !0u32;
-        let mut buf = vec![0u8; 1 << 20];
-        let mut len = 0u64;
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            crc = zip_crc32_update(crc, &buf[..n]);
-            len += n as u64;
-        }
-        let f = std::fs::File::open(path)?;
-        self.add_from(name, !crc, len, &mut f.take(len))
     }
 
     fn add_from(&mut self, name: &str, crc: u32, len: u64, data: &mut dyn std::io::Read) -> std::io::Result<()> {
@@ -287,37 +214,22 @@ mod csv_tests {
         assert_eq!(super::zip_crc32(b"hello"), 0x3610a686);
     }
 
-    #[test]
-    fn a_file_added_from_disk_is_the_same_entry_as_one_from_memory() {
-        let dir = std::env::temp_dir().join(format!("amber-zipfile-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("clip.mp4");
-        let data: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
-        std::fs::write(&p, &data).unwrap();
-        let mut a = super::ZipOut::new(Vec::new());
-        a.add("c.mp4", &data).unwrap();
-        let mut b = super::ZipOut::new(Vec::new());
-        b.add_file("c.mp4", &p).unwrap();
-        assert_eq!(a.finish().unwrap(), b.finish().unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn masked_engine(n: usize) -> (std::sync::Arc<crate::engine::Engine>, Vec<crate::engine::Event>) {
+    fn export_engine(n: usize) -> (std::sync::Arc<crate::engine::Engine>, Vec<crate::engine::Event>) {
         let cfg: crate::config::Config = toml::from_str(&format!(
-            "[[cameras]]\nname = \"Export Mask {}\"\nurl = \"rtsp://192.0.2.10/s\"\nmask_mode = \"screen\"\nprivacy_masks = [{{ x = 0.1, y = 0.1, w = 0.2, h = 0.2 }}]\n",
+            "[[cameras]]\nname = \"Export Test {}\"\nurl = \"rtsp://192.0.2.10/s\"\n",
             std::process::id()
         ))
         .unwrap();
         let cam = cfg.cameras[0].name.clone();
         let evs = (0..n)
-            .map(|i| crate::engine::Event { id: format!("exportmask-nofile-{}-{i}", std::process::id()), camera_id: 0, camera: cam.clone(), start: 1_000 + i as i64 * 100, end: 1_010 + i as i64 * 100, score: 0.5, clip: None, thumb: None, objects: vec![], protect: false })
+            .map(|i| crate::engine::Event { id: format!("exporttest-nofile-{}-{i}", std::process::id()), camera_id: 0, camera: cam.clone(), start: 1_000 + i as i64 * 100, end: 1_010 + i as i64 * 100, score: 0.5, clip: None, thumb: None, objects: vec![], protect: false })
             .collect();
         (crate::engine::Engine::for_test(cfg), evs)
     }
 
     #[test]
     fn a_stopped_export_ends_at_the_next_clip() {
-        let (e, evs) = masked_engine(3);
+        let (e, evs) = export_engine(3);
         let dest = std::env::temp_dir().join(format!("amber-export-stop-{}.zip", std::process::id()));
         let asked = std::cell::Cell::new(0);
         let r = e.export_events_zip_to(&dest, &evs, &|| {
@@ -326,19 +238,6 @@ mod csv_tests {
         });
         assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
         assert_eq!(asked.get(), 2, "asked before each clip, stopped at the second");
-        let _ = std::fs::remove_file(&dest);
-    }
-
-    #[test]
-    fn an_export_burns_masks_into_so_many_clips_and_lists_the_rest() {
-        let n = super::EXPORT_MAX_BURNED + 3;
-        let (e, evs) = masked_engine(n);
-        let dest = std::env::temp_dir().join(format!("amber-export-cap-{}.zip", std::process::id()));
-        e.export_events_zip_to(&dest, &evs, &|| false).unwrap();
-        // (Store-only: the CSV is there as text.)
-        let z = String::from_utf8_lossy(&std::fs::read(&dest).unwrap()).into_owned();
-        assert_eq!(z.matches(super::EXPORT_BURNED_LEFT_OUT).count(), 3, "{z}");
-        assert_eq!(z.matches("\"no recording\"").count(), super::EXPORT_MAX_BURNED);
         let _ = std::fs::remove_file(&dest);
     }
 

@@ -23,15 +23,8 @@ pub fn why_ffmpeg(cfg: &CameraConfig, ingest: &str, fallback: Option<&str>) -> O
     if crate::local_source::is_local(&cfg.url) {
         return Some("a local device or the screen is always read by ffmpeg".into());
     }
-    let mut picture = Vec::new();
     if cfg.overlay {
-        picture.push("\"Also burn it into recordings\" is on (Audio & text): burning text into the video needs ffmpeg. Turn it off to use the built-in reader");
-    }
-    if cfg.mask_in_recording() {
-        picture.push("its privacy masks are set to \"Hide in recordings too\", which ffmpeg burns into the recordings. Choose \"Hide on screen and in pictures\" (Motion > Edit zones) to use the built-in reader");
-    }
-    if !picture.is_empty() {
-        return Some(picture.join("; and "));
+        return Some("\"Also burn it into recordings\" is on (Audio & text): burning text into the video needs ffmpeg. Turn it off to use the built-in reader".into());
     }
     if cfg.ingest == "ffmpeg" {
         return Some("its ingest setting is \"ffmpeg\" (ingest = \"ffmpeg\" in config.toml). Remove that line to use the built-in reader".into());
@@ -52,12 +45,11 @@ pub fn why_ffmpeg_now(run: &CameraConfig, ingest: &str) -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reencode {
     Overlay,
-    Masks,
     /// Direct copy is off.
     NoDirect,
 }
 
-/// `picture`: the camera has burned-in filters (overlay or masks). Local
+/// `picture`: the camera has burned-in text (overlay). Local
 /// sources and synthetic ones always encode (there is nothing to copy).
 pub fn reencode_cause(cfg: &CameraConfig) -> Option<Reencode> {
     if !cfg.record || crate::local_source::is_local(&cfg.url) || cfg.url.starts_with("lavfi://") {
@@ -65,8 +57,6 @@ pub fn reencode_cause(cfg: &CameraConfig) -> Option<Reencode> {
     }
     if cfg.overlay {
         Some(Reencode::Overlay)
-    } else if cfg.mask_in_recording() {
-        Some(Reencode::Masks)
     } else if !cfg.direct {
         Some(Reencode::NoDirect)
     } else {
@@ -79,7 +69,6 @@ pub fn reencode_cause(cfg: &CameraConfig) -> Option<Reencode> {
 pub fn reencode_text(name: &str, cause: Reencode, encoder: Option<&str>) -> String {
     let (why, fix) = match cause {
         Reencode::Overlay => ("to burn in the text", "Turn off \"Also burn it into recordings\" (Audio & text) to record the camera's own stream, or keep it."),
-        Reencode::Masks => ("to burn in the privacy masks", "Choose \"Hide on screen and in pictures\" for the masks (Motion > Edit zones) to record the camera's own stream, use the camera's own privacy mask, or keep it."),
         Reencode::NoDirect => ("because Direct copy is off", "Turn on Direct copy (Recording) to record the camera's own stream."),
     };
     match encoder {
@@ -537,13 +526,6 @@ mod tests {
         assert_eq!(why_ffmpeg(&cam(""), "native", None), None);
         let w = why_ffmpeg(&cam("overlay = true"), "ffmpeg", None).unwrap();
         assert!(w.contains("Also burn it into recordings") && w.contains("Turn it off"), "{w}");
-        let w = why_ffmpeg(&cam("privacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]"), "ffmpeg", None).unwrap();
-        assert!(w.contains("privacy masks"), "{w}");
-        let w = why_ffmpeg(&cam("mask_mode = \"recording\"\nprivacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]"), "ffmpeg", None).unwrap();
-        assert!(w.contains("Hide in recordings too"), "{w}");
-        // Masks only on screen do not need ffmpeg: on it for another reason, that one is said.
-        let w = why_ffmpeg(&cam("ingest = \"ffmpeg\"\nmask_mode = \"screen\"\nprivacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]"), "ffmpeg", None).unwrap();
-        assert!(!w.contains("privacy masks") && w.contains("ingest = \"ffmpeg\""), "{w}");
         let w = why_ffmpeg(&cam("ingest = \"ffmpeg\""), "ffmpeg", None).unwrap();
         assert!(w.contains("ingest = \"ffmpeg\""), "{w}");
         let w = why_ffmpeg(&cam(""), "ffmpeg (fallback)", Some("SETUP failed: 461")).unwrap();
@@ -559,15 +541,10 @@ mod tests {
         assert_eq!(reencode_cause(&cam("record = true\ndirect = true\noverlay = true")), Some(Reencode::Overlay));
         assert_eq!(reencode_cause(&cam("record = false\noverlay = true")), None);
         assert_eq!(reencode_cause(&cam("record = true")), Some(Reencode::NoDirect));
-        let m = "privacy_masks = [{ x = 0.0, y = 0.0, w = 0.1, h = 0.1 }]";
-        assert_eq!(reencode_cause(&cam(&format!("direct = true\n{m}"))), Some(Reencode::Masks), "masks from before the level: in the recordings");
-        assert_eq!(reencode_cause(&cam(&format!("direct = true\nmask_mode = \"recording\"\n{m}"))), Some(Reencode::Masks));
-        assert_eq!(reencode_cause(&cam(&format!("direct = true\nmask_mode = \"screen\"\n{m}"))), None, "screen masks: the camera's own stream");
-        assert_eq!(reencode_cause(&cam("direct = true\nmask_mode = \"recording\"")), None, "a level without masks is nothing");
         let t = reencode_text("Porch", Reencode::Overlay, None);
         assert!(t.starts_with("Porch: recordings are re-encoded to burn in the text (about one processor core per 4K camera)"), "{t}");
         assert!(t.contains("Turn off \"Also burn it into recordings\""));
-        let t = reencode_text("Porch", Reencode::Masks, Some("NVENC"));
+        let t = reencode_text("Porch", Reencode::NoDirect, Some("NVENC"));
         assert!(t.contains("graphics card (NVENC)") && t.contains("little processor time"), "{t}");
     }
 

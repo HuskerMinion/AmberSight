@@ -250,7 +250,7 @@ pub(super) fn recognize(engine: &Engine, camera: &str, event_id: &str, ai: &supe
     let mut reads = 0usize;
     for look in looks {
         // The recording's full-quality picture; else what the AI check saw.
-        let jpeg = match engine.still_masked_at(camera, look.at_ms) {
+        let jpeg = match engine.still_plain_at(camera, look.at_ms) {
             Ok(Some(j)) => j,
             _ => look.fallback.clone(),
         };
@@ -300,15 +300,12 @@ pub(super) fn recognize(engine: &Engine, camera: &str, event_id: &str, ai: &supe
     }
     let known = engine.db.known_plate_texts().unwrap_or_default();
     let cam_slug = slug(camera);
-    // (Each noted with the masks its picture had: a later mask change hides it.)
-    let look = engine.picture_cfg(camera);
     static INSERTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     for c in best {
         let known_id = lpr::best_known(&c.text, &known, lc.max_diff as usize, lc.confusions);
         let name = known_id.and_then(|id| engine.db.known_plate_name(id).ok().flatten());
         let known_hit = known_id.zip(name);
         let (at_ms, pic, width) = c.extra;
-        let pic = crate::privacy::mark_crop(&pic, look.as_ref());
         let row = crate::db::PlateRow { event_id, camera: &cam_slug, at_ms, text: &c.text, confidence: c.confidence, width, img: &pic, known_id: known_hit.as_ref().map(|k| k.0) };
         if let Err(e) = engine.db.insert_plate(&row) {
             warn!("plates: could not save: {e:#}");

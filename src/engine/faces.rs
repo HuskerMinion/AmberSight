@@ -244,7 +244,7 @@ pub(super) fn recognize(engine: &Engine, camera: &str, event_id: &str, ai: &supe
     // (fingerprint, size, score, at_ms, picture, match) of the faces kept.
     let mut kept: Vec<(Vec<f32>, u32, f32, i64, Vec<u8>, Option<(i64, f32)>)> = Vec::new();
     for (at_ms, people, _) in looks {
-        let jpeg = match engine.still_masked_at(camera, at_ms) {
+        let jpeg = match engine.still_plain_at(camera, at_ms) {
             Ok(Some(j)) => j,
             Ok(None) => continue,
             Err(e) => {
@@ -323,10 +323,7 @@ pub(super) fn recognize(engine: &Engine, camera: &str, event_id: &str, ai: &supe
             .collect(),
         _ => Vec::new(),
     };
-    // (Each noted with the masks its picture had: a later mask change hides it.)
-    let look = engine.picture_cfg(camera);
     for (emb, size, score, at_ms, pic, best) in kept {
-        let pic = crate::privacy::mark_crop(&pic, look.as_ref());
         if let Err(e) = engine.db.insert_face(event_id, &slug(camera), at_ms, score, size, &faces::emb_to_bytes(&emb), &pic, best) {
             warn!("faces: could not save: {e:#}");
             continue;

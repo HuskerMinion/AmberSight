@@ -546,8 +546,7 @@ impl Conn {
         let h = cams.into_iter().find(|h| crate::config::slug(&h.cfg.read().unwrap().name) == p.slug).ok_or(404u16)?;
         let (share, name, has_sub) = {
             let c = h.cfg.read().unwrap();
-            // A mask or overlay added after sharing was turned on still
-            // keeps the unmasked picture from going out.
+            // (A camera that can no longer be shared is not, though its switch is on.)
             (c.share && super::http::blocker(&c).is_none(), c.name.clone(), c.sub_url.as_deref().is_some_and(|u| !u.is_empty()))
         };
         if !share || (p.sub && !has_sub) {

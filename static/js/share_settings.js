@@ -1,7 +1,7 @@
 // share_settings.js - Settings > Connections > Share streams: let other apps (Home Assistant, Scrypted, VLC,
 // another NVR) use AmberSight as their video source over RTSP, without connecting to the cameras.
-//   GET /api/restream   {enabled, port, listening, error, auth, cameras: [{id, name, slug, share, has_sub, blocked, masked, unmasked_ok, waiting, main, sub}]}
-//   PUT /api/restream   {enabled?, port?, cameras?: {name: bool}, unmasked?: {name: bool}}   (admin)
+//   GET /api/restream   {enabled, port, listening, error, auth, cameras: [{id, name, slug, share, has_sub, blocked, main, sub}]}
+//   PUT /api/restream   {enabled?, port?, cameras?: {name: bool}}   (admin)
 
 import { api, esc, toast, errText, liveSwitch, swHtml, fld, formBar, hasUnsaved, ic } from './core.js';
 import { lead, how, more, notice } from './sp_kit.js';
@@ -50,14 +50,10 @@ export function mountShare(el) {
   function camHtml(c) {
     const creds = st.auth ? 'USER:PASSWORD@' : '';
     const base = 'rtsp://' + creds + host + ':' + st.port + '/' + c.slug;
-    const live = c.share && !c.blocked && !c.waiting;
-    const sub = c.blocked ? esc(c.blocked) : c.share && c.waiting ? 'Waiting for your confirmation below.' : c.share ? (st.enabled ? 'Shared. ' : 'Marked to share; sharing is off. ') + esc(streamInfo(c.main)) : '';
+    const live = c.share && !c.blocked;
+    const sub = c.blocked ? esc(c.blocked) : c.share ? (st.enabled ? 'Shared. ' : 'Marked to share; sharing is off. ') + esc(streamInfo(c.main)) : '';
     let h = '<div class="sh-row" data-cam="' + esc(c.name) + '"><div class="sh-main">' + swHtml('data-share', c.share, esc(c.name), sub, !!c.blocked) +
       (live ? '<button type="button" class="btn sh-copy" data-copytext="' + esc(base) + '" title="Copy this camera\'s stream address">' + ic('share') + ' Copy address</button>' : '') + '</div>';
-    if (c.masked && c.share && !c.blocked) {
-      h += '<div class="hint' + (c.unmasked_ok ? '' : ' warn') + '"><b>This camera has a privacy mask or text overlay.</b> Shared streams are passed on exactly as the camera sends them, so other apps see the picture <b>without</b> the mask or overlay.</div>' +
-        swHtml('data-unmasked', c.unmasked_ok, 'I understand: share it without the mask', c.unmasked_ok ? 'Shared without the mask or overlay.' : 'Not shared until you turn this on.');
-    }
     if (live) {
       h += '<details class="sh-more"><summary>Other addresses</summary><div class="cs-push">' + (c.has_sub ? urlRow('Sub stream', base + '/sub') + '<div class="hint">Sub stream: ' + esc(streamInfo(c.sub)) + '</div>' : '') +
         urlRow('Snapshot', location.origin + '/api/snapshot/' + c.id) + urlRow('MJPEG', location.origin + '/api/live/' + c.id) + '</div></details>';
@@ -87,7 +83,7 @@ export function mountShare(el) {
       '<p class="hint"><b>Home Assistant</b>: Settings, Devices &amp; services, Add integration, <b>Generic Camera</b>. Stream source: the main or sub stream address, with <b>USER</b> and <b>PASSWORD</b> filled in (a password with special characters must be percent-encoded, @ is %40). RTSP transport protocol: TCP. Still image URL: the Snapshot address, with the same user name and password in the authentication fields (basic); the MJPEG address works as a stream source too. If this server uses HTTPS with its own certificate, turn off certificate verification there.</p>' +
       '<p class="hint"><b>Scrypted</b>: add an <b>RTSP Camera</b> (or ONVIF-less generic) and paste the stream address; use the sub stream for low-resolution uses such as detection.</p>' +
       '<p class="hint"><b>VLC</b>: Media, Open Network Stream, paste the address (it asks for the user name and password if they are not in it). <b>Another NVR</b>: add a generic RTSP camera with the address; choose TCP.</p>' +
-      '<p class="hint">Only TCP is offered (UDP is not). A camera with a privacy mask or text overlay is shared only after you confirm it, because the shared video shows the picture without them. The camera sound is shared when it is AAC; G.711 sound is not (video only).</p>') + '</div>';
+      '<p class="hint">Only TCP is offered (UDP is not). Shared video is the camera\'s own picture, without AmberSight\'s drawn text. The camera sound is shared when it is AAC; G.711 sound is not (video only).</p>') + '</div>';
     // Switches save when flipped; the port goes through the bar.
     liveSwitch(el.querySelector('[data-en]'), (on) => save({ enabled: on }));
     formBar(el.querySelector('[data-sharecard]'), { save: async () => {
@@ -101,8 +97,6 @@ export function mountShare(el) {
     if (all) liveSwitch(all, (on) => save({ cameras: Object.fromEntries(st.cameras.filter(c => !c.blocked).map(c => [c.name, on])) }));
     el.querySelectorAll('[data-cam]').forEach(card => {
       liveSwitch(card.querySelector('[data-share]'), (on) => save({ cameras: { [card.dataset.cam]: on } }));
-      const um = card.querySelector('[data-unmasked]');
-      if (um) liveSwitch(um, (on) => save({ unmasked: { [card.dataset.cam]: on } }));
     });
   }
 

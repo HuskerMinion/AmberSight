@@ -277,11 +277,6 @@ pub struct Engine {
     /// in the background), by the slug of the camera's name: a rename waits
     /// for them (see [`Engine::writing_into`]).
     writers: Mutex<std::collections::HashMap<String, usize>>,
-    /// A camera with privacy masks was renamed while such a file was still
-    /// being written into its old folder (by its old name's slug): when the
-    /// last one is done, its masks are kept there for a little longer again
-    /// (see [`FolderWrite`]).
-    late_tails: Mutex<std::collections::HashMap<String, Vec<crate::config::ZoneRect>>>,
 }
 
 /// A recording file being written into a camera's folder outside its worker
@@ -293,26 +288,13 @@ pub(crate) struct FolderWrite {
 
 impl Drop for FolderWrite {
     fn drop(&mut self) {
-        let late = {
-            let mut w = self.engine.writers.lock().unwrap_or_else(|e| e.into_inner());
-            let n = w.get_mut(&self.slug).map(|n| {
-                *n = n.saturating_sub(1);
-                *n
-            });
-            if n == Some(0) {
-                w.remove(&self.slug);
-                // (Under the writers lock: see Engine::keep_tail_after_writers.)
-                self.engine.late_tails.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.slug)
-            } else {
-                None
-            }
-        };
-        // The camera was renamed while this was written: what it wrote keeps
-        // the masks of the camera it came from (see masked::rename_tail_entry).
-        if let Some(masks) = late {
-            if let Err(e) = crate::transcode::masked::keep_rename_tail(&self.engine.db, &self.slug, &masks, Utc::now().timestamp_millis()) {
-                warn!("privacy masks: could not keep the masks of a renamed camera for a recording finished after the rename: {e:#}");
-            }
+        let mut w = self.engine.writers.lock().unwrap_or_else(|e| e.into_inner());
+        let n = w.get_mut(&self.slug).map(|n| {
+            *n = n.saturating_sub(1);
+            *n
+        });
+        if n == Some(0) {
+            w.remove(&self.slug);
         }
     }
 }
@@ -357,24 +339,13 @@ impl Engine {
         timed_step("transcode cache", || crate::transcode::cache::init(&data_dir, crate::transcode::cache::Limits::from_config(&config.transcode.sanitized().0)));
         let db = Arc::new(timed_step("opening the database", || crate::db::Db::open(&data_dir.join("ambersight.db")))?);
         timed_step("opening the layout index", || crate::ingest::splice::open_index(&data_dir.join("layouts.db")));
-        // Privacy mask levels and burned-in text (0.11.1), before any camera
-        // starts; written to the config file at once.
+        // Privacy masks made ignore zones (0.11.2) and burned-in text
+        // (0.11.1), before any camera starts; written to the config file at once.
         {
             let save = |c: &Config| if config_path.is_empty() { Ok(()) } else { c.save(&config_path) };
             let changed = mask_settings::migrate(&db, &mut config, Utc::now().timestamp_millis(), &save);
             for line in mask_settings::log_lines(&changed) {
                 info!("{line}");
-            }
-        }
-        // Which cameras' recordings carry their masks, and from when (nothing
-        // is known about the ones before a first start with masks at the
-        // recording level: from now).
-        {
-            let now = Utc::now().timestamp_millis();
-            let roots: Vec<std::path::PathBuf> = std::iter::once(data_dir.clone()).chain(config.storage.folder_roots().into_iter().map(|(_, p)| p)).collect();
-            crate::transcode::masked::prune_records(&db, &config.cameras, &roots, now);
-            for c in &config.cameras {
-                crate::transcode::masked::note_level(&db, c, now, false);
             }
         }
         // Reviews from before the one-line verdicts were kept get theirs, a little at a time.
@@ -485,7 +456,6 @@ impl Engine {
             tamper: Mutex::new(std::collections::HashMap::new()),
             overlay_vars: Mutex::new(std::collections::HashMap::new()),
             writers: Mutex::new(std::collections::HashMap::new()),
-            late_tails: Mutex::new(std::collections::HashMap::new()),
         });
         timed_step("loading alert pauses", || engine.load_alert_pauses());
         // Once the NVIDIA add-on is downloaded, load the AI again onto the card.
@@ -672,7 +642,6 @@ impl Engine {
             tamper: Mutex::new(std::collections::HashMap::new()),
             overlay_vars: Mutex::new(std::collections::HashMap::new()),
             writers: Mutex::new(std::collections::HashMap::new()),
-            late_tails: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -910,9 +879,6 @@ impl Engine {
 
     pub fn add_camera_arc(self: &Arc<Engine>, mut cfg: CameraConfig) -> usize {
         normalize_creds(&mut cfg);
-        crate::restream::http::settle_consent(None, &mut cfg);
-        // (Recordings kept under its name are not taken as masked: from now.)
-        crate::transcode::masked::note_level(&self.db, &cfg, Utc::now().timestamp_millis(), true);
         let id = {
             let mut cams = self.cameras.write().unwrap();
             let id = match cams.iter().position(|c| c.is_none()) {
@@ -962,12 +928,6 @@ impl Engine {
             let before = h.cfg.read().unwrap().clone();
             let mut cfg = edit(&before).map_err(Some)?;
             normalize_creds(&mut cfg);
-            // Sharing a masked camera unmasked was confirmed for the masks it
-            // had: new or other masks (or text turned on) need it again.
-            if crate::restream::http::consent_lapses(&before, &cfg) {
-                cfg.share_unmasked = false;
-            }
-            crate::restream::http::settle_consent(Some(&before), &mut cfg);
             let differs = restart_fields(&before, &cfg);
             may_restart(&differs).map_err(Some)?;
             if differs.is_empty() {
@@ -976,7 +936,6 @@ impl Engine {
                     copy_light_fields(&mut c, &cfg);
                 }
                 drop(cams);
-                crate::transcode::masked::note_level(&self.db, &cfg, Utc::now().timestamp_millis(), mask_record_fresh(&before, &cfg));
                 self.sync_config_cameras();
                 return Ok((before, cfg));
             }
@@ -987,10 +946,6 @@ impl Engine {
             spawn_worker(self.clone(), h.clone(), cfg.clone());
             (before, cfg)
         };
-        // From when its recordings carry these masks (the old reader is
-        // stopping now; see masked::SETTLE_MS). A database write: not under
-        // the cameras lock.
-        crate::transcode::masked::note_level(&self.db, &after, Utc::now().timestamp_millis(), mask_record_fresh(&before, &after));
         self.sync_config_cameras();
         self.note_recording_mode(id);
         Ok((before, after))
@@ -1015,38 +970,27 @@ impl Engine {
 
     /// Rename camera `id` from `old` and apply its new settings `cfg` as one
     /// step: no removal of the camera can come between its recordings moving
-    /// to the new name and the camera taking it (the masks it leaves for its
-    /// recordings would be kept under the name they no longer have).
+    /// to the new name and the camera taking it.
     /// Ok(false): no such camera, or it is no longer called `old`.
     ///
     /// Its recordings are kept in the folder of its old name (files keep
     /// their paths; the index rows move). So that its last ones move with
     /// it too, its recorder is stopped first and the files it left there
     /// are indexed (as at a clean stop) before the rows move; a stop that
-    /// takes too long ([`RENAME_STOP_WAIT`]) is not waited for. Either way,
-    /// a camera that had privacy masks leaves them under its old name for
-    /// what was recorded there until a little after now (see
-    /// masked::rename_tail_entry): a file found there later is not shown
-    /// unmasked as the footage of a camera added under that name.
+    /// takes too long ([`RENAME_STOP_WAIT`]) is not waited for.
     pub fn rename_and_update_camera(self: &Arc<Engine>, id: usize, old: &str, cfg: CameraConfig) -> anyhow::Result<bool> {
         let _naming = CAMERA_NAMING.lock().unwrap_or_else(|e| e.into_inner());
         let Some(h) = self.camera(id).filter(|h| h.cfg.read().unwrap().name == old) else {
             return Ok(false);
         };
-        let before = h.cfg.read().unwrap().clone();
         let moves = slug(old) != slug(&cfg.name);
         let was_active = moves.then(|| self.stop_for_rename(id, &h));
-        let seg = self.config.lock().unwrap().storage.segment_seconds;
-        let tail = if moves { crate::transcode::masked::rename_tail_entry(&before, seg, Utc::now().timestamp_millis()) } else { None };
-        if let Err(e) = self.rename_camera_refs(old, &cfg.name, tail.clone()) {
+        if let Err(e) = self.rename_camera_refs(old, &cfg.name) {
             // (Not renamed: it goes on as it was.)
             if let Some(a) = was_active {
                 self.restart_after_failed_rename(id, a);
             }
             return Err(e);
-        }
-        if tail.is_some() {
-            self.keep_tail_after_writers(&slug(old), &before.privacy_masks);
         }
         Ok(self.update_camera(id, cfg))
     }
@@ -1059,17 +1003,6 @@ impl Engine {
     fn restart_after_failed_rename(&self, id: usize, was: bool) {
         if let Some(cur) = self.camera(id) {
             cur.active.store(was, Ordering::SeqCst);
-        }
-    }
-
-    /// A camera with privacy masks `masks` was renamed from `old_slug`: if
-    /// a recording is still being written into its old folder (a download
-    /// the rename did not wait out), its masks are kept there again once the
-    /// last one is done (see [`FolderWrite`]).
-    fn keep_tail_after_writers(&self, old_slug: &str, masks: &[crate::config::ZoneRect]) {
-        let w = self.writers.lock().unwrap_or_else(|e| e.into_inner());
-        if w.get(old_slug).is_some_and(|n| *n > 0) {
-            self.late_tails.lock().unwrap_or_else(|e| e.into_inner()).insert(old_slug.to_string(), masks.to_vec());
         }
     }
 
@@ -1121,7 +1054,7 @@ impl Engine {
             }
             if std::time::Instant::now() >= until {
                 if parked {
-                    warn!("camera '{}': a recording was still being written into its folder at the rename (its privacy masks stay with it)", h.cfg.read().unwrap().name);
+                    warn!("camera '{}': a recording was still being written into its folder at the rename", h.cfg.read().unwrap().name);
                 }
                 break parked;
             }
@@ -1129,7 +1062,7 @@ impl Engine {
         };
         let cfg = h.running.read().unwrap().clone();
         if !parked {
-            warn!("camera '{}': its recorder did not stop in time for the rename; its last recordings may stay under the old name (its privacy masks stay with them)", cfg.name);
+            warn!("camera '{}': its recorder did not stop in time for the rename; its last recordings may stay under the old name", cfg.name);
             return was;
         }
         // What the built-in reader closed is handed to the indexer: in first.
@@ -1154,12 +1087,10 @@ impl Engine {
     /// overrides, user camera lists, recordings, events and AI reviews to the
     /// new name (the caller then saves the camera itself).
     /// Err: its recordings could not be moved (nothing else was changed;
-    /// the camera is not to be renamed). `keep`: a privacy mask record
-    /// written with the recordings (see Db::rename_camera_keeping).
-    fn rename_camera_refs(&self, old: &str, new: &str, keep: Option<(String, String)>) -> anyhow::Result<()> {
-        // The recordings first (and the records of their privacy masks, in
-        // the same transaction): when they cannot follow, nothing does.
-        if let Err(e) = self.db.rename_camera_keeping(old, new, keep) {
+    /// the camera is not to be renamed).
+    fn rename_camera_refs(&self, old: &str, new: &str) -> anyhow::Result<()> {
+        // The recordings first: when they cannot follow, nothing does.
+        if let Err(e) = self.db.rename_camera(old, new) {
             warn!("could not move recordings of '{old}' to '{new}': {e:#}");
             return Err(e);
         }
@@ -1231,28 +1162,13 @@ impl Engine {
         self.note_recording_mode(id);
     }
 
-    #[cfg(test)]
     pub fn remove_camera(&self, id: usize) -> bool {
-        self.try_remove_camera(id).unwrap_or(false)
-    }
-
-    /// As [`Engine::remove_camera`]; Err: the camera's privacy masks could
-    /// not be kept for its recordings (see masked::remember_removed), so it
-    /// was not removed (its recordings would otherwise leave unmasked).
-    pub fn try_remove_camera(&self, id: usize) -> anyhow::Result<bool> {
         // (Not while a rename moves its recordings: see rename_and_update_camera.)
         let _naming = CAMERA_NAMING.lock().unwrap_or_else(|e| e.into_inner());
         let removed = {
             let mut cams = self.cameras.write().unwrap();
             if id >= cams.len() || cams[id].is_none() {
-                return Ok(false);
-            }
-            {
-                let c = cams[id].as_ref().unwrap().cfg.read().unwrap().clone();
-                crate::transcode::masked::remember_removed(&self.db, &c, Utc::now().timestamp_millis()).map_err(|e| {
-                    tracing::warn!("camera '{}': not removed, its privacy masks could not be kept for its recordings: {e:#}", c.name);
-                    e
-                })?;
+                return false;
             }
             let h = cams[id].take().unwrap();
             h.active.store(false, Ordering::Relaxed);
@@ -1261,8 +1177,6 @@ impl Engine {
         };
         // A new camera given the same name must not inherit its alert pause.
         if let Some(name) = &removed {
-            // ... nor its "masked from" record.
-            crate::transcode::masked::forget_record(&self.db, name);
             self.pause_alerts(name, Some(0));
             // ... nor anyone's snooze of it.
             if let Err(e) = self.db.snooze_forget_camera(&crate::config::slug(name)) {
@@ -1282,7 +1196,7 @@ impl Engine {
         }
         let removed = removed.is_some();
         self.sync_config_cameras();
-        Ok(removed)
+        removed
     }
 
     /// Rewrite config.cameras from the live camera slots (skipping holes)
@@ -1630,16 +1544,6 @@ pub(crate) static CAMERA_NAMING: std::sync::Mutex<()> = std::sync::Mutex::new(()
 /// not hold the request, or a removal, for long.
 pub const RENAME_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 3 } else { 10 });
 
-/// Whether a camera's "masked from" record (transcode::masked::note_level)
-/// is to start again from now when its settings go from `before` to
-/// `after`: renamed (the record of either name says nothing about the
-/// recordings now under the new one), or its masks were not burned into its
-/// recordings before (a record kept from an earlier time at the recording
-/// level would count the recordings made since as masked).
-fn mask_record_fresh(before: &CameraConfig, after: &CameraConfig) -> bool {
-    before.name != after.name || !crate::transcode::masked::burns_in(before)
-}
-
 /// Settings that only matter when a notification is decided (or how the
 /// camera is listed): changing them does not touch the stream. Everything not
 /// listed here (including the camera's own on/off for notifications and its
@@ -1686,7 +1590,6 @@ fn restart_fields(old: &CameraConfig, new: &CameraConfig) -> Vec<String> {
 }
 
 fn make_handle(id: usize, cfg: CameraConfig) -> Arc<CameraHandle> {
-    // (Never shared with a privacy mask or overlay: the stream would bypass it.)
     let shared = cfg.share && crate::restream::enabled() && crate::restream::http::blocker(&cfg).is_none();
     Arc::new(CameraHandle {
         id,
@@ -1898,41 +1801,6 @@ mod rename_stop_tests {
         let t = Instant::now();
         assert!(e.stop_for_rename(0, &h));
         assert!(t.elapsed() >= RENAME_STOP_WAIT && t.elapsed() < RENAME_STOP_WAIT + Duration::from_secs(2));
-        take_out(&e);
-    }
-
-    /// A masked camera renamed while a download still writes into its old
-    /// folder: when it is done, the camera's masks are kept there again from
-    /// then (the record made at the rename may have run out by then).
-    #[test]
-    fn a_download_finished_after_a_rename_keeps_the_masks() {
-        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let (e, h) = engine_with("Cam", "enabled = false\nmask_mode = \"screen\"\nprivacy_masks = [{ x = 0.0, y = 0.0, w = 0.5, h = 0.5 }]");
-        h.active.store(false, Ordering::SeqCst);
-        let w = e.writing_into("Cam");
-        let mut cfg = h.cfg.read().unwrap().clone();
-        cfg.name = "Cam Two".into();
-        assert!(e.rename_and_update_camera(0, "Cam", cfg).unwrap());
-        let at_rename = crate::transcode::masked::gone_masks(&e.db, "cam").unwrap();
-        assert_eq!(at_rename.len(), 1, "the tail kept at the rename");
-        thread::sleep(Duration::from_millis(50));
-        drop(w);
-        let mut after = crate::transcode::masked::gone_masks(&e.db, "cam").unwrap();
-        assert_eq!(after.len(), 2, "kept again once the download is done");
-        after.sort_by_key(|(u, _)| *u);
-        let now = Utc::now().timestamp_millis();
-        assert!(after[1].0 >= now + crate::transcode::masked::RENAME_TAIL_MS - 5_000, "{after:?}");
-        assert_eq!(after[1].1.len(), 1);
-        assert!(e.late_tails.lock().unwrap().is_empty());
-        // A camera without masks: nothing is kept.
-        let (e, h) = engine_with("Open", "enabled = false");
-        h.active.store(false, Ordering::SeqCst);
-        let w = e.writing_into("Open");
-        let mut cfg = h.cfg.read().unwrap().clone();
-        cfg.name = "Open Two".into();
-        assert!(e.rename_and_update_camera(0, "Open", cfg).unwrap());
-        drop(w);
-        assert!(crate::transcode::masked::gone_masks(&e.db, "open").unwrap().is_empty());
         take_out(&e);
     }
 

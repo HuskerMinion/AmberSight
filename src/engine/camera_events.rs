@@ -329,7 +329,6 @@ fn spawn_baichuan_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &C
     };
     let (user, pass) = (cfg.username.clone(), cfg.password.clone());
     let name = cfg.name.clone();
-    // (Masks set to "Hide in recordings too" stop its recording: native.rs.)
     if cfg.overlay {
         warn!("camera '{name}': burned-in text is not applied to battery Argus recordings (they are the camera's own stream)");
     }

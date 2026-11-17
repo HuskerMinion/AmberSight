@@ -5,7 +5,6 @@
 // answers repeats.
 
 import { enc, fmtWall, state } from './core.js';
-import { maskRevQ } from './masks.js';
 
 const WIDTH = 240;
 const DEBOUNCE_MS = 90;
@@ -40,12 +39,10 @@ async function fetchNext() {
   if (busy || !want) return;
   const w = want;
   const sec = Math.floor(w.ms / 1000) * 1000;
-  // (With the masks' revision: a picture made before a mask change is not shown again.)
-  const rev = maskRevQ(state.cams.find(x => x.name === w.cam));
-  const key = w.cam + '|' + sec + rev;
+  const key = w.cam + '|' + sec;
   if (key === shownKey) return;
   busy = true;
-  const url = '/api/preview?camera=' + enc(w.cam) + '&at=' + sec + '&w=' + WIDTH + rev;
+  const url = '/api/preview?camera=' + enc(w.cam) + '&at=' + sec + '&w=' + WIDTH;
   try {
     const r = await fetch(url, { credentials: 'same-origin' });
     if (want && r.ok) {

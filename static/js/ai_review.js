@@ -10,7 +10,6 @@ const mayFix = (r) => {
   return state.isAdmin || (can('camera_detection') && !!c && !c.remote);
 };
 import { registerAdminPage } from './admin.js';
-import { maskRevQ } from './masks.js';
 
 const pct = (s) => Math.round(s * 100) + '%';
 const errText = (e) => (e && e.body) ? e.body : (e && e.message) || String(e);
@@ -204,7 +203,7 @@ function explain(r) {
 }
 
 // One frame card with the AI's boxes.
-function frameCard(id, c, v, again, rev) {
+function frameCard(id, c, v, again) {
   const min = v.min_score, wanted = v.wanted || [];
   const why = new Map((c.seen || []).map((d, i) => [d, (c.spot && c.spot[i]) || ((c.parked && c.parked[i]) ? 'parked' : '')]));
   const cls = (d) => why.get(d) ? 'faint' : wanted.includes(d.label) ? (d.score >= min ? 'hit' : 'low') : (d.score >= min ? 'other' : 'faint');
@@ -214,7 +213,7 @@ function frameCard(id, c, v, again, rev) {
   const chips = seen.length ? seen.map(d => '<span class="air-chip air-' + cls(d) + '">' + esc(d.label) + ' ' + pct(d.score) + tag(d) + '</span>').join('') : '<span class="muted">nothing</span>';
   const re = again ? '<div class="air-again"><b>Today:</b> ' + ((again.seen || []).length ? again.seen.slice().sort((a, b) => b.score - a.score).map(d => '<span class="air-chip air-' + cls(d) + '">' + esc(d.label) + ' ' + pct(d.score) + '</span>').join('') : '<span class="muted">nothing</span>') + '</div>' : '';
   return '<div class="air-frame"><div class="air-img">' +
-    (c.frame ? '<img loading="lazy" src="/api/events/' + encodeURIComponent(id) + '/ai/' + c.n + (rev || '') + '" alt="">' : '<div class="air-noimg">frame not kept</div>') +
+    (c.frame ? '<img loading="lazy" src="/api/events/' + encodeURIComponent(id) + '/ai/' + c.n + '" alt="">' : '<div class="air-noimg">frame not kept</div>') +
     '<svg viewBox="0 0 100 100" preserveAspectRatio="none">' + boxes + '</svg></div>' +
     '<div class="air-cap"><span class="muted">+' + secs(Math.max(0, c.offset_ms)) + '</span> ' + (c.error ? '<span class="air-err">' + esc(c.error) + '</span>' : chips) + '</div>' + re + '</div>';
 }
@@ -235,7 +234,7 @@ export async function openAiReview(eventId) {
     if (x.fixes.length && mayFix(r)) h += '<div class="air-fixes">' + x.fixes.map((f, i) => '<button class="btn" data-fix="' + i + '">' + f.label + '</button>').join('') + '</div>';
     if (v && (v.checks || []).length) {
       h += '<div class="air-legend"><span class="air-chip air-hit">counts</span><span class="air-chip air-low">wanted, not sure enough</span><span class="air-chip air-other">not on the alert list</span><span class="air-chip air-faint">faint guess</span></div>';
-      h += '<div class="air-grid">' + v.checks.map(c => frameCard(r.event.id, c, v, again && again.find(a => a.n === c.n), maskRevQ(state.cams.find(x => x.name === r.event.camera), '?'))).join('') + '</div>';
+      h += '<div class="air-grid">' + v.checks.map(c => frameCard(r.event.id, c, v, again && again.find(a => a.n === c.n))).join('') + '</div>';
       if (state.isAdmin && v.checks.some(c => c.frame)) h += '<div class="row"><button class="btn" data-recheck>' + ic('swap') + ' Check these frames again with today\'s AI</button><span class="hint">After switching models or changing settings: nothing is saved.</span></div>';
     }
     const body = d.querySelector('[data-air]');
@@ -365,7 +364,7 @@ function reviewPage(el) {
           '<td class="num">' + (n(c, 'near_miss') ? '<b>' + n(c, 'near_miss') + '</b>' : 0) + '</td><td class="num">' + n(c, 'other_object') + '</td><td class="num">' + n(c, 'parked') + '</td><td class="num">' + n(c, 'fixed_spot') + '</td><td class="num">' + n(c, 'camera_only') + '</td><td class="num">' + n(c, 'nothing') + '</td>' +
           '<td class="ar-opt ar-for" title="' + esc(((c.now || {}).labels || []).join(', ')) + '">' + esc(((c.now || {}).labels || []).join(', ')) + '</td><td class="num ar-opt">' + (c.now && c.now.min_score != null ? pct(c.now.min_score) : '-') + '</td></tr>').join('') + '</tbody></table></div>' +
         (data.cameras.some(c => c.sampled < c.total) ? '<p class="hint">Checked and Alerts sent count the whole period. For ' + data.cameras.filter(c => c.sampled < c.total).map(c => esc(c.camera)).join(', ') + ', the other columns are based on the latest ' + data.per_camera_limit + ' events of each camera.</p>' : '') +
-        '<p class="hint">"Almost" means AI saw something it alerts for but was not sure enough: worth a look if you are missing alerts. Many "Nothing found" usually means shadows, lighting or plants set off motion; a motion zone or mask can help.</p>';
+        '<p class="hint">"Almost" means AI saw something it alerts for but was not sure enough: worth a look if you are missing alerts. Many "Nothing found" usually means shadows, lighting or plants set off motion; a motion zone or an ignore zone can help.</p>';
     }
     const evs = (data.events || []).filter(e => filter === 'all' || (filter === 'noalert' ? !e.alerted : e.summary.kind === filter));
     const most = data.list_limit || 300;

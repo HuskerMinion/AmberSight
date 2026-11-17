@@ -216,7 +216,7 @@ A camera note like `the system would not start another process or thread
 temporarily unavailable` (followed by `error code: -22`), mean the container
 ran out of processes and threads. A container started with a low
 `--pids-limit` (or `pids_limit:` in Compose) allows only that many in all;
-a camera that AmberSight re-encodes (an overlay, privacy masks, or
+a camera that AmberSight re-encodes (an overlay or
 `ingest = "ffmpeg"`) runs an ffmpeg with a dozen or more threads, and 4K
 cameras need the most.
 
@@ -224,7 +224,7 @@ cameras need the most.
   per 4K camera; `pids_limit: -1` in Compose. On Unraid, remove `--pids-limit`
   from Extra Parameters.
 - Or move the camera back to the built-in reader (turn off the overlay,
-  remove the privacy masks and any `ingest = "ffmpeg"` line), which needs no
+  remove any `ingest = "ffmpeg"` line), which needs no
   ffmpeg process per camera. The camera report says why a camera is on ffmpeg.
 - The camera report (Network section of the camera's settings) shows the
   container's limit and how much of it is in use under **This server**.

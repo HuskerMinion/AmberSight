@@ -2,8 +2,7 @@
 import { state, enc, esc, fmtWall, toLocalInput, openDlg, msgDlg, downloadUrl } from './core.js';
 
 // "Burn the text into this clip": a switch for every place clips are
-// downloaded. A downloaded clip always has the camera's privacy masks burned
-// in (the file leaves AmberSight) and the time as a subtitle track; burning
+// downloaded. A downloaded clip has the time as a subtitle track; burning
 // the text in as well re-encodes the clip, so it is off unless asked for.
 // Remembered per browser (the same choice for every download).
 const BURN_KEY = 'ambs.burnText';
@@ -19,11 +18,6 @@ export function wireBurnText(root, onChange) {
 }
 // '&burn_text=1' (or '?burn_text=1' with first) when the text is to be burned in.
 export const burnTextQuery = (first) => (burnText() ? (first ? '?' : '&') + 'burn_text=1' : '');
-// Downloads of these cameras have their privacy masks burned in: a line saying so (or nothing).
-export function maskedNote(names) {
-  const masked = state.cams.filter(c => names.includes(c.name) && (c.privacy_masks || []).length);
-  return masked.length ? '<div class="hint">Privacy masks are burned into the download' + (names.length > 1 ? ' (' + masked.map(c => esc(c.name)).join(', ') + ')' : '') + '.</div>' : '';
-}
 
 // opts = { cams: [names shown], camera, from, to } (ms) for the marked range.
 // The server saves one camera per MP4, so with several cameras the list also
@@ -43,7 +37,7 @@ export function exportDialog(opts) {
     '<label>Start <input id="exFrom" type="datetime-local" step="1" value="' + toLocalInput(from) + '"></label>' +
     '<label>End <input id="exTo" type="datetime-local" step="1" value="' + toLocalInput(to) + '"></label>' +
     '<div class="hint">' + (opts.from != null ? 'The range you marked on the timeline. ' : 'Defaults to 30 s either side of the playhead. ') + 'The saved MP4 starts at the nearest earlier keyframe.</div>' +
-    burnTextSwitch(false) + maskedNote(cams) +
+    burnTextSwitch(false) +
     '<button class="primary" data-go="1">Download MP4</button>');
   wireBurnText(d);
   d.querySelector('[data-go]').onclick = async () => {

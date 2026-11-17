@@ -33,11 +33,10 @@ pub struct AlertOver {
 }
 
 impl Engine {
-    /// An event's picture to send out (MQTT, email): the camera's privacy
-    /// masks blacked out when it was kept before they were set or changed.
+    /// An event's picture to send out (MQTT, email).
     pub(super) fn event_picture_to_send(&self, ev: &Event) -> Option<Vec<u8>> {
         let t = ev.thumb.as_deref().filter(|t| !t.is_empty() && !t.contains(['/', '\\']))?;
-        crate::privacy::read_masked(&self.data_dir.join("thumbs").join(format!("{t}.jpg")), self.picture_cfg(&ev.camera).as_ref()).ok()
+        std::fs::read(self.data_dir.join("thumbs").join(format!("{t}.jpg"))).ok()
     }
 
     /// classic NVR-style alerts: webhook JSON POST + optional Telegram message.
@@ -214,9 +213,7 @@ impl Engine {
         }
         let thumb_key = ev.thumb.clone().unwrap_or("".into());
         let thumb_path = self.data_dir.join("thumbs").join(format!("{}.jpg", thumb_key));
-        // (The file is passed on by its path: a picture kept before the camera's
-        // privacy masks were set or changed is masked first, or not sent.)
-        let have_thumb = !thumb_key.is_empty() && std::fs::exists(&thumb_path).unwrap_or(false) && crate::privacy::mask_file(&thumb_path, self.picture_cfg(&ev.camera).as_ref());
+        let have_thumb = !thumb_key.is_empty() && std::fs::exists(&thumb_path).unwrap_or(false);
         // Browser notifications: tapping one opens this camera at the alert;
         // the picture is fetched by the browser itself (signed in).
         let push_msg = push.then(|| {

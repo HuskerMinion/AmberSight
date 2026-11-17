@@ -1,12 +1,11 @@
 // zones.js - the motion zone editor: a large overlay with the camera's picture, where
-// detect zones, ignore zones (rectangles or polygons, 0..1 of the frame) and privacy masks
+// detect zones, ignore zones (rectangles or polygons, 0..1 of the frame)
 // (rectangles only) are drawn, selected, moved, resized, reshaped, deleted, undone, and saved together.
 // Named alert zones live here too: areas (polygons; loitering alerts) and lines (2+ points with an arrow;
 // crossing alerts), each with a name and options (objects, seconds or direction, alert, record, window).
 // Opened from the camera panel's Motion section and from the Live dock.
 
 import { topDlgOpen, state, api, esc, toast, camFromId, refreshCameras, msgDlg, backLayer, overlaysChanged, can } from './core.js';
-import { noFfmpegReader } from './masks.js';
 
 const MIN = 0.01;
 const MIN_AREA = 0.0005;    // smallest polygon area (fraction of the frame)           // smallest side of a zone (fraction of the frame)
@@ -17,16 +16,15 @@ let askNow = null;          // asks to leave the editor that is showing (Esc, th
 // Below dialogs (30 in core.js): a dialog opened over the editor closes first on Back.
 backLayer(28, () => !!open && !!askNow, () => { if (askNow) askNow(); });
 
-// Counts rectangles and polygons, and mentions privacy masks. Takes a camera object.
+// Counts rectangles and polygons. Takes a camera object.
 export function zoneCounts(c) {
   c = c || {};
-  return { zn: (c.zones || []).length + (c.zone_polys || []).length, iz: (c.ignore_zones || []).length + (c.ignore_polys || []).length, pm: (c.privacy_masks || []).length, nz: (c.named_zones || []).length };
+  return { zn: (c.zones || []).length + (c.zone_polys || []).length, iz: (c.ignore_zones || []).length + (c.ignore_polys || []).length, nz: (c.named_zones || []).length };
 }
 export function zonesSummary(c) {
-  const { zn, iz, pm, nz } = zoneCounts(c), parts = [];
+  const { zn, iz, nz } = zoneCounts(c), parts = [];
   if (zn || iz) parts.push(zn + ' zone' + (zn === 1 ? '' : 's'));
   if (iz) parts.push(iz + ' ignore');
-  if (pm) parts.push(pm + ' privacy mask' + (pm === 1 ? '' : 's'));
   if (nz) parts.push(nz + ' alert zone' + (nz === 1 ? '' : 's'));
   return 'Zones: ' + (parts.length ? parts.join(' \u00b7 ') : 'none (the whole picture counts)') + '.';
 }
@@ -46,8 +44,6 @@ export async function openZoneEditor(id, opts) {
   opts = opts || {};
   if (open) return;
   if (!can('camera_detection')) { msgDlg('This account cannot change zones: an admin can allow it'); return; }
-  // (Privacy masks are an admin's: an operator neither sees them here nor sends them.)
-  const masksToo = state.isAdmin;
   let c0 = camFromId(id);
   if (!c0) { msgDlg('That camera no longer exists'); return; }
   if (c0.remote) { msgDlg('Zones of a camera on another server are edited on that server'); return; }
@@ -56,7 +52,7 @@ export async function openZoneEditor(id, opts) {
   try { await refreshCameras(); } catch (e) { /* use what we have */ }
   c0 = camFromId(id) || c0;
 
-  // Shapes: rectangle {k:'r', t, x, y, w, h} or polygon {k:'p', t, pts:[[x,y],...]}; t is detect | ignore | mask.
+  // Shapes: rectangle {k:'r', t, x, y, w, h} or polygon {k:'p', t, pts:[[x,y],...]}; t is detect | ignore.
   const R = (t) => (z) => ({ k: 'r', t, x: z.x, y: z.y, w: z.w, h: z.h });
   const P = (t) => (z) => ({ k: 'p', t, pts: (z.points || []).map(q => [q[0], q[1]]) });
   // Named alert zones: area {k:'p'|'r', t:'area'} or line {k:'l', t:'line'}, with name and options.
@@ -67,18 +63,7 @@ export async function openZoneEditor(id, opts) {
   // They are ignore-style shapes here and saved to that field instead of the motion zones.
   const Q = opts.mode === 'quiet';
   let zones = Q ? (c0.alert_ignore_polys || []).map(P('ignore')) : [].concat((c0.zones || []).map(R('detect')), (c0.ignore_zones || []).map(R('ignore')),
-    (c0.zone_polys || []).map(P('detect')), (c0.ignore_polys || []).map(P('ignore')), (masksToo ? c0.privacy_masks || [] : []).map(R('mask')), (c0.named_zones || []).map(NZ));
-  const hadMasks = (c0.privacy_masks || []).length > 0;
-  // How far the camera's masks reach (one setting for all its masks): 'screen'
-  // = drawn over its video in the apps and burned into the pictures and
-  // downloads AmberSight makes; 'recording' = the video is re-encoded with them.
-  // (A camera that had masks before the choice existed keeps 'recording'.)
-  // Pushed and battery cameras have no re-encoding reader: 'screen' only.
-  // (The server's rule: the address alone; a uid setting does not decide it.)
-  const noReencode = noFfmpegReader(c0.url);
-  let maskMode = c0.mask_mode === 'recording' || c0.mask_mode === 'screen' ? c0.mask_mode : (hadMasks ? 'recording' : 'screen');
-  if (noReencode) maskMode = 'screen';
-  const savedMode = maskMode;
+    (c0.zone_polys || []).map(P('detect')), (c0.ignore_polys || []).map(P('ignore')), (c0.named_zones || []).map(NZ));
   const key = () => JSON.stringify(zones);
   let saved = key();
   let sel = -1, hover = -1, type = Q ? 'ignore' : 'detect', tool = 'rect', selV = -1, poly = null;
@@ -99,7 +84,6 @@ export async function openZoneEditor(id, opts) {
         '<div class="ze-seg" role="group" aria-label="New zone type"' + (Q ? ' hidden' : '') + '>' +
           '<button type="button" data-type="detect" aria-pressed="true" title="Motion counts only inside detect zones (if there are any)">Detect zone</button>' +
           '<button type="button" data-type="ignore" aria-pressed="false" title="Motion inside an ignore zone never counts">Ignore zone</button>' +
-          (masksToo ? '<button type="button" data-type="mask" aria-pressed="false" title="An area blacked out on screen and in pictures (and, if you choose, in recordings)">Privacy mask</button>' : '') +
           '<button type="button" data-type="area" aria-pressed="false" title="A named area: alerts when someone stays inside too long (loitering). Needs AI.">Alert area</button>' +
           '<button type="button" data-type="line" aria-pressed="false" title="A named line with a direction arrow: alerts when someone crosses it. Needs AI.">Alert line</button></div>' +
         '<div class="ze-seg" role="group" aria-label="Shape tool">' +
@@ -112,13 +96,7 @@ export async function openZoneEditor(id, opts) {
       '</div>' +
       '<div class="ze-confirm" data-confirm hidden><span>Discard your changes to the zones?</span><button type="button" class="btn" data-keep>Keep editing</button><button type="button" class="btn danger" data-discard>Discard</button></div>' +
       '<div class="ze-err" data-err hidden></div>' +
-      (masksToo && !Q ? '<div class="ze-note ze-ml" data-masklvl hidden>' +
-        '<div class="ze-mlrow"><span class="ze-mlk">Privacy masks</span><div class="ze-seg" role="group" aria-label="How far the privacy masks reach">' +
-          '<button type="button" data-ml="screen" aria-pressed="false">Hide on screen and in pictures</button>' +
-          '<button type="button" data-ml="recording" aria-pressed="false"' + (noReencode ? ' disabled title="Not for pushed or battery cameras: AmberSight has no way to re-encode their video"' : '') + '>Hide in recordings too</button></div></div>' +
-        '<p data-mlhint></p>' +
-        '<p class="muted">' + (noReencode ? 'Hide in recordings too is not available for pushed or battery cameras. ' : '') + 'Best of all, if the camera has its own privacy mask (Reolink, Dahua/Amcrest and Hikvision cameras do), use it: the area never leaves the camera, and it costs nothing here.</p>' +
-      '</div>' : '') +
+      (Q ? '' : '<div class="ze-note">AmberSight no longer makes privacy masks: use the camera\'s own (Reolink, Dahua/Amcrest and Hikvision cameras have one). An ignore zone keeps motion there from counting.</div>') +
       '<div class="ze-main">' +
         '<div class="ze-stage" data-stage><canvas data-cv aria-label="Camera picture: drag to draw a zone; click a zone to select it"></canvas><div class="ze-nopic" data-nopic hidden>No picture right now. You can still draw zones.</div>' +
           '<div class="ze-polybar" data-polybar hidden><span data-pcount></span><button type="button" class="btn" data-pclose>Close</button><button type="button" class="btn" data-pback>Undo point</button><button type="button" class="btn" data-pcancel>Cancel</button></div></div>' +
@@ -132,7 +110,7 @@ export async function openZoneEditor(id, opts) {
   behind.forEach(e => e.setAttribute('inert', ''));
   const $q = (s) => root.querySelector(s);
   const win = $q('.ze-win'), cv = $q('[data-cv]'), stage = $q('[data-stage]'), list = $q('[data-list]');
-  const mlEl = $q('[data-masklvl]'), polybar = $q('[data-polybar]');
+  const polybar = $q('[data-polybar]');
   const saveBtn = $q('[data-zsave]'), undoBtn = $q('[data-undo]'), redoBtn = $q('[data-redo]');
   const ctx = cv.getContext('2d');
   let cw = 0, ch = 0, dpr = 1;
@@ -149,7 +127,7 @@ export async function openZoneEditor(id, opts) {
   const hatch = ctx.createPattern(pat, 'repeat');
 
   // ---------- model ----------
-  const dirty = () => key() !== saved || maskMode !== savedMode;
+  const dirty = () => key() !== saved;
   function record(label) {
     const k = key();
     if (k === hist[hi]) return;
@@ -171,7 +149,7 @@ export async function openZoneEditor(id, opts) {
     saveBtn.disabled = !dirty() || saving;
     undoBtn.disabled = hi <= 0; redoBtn.disabled = hi >= hist.length - 1;
   }
-  const TNAME = { detect: 'Detect', ignore: Q ? 'No notification' : 'Ignore', mask: 'Privacy mask', area: 'Area', line: 'Line' };
+  const TNAME = { detect: 'Detect', ignore: Q ? 'No notification' : 'Ignore', area: 'Area', line: 'Line' };
   const isNamed = (z) => z.t === 'area' || z.t === 'line';
   const isPts = (z) => z.k === 'p' || z.k === 'l';          // corner / vertex list (polygon or line)
   const minPts = (z) => (z.k === 'l' ? 2 : 3);
@@ -179,33 +157,26 @@ export async function openZoneEditor(id, opts) {
     const z = zones[i]; let n = 0;
     if (isNamed(z)) return z.name || TNAME[z.t];
     for (let j = 0; j <= i; j++) if (zones[j].t === z.t) n++;
-    return (z.t === 'mask' ? 'Mask ' : TNAME[z.t] + ' ') + n;
+    return TNAME[z.t] + ' ' + n;
   };
   const rowName = (z) => (isNamed(z) ? (z.name || '(unnamed)') : TNAME[z.t] + (z.k === 'p' ? ' polygon (' + z.pts.length + ' points)' : ''));
-  const effTool = () => (type === 'mask' ? 'rect' : tool);
+  const effTool = () => tool;
   // A fresh name: "Area 1", "Line 2" ... the first free number.
   const freeName = (t) => { const w = TNAME[t]; for (let n = 1; ; n++) if (!zones.some(z => isNamed(z) && (z.name || '').toLowerCase() === (w + ' ' + n).toLowerCase())) return w + ' ' + n; };
   const newNamed = (t, k, pts) => ({ k, t, pts, name: freeName(t), labels: ['person'], seconds: 30, direction: 'both', enabled: true, alert: true, record: true, ignore_parked: true, schedule: '' });
   function updateUi() {
     root.querySelectorAll('[data-type]').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.type === type)));
     root.querySelectorAll('[data-tool]').forEach(x => {
-      x.setAttribute('aria-pressed', String(x.dataset.tool === effTool())); if (x.dataset.tool === 'poly') x.disabled = type === 'mask';
+      x.setAttribute('aria-pressed', String(x.dataset.tool === effTool()));
       x.textContent = type === 'line' ? (x.dataset.tool === 'rect' ? 'Straight' : 'Bent') : (x.dataset.tool === 'rect' ? 'Rectangle' : 'Polygon');
     });
-    const what = type === 'mask' ? 'privacy mask' : type === 'area' ? 'alert area' : type === 'line' ? 'alert line' : type + ' zone';
+    const what = type === 'area' ? 'alert area' : type === 'line' ? 'alert line' : type + ' zone';
     $q('[data-hintdraw]').textContent = type === 'line'
       ? (effTool() === 'poly' ? 'Click to add the points of a line; double-click or Enter finishes it. Esc cancels.' : 'Drag on the picture to draw a line. The arrow shows which way counts as in.')
       : effTool() === 'poly'
         ? 'Click on the picture to add points of a ' + what + ' polygon; double-click, Enter or the first point closes it. Esc cancels, Backspace removes the last point.'
         : 'Drag on the picture to draw a ' + what + '.';
     if (Q) $q('[data-hintdraw]').textContent = (effTool() === 'poly' ? 'Click on the picture to add the corners of an area; double-click, Enter or the first point closes it.' : 'Drag on the picture to draw an area.') + ' Things here are still detected, recorded and searchable. They just don\'t send a notification.';
-    if (mlEl) {
-      mlEl.hidden = !zones.some(z => z.t === 'mask');
-      mlEl.querySelectorAll('[data-ml]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.ml === maskMode)));
-      mlEl.querySelector('[data-mlhint]').textContent = maskMode === 'recording'
-        ? 'Black everywhere, in the files on disk too: the only level that protects the recordings. The video is re-encoded (about one processor core per 4K camera, or the graphics card). Gaps are not filled from the camera\'s SD card.'
-        : 'Black in Live, playback, snapshots, event pictures, downloads, motion and AI. The recordings on disk and shared streams still contain the area. Viewers see it blacked out in AmberSight\'s apps, but the video itself isn\'t changed: to keep it from anyone who can watch this camera, use Hide in recordings too or the camera\'s own privacy mask.';
-    }
     polybar.hidden = !poly;
     if (poly) {
       const min = poly.t === 'line' ? 2 : 3;
@@ -335,12 +306,7 @@ export async function openZoneEditor(id, opts) {
         if (i === sel) { ctx.lineWidth = 1; ctx.strokeStyle = colors.accent; ctx.strokeRect(x - 3.5, y - 3.5, w + 7, h + 7); }
         return;
       }
-      if (z.t === 'mask') {
-        path(); ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fill();
-        if (hot) { ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill(); }
-        ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.stroke();
-        lock(ctx, w > 34 && h > 34 ? x + 8 : x + w / 2 - 6, w > 34 && h > 34 ? y + 8 : y + h / 2 - 7);
-      } else if (z.t === 'ignore') {
+      if (z.t === 'ignore') {
         path(); ctx.fillStyle = hatch; ctx.fill();
         if (hot) { ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill(); }
         ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.stroke();
@@ -354,7 +320,7 @@ export async function openZoneEditor(id, opts) {
         ctx.lineWidth = fl ? 3 : 2; ctx.strokeStyle = fl ? colors.motion : '#fff'; ctx.stroke();
       }
       if (i === sel) { ctx.lineWidth = 1; ctx.strokeStyle = colors.accent; ctx.strokeRect(x - 3.5, y - 3.5, w + 7, h + 7); }
-      if (z.t !== 'mask') {
+      {
         ctx.font = '600 11px system-ui, sans-serif'; ctx.textBaseline = 'top';
         const label = nameOf(i), tw = ctx.measureText(label).width;
         let lx = x, ly = y;
@@ -378,7 +344,7 @@ export async function openZoneEditor(id, opts) {
     } else if (drag && drag.mode === 'draw' && drag.cur) {
       const z = drag.cur, [x, y, w, h] = rectPath(z);
       ctx.setLineDash([5, 4]); ctx.lineWidth = 2; ctx.strokeStyle = '#fff';
-      ctx.fillStyle = drag.t === 'mask' ? 'rgba(0,0,0,.6)' : drag.t === 'ignore' ? 'rgba(150,156,164,.35)' : drag.t === 'area' ? 'rgba(79,209,197,.2)' : 'rgba(255,255,255,.15)'; ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+      ctx.fillStyle = drag.t === 'ignore' ? 'rgba(150,156,164,.35)' : drag.t === 'area' ? 'rgba(79,209,197,.2)' : 'rgba(255,255,255,.15)'; ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
     }
     // draft polygon
     if (poly) {
@@ -470,15 +436,6 @@ export async function openZoneEditor(id, opts) {
     if (selected) { /* handles are drawn with the others */ }
   }
 
-  // a small padlock, top-left at (x, y)
-  function lock(c, x, y) {
-    c.save(); c.lineWidth = 2; c.strokeStyle = '#fff'; c.fillStyle = '#fff';
-    c.beginPath(); c.arc(x + 6, y + 5, 4, Math.PI, 0); c.stroke();
-    c.fillRect(x, y + 5, 12, 9);
-    c.fillStyle = '#000'; c.fillRect(x + 5, y + 8, 2, 4);
-    c.restore();
-  }
-
   function renderList() {
     if (!zones.length) {
       list.innerHTML = '<li class="ze-empty">' + (Q ? 'No areas yet: every detected object can notify. Draw on the picture to add one.' : 'No zones: the whole picture counts. Draw on the picture to add one.') + '</li>';
@@ -486,12 +443,12 @@ export async function openZoneEditor(id, opts) {
     }
     const row = (z, i) =>
       '<li class="ze-row' + (i === sel ? ' on' : '') + (isNamed(z) && !z.enabled ? ' off' : '') + '" data-i="' + i + '"><button type="button" class="ze-pick" data-pick="' + i + '" aria-pressed="' + (i === sel) + '">' +
-        '<span class="ze-sw ' + (z.t === 'ignore' ? 'ig' : z.t === 'mask' ? 'pm' : z.t === 'area' ? 'ar' : z.t === 'line' ? 'ln' : 'de') + '"></span><span class="ze-nm">' + esc(rowName(z)) + '</span>' +
+        '<span class="ze-sw ' + (z.t === 'ignore' ? 'ig' : z.t === 'area' ? 'ar' : z.t === 'line' ? 'ln' : 'de') + '"></span><span class="ze-nm">' + esc(rowName(z)) + '</span>' +
         (isNamed(z) ? '<span class="ze-sz">' + (z.t === 'line' ? 'line' : (+z.seconds || 30) + ' s') + '</span>' : isPts(z) ? '' : '<span class="ze-sz">' + pc(z.w) + ' x ' + pc(z.h) + '%</span>') + '</button>' +
         '<button type="button" class="ze-del" data-del="' + i + '" aria-label="Delete ' + esc(nameOf(i)) + '" title="Delete">&times;</button></li>';
-    const zs = [], ms = [], ns = [];
-    zones.forEach((z, i) => (z.t === 'mask' ? ms : isNamed(z) ? ns : zs).push(row(z, i)));
-    list.innerHTML = zs.join('') + (ns.length ? '<li class="ze-sub">Alert zones</li>' + ns.join('') : '') + (ms.length ? '<li class="ze-sub">Privacy masks</li>' + ms.join('') : '');
+    const zs = [], ns = [];
+    zones.forEach((z, i) => (isNamed(z) ? ns : zs).push(row(z, i)));
+    list.innerHTML = zs.join('') + (ns.length ? '<li class="ze-sub">Alert zones</li>' + ns.join('') : '');
   }
 
   // ---------- options of the selected alert zone ----------
@@ -678,7 +635,7 @@ export async function openZoneEditor(id, opts) {
   root.querySelectorAll('[data-type]').forEach(b => {
     b.onclick = () => {
       type = b.dataset.type;
-      if (type === 'mask' || (poly && (type === 'line') !== (poly.t === 'line'))) cancelPoly(); else if (poly) poly.t = type;
+      if (poly && (type === 'line') !== (poly.t === 'line')) cancelPoly(); else if (poly) poly.t = type;
       updateUi();
     };
   });
@@ -735,10 +692,6 @@ export async function openZoneEditor(id, opts) {
     // (A rectangle drawn for a quiet area is saved as a four-corner polygon.)
     const quiet = () => polys('ignore').concat(rects('ignore').map(r => ({ points: [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]].map(q => [r4(q[0]), r4(q[1])]) })));
     const body = Q ? { alert_ignore_polys: quiet() } : { zones: rects('detect'), ignore_zones: rects('ignore'), zone_polys: polys('detect'), ignore_polys: polys('ignore'), named_zones: named };
-    if (!Q && masksToo) {
-      body.privacy_masks = rects('mask');
-      if (body.privacy_masks.length) body.mask_mode = maskMode;
-    }
     saving = true; saveBtn.textContent = 'Saving...'; status();
     try {
       await api('/api/cameras/' + id, { method: 'PUT', json: body });
@@ -762,7 +715,6 @@ export async function openZoneEditor(id, opts) {
   }
   function unask() { confirming = false; $q('[data-confirm]').hidden = true; }
   saveBtn.onclick = save;
-  if (mlEl) mlEl.querySelectorAll('[data-ml]').forEach(b => { b.onclick = () => { if (b.disabled) return; maskMode = b.dataset.ml; updateUi(); status(); }; });
   $q('[data-zcancel]').onclick = ask;
   $q('[data-keep]').onclick = () => { unask(); win.focus(); };
   $q('[data-discard]').onclick = () => close();

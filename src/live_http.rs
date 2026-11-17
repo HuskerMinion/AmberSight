@@ -27,50 +27,15 @@ pub struct StreamQ {
     /// the stream is sent untouched when it fits, else transcoded.
     #[serde(default)]
     caps: Option<String>,
-    /// `masks`: the player draws the camera's privacy masks over the video
-    /// itself. A camera masked on screen only sends its live video stream
-    /// (fMP4) to such players alone; others get the masked JPEG pictures.
-    #[serde(default)]
-    draws: Option<String>,
+    // (`draws=masks`, sent by players of 0.11.1 that drew the camera's
+    // privacy masks, is accepted and ignored like any other unknown field:
+    // AmberSight no longer makes masks.)
 }
 
 impl StreamQ {
     fn quiet(&self) -> bool {
         self.audio.as_deref() == Some("0")
     }
-
-    fn draws_masks(&self) -> bool {
-        crate::transcode::masked::draws_masks(self.draws.as_deref())
-    }
-
-    /// Only what says the player draws the masks (for a linked server's
-    /// request, which passes nothing else on).
-    #[cfg(test)]
-    pub fn draws_value(&self) -> Option<&str> {
-        self.draws.as_deref()
-    }
-
-    pub fn drawing_only(&self) -> StreamQ {
-        StreamQ { draws: self.draws_masks().then(|| "masks".to_string()), ..StreamQ::default() }
-    }
-}
-
-/// Whether this camera's live stream shows what its privacy masks cover
-/// (hidden on screen only, or a pushed or battery camera, whose stream is
-/// never re-encoded): it goes only to players that draw them.
-fn sends_unmasked(engine: &Engine, id: usize) -> bool {
-    engine.camera(id).is_some_and(|h| crate::transcode::masked::sends_unmasked(&h.cfg.read().unwrap()))
-}
-
-/// The answer to a live video request for a camera whose stream shows what
-/// its masks cover, from a player that does not draw the masks (`draws=masks`).
-fn needs_drawing() -> Response {
-    (
-        StatusCode::CONFLICT,
-        [(header::CACHE_CONTROL, "no-store")],
-        "This camera's live video shows what its privacy masks cover (they are hidden on screen only, or it is a pushed or battery camera): it is sent only to players that draw the masks themselves (draws=masks). Use the live pictures (/api/live/:id/jpeg), which are masked.",
-    )
-        .into_response()
 }
 
 /// Viewing an on-demand (battery) camera wakes it, unless `user` may not wake
@@ -105,8 +70,7 @@ pub async fn live_info(
     caller: Option<axum::Extension<crate::web::Caller>>,
 ) -> Response {
     if crate::remote::is_remote(id) {
-        let path = if q.draws_masks() { "/link/live/{id}/info?draws=masks" } else { "/link/live/{id}/info" };
-        return crate::remote::proxy_get(&engine, id, path, "application/json").await;
+        return crate::remote::proxy_get(&engine, id, "/link/live/{id}/info", "application/json").await;
     }
     let caps = match q.caps.as_deref().map(crate::transcode::Caps::parse) {
         Some(Err(e)) => return (StatusCode::BAD_REQUEST, e).into_response(),
@@ -116,24 +80,17 @@ pub async fn live_info(
     let user = caller.map(|c| c.0 .0.clone()).unwrap_or_default();
     wake_if_on_demand(&engine, id, Some(&user));
     let sleeping = engine.camera(id).is_some_and(|h| h.state.read().unwrap().sleeping);
-    let masked = sends_unmasked(&engine, id);
-    // A player that does not draw the masks is told there is no live video
-    // stream (it uses the masked JPEG pictures, as for an ffmpeg camera).
-    let hidden = masked && !q.draws_masks();
     match hubs(&engine, id) {
         None => (StatusCode::NOT_FOUND, "camera not found").into_response(),
         Some((main, sub)) => {
             let mut v = serde_json::json!({
-                "main": if hidden { None } else { main.info() },
-                "sub": if hidden { None } else { sub.info() },
+                "main": main.info(),
+                "sub": sub.info(),
                 "viewers": main.viewers() + sub.viewers(),
                 // true while a battery camera is still waking: ask again shortly.
                 "waking": sleeping || (main.info().is_none() && sub.info().is_none() && engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand)),
-                // The camera's privacy masks are hidden on screen only: a player
-                // gets its live video only with draws=masks, and must draw them.
-                "masked_needs_draw": masked,
             });
-            if let Some(caps) = caps.filter(|_| !hidden) {
+            if let Some(caps) = caps {
                 if let Ok(p) = plan_live(&engine, id, &q, &caps, &user, false).await {
                     if let (Some(o), serde_json::Value::Object(add)) = (v.as_object_mut(), p.plan.json()) {
                         o.extend(add);
@@ -310,9 +267,6 @@ pub async fn live_stream(
     method: axum::http::Method,
 ) -> Response {
     let quiet = q.quiet();
-    if sends_unmasked(&engine, id) && !q.draws_masks() {
-        return needs_drawing();
-    }
     let who: crate::web::Who = caller.as_ref().map(|c| (engine.clone(), c.0 .0.clone(), c.0 .1));
     // HEAD with caps: the headers of what would be sent; nothing starts.
     if method == axum::http::Method::HEAD {
@@ -415,10 +369,8 @@ pub type StillAllowed = Option<Arc<dyn Fn() -> bool + Send + Sync>>;
 pub fn live_ws_with(engine: Arc<Engine>, id: usize, q: StreamQ, ws: axum::extract::ws::WebSocketUpgrade, allowed: StillAllowed, who: crate::web::Who) -> Response {
     use axum::extract::ws::Message;
     let quiet = q.quiet();
-    let draws = q.draws_masks();
     let q = q.q.clone();
     if crate::remote::is_remote(id) {
-        // (The other server decides; it is told only whether this player draws the masks.)
         let mut parts: Vec<String> = Vec::new();
         if let Some(v) = q.as_deref() {
             parts.push(format!("q={}", url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()));
@@ -426,13 +378,7 @@ pub fn live_ws_with(engine: Arc<Engine>, id: usize, q: StreamQ, ws: axum::extrac
                 parts.push("audio=0".into());
             }
         }
-        if draws {
-            parts.push("draws=masks".into());
-        }
         return crate::remote::proxy_ws(&engine, id, "/link/live/{id}/ws", Some(parts.join("&")), ws, who);
-    }
-    if sends_unmasked(&engine, id) && !draws {
-        return needs_drawing();
     }
     let viewer = who.as_ref().map(|w| w.1.clone());
     ws.on_upgrade(move |mut socket| crate::web::while_account_allowed(who, async move {

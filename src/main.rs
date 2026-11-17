@@ -76,7 +76,7 @@ mod push_http;
 mod presence_http;
 mod snooze;
 mod web;
-mod privacy;
+mod picture_text;
 #[cfg(test)]
 mod test_ports;
 

@@ -426,31 +426,20 @@ pub(super) fn run_odt(command_line: String) -> Vec<String> {
     }
     labels
 }
-/// An event's picture as it is kept: the camera's privacy masks blacked out
-/// (again: the analysed pictures already are) and marked with their
-/// revision, and the camera's text burned in with the event's start time
-/// (`start_s`). A masked picture that cannot be made is not kept.
+/// An event's picture as it is kept: the camera's text burned in with the
+/// event's start time (`at_ms`). The picture as it is when that cannot be
+/// done.
 pub(super) fn event_picture(cfg: &CameraConfig, jpeg: Vec<u8>, at_ms: i64) -> Vec<u8> {
-    use crate::privacy;
+    use crate::picture_text;
     if jpeg.is_empty() {
         return jpeg;
     }
-    let rev = privacy::revision(cfg);
-    let made = match privacy::text_filter(cfg, privacy::Clock::At(at_ms)) {
-        Some(text) => privacy::burn(&jpeg, &privacy::chain(&privacy::camera_mask_filter(cfg), &text)).or_else(|e| {
-            tracing::debug!("camera '{}': event picture text: {e:#}", cfg.name);
-            privacy::black_out_jpeg(&jpeg, &cfg.privacy_masks)
-        }),
-        None if !rev.is_empty() => privacy::black_out_jpeg(&jpeg, &cfg.privacy_masks),
-        None => return jpeg,
-    };
-    match made {
-        Ok(j) if rev.is_empty() => j,
-        Ok(j) => privacy::with_mark(&j, &rev),
-        Err(_) if rev.is_empty() => jpeg,
+    let Some(text) = picture_text::text_filter(cfg, picture_text::Clock::At(at_ms)) else { return jpeg };
+    match picture_text::burn(&jpeg, &text) {
+        Ok(j) => j,
         Err(e) => {
-            warn!("camera '{}': event picture could not be masked: {e:#}", cfg.name);
-            Vec::new()
+            tracing::debug!("camera '{}': event picture text: {e:#}", cfg.name);
+            jpeg
         }
     }
 }

@@ -216,11 +216,8 @@ pub async fn event_ai_frame(State(engine): State<Arc<Engine>>, AxPath((id, n)): 
     if !good_id(&id) {
         return err(StatusCode::BAD_REQUEST, "bad event id");
     }
-    // A frame kept before the camera's privacy masks were set or changed is
-    // masked now, once (and kept that way). (The page asks with the masks'
-    // revision in the address, so a browser's kept copy is not shown after a change.)
     let path = engine.ai_review_dir(&id).join(format!("{n}.jpg"));
-    match tokio::task::spawn_blocking(move || crate::privacy::read_event_picture(&engine.config, &engine.db, &id, &path)).await {
+    match tokio::task::spawn_blocking(move || std::fs::read(&path)).await {
         Ok(Ok(b)) => ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "private, max-age=86400")], Body::from(b)).into_response(),
         _ => err(StatusCode::NOT_FOUND, "frame not kept"),
     }
@@ -246,14 +243,8 @@ pub async fn event_ai_recheck(State(engine): State<Arc<Engine>>, AxPath(id): AxP
             .collect();
         frames.sort();
         let mut checks = Vec::new();
-        // (The AI sees the camera's privacy masks blacked out, as when the event was checked.)
-        let cam = match crate::privacy::event_camera_in(&e.config, &e.db, &id) {
-            crate::privacy::EventCamera::Camera(c) => Some(c),
-            crate::privacy::EventCamera::Gone => None,
-            crate::privacy::EventCamera::Unknown => anyhow::bail!("the event's camera is not known"),
-        };
         for (n, p) in frames.into_iter().take(30) {
-            let jpeg = crate::privacy::read_masked(&p, cam.as_ref())?;
+            let jpeg = std::fs::read(&p)?;
             match e.ai_detect(&jpeg, 0.25) {
                 Ok(seen) => checks.push(serde_json::json!({ "n": n, "seen": seen })),
                 Err(x) => {

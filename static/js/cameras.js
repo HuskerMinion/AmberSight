@@ -293,7 +293,7 @@ function streamHtml(c, isNew) {
     '<div class="hint" data-devnote hidden></div>' +
     (isNew ? '' : '<div class="hint">Receiving: ' + esc(c.ingest || 'unknown') + (c.ffmpeg_why ? '. Why: ' + esc(c.ffmpeg_why) + '.' : '') + '</div>' + reencodeHtml(c));
 }
-// The ffmpeg pipeline re-encodes the full-size recording (burned-in text, masks, Direct copy off).
+// The ffmpeg pipeline re-encodes the full-size recording (burned-in text, Direct copy off).
 function reencodeHtml(c) {
   const x = c.decode;
   if (!x || !x.reencode || !(c.ingest || '').startsWith('ffmpeg')) return '';

@@ -6,7 +6,6 @@ import { renderVerdict, aiFrames } from './ai_review.js';
 import { $, state, api, esc, fmtTime, stillWaiting, openDlg, msgDlg, toast, lowQ, enc, topDlgOpen, overlayOpen, backLayer, overlaysChanged, afterOverlayClose, returnOnBack, viewOnlyNote, downloadUrl, speedOptions, applySpeed, safeRate, MAX_RATE, can } from './core.js';
 import { isActive, showTab } from './nav.js';
 import { openFullCam, closeFull, addOverlayText, paintOverlayText } from './live.js';
-import { watchMasks, maskRevQ } from './masks.js';
 import { burnTextSwitch, wireBurnText, burnTextQuery } from './export.js';
 
 // New-event pop-ups are off unless the user turns them on (account menu).
@@ -390,7 +389,7 @@ function render() {
 }
 
 // ---------- selection and the player ----------
-let readTimer = 0, curVideo = null, curMasks = null;
+let readTimer = 0, curVideo = null;
 function markReviewed(id) { if (!reviewed.has(id)) { reviewed.add(id); saveReviewed(); lastRender = ''; render(); } }
 
 // A link to one event (#events?ev=<id>): the id the address brought in, until it has been opened.
@@ -554,7 +553,6 @@ function paintPlayer(e) {
   const box = $('evPlayer');
   if (shareFile && (!e || shareFile.id !== e.id)) shareFile = null;   // frees the fetched clip
   if (curVideo) { try { curVideo.pause(); curVideo.removeAttribute('src'); curVideo.load(); } catch (x) { /* gone */ } curVideo = null; }
-  if (curMasks) { curMasks.stop(); curMasks = null; }
   if (!e) { box.innerHTML = '<p class="empty evnone">Select an event to see it here.</p>'; return; }
   const cl = classesOf(e);
   const objs = (e.objects && e.objects.length) ? e.objects.join(', ') : 'motion';
@@ -572,10 +570,8 @@ function paintPlayer(e) {
   if (v) {
     curVideo = v;
     v.defaultPlaybackRate = safeRate(state.speed);
-    // draws=masks: the camera's privacy masks are drawn over the clip here.
     const cam = camOf(e);
-    curMasks = watchMasks(box.querySelector('.evp-vid'), () => camOf(e) || cam);
-    v.src = '/api/clips/' + enc(e.id) + '?draws=masks' + lowQ(false);
+    v.src = '/api/clips/' + enc(e.id) + lowQ(true);
     // The camera's text on the picture, with the time of the moment playing.
     let t0 = null;
     const ot = addOverlayText(box.querySelector('.evp-vid'), cam, { at: () => (t0 == null ? null : t0 + v.currentTime * 1000) });
@@ -609,7 +605,7 @@ function camOf(e) { return state.cams.find(c => c.id === e.camera_id && !c.remot
 // it, at the keyframe before).
 async function clipStartMs(e, cam) {
   try {
-    const r = await fetch('/api/clips/' + enc(e.id) + '?draws=masks&quiet=1', { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' });
+    const r = await fetch('/api/clips/' + enc(e.id) + '?quiet=1', { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' });
     const h = parseInt(r.headers.get('x-clip-start-ms'), 10);
     try { if (r.body) r.body.cancel(); } catch (x) { /* ignore */ }
     if (h > 0) return h;
@@ -623,7 +619,7 @@ function paintActions(e) {
   const fa = e.review === 'false_alarm', ok = isOk(e);
   const cam = can('pause') ? state.cams.find(c => c.id === e.camera_id && !c.remote) : null;
   const saveHref = () => '/api/clips/' + enc(e.id) + '?download=1' + burnTextQuery();
-  a.innerHTML = (e.clip ? '<a class="btn" data-a="save" href="' + saveHref() + '" download title="Download this clip (its privacy masks are burned in)">' + ico('dl') + '<span>Save</span></a>' +
+  a.innerHTML = (e.clip ? '<a class="btn" data-a="save" href="' + saveHref() + '" download title="Download this clip">' + ico('dl') + '<span>Save</span></a>' +
       '<button type="button" class="btn" data-a="share" title="Share this clip">' + ico('share') + '<span>Share</span></button>' : '') +
     // (Keeping and "not a real alert" change the event for everyone: admins and operators allowed to, as in the bulk bar.)
     (!can('events') ? '' : '<button type="button" class="btn' + (e.protect ? ' on' : '') + '" data-a="p" aria-pressed="' + !!e.protect + '" title="' + (e.protect ? 'Kept: it will not be deleted. Click to let it expire normally (P)' : 'Keep this clip forever, even when old recordings are cleared (P)') + '">' + ico('lock') + '<span>' + (e.protect ? 'Kept' : 'Keep forever') + '</span></button>') +
@@ -669,7 +665,6 @@ async function shareClip(e, btn) {
     if (!file) {
       shareLabel(btn, 'Preparing…', true);
       try {
-        // (As a download: the file leaves AmberSight, so its privacy masks are burned in.)
         const r = await fetch('/api/clips/' + enc(e.id) + '?download=1' + burnTextQuery(), { credentials: 'same-origin' });
         if (r.ok) {
           const blob = await r.blob();
@@ -864,10 +859,8 @@ function wireHover(el, e) {
       const im = el.querySelector('.evt');
       if (ns.length < 2 || !im || !el.matches(':hover')) return;
       orig = im.getAttribute('src'); let i = 0;
-      // (With the masks' revision: a frame kept by the browser from before a mask change is not shown.)
-      const rev = maskRevQ(state.cams.find(x => x.name === e.camera), '?');
       // (Stops by itself when the row is gone or out of sight without a mouseleave.)
-      const show = () => { if (!el.isConnected || !el.matches(':hover') || !isActive('events')) { stop(); return; } im.src = '/api/events/' + enc(e.id) + '/ai/' + ns[i++ % ns.length] + rev; };
+      const show = () => { if (!el.isConnected || !el.matches(':hover') || !isActive('events')) { stop(); return; } im.src = '/api/events/' + enc(e.id) + '/ai/' + ns[i++ % ns.length]; };
       show(); iv = setInterval(show, 600);
     }, 300);
   });
@@ -1008,7 +1001,7 @@ async function runSmart() {
       const bx = x.box;
       // How close to the best match (the first is 100%).
       const rel = Math.max(0, Math.round(100 - (best - x.score) * 1000));
-      return '<button class="smq-card" data-i="' + i + '" title="Open ' + esc(x.camera) + ' at this moment"><span class="smq-pic"><img loading="lazy" src="/api/smart/pic/' + x.pic + maskRevQ(state.cams.find(c => c.name === x.camera), '?') + '" alt="">' +
+      return '<button class="smq-card" data-i="' + i + '" title="Open ' + esc(x.camera) + ' at this moment"><span class="smq-pic"><img loading="lazy" src="/api/smart/pic/' + x.pic + '" alt="">' +
         (bx ? '<span class="smq-box" style="left:' + (bx[0] * 100) + '%;top:' + (bx[1] * 100) + '%;width:' + (bx[2] * 100) + '%;height:' + (bx[3] * 100) + '%"></span>' : '') + '</span>' +
         '<span class="smq-meta"><b>' + esc(x.camera) + '</b><small>' + esc(fmtAt(x.at_ms)) + ' · ' + rel + '%</small></span></button>';
     }).join('') + '</div>';

@@ -1,75 +1,36 @@
 use super::*;
 use std::io::Write;
 
-/// Privacy masks (solid black boxes) and the burned-in name + time overlay
-/// together. Empty when the camera has neither.
-#[cfg(test)]
-pub fn picture_filters(cfg: &CameraConfig) -> String {
-    picture_filters_with(cfg, true)
-}
-
-/// The privacy masks as ffmpeg drawbox filters (empty without masks).
-pub fn mask_filters(cfg: &CameraConfig) -> String {
-    // (Edges rounded outward to even pixels; zero-size masks dropped.)
-    crate::privacy::camera_mask_filter(cfg)
-}
-
-/// Filters burned into the recordings: the masks when they are set to
-/// "Hide in recordings too", the text when "Also burn it into recordings"
-/// is on. Empty: the camera's own stream can be recorded as it is.
+/// Filters burned into the recordings: the camera's text when "Also burn
+/// it into recordings" is on. Empty: the camera's own stream can be
+/// recorded as it is.
 pub fn recording_filters(cfg: &CameraConfig) -> String {
-    picture_filters_with(cfg, cfg.mask_in_recording())
-}
-
-/// The sub stream recorded all along ("record_sub") of a camera whose masks
-/// go into its recordings: re-encoded on the processor with the masks (and
-/// the text, if burned in) rather than copied. The sub stream is small, so
-/// this costs little, and the main stream stays recorded around events only
-/// (not re-encoded all the time instead). None: copied as it is.
-pub(super) fn sub_recording_filters(cfg: &CameraConfig) -> Option<String> {
-    cfg.mask_in_recording().then(|| recording_filters(cfg))
+    if cfg.overlay {
+        overlay_text_filter(cfg, crate::picture_text::Clock::Live)
+    } else {
+        String::new()
+    }
 }
 
 /// The ffmpeg arguments of the sub stream recorder (`input`: its input
-/// arguments; `out`: the segment file pattern).
-fn sub_recorder_args(cfg: &CameraConfig, input: Vec<String>, segment_seconds: u64, budget: usize, out: String) -> Vec<String> {
+/// arguments; `out`: the segment file pattern): the sub stream copied as
+/// it is.
+fn sub_recorder_args(input: Vec<String>, segment_seconds: u64, out: String) -> Vec<String> {
     let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
-    let filters = sub_recording_filters(cfg);
-    if filters.is_some() {
-        rargs.extend(super::ffpath::graph_thread_args());
-        rargs.extend(super::ffpath::decode_thread_args(budget));
-    }
     rargs.extend(input);
     rargs.extend(["-map", "0:v"].map(String::from));
     rargs.extend(["-f", "segment", "-segment_time"].map(String::from));
     rargs.push(segment_seconds.to_string());
     rargs.extend(["-reset_timestamps", "1"].map(String::from));
-    match filters {
-        // Masks go into the recordings: never a copy of the sub stream.
-        Some(f) => {
-            rargs.extend(["-vf".to_string(), f]);
-            rargs.extend(super::ffpath::rec_encode_args(None, segment_seconds));
-            rargs.extend(super::ffpath::encode_thread_args(None, budget));
-        }
-        None => rargs.extend(["-c", "copy"].map(String::from)),
-    }
+    rargs.extend(["-c", "copy"].map(String::from));
     rargs.extend(FRAGMENTED.map(String::from));
     rargs.push(out);
     rargs
 }
 
-fn picture_filters_with(cfg: &CameraConfig, with_masks: bool) -> String {
-    let masks = if with_masks { mask_filters(cfg) } else { String::new() };
-    if cfg.overlay {
-        crate::privacy::chain(&masks, &overlay_text_filter(cfg, crate::privacy::Clock::Live))
-    } else {
-        masks
-    }
-}
-
 /// The camera's text (`overlay_text`, in its corner) as a drawtext filter,
 /// its date and time from `clock`.
-pub fn overlay_text_filter(cfg: &CameraConfig, clock: crate::privacy::Clock) -> String {
+pub fn overlay_text_filter(cfg: &CameraConfig, clock: crate::picture_text::Clock) -> String {
     let (x, y) = match cfg.overlay_pos.as_deref().unwrap_or("bottom-left") {
         "top-left" => ("10", "10"),
         "top-right" => ("w-tw-10", "10"),
@@ -106,7 +67,7 @@ pub fn overlay_download_drawtext(cfg: &CameraConfig, base_s: f64) -> String {
         "bottom-right" => ("w-tw-10", "h-th-10"),
         _ => ("10", "h-th-10"),
     };
-    let text = overlay_drawtext_at(cfg, crate::privacy::Clock::Live)
+    let text = overlay_drawtext_at(cfg, crate::picture_text::Clock::Live)
         .replace("%{localtime\\:%F}", &format!("%{{pts\\:gmtime\\:{base_s:.3}\\:%F}}"))
         .replace("%{localtime\\:%T}", &format!("%{{pts\\:gmtime\\:{base_s:.3}\\:%T}}"));
     format!("drawtext={}text='{text}':fontcolor=white:fontsize=h/25+12:box=1:boxcolor=black@0.5:x={x}:y={y}", font_option())
@@ -227,12 +188,12 @@ fn drawtext_safe(s: &str) -> String {
 /// and ffmpeg's clock; everything else is sanitized.
 #[cfg(test)]
 pub fn overlay_drawtext(cfg: &CameraConfig) -> String {
-    overlay_drawtext_at(cfg, crate::privacy::Clock::Live)
+    overlay_drawtext_at(cfg, crate::picture_text::Clock::Live)
 }
 
 /// As [`overlay_drawtext`], the date and time from `clock`.
-fn overlay_drawtext_at(cfg: &CameraConfig, clock: crate::privacy::Clock) -> String {
-    use crate::privacy::Clock;
+fn overlay_drawtext_at(cfg: &CameraConfig, clock: crate::picture_text::Clock) -> String {
+    use crate::picture_text::Clock;
     // A fixed moment is written out (colons escaped for the filter); a
     // frame's own time is ffmpeg's pts clock from `base_s`.
     let at = |ms: i64, fmt: &str| {
@@ -285,16 +246,14 @@ fn overlay_drawtext_at(cfg: &CameraConfig, clock: crate::privacy::Clock) -> Stri
 }
 
 /// Frame rate and size for motion analysis / the MJPEG live view.
-/// Privacy masks are drawn here too (also when the recording is not
-/// masked): every analysed picture, and the live JPEGs made from them.
 fn analysis_filter(cfg: &CameraConfig) -> String {
-    crate::privacy::chain(&format!("fps={},scale={}:-2", cfg.fps.max(1), cfg.scale), &crate::privacy::camera_mask_filter(cfg))
+    format!("fps={},scale={}:-2", cfg.fps.max(1), cfg.scale)
 }
 
 /// Full chain for single-output use (analysis pipe, CLI snapshot): the
-/// burned-in text (when on), then `analysis_filter` (which draws the masks).
+/// burned-in text (when on), then `analysis_filter`.
 pub fn video_filter(cfg: &CameraConfig) -> String {
-    crate::privacy::chain(&picture_filters_with(cfg, false), &analysis_filter(cfg))
+    crate::picture_text::chain(&recording_filters(cfg), &analysis_filter(cfg))
 }
 
 /// Re-encoding arguments for recorded segments: H.264 with a keyframe every 1-2 s,
@@ -474,10 +433,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
 
         // Direct mode stream-copies the source; lavfi sources have nothing
         // encoded to copy, so they fall back to inline re-encode segments.
-        // Masks in the recordings and burned-in text change the picture, so
-        // they rule out stream copy (never a copy of a camera whose masks
-        // go into its recordings: `picture` is not empty then). Masks only
-        // on screen are drawn into the analysis pictures alone.
+        // Burned-in text changes the picture, so it rules out stream copy.
         let mut picture = recording_filters(&cfg);
         if let Some(cap) = crate::local_source::record_filter(&cfg.url) {
             picture = if picture.is_empty() { cap.to_string() } else { format!("{cap},{picture}") };
@@ -536,8 +492,8 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let mut hw_ok_noted = false;
         let download = if hw_args.is_some() { format!("{},", crate::ingest::decode::HW_DOWNLOAD) } else { String::new() };
         let segment_seconds = engine.config.lock().unwrap().storage.segment_seconds;
-        // The full-size recording is re-encoded all along (masks/overlay
-        // burned in, or Direct copy off): on a hardware encoder when one
+        // The full-size recording is re-encoded all along (text burned in,
+        // or Direct copy off): on a hardware encoder when one
         // passed the test and has a free place, else libx264.
         let reencode_main = cfg.record && !direct && !motion_only;
         // One ffmpeg decodes the main stream for both the recording and motion.
@@ -587,14 +543,11 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         args.extend(input_args(&cfg, try_udp, &camera_url(&ana_cfg)));
         if single {
             // One decode, two outputs: the full-resolution recording (with
-            // masks/overlay burned in) and the small analysis stream.
+            // the text burned in) and the small analysis stream.
             let pre = if picture.is_empty() { "null".to_string() } else { picture.clone() };
             let dl = if ana_hw { download.as_str() } else { "" };
             args.extend([
                 "-filter_complex".to_string(),
-                // (The analysis branch draws the masks itself, on the small picture:
-                // `analysis_filter`. With masks in the recording too, they are
-                // drawn there again: a few boxes on a small picture, no harm.)
                 format!("[0:v]{dl}{pre},split=2[r0][a0];[r0]null{up}[rec];[a0]{}[ana]", analysis_filter(&cfg)),
                 "-map".into(),
                 "[rec]".into(),
@@ -691,7 +644,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let mut meter = super::ffpath::SegMeter::default();
 
         // The main stream recorded by its own ffmpeg while motion decodes
-        // the sub stream: re-encoded (masks/overlay burned in), on the
+        // the sub stream: re-encoded (text burned in), on the
         // hardware encoder when there is one.
         if reencode_main && ana_sub {
             let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
@@ -798,7 +751,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             let mut sc = cfg.clone();
             sc.url = u.clone();
             let out = seg_dir.join(format!("{slug_name}-sub-{run_ts}-seg%06d.mp4")).to_string_lossy().into_owned();
-            let rargs = sub_recorder_args(&cfg, input_args(&cfg, try_udp, &camera_url(&sc)), segment_seconds, budget, out);
+            let rargs = sub_recorder_args(input_args(&cfg, try_udp, &camera_url(&sc)), segment_seconds, out);
             match crate::child::ffmpeg().args(&rargs).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn() {
                 Ok(mut c) => {
                     crate::child::adopt(&c);
@@ -1020,7 +973,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                 if motion_only {
                                     let m = handle.state.read().unwrap().motion;
                                     if m && recorder.is_none() {
-                                        // Re-encoded (masks/overlay, or Direct copy off): on
+                                        // Re-encoded (text burned in, or Direct copy off): on
                                         // a hardware encoder with a free place, when one
                                         // passed the test (never waiting for it here).
                                         let copy = cfg.direct && picture.is_empty();
@@ -1859,7 +1812,7 @@ pub(super) fn process_frame(
     let use_ai = super::ai_check::ai_active(engine, cfg);
     let ai_frame = if use_ai { Some(frame.clone()) } else { None };
     let (score, over, blobs) = if motion_cfg.algorithm == "frame-diff" {
-        let s = detector.score(&frame, &cfg.zones, &crate::privacy::motion_ignore(cfg)).unwrap_or(0.0);
+        let s = detector.score(&frame, &cfg.zones, &cfg.ignore_zones).unwrap_or(0.0);
         (s, s >= sensitivity, Vec::new())
     } else {
         let p = crate::motion::ObjectParams {
@@ -1869,7 +1822,7 @@ pub(super) fn process_frame(
             min_travel: motion_cfg.min_travel,
         };
         detector.objects.set_polygons(&cfg.zone_polys, &cfg.ignore_polys);
-        let r = detector.objects.analyze(&frame, &cfg.zones, &crate::privacy::motion_ignore(cfg), &p).unwrap_or_default();
+        let r = detector.objects.analyze(&frame, &cfg.zones, &cfg.ignore_zones, &p).unwrap_or_default();
         if r.lighting_change {
             tracing::debug!("camera '{}': lighting change ignored (background reset)", cfg.name);
         }
@@ -2152,7 +2105,9 @@ mod overlay_tests {
         // Named overlay variables are live-view only: the whole {v:NAME} token
         // is dropped from burned-in text (not left as garbage).
         assert_eq!(overlay_drawtext(&cam(Some("{short} {v:outside_temp}C"))), "Door C");
-        let f = picture_filters(&cam(Some("{short}")));
+        let mut c = cam(Some("{short}"));
+        c.overlay = true;
+        let f = recording_filters(&c);
         // (A fontfile= option comes first when a usual font is found: see font_option.)
         assert!(f.starts_with("drawtext=") && f.contains("text='Door':") && f.contains("x=10:y=h-th-10"), "{f}");
         assert_eq!(f.contains("fontfile="), !font_option().is_empty(), "{f}");
@@ -2682,44 +2637,30 @@ mod tail_tests {
 }
 
 #[cfg(test)]
-mod mask_level_tests {
+mod recording_filter_tests {
     use super::*;
 
-    fn cam(extra: &str) -> CameraConfig {
-        toml::from_str(&format!("name = \"a\"\nurl = \"rtsp://192.0.2.1/x\"\n{extra}\nprivacy_masks = [{{ x = 0.1, y = 0.2, w = 0.3, h = 0.4 }}]")).unwrap()
+    fn cam() -> CameraConfig {
+        toml::from_str("name = \"a\"\nurl = \"rtsp://192.0.2.1/x\"").unwrap()
     }
 
     #[test]
-    fn masks_go_into_recordings_only_at_the_recording_level() {
-        let screen = cam("mask_mode = \"screen\"");
-        assert_eq!(recording_filters(&screen), "", "screen masks: the stream can be copied");
-        assert!(picture_filters(&screen).contains("drawbox"), "the analysis pictures are masked");
-        let v = video_filter(&screen);
-        assert!(v.starts_with("fps=") && v.matches("drawbox").count() == 1, "the masks once, on the small picture: {v}");
-        assert_eq!(sub_recording_filters(&screen), None, "the sub stream is copied");
-        for c in [cam("mask_mode = \"recording\""), cam(""), cam("mask_mode = \"bogus\"")] {
-            assert!(recording_filters(&c).contains("drawbox"), "{:?}", c.mask_mode);
-            assert_eq!(video_filter(&c).matches("drawbox").count(), 1, "{:?}", c.mask_mode);
-            assert!(sub_recording_filters(&c).is_some_and(|f| f.contains("drawbox")), "the sub stream is re-encoded with the masks");
-        }
-        // Burned-in text with screen masks: the text alone goes into the recording.
-        let mut t = cam("mask_mode = \"screen\"");
-        t.overlay = true;
-        let r = recording_filters(&t);
-        assert!(r.starts_with("drawtext") && !r.contains("drawbox"), "{r}");
-        let v = video_filter(&t);
-        assert!(v.starts_with("drawtext") && v.matches("drawbox").count() == 1, "{v}");
+    fn only_burned_in_text_goes_into_the_recordings() {
+        let mut c = cam();
+        assert_eq!(recording_filters(&c), "", "the stream can be copied");
+        assert!(video_filter(&c).starts_with("fps="));
+        c.overlay = true;
+        let r = recording_filters(&c);
+        assert!(r.starts_with("drawtext"), "{r}");
+        assert!(video_filter(&c).starts_with("drawtext"));
     }
 
     #[test]
-    fn the_sub_stream_recorder_masks_or_copies() {
+    fn the_sub_stream_recorder_copies() {
         let input = vec!["-i".to_string(), "rtsp://192.0.2.1/sub".to_string()];
-        let a = sub_recorder_args(&cam("mask_mode = \"recording\""), input.clone(), 10, 6, "out%06d.mp4".into());
+        let a = sub_recorder_args(input, 10, "out%06d.mp4".into());
         let j = a.join(" ");
-        assert!(!j.contains("-c copy"), "{j}");
-        assert!(j.contains("-vf drawbox") && j.contains("-c:v libx264"), "{j}");
+        assert!(j.contains("-c copy") && !j.contains("-vf"), "{j}");
         assert_eq!(a.last().map(String::as_str), Some("out%06d.mp4"));
-        let j = sub_recorder_args(&cam("mask_mode = \"screen\""), input, 10, 6, "o.mp4".into()).join(" ");
-        assert!(j.contains("-c copy") && !j.contains("drawbox"), "{j}");
     }
 }

@@ -14,7 +14,7 @@ pub mod cache;
 pub mod file;
 pub mod http;
 pub mod live;
-pub mod masked;
+pub mod burn;
 pub mod mp4;
 
 use mp4::{VideoCodec, VideoDesc};
@@ -38,7 +38,7 @@ pub struct TranscodeConfig {
     #[serde(default = "default_max_hardware")]
     pub max_hardware: usize,
     /// Recordings re-encoded on the video encoder at a time (cameras with
-    /// burned-in text or privacy masks on the ffmpeg pipeline), counted apart
+    /// burned-in text on the ffmpeg pipeline), counted apart
     /// from `max_hardware` so they never take the places of live views and
     /// downloads. Past it, such a recording uses the processor (libx264).
     #[serde(default = "default_max_recording_hw")]
@@ -279,9 +279,6 @@ pub enum Why {
     Fps,
     BusyFallback,
     Off,
-    /// The privacy masks are burned in (a player that does not draw them,
-    /// or a download).
-    Masks,
     /// The camera's text is burned in (a download asked for it).
     Text,
 }
@@ -294,7 +291,6 @@ impl Why {
             Why::Fps => "fps",
             Why::BusyFallback => "busy_fallback",
             Why::Off => "off",
-            Why::Masks => "masks",
             Why::Text => "text",
         }
     }
@@ -964,23 +960,6 @@ impl Drop for DownloadSlot {
 /// A place for one fitted download. None: `MAX_FIT_DOWNLOADS` are running.
 pub fn reserve_download() -> Option<DownloadSlot> {
     take(&DOWNLOADS, MAX_FIT_DOWNLOADS).then(|| DownloadSlot(()))
-}
-
-/// How many places for these encoders are free now (hardware and software).
-pub fn free_places(encoders: &[Encoder]) -> usize {
-    let cfg = config();
-    let free = |c: &AtomicUsize, max: usize| max.saturating_sub(c.load(Ordering::SeqCst));
-    let hw = if encoders.iter().any(|e| e.hw.is_some()) { free(&HW_RUNNING, cfg.max_hardware) } else { 0 };
-    let sw = if encoders.iter().any(|e| e.hw.is_none()) { free(&SW_RUNNING, cfg.max_software) } else { 0 };
-    hw + sw
-}
-
-/// How many places these encoders have in all (busy or not).
-pub fn capacity(encoders: &[Encoder]) -> usize {
-    let cfg = config();
-    let hw = if encoders.iter().any(|e| e.hw.is_some()) { cfg.max_hardware } else { 0 };
-    let sw = if encoders.iter().any(|e| e.hw.is_none()) { cfg.max_software } else { 0 };
-    hw + sw
 }
 
 /// Whether a place is free now (for `info`, which starts nothing).

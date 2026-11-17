@@ -735,127 +735,37 @@ Assistant and MQTT.
 
 ---
 
-## Privacy masks and text on the picture
+## Text on the picture
 
-A **privacy mask** blacks out part of a camera's picture: a neighbor's window, a path that is not
-yours. Draw one in **Edit zones** (admins: pick **Privacy mask** and drag a rectangle). One choice
-covers all of a camera's masks:
+**Privacy:** AmberSight has no privacy masks of its own. Use the camera's own privacy mask if it has
+one: Reolink, Dahua/Amcrest and Hikvision cameras do (in the camera's own web page or app). The area
+never leaves the camera, it costs nothing here, and it covers everything at once. In **Edit zones**,
+an ignore zone keeps motion in an area from counting.
 
-| | Hide on screen and in pictures (default) | Hide in recordings too |
-|---|---|---|
-| Live, playback, event clips in AmberSight's apps | black (the app draws it) | black (in the video) |
-| Another app or player (no masks drawn) | black: still pictures for live, a masked conversion for playback | black (older recordings: a masked conversion) |
-| A linked server's view | black (its app draws it) | black |
-| Snapshots, event pictures, time-lapse, AI and motion | black | black |
-| Downloaded clips, exports, event copies to a folder | black (burned in) | black (older recordings: burned in) |
-| Recordings on disk | **not masked** | black from the switch on; **older recordings stay unmasked** |
-| Off-site backup | pictures black; event clips **as recorded** (not masked) | pictures black; event clips as recorded |
-| RTSP stream sharing | **not masked** (only after you confirm) | not shared (the camera is read by ffmpeg) |
-| Cost | none: the camera's stream is kept as it is | re-encoding: about one processor core per 4K camera, or the graphics card |
-
-**Hide on screen and in pictures** keeps the camera's own stream, so it costs nothing. AmberSight's
-apps draw the black areas over the video, and every picture AmberSight makes has them burned in.
-The video itself is not changed: anyone who can watch the camera (a viewer account, a display's
-device token) could get the unmasked video with a modified app, and the files on disk show the
-whole picture. Use it to keep the area off your screens, not to keep it from the people who can
-watch the camera.
-
-**Hide in recordings too** re-encodes the video with the masks (on the graphics card when it has a
-video encoder that passed the test at start, else on the processor). It is the only level that
-protects the files on disk, and only from the moment it is on: recordings made before the switch
-(or before the masks were last changed) stay on disk as they were, unmasked or with the old masks.
-They are masked whenever they leave: downloads, exports, event copies to a folder, and apps that do
-not draw masks get a masked conversion. They go as recordings age out. If the masking cannot run,
-the camera records nothing rather than unmasked video, and Status says why. Gaps are not filled
-from the camera's SD card for such a camera (the card holds unmasked video). It is not available
-for pushed or battery cameras: AmberSight has no way to re-encode their video, so only Hide on
-screen and in pictures can be chosen for them.
-
-**Use the camera's own privacy mask first** if it has one: Reolink, Dahua/Amcrest and Hikvision
-cameras do (in the camera's own web page or app). The area never leaves the camera, it costs
-nothing here, and it covers everything at once.
-
-**Downloads:** a clip or export you download always has the camera's masks burned in, because the
-file leaves AmberSight (with Hide on screen and in pictures, and for recordings made before Hide in
-recordings too was on, that is one re-encode of the clip). A download carries the time as a
-subtitle track a player can show; the exception is an event clip that needs nothing burned in and
-is sent from its saved clip file as it is, which has no subtitle track. **Burn the text into this
-clip** (next to where clips are saved) also draws the camera's text into the file; that re-encodes
-the clip, so it takes longer. Burned-in clock text follows a change to or from daylight saving
-time inside the clip.
-
-**Conversions cost time on a server without a graphics encoder.** Masked downloads, masked event
-copies, and playback for apps that do not draw masks (another player, or an older version of the
-Android app) are re-encoded on the server, on the graphics card when it has a video encoder that
-passed the test at start. Without one they run on the processor, as H.264 at up to 1080p, and they
-are slow: a long clip or a 4K camera can take a good while, and only one runs at a time
-(`max_software` in `[transcode]`). When every conversion slot is busy, or the account is already
-converting as many videos as `max_per_user` allows, the server answers "busy, try again shortly"
-rather than sending the video without the masks; with video conversion turned off
-(`[transcode] encoder = "off"`), or for the demo account (never converted), masked playback and
-masked downloads are refused with a plain reason. Apps that draw the masks themselves
-(the web app, newer app versions) need no conversion for watching.
-
-**Event copies to a folder** (camera settings, Recording, **Also save event clips to**) are files
-that leave AmberSight too: with Hide on screen and in pictures each copied clip is re-encoded with
-the masks burned in. When that cannot be done (video conversion turned off, the encoders busy for
-long), the copy is tried again a few times and then left out, never copied without the masks; the
-camera's copy status says so.
-
-**Off-site backup** copies AmberSight's own data, so that it can be restored: the settings, the
-database, and the clips and pictures of protected events. Pictures are masked as everywhere else.
-Event clips are copied as they are on disk: for a camera at Hide on screen and in pictures (and
-for recordings made before Hide in recordings too was on) they show the whole picture, like the
-recordings. The backup is AmberSight's own copy for restoring, not a file to hand out: set an
-encryption passphrase for off-site copies, and use Hide in recordings too for a camera whose
-footage must never leave unmasked from now on.
-
-**Pictures from before a change:** event pictures, AI frames and tamper alert pictures saved
-before a camera's masks were set or changed are blacked out the next time they are shown or sent.
-Face and plate pictures saved before the change are no longer shown, and the tamper watch takes
-its reference pictures again (it learns the camera's view again). A time-lapse made with other
-masks is not shown; make it again (**Make now**).
-
-**Sharing:** a masked camera is shared over RTSP only after you turn on **I understand: share it
-without the mask** for it. With Hide on screen and in pictures, the shared stream shows the whole
-picture. Adding masks or changing them turns that consent off again, so the camera stops being
-shared until you confirm once more. A camera at Hide in recordings too is read by ffmpeg and
-cannot be shared over RTSP.
+**Downloads:** a clip or export you download carries the time as a subtitle track a player can
+show; the exception is an event clip that is sent from its saved clip file as it is, which has no
+subtitle track. **Burn the text into this clip** (next to where clips are saved) also draws the
+camera's text into the file; that re-encodes the clip, so it takes longer. Burned-in clock text
+follows a change to or from daylight saving time inside the clip.
 
 **Text on the picture** (camera settings, Audio & text): the app draws your text over live view and
 playback (playback shows the recording's own date and time), and it is put into snapshots, event
 pictures and time-lapse frames, at no cost. **Also burn it into recordings** makes it part of the
 video files too, which re-encodes the camera's video; leave it off unless the files must carry it.
 
-**Upgrading to 0.11.1:** a camera that already had privacy masks keeps them in the recordings
-(Hide in recordings too), so nothing becomes less private. Change it in Edit zones if the screen
-level is enough. A camera that burned its text into the recordings and had no masks now has the
-text drawn instead (no re-encoding); Status lists those cameras once. Turn **Also burn it into
-recordings** back on for any camera whose files must carry the text.
-
-Also after the upgrade: when a camera's masks went into its recordings is not known, so the
-recordings it made before the upgrade count as unmasked. They get the masks burned in when they
-are downloaded, exported, copied to a folder or watched in an app that does not draw the masks
-(a conversion, slower). Face and plate pictures of cameras that had masks are no longer shown
-(the new ones are), and the tamper watch learns those cameras' view again. A confirmation to
-share a masked camera over RTSP holds for the masks it has now; changing its masks or text in
-config.toml by hand asks for it again.
-
-**Removing or renaming a masked camera:** its recordings, and the pictures and time-lapses made
-from them, keep its masks until they age out, also if you later give another camera its name
-(that camera's own recordings get only its own masks; the old ones get both). The same holds for a
-camera you take out of config.toml or rename there while AmberSight is stopped: the next start
-keeps the masks it had for its recordings. A rename stops the camera's recorder for a moment
-first (up to 10 seconds), so the file it was writing goes with it under the new name. Recordings
-stay in the folder of the old name on disk. If you give a new camera the old name within about
-a minute (one segment length plus 60 seconds), its recordings from that minute also get the
-renamed camera's masks.
-
-**Which recordings count as masked:** with Hide in recordings too, only a recording the camera's
-masking recorder wrote while AmberSight was running counts as having the masks in the file. A
-recording found on disk any other way counts as unmasked and is masked when it leaves: ones from
-before the upgrade, ones the start-up indexing finds again, and ones made after the moment an
-older database backup was taken, if you restore one.
+**Upgrading to 0.11.2:** privacy masks made in 0.11.1 or earlier are gone. Each camera's masks
+became ignore zones (motion there still does not count) and areas that don't notify (objects there
+are still found by AI and search, but ordinary object alerts there are not sent). A mask with no
+size goes, and one partly outside the picture is cut to it. Each list is filled while it has room
+(32 ignore zones, 12 areas that don't notify); Status says how many masks had no room in each, so
+you can draw them again (motion counts again where a mask had no room as an ignore zone). A camera
+that burned its text into the recordings because of masks now has the text drawn on screen
+instead (**Also burn it into recordings** is off; turn it back on if the files must carry the
+text). Every camera with masks has **Share** (RTSP) turned off, because its picture now includes
+the areas the masks hid; turn it back on if you want it shared. Status lists those cameras for 90
+days and suggests the camera's own privacy mask. The picture, recordings (older ones too, unless
+the masks were burned into them), downloads, linked servers and RTSP sharing are no longer changed
+for masks: they show the full picture.
 
 ---
 
@@ -1034,9 +944,7 @@ works (or why not).
 The motion message has no password (the cameras cannot send one), so AmberSight takes it only from
 the camera's own address. That is why the camera needs a fixed IP address.
 
-Privacy masks work at the Hide on screen and in pictures level only (see [Privacy masks and text
-on the picture](#privacy-masks-and-text-on-the-picture)): the apps draw them and the pictures have
-them, but the recordings show the whole picture. Burned-in text is not applied to these cameras.
+Burned-in text is not applied to these cameras (see [Text on the picture](#text-on-the-picture)).
 
 **What happens on motion:** the camera wakes and sends its message; AmberSight marks motion on the
 timeline, connects (2–3 s), records the live picture, and lets the camera sleep again about 30 s
@@ -1308,7 +1216,7 @@ The camera's note says the system would not start another process or thread, or 
 (then `error code: -22`). The server hit a limit on processes and threads. In a Docker container
 it is usually `--pids-limit` (see [docker.md](docker.md#cameras-fail-with-resource-temporarily-unavailable));
 as a service, `ulimit -u` or systemd's `TasksMax`. It mostly happens to cameras read by ffmpeg
-(burned-in text, privacy masks hidden in recordings, or `ingest = "ffmpeg"`), 4K ones first. Raise the limit, or let the
+(burned-in text or `ingest = "ffmpeg"`), 4K ones first. Raise the limit, or let the
 camera use the built-in reader. The camera report shows the limit and what is in use.
 
 ### Recordings on a merged drive (Unraid, mergerfs)
@@ -1361,12 +1269,6 @@ by default; for a folder there, take that away, for example (in an Administrator
 - **The copy folder is not responding.** A copy has been running for minutes: a network share or a
   drive stopped answering. Other cameras' copies to other folders carry on, and recording is not
   affected.
-- **"The privacy masks could not be burned in, so it was not copied".** The camera's masks are set
-  to Hide on screen and in pictures (or the event was recorded before Hide in recordings too was
-  on), so the copy is re-encoded with them, and that failed three times (video conversion is off
-  in Settings, or the encoders stayed busy). Turn video conversion on, or set the masks to Hide in
-  recordings too (recordings made from then on are masked already and are copied as they are).
-  The server log has the details.
 - A renamed camera saves into a new folder; its old folder is no longer trimmed by **Keep copies**.
   In Docker the file names use the container's time zone (`TZ`).
 
@@ -1459,7 +1361,7 @@ anything that was revoked since.
 |---|---|
 | The page does not open from another device | The firewall step for your system; use the computer's IP address; the service is running (`service status`). |
 | A camera stays offline | Its address, user name and password; that it is on the same network; that RTSP is turned on in the camera's own settings. Status and Settings > System > Logs give the reason in plain words (for example "the camera has no stream at that address (404)" means a wrong stream path: see the [camera guide](cameras.md)). A camera that only streams over UDP: set Transport to Auto or UDP in its settings. On macOS, "No route to host" means Local Network access is blocked (macOS step 4). Still stuck: save its **Camera report** (Settings > Cameras > the camera > Network) and attach it to a bug report. |
-| One camera uses a lot of processor time | Usually a large (4K) camera without a sub stream, or burned-in text or privacy masks. Status notes a missing sub stream and **Find the sub stream** looks for one. A graphics card (NVIDIA, Intel or AMD) decodes for motion detection when the camera's Hardware decoding is Auto (the default; see [Hardware decoding](#hardware-decoding-for-motion-detection)); Settings > System > Hardware shows what each camera uses and why. |
+| One camera uses a lot of processor time | Usually a large (4K) camera without a sub stream, or burned-in text. Status notes a missing sub stream and **Find the sub stream** looks for one. A graphics card (NVIDIA, Intel or AMD) decodes for motion detection when the camera's Hardware decoding is Auto (the default; see [Hardware decoding](#hardware-decoding-for-motion-detection)); Settings > System > Hardware shows what each camera uses and why. |
 | "ffmpeg was not found" (Linux) | Install ffmpeg (Linux step 1), then restart the service. |
 | The browser warns about the certificate | Choose "Trust this server" in the account menu on that device. |
 | A linked server or capture helper says `invalid peer certificate: MalformedNameConstraint` | The private certificate authority made earlier lists a computer name that is not a valid network name (for example a name ending in a hyphen, like `pc-`). Settings > System > Logs says so at start. New certificate authorities leave such names out. To replace the old one: stop AmberSight, delete `ca.pem`, `ca-key.pem`, `ca.json`, `cross.pem`, `cert.pem`, `key.pem` and `server.json` in the `tls` folder of the data folder, and start it again. Every device must then "Trust this server" again and linked servers must be linked again. Or open the server by its IP address instead. |

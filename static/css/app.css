@@ -1263,20 +1263,6 @@ body.pane-remote #dkProfile { display: none !important; }
 .pane-bar { display: flex; align-items: center; gap: var(--s2); padding: 4px var(--s2); border-bottom: 1px solid var(--line); background: var(--surface); }
 .pane-bar select { font-weight: 600; }
 
-/* Privacy masks drawn over a camera's video (masks.js): solid black, above
-   the picture, under the pills and text; never caught by the pointer. */
-.pmask { position: absolute; z-index: 3; overflow: hidden; pointer-events: none; }
-.pmask[hidden] { display: none; }
-.pmask > i { position: absolute; background: #000; }
-/* A masked camera's player: our full-screen button (the browser's own would
-   show the video without the masks), and its box filling the screen. */
-.pmask-fs { position: absolute; z-index: 4; top: 8px; right: 8px; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: rgba(12,15,19,.6); color: #fff; cursor: pointer; opacity: .8; }
-.pmask-fsbox:has(> .ovltext.pos-top-right) > .pmask-fs { top: auto; bottom: 52px; }
-.pmask-fs:hover, .pmask-fs:focus-visible { opacity: 1; background: rgba(12,15,19,.8); }
-.pmask-fs:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.pmask-fsbox:fullscreen { width: 100vw; height: 100vh; max-width: none; max-height: none; aspect-ratio: auto; border-radius: 0; border: 0; background: #000; }
-.pmask-fsbox:-webkit-full-screen { width: 100vw; height: 100vh; max-width: none; max-height: none; aspect-ratio: auto; border-radius: 0; border: 0; background: #000; }
-
 /* A camera's own text on the picture (live view and playback) */
 .ovltext { position: absolute; z-index: 4; max-width: calc(100% - 16px); padding: 1px 6px; border-radius: 3px; background: rgba(0,0,0,.5); color: #fff; font-size: calc(12px * var(--ts)); line-height: 1.4; white-space: pre; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .ovltext.pos-top-left { top: calc(6px + var(--ott, 0px)); left: calc(8px + var(--otl, 0px)); }

@@ -79,8 +79,8 @@ port = 8090
 # [transcode]
 # encoder = "auto"     # or "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "software", "off"
 # max_hardware = 6     # at a time on the graphics card
-# max_recording_hw = 4 # recordings re-encoded on the graphics card at a time (burned-in text or privacy
-#                      # masks), apart from max_hardware; past it they use the processor (libx264)
+# max_recording_hw = 4 # recordings re-encoded on the graphics card at a time (burned-in text),
+#                      # apart from max_hardware; past it they use the processor (libx264)
 # max_software = 1     # at a time in software (several CPU cores each)
 # max_per_user = 4     # per account: transcoded streams watched, and live transcodes started
 # cache_seconds = 600  # a converted clip or playback is kept on disk this long after its last use (players
@@ -368,34 +368,11 @@ post_roll = 10          # seconds of footage after the trigger
 # # Also start recording on other cameras when this one sees motion:
 # # also_trigger = ["Side Yard", "group:Outside"]
 
-# # Privacy masks: rectangles blacked out (0..1 of the picture).
-# # mask_mode = "screen": hidden on screen and in pictures. The apps draw the
-# #   masks over the video; snapshots, event pictures, AI and motion frames,
-# #   downloads and event copies to a folder have them burned in. The recordings
-# #   on disk (and event clips in off-site copies) and shared RTSP streams still
-# #   contain the area, and anyone who can watch the camera could get the
-# #   unmasked video with a modified app. Costs nothing (no re-encoding).
-# # mask_mode = "recording": hidden in recordings too. The video is re-encoded
-# #   (about one processor core per 4K camera, or the graphics card); the only
-# #   level that protects the files, from the moment it is on: recordings made
-# #   before (or before the masks changed) stay unmasked on disk and are masked
-# #   when they leave (downloads, exports, event copies, apps that do not draw
-# #   masks). Not for pushed or battery cameras; filling gaps from the camera's
-# #   card is off for such cameras.
-# # Masked downloads, event copies and playback for apps that do not draw masks
-# # are converted on the server ([transcode]): quick on a graphics encoder,
-# # slow on the processor (H.264, up to 1080p). Adding or changing masks turns
-# # off share_unmasked (RTSP sharing) until it is confirmed again.
-# # Default: "screen" for masks added from 0.11.1 on; a camera that already had
-# # masks before is set to "recording" once at upgrade.
-# # The camera's own privacy mask (Reolink, Dahua/Amcrest, Hikvision...) is
-# # better still: the area never leaves the camera.
-# # mask_mode = "screen"
-# # [[cameras.privacy_masks]]
-# # x = 0.0
-# # y = 0.0
-# # w = 0.25
-# # h = 0.5
+# # Privacy masks: AmberSight has none of its own. Use the camera's own privacy
+# # mask (Reolink, Dahua/Amcrest, Hikvision...): the area never leaves the
+# # camera. An ignore zone (ignore_polys, below) keeps motion there from counting.
+# # (privacy_masks from before 0.11.2 are moved at start into ignore_zones and
+# # alert_ignore_polys, as far as they fit; see docs/install.md.)
 # #
 # # Camera events (the camera's own motion/person/vehicle/doorbell detection):
 # # onvif_port = 8000

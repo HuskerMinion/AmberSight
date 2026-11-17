@@ -70,7 +70,7 @@ function build() {
     add('cam:play:' + id, 'Cameras', 'timeline', 'Play back ' + n, 'Recordings', async () => { await goTab('live'); (await imp.tl()).openAt(id, Date.now() - 60000); }, [], false, 'recordings rewind history');
     add('cam:snap:' + id, 'Cameras', 'camera', 'Snapshot ' + n, n, async () => (await imp.live()).snapshot(id));
     add('cam:set:' + id, 'Cameras', 'gear', n + ' settings', 'Camera settings', async () => (await imp.cams()).openCameraDialog(id), [], !may('camera_detection'));
-    add('cam:zones:' + id, 'Cameras', 'zone', 'Zones for ' + n, 'Motion zones and masks', async () => (await imp.zones()).openZoneEditor(id), [], !may('camera_detection'));
+    add('cam:zones:' + id, 'Cameras', 'zone', 'Zones for ' + n, 'Motion and ignore zones', async () => (await imp.zones()).openZoneEditor(id), [], !may('camera_detection'));
   }
 
   add('act:shield', 'Actions', 'shield', 'Arm / disarm', 'Turn motion detection on or off for all cameras', async () => (await imp.status()).toggleShield(true), ['S'], !may('arm'), 'armed disarmed shield detection on off');

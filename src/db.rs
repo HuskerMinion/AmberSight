@@ -267,12 +267,6 @@ pub struct Db {
     smart_counts_cache: Mutex<Option<(std::time::Instant, (i64, i64, i64))>>,
     /// See [`Db::fragmented_since_ms`].
     fragmented_since: i64,
-    /// Per camera slug: the privacy masks (privacy::masks_revision) this
-    /// run's recorders burn into what they record, and from when (epoch ms).
-    /// In memory only: a recording found on disk gets the revision in its
-    /// row (`segments.mask_rev`) only when this run's recorder made it (see
-    /// [`Db::set_mask_run`]), never from a record in a restored database.
-    mask_runs: Mutex<std::collections::HashMap<String, (String, i64)>>,
 }
 
 /// Read connections (see `Db::ro`).
@@ -462,7 +456,7 @@ fn insert_segment_on(conn: &Connection, camera: &str, s: &SegmentRow) -> Result<
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(path) DO UPDATE SET camera=excluded.camera, start_ms=excluded.start_ms,
            end_ms=excluded.end_ms, bytes=excluded.bytes, video_frames=excluded.video_frames,
-           kind=excluded.kind, folder=excluded.folder, mask_rev=NULL",
+           kind=excluded.kind, folder=excluded.folder",
         params![camera, s.path, s.start_ms, s.end_ms, s.bytes, s.video_frames, s.kind, s.folder],
     )?;
     // Footage of an event already saved (its post-roll closes after it).
@@ -1214,7 +1208,8 @@ impl Db {
         }
         if version < 34 {
             // v34: the privacy masks burned into each recording by the recorder that made it
-            // (`mask_rev`; NULL: not known to be masked, so it is masked when it leaves).
+            // (`mask_rev`). Neither written nor read since 0.11.2 (AmberSight no longer
+            // makes privacy masks); the column stays so the schema does not change.
             let tx = conn.transaction()?;
             let has: i64 = tx.query_row("SELECT COUNT(*) FROM pragma_table_info('segments') WHERE name = 'mask_rev'", [], |r| r.get(0))?;
             if has == 0 {
@@ -1258,7 +1253,7 @@ impl Db {
             tx.commit()?;
         }
         let longest: i64 = conn.query_row("SELECT ms FROM seg_longest WHERE id = 1", [], |r| r.get(0))?;
-        let db = Db { conn: Mutex::new(conn), created_fresh: version == 0, ro: Vec::new(), ro_next: std::sync::atomic::AtomicUsize::new(0), longest_segment: std::sync::atomic::AtomicI64::new(longest), importing: std::sync::atomic::AtomicBool::new(false), walk_ok: Mutex::new(Default::default()), import_started: Mutex::new(None), import_warned: std::sync::atomic::AtomicBool::new(false), sums_checked: std::sync::atomic::AtomicBool::new(false), totals_ready: std::sync::atomic::AtomicBool::new(false), smart_hint: Mutex::new(None), smart_counts_cache: Mutex::new(None), fragmented_since, mask_runs: Mutex::new(Default::default()) };
+        let db = Db { conn: Mutex::new(conn), created_fresh: version == 0, ro: Vec::new(), ro_next: std::sync::atomic::AtomicUsize::new(0), longest_segment: std::sync::atomic::AtomicI64::new(longest), importing: std::sync::atomic::AtomicBool::new(false), walk_ok: Mutex::new(Default::default()), import_started: Mutex::new(None), import_warned: std::sync::atomic::AtomicBool::new(false), sums_checked: std::sync::atomic::AtomicBool::new(false), totals_ready: std::sync::atomic::AtomicBool::new(false), smart_hint: Mutex::new(None), smart_counts_cache: Mutex::new(None), fragmented_since };
         // A small index is counted now; a big one in the background (see fill_segment_totals).
         let max_id: i64 = db.lock().query_row("SELECT COALESCE(MAX(id), 0) FROM segments", [], |r| r.get(0))?;
         if max_id <= SEG_TOTALS_FILL_NOW {
@@ -2000,42 +1995,6 @@ impl Db {
         from_ms.saturating_sub(self.longest_segment.load(std::sync::atomic::Ordering::Relaxed).max(0) + 60_000)
     }
 
-    /// Note that this run's recorder of camera `slug` burns the privacy masks
-    /// of revision `rev` into what it records from `since_ms` on (None: it
-    /// burns none). Recordings of that camera found on disk later (the
-    /// ffmpeg pipeline's files, indexed by the folder scans) that began from
-    /// then carry it in their rows.
-    pub fn set_mask_run(&self, slug: &str, run: Option<(String, i64)>) {
-        let mut m = self.mask_runs.lock().unwrap();
-        match run {
-            Some(r) => {
-                m.insert(slug.to_string(), r);
-            }
-            None => {
-                m.remove(slug);
-            }
-        }
-    }
-
-    /// What [`Db::set_mask_run`] noted for camera `slug` in this run.
-    pub fn mask_run(&self, slug: &str) -> Option<(String, i64)> {
-        self.mask_runs.lock().unwrap().get(slug).cloned()
-    }
-
-    /// The privacy masks burned into each recording of `camera` with
-    /// `start_ms < to_ms && end_ms > from_ms` (see `segments.mask_rev`;
-    /// None: not known to have any).
-    pub fn segment_mask_revs(&self, camera: &str, from_ms: i64, to_ms: i64) -> Result<Vec<Option<String>>> {
-        let conn = self.lock();
-        let mut st = conn.prepare(
-            "SELECT mask_rev FROM segments
-             WHERE camera = ?1 AND start_ms < ?3 AND start_ms >= ?4 AND end_ms > ?2
-             ORDER BY start_ms, id",
-        )?;
-        let rows = st.query_map(params![camera, from_ms, to_ms, self.earliest_start(from_ms)], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     /// A recording found on disk by a folder scan (as the ffmpeg pipeline's
     /// are), added as the scans add them.
     #[cfg(test)]
@@ -2685,25 +2644,6 @@ impl Db {
         Ok((out, first))
     }
 
-    /// Whether anything recorded under this camera slug from before
-    /// `until_ms` is still kept: a recording that began before then, or an
-    /// event (of a camera name with this slug) that did.
-    pub fn footage_before(&self, slug: &str, until_ms: i64) -> Result<bool> {
-        let conn = self.lock();
-        let seg: Option<i64> = conn.query_row("SELECT 1 FROM segments WHERE camera = ?1 AND start_ms < ?2 LIMIT 1", params![slug, until_ms], |r| r.get(0)).optional()?;
-        if seg.is_some() {
-            return Ok(true);
-        }
-        let mut st = conn.prepare("SELECT DISTINCT camera FROM events WHERE start < ?1")?;
-        let names = st.query_map(params![until_ms.div_euclid(1000) + 1], |r| r.get::<_, String>(0))?;
-        for n in names {
-            if crate::config::slug(&n?) == slug {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     /// Start of the oldest recording still indexed for a camera.
     pub fn oldest_segment_start(&self, camera: &str) -> Result<Option<i64>> {
         Ok(self
@@ -2724,10 +2664,6 @@ impl Db {
 
     /// A camera was renamed: its recordings, events and AI reviews follow.
     /// (Files keep their paths; event ids keep the old name.)
-    #[cfg(test)]
-    pub fn rename_camera(&self, old: &str, new: &str) -> Result<()> {
-        self.rename_camera_keeping(old, new, None)
-    }
 
     /// Run SQL on the database as it is (tests that make a step fail).
     #[cfg(test)]
@@ -2735,12 +2671,7 @@ impl Db {
         self.lock().execute_batch(sql).unwrap();
     }
 
-    /// [`Db::rename_camera`], also writing `keep` (key, value in the privacy
-    /// mask records' scope) in the same transaction, after the masks of
-    /// cameras removed under the old name have moved to the new one: the
-    /// renamed camera's masks kept under its old name (see
-    /// masked::rename_tail_entry).
-    pub fn rename_camera_keeping(&self, old: &str, new: &str, keep: Option<(String, String)>) -> Result<()> {
+    pub fn rename_camera(&self, old: &str, new: &str) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         tx.execute("UPDATE segments SET camera = ?2 WHERE camera = ?1", params![crate::config::slug(old), crate::config::slug(new)])?;
@@ -2763,30 +2694,7 @@ impl Db {
             params![format!("{so}|"), format!("{sn}|")],
         )?;
         tx.execute("UPDATE OR REPLACE ui_kv SET key = ?2 WHERE scope = 'card_fill_mode' AND key = ?1", params![so, sn])?;
-        // Privacy masks: the "masked from" records of both names say nothing
-        // about the recordings now under the new one (noted again, from now,
-        // when the camera's settings are applied); the masks of cameras
-        // removed under the old name go with their recordings.
-        {
-            use crate::transcode::masked::{GONE_PREFIX, KNOWN_PREFIX, SINCE_PREFIX, SINCE_SCOPE};
-            tx.execute("DELETE FROM ui_kv WHERE scope = ?1 AND (key = ?2 OR key = ?3)", params![SINCE_SCOPE, format!("{SINCE_PREFIX}{so}"), format!("{SINCE_PREFIX}{sn}")])?;
-            // (The camera's masks are noted again under the new name as its settings are applied.)
-            tx.execute("DELETE FROM ui_kv WHERE scope = ?1 AND key = ?2", params![SINCE_SCOPE, format!("{KNOWN_PREFIX}{so}")])?;
-            if so != sn {
-                tx.execute(
-                    "UPDATE OR REPLACE ui_kv SET key = ?3 || substr(key, length(?2) + 1) WHERE scope = ?1 AND substr(key, 1, length(?2)) = ?2",
-                    params![SINCE_SCOPE, format!("{GONE_PREFIX}{so}|"), format!("{GONE_PREFIX}{sn}|")],
-                )?;
-            }
-            if let Some((k, v)) = keep {
-                tx.execute("INSERT OR REPLACE INTO ui_kv (scope, key, value) VALUES (?1, ?2, ?3)", params![SINCE_SCOPE, k, v])?;
-            }
-        }
         tx.commit()?;
-        // What the old name's recorder burned in says nothing about what is recorded there now.
-        if so != sn {
-            self.set_mask_run(&so, None);
-        }
         Ok(())
     }
 
@@ -3367,15 +3275,13 @@ impl Db {
                 let tx = conn.transaction()?;
                 {
                     let mut st = tx.prepare_cached(
-                        "INSERT OR IGNORE INTO segments (camera, path, start_ms, end_ms, bytes, video_frames, kind, folder, mask_rev)
-                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?7, ?6, ?8)",
+                        "INSERT OR IGNORE INTO segments (camera, path, start_ms, end_ms, bytes, video_frames, kind, folder)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?7, ?6)",
                     )?;
-                    let runs = self.mask_runs.lock().unwrap().clone();
                     let first = done;
                     while done < found.len() && (done == first || (done - first < max_rows && held.elapsed() < max_time)) {
                         let f = &found[done];
-                        let rev = mask_rev_for(&runs, &f.camera, f.start_ms);
-                        n += st.execute(params![f.camera, f.path, f.start_ms, f.end_ms, f.bytes, f.folder, f.kind, rev])?;
+                        n += st.execute(params![f.camera, f.path, f.start_ms, f.end_ms, f.bytes, f.folder, f.kind])?;
                         // (As insert_segment does: a longer segment found by the walk is looked for.)
                         self.longest_segment.fetch_max(f.end_ms - f.start_ms, std::sync::atomic::Ordering::Relaxed);
                         done += 1;
@@ -3402,13 +3308,6 @@ impl Db {
         }
         Ok(n)
     }
-}
-
-/// The privacy masks a recording of camera `slug` that began at `start_ms`
-/// has burned in: those of this run's recorder for it, when it began after
-/// that recorder started (see [`Db::set_mask_run`]); None otherwise.
-fn mask_rev_for<'a>(runs: &'a std::collections::HashMap<String, (String, i64)>, slug: &str, start_ms: i64) -> Option<&'a str> {
-    runs.get(slug).filter(|(_, since)| start_ms >= *since).map(|(rev, _)| rev.as_str())
 }
 
 /// Rows per transaction when adding found recordings, and the longest one
@@ -5141,7 +5040,7 @@ mod tests {
     }
 
     #[test]
-    fn a_version_33_database_gains_the_mask_column_and_its_recordings_count_as_unmasked() {
+    fn a_version_33_database_gains_the_mask_column() {
         let dir = std::env::temp_dir().join(format!("ambersight-maskrev-mig-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -5149,23 +5048,13 @@ mod tests {
         {
             let db = Db::open(&p).unwrap();
             db.lock().execute_batch("ALTER TABLE segments DROP COLUMN mask_rev; PRAGMA user_version = 33;").unwrap();
-            db.lock()
-                .execute("INSERT INTO segments (camera, path, start_ms, end_ms, bytes, video_frames, kind, folder) VALUES ('cam', 'a.mp4', 0, 1000, 1, 0, 'legacy', '')", [])
-                .unwrap();
         }
         let db = Db::open(&p).unwrap();
         let v: i64 = db.lock().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(db.segment_mask_revs("cam", 0, 1000).unwrap(), vec![None], "from before: not known to be masked");
-        // A recording found later, made by this run's masking recorder: noted.
-        db.set_mask_run("cam", Some(("abc".into(), 2000)));
-        db.insert_scanned_segment("cam", &SegmentRow { path: "b.mp4".into(), start_ms: 2000, end_ms: 3000, bytes: 1, video_frames: 0, kind: "legacy".into(), folder: String::new() }).unwrap();
-        assert_eq!(db.segment_mask_revs("cam", 2000, 3000).unwrap(), vec![Some("abc".to_string())]);
-        // Opened again (a new run: nothing noted in memory): the rows keep what they say.
-        drop(db);
-        let db = Db::open(&p).unwrap();
-        assert_eq!(db.mask_run("cam"), None);
-        assert_eq!(db.segment_mask_revs("cam", 0, 3000).unwrap(), vec![None, Some("abc".to_string())]);
+        // (Unused since 0.11.2, kept so the schema stays as it was.)
+        let has: i64 = db.lock().query_row("SELECT COUNT(*) FROM pragma_table_info('segments') WHERE name = 'mask_rev'", [], |r| r.get(0)).unwrap();
+        assert_eq!(has, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
