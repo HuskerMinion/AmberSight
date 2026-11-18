@@ -208,6 +208,16 @@ main { padding: var(--s4); max-width: 1900px; margin: 0 auto; }
 .big.cam .lbtools { display: flex; }
 .lbclose { margin-left: auto; }
 .fullname { color: #fff; font-weight: 600; font-size: var(--fs-l); text-shadow: 0 1px 3px #000; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none !important; }
+.fullsub { color: rgba(255,255,255,.85); font-size: var(--fs-s, 12px); padding: 2px 8px; border-radius: 99px; background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.2); white-space: nowrap; cursor: help; flex-shrink: 0; }
+.fullsub .fs-short { display: none; }
+/* The camera name keeps a few letters however crowded the bar is. */
+.fullname { min-width: 3.5em; }
+/* Phones and short landscape screens: the note shrinks to "Sub". */
+@media (max-width: 560px), (max-height: 500px) and (pointer: coarse) {
+  .fullsub { padding: 1px 6px; }
+  .fullsub .fs-long { display: none; }
+  .fullsub .fs-short { display: inline; }
+}
 .lbnav { display: none !important; position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 64px; padding: 0 !important; z-index: 5; }
 .big.cam .lbnav { display: inline-flex !important; }
 .lbnav.prev { left: 8px; } .lbnav.next { right: 8px; }

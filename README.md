@@ -96,8 +96,9 @@ program and config where they are), `--dry-run` (only print the plan) and
 
 - **Windows and macOS:** nothing to install. If none is found at start, AmberSight
   downloads one once (see Cross-platform notes).
-- **Linux:** ffmpeg is required. The .deb installs it. Otherwise
-  `sudo apt install ffmpeg` or `sudo pacman -S ffmpeg`. On Fedora the standard
+- **Linux:** ffmpeg and curl are required (curl sends alerts and AI server
+  checks). The .deb and .rpm install both. Otherwise
+  `sudo apt install ffmpeg curl` or `sudo pacman -S ffmpeg curl`. On Fedora the standard
   `ffmpeg-free` cannot decode H.265 cameras: use RPM Fusion's ffmpeg.
 
 ### Background service commands
@@ -141,7 +142,7 @@ config file's directory as its working directory, so a relative
 ## Build from source
 
 You need a recent stable Rust toolchain (`rustup update stable`). On Linux you
-also need ffmpeg (`apt install ffmpeg`).
+also need ffmpeg and curl (`apt install ffmpeg curl`).
 
 ```bash
 cargo build --release

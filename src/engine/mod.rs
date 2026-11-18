@@ -854,7 +854,9 @@ impl Engine {
             .collect();
         for h in targets {
             // A sleeping battery camera is woken so it can record.
-            if h.cfg.read().unwrap().on_demand && h.state.read().unwrap().sleeping {
+            // (One camera lock at a time: elsewhere the state lock is taken before the settings lock.)
+            let on_demand = h.cfg.read().unwrap().on_demand;
+            if on_demand && h.state.read().unwrap().sleeping {
                 self.wake_camera(h.id, "another camera's motion");
             }
             let mut st = h.state.write().unwrap();

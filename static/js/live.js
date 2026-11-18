@@ -15,7 +15,7 @@ import { mark } from './diag.js';
 import { isPhone, device } from './device.js';
 import { startLive, startJpeg, markFirstFrame } from './player.js';
 import { fitRect } from './fit.js';
-export { startLive, startJpeg, noSound } from './player.js';
+export { startLive, startJpeg, noSound, liveStream, playableStream } from './player.js';
 import { openCameraDialog, setCameraEnabled, pauseAlertsDlg, resumeAlerts, pausedText, rebootDlg, canReboot } from './cameras.js';
 
 function smoothGrid() { return Layouts.getPrefs().quality === 'smooth'; }
@@ -1148,7 +1148,7 @@ export function renderLive() {
     tile.onmouseenter = () => { hoverId = c.id; };
     if (!arrange && (!tlHook || solo)) {
       t.spk = Speaker.attach(frame, {
-        id: c.id, q: t.big ? bigQ() : 'sub', above: true, info: !tlHook,
+        id: c.id, q: t.big && !c.remote ? bigQ() : 'sub', above: true, info: !tlHook,
         videos: () => {
           return t.media && t.media.tagName === 'VIDEO' ? [t.media] : [];
         },
@@ -1389,6 +1389,8 @@ function mountFull() {
   video.addEventListener('loadedmetadata', () => placeFull());
   video.addEventListener('resize', () => placeFull());
   content.appendChild(video);
+  $('fullSub').hidden = true;
+  video.addEventListener('ambersight:stream', (e) => { $('fullSub').hidden = !(e.detail && e.detail.swapped); });
   $('lightbox').dataset.cam = String(fullCamId);
   const c = camFromId(fullCamId);
   addOverlayText(content, c, { big: true });
@@ -1407,6 +1409,7 @@ function mountFull() {
   fullSpk = Speaker.attach(content, { id: fullCamId, q: bigQ(), videos: () => [$('fullVid')] });
   if (keepAudio && c && c.audio) fullSpk.unmute();
   fullPlayer = startLive(video, fullCamId, bigQ(), () => {
+    $('fullSub').hidden = true;
     if (fullSpk) fullSpk.destroy();
     fullSpk = null;
     video.remove();
@@ -1473,6 +1476,7 @@ export function closeFull() {
   lb.classList.remove('cam');
   placeFull();
   $('fullName').hidden = true;
+  $('fullSub').hidden = true;
   stopFull();
   Zoom.reset();
   fullCamId = null;

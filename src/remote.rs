@@ -105,8 +105,9 @@ pub async fn share_cameras(State(engine): State<Arc<Engine>>, h: HeaderMap) -> R
         .flatten()
         .filter(|c| c.id < PER_LINK)
         .map(|c| {
-            let cfg = c.cfg.read().unwrap();
+            // State before settings, the order used everywhere else.
             let st = c.state.read().unwrap();
+            let cfg = c.cfg.read().unwrap();
             serde_json::json!({
                 "id": c.id,
                 "name": cfg.name,

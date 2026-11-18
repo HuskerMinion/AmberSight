@@ -1,6 +1,6 @@
 [package]
 name = "ambersight"
-version = "0.11.2"
+version = "0.11.3"
 edition = "2021"
 description = "AmberSight - a self-hosted camera security and recording server"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -28,7 +28,7 @@ subtle = "2"
 percent-encoding = "2"
 retina = "0.4"
 url = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 argon2 = "0.5"
 rand = "0.8"
 sha2 = "0.10"

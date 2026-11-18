@@ -268,12 +268,22 @@ async fn sign_out_all_other_devices_keeps_this_one() {
 // ---- a signed-out device is a new browser again ----
 
 /// These tests use the account database the way the server does (sessions and
-/// known browsers in one place), and one at a time.
-fn store(e: &Arc<Engine>) -> std::sync::MutexGuard<'static, ()> {
+/// known browsers in one place), and one at a time. The account store is shared
+/// by every test in the run, so it is let go again when the test ends: left in
+/// place, other tests would write into this test's database after it is gone.
+fn store(e: &Arc<Engine>) -> StoreGuard {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let g = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
     crate::auth::attach_store(e.db.clone());
-    g
+    StoreGuard(g)
+}
+
+struct StoreGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl Drop for StoreGuard {
+    fn drop(&mut self) {
+        crate::auth::detach_store();
+    }
 }
 
 /// How many "new device" alerts went out for the account (each writes this entry).

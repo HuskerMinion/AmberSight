@@ -27,6 +27,23 @@ const badAudio = new Set();
 // Does the browser know this camera's sound cannot be played? (The speaker button says so.)
 export function noSound(camId) { for (const k of badAudio) if (k.startsWith(camId + '/')) return true; return false; }
 
+// The stream key ('main' or 'sub') startLive plays for quality q. A camera without a
+// separate sub stream serves its main stream for 'sub' (and the other way round).
+// Main plays the sub stream instead when this browser cannot play the main stream's
+// video (H.265 in Firefox and in Chrome on most Linux machines). Sub never swaps up
+// to main, so a grid of tiles does not pull the big stream.
+// Can this browser play the video of stream `x` (an entry of /api/live/:id/info)?
+export function playableStream(x) {
+  return !!(x && MSEClass && MSEClass.isTypeSupported(x.video_mime || x.mime));
+}
+
+export function liveStream(info, q) {
+  const playable = playableStream;
+  const wq = info && info[q] ? q : (q === 'sub' ? 'main' : 'sub');
+  if (wq === 'main' && info && info.main && !playable(info.main) && playable(info.sub)) return 'sub';
+  return wq;
+}
+
 // Plays /api/live/:id/ws?q=main|sub (a WebSocket carrying fragmented MP4) into <video>.
 // A WebSocket, not a streaming fetch: browsers allow only six HTTP connections per
 // server, and a grid of streams would take them all and stall every other request.
@@ -58,15 +75,13 @@ export function startLive(video, camId, q, onFallback) {
     camStep(camId, 'ask');
     if (st.tries) camCount(camId, 'retries');
     const info = await api('/api/live/' + camId + '/info');
+    // Stopped while asking (closed, or another camera opened): nothing more to do.
+    if (st.stopped) return 'stop';
     // A camera without a separate sub stream serves its main stream for 'sub' (and the
     // other way round); the server picks the same one.
-    const other = (x) => (x === 'sub' ? 'main' : 'sub');
-    const playable = (x) => !!(x && MSEClass && MSEClass.isTypeSupported(x.video_mime || x.mime));
-    let wq = info[q] ? q : other(q);
-    // A browser that cannot play this stream's video (H.265 in Firefox and in
-    // Chrome on most Linux machines) plays the camera's other stream when it
-    // can, rather than falling back to pictures.
-    if (info[wq] && !playable(info[wq]) && playable(info[other(wq)])) wq = other(wq);
+    const wq = liveStream(info, q);
+    // Tells the page when the main stream was swapped for the sub stream (full view says so).
+    video.dispatchEvent(new CustomEvent('ambersight:stream', { detail: { asked: q, played: wq, swapped: q === 'main' && wq === 'sub' && !!info.main } }));
     const s = info[wq];
     // A battery camera that is still waking up: ask again shortly (not a failure).
     if (!s && info.waking) return 'waking';

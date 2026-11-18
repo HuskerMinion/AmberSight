@@ -32,8 +32,9 @@ RUN apt-get update \
  && echo "f7f474b5f6a4adf987aa587920df00e713285958ef6a913dda1945a544a3099e  /tmp/cuda-keyring_1.1-1_all.deb" | sha256sum -c - \
  && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && rm /tmp/cuda-keyring_1.1-1_all.deb \
  && apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata tini fonts-dejavu-core \
+ && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tzdata tini fonts-dejavu-core \
       cuda-cudart-13-5 libcublas-13-5 libcurand-13-5 libcudnn9-cuda-13 \
+ && curl --version >/dev/null && ffmpeg -version >/dev/null \
  && rm -rf /var/lib/apt/lists/* \
  && (userdel -r ubuntu 2>/dev/null || true) \
  && useradd --system --uid 1000 --user-group --home-dir /data --no-create-home ambersight \

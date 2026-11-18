@@ -177,6 +177,17 @@ impl Engine {
             shorts.push("Network may be down".into());
             warnings.push(w.into());
         }
+        // Things that send with curl, set up where curl is missing.
+        {
+            let ai_server = self.detector().is_none();
+            let missing = curl_users(&self.config.lock().unwrap(), ai_server);
+            if !missing.is_empty() && !crate::child::curl_available() {
+                let w = format!("curl is not installed, so AmberSight cannot use these: {}. Install curl and this warning clears within a minute", missing.join(", "));
+                problem("curl".into(), &w);
+                shorts.push("curl is missing".into());
+                warnings.push(w);
+            }
+        }
         // The AI was asked for checks and none has worked for two minutes.
         {
             let det = self.detector();
@@ -366,5 +377,40 @@ mod tests {
         );
         assert_eq!(plain_error("the camera refused the user name or password (check them in the camera's settings)"), "the camera refused the user name or password");
         assert_eq!(plain_error("could not open admin:secret@192.0.2.10:554/live (odd)"), "could not open (odd)");
+    }
+}
+
+/// What is set up that sends with curl (alerts and the AI server option).
+/// `ai_server`: no built-in model is loaded, so checks would go to `[ai] url`.
+fn curl_users(cfg: &crate::config::Config, ai_server: bool) -> Vec<&'static str> {
+    let set = |v: &Option<String>| v.as_deref().is_some_and(|x| !x.trim().is_empty());
+    let a = &cfg.alerts;
+    let mut v = Vec::new();
+    for (on, name) in [
+        (set(&a.webhook_url), "webhook"),
+        (set(&a.telegram_bot_token), "Telegram"),
+        (set(&a.ntfy_url), "ntfy"),
+        (set(&a.pushover_token), "Pushover"),
+        (set(&a.ha_url), "Home Assistant"),
+        (set(&a.image_post_url), "picture posts"),
+        (cfg.ai.enabled && ai_server && set(&cfg.ai.url), "the AI server"),
+    ] {
+        if on {
+            v.push(name);
+        }
+    }
+    v
+}
+
+#[cfg(test)]
+mod curl_user_tests {
+    #[test]
+    fn only_what_is_set_up_is_named() {
+        let cfg: crate::config::Config = toml::from_str("[alerts]\nwebhook_url = \"http://x/h\"\nntfy_url = \"  \"\n[ai]\nenabled = true\nurl = \"http://y/detect\"\n").unwrap();
+        assert_eq!(super::curl_users(&cfg, true), vec!["webhook", "the AI server"]);
+        // The built-in model checks the pictures: the address is not used.
+        assert_eq!(super::curl_users(&cfg, false), vec!["webhook"]);
+        let none: crate::config::Config = toml::from_str("").unwrap();
+        assert!(super::curl_users(&none, true).is_empty());
     }
 }

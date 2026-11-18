@@ -13,6 +13,7 @@ License:        PolyForm-Noncommercial-1.0.0
 URL:            https://github.com/HuskerMinion/AmberSight
 Packager:       HuskerMinion <28571744+HuskerMinion@users.noreply.github.com>
 Requires:       ffmpeg
+Requires:       curl
 Requires(pre):  shadow-utils
 
 %description

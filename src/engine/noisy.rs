@@ -507,7 +507,15 @@ mod tests {
         ok
     }
 
-    fn alert_goes_out(areas: &str, labels: &str, objects: &[&str], review: &Value, eid: &str) -> (bool, Option<String>) {
+    /// How long to wait for the webhook. One that should come gets long: with
+    /// the whole suite running, starting curl on Windows has taken 6 to 15 s
+    /// (seen with a probe; each late alert was the test's own). The wait ends as
+    /// soon as it comes. One that should not come gets a short look.
+    fn wait(want: bool) -> std::time::Duration {
+        std::time::Duration::from_secs(if want { 30 } else { 6 })
+    }
+
+    fn alert_goes_out(areas: &str, labels: &str, objects: &[&str], review: &Value, eid: &str, want: bool) -> (bool, Option<String>) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.set_nonblocking(true).unwrap();
         let port = l.local_addr().unwrap().port();
@@ -524,7 +532,7 @@ mod tests {
             if l.accept().is_ok() {
                 break true;
             }
-            if t0.elapsed() > std::time::Duration::from_secs(6) {
+            if t0.elapsed() > wait(want) {
                 break false;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -541,15 +549,15 @@ mod tests {
         let strip = "alert_ignore_polys = [{ points = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.3], [0.0, 0.3]] }]";
         let at = |y: f64| serde_json::json!({"wanted": ["person", "car"], "min_score": 0.5, "alert": {"sent": true, "why": "sent"},
             "checks": [{"seen": [{"label": "car", "score": 0.9, "x": 0.4, "y": y, "w": 0.2, "h": 0.1}], "parked": [false]}]});
-        let (sent, why) = alert_goes_out(strip, "", &["car"], &at(0.05), "q1");
+        let (sent, why) = alert_goes_out(strip, "", &["car"], &at(0.05), "q1", false);
         assert!(!sent, "a car in the top strip is silent");
         assert_eq!(why.as_deref(), Some("notify_area"));
-        let (sent, why) = alert_goes_out(strip, "", &["car"], &at(0.6), "q2");
+        let (sent, why) = alert_goes_out(strip, "", &["car"], &at(0.6), "q2", true);
         assert!(sent, "a car further down still notifies");
         assert_eq!(why.as_deref(), Some("sent"));
-        let (sent, _) = alert_goes_out("", "", &["car"], &at(0.05), "q3");
+        let (sent, _) = alert_goes_out("", "", &["car"], &at(0.05), "q3", true);
         assert!(sent, "no areas: as before");
-        let (sent, why) = alert_goes_out("", "alert_labels = [\"person\"]", &["car"], &at(0.6), "q4");
+        let (sent, why) = alert_goes_out("", "alert_labels = [\"person\"]", &["car"], &at(0.6), "q4", false);
         assert!(!sent, "only people notify");
         assert_eq!(why.as_deref(), Some("notify_objects"));
     }
@@ -564,18 +572,18 @@ mod tests {
         let review = serde_json::json!({"wanted": ["car"], "min_score": 0.5, "alert": {"sent": true, "why": "sent"},
             "checks": [{"seen": [{"label": "car", "score": 0.9, "x": 0.4, "y": 0.4, "w": 0.2, "h": 0.1}], "parked": [false]}]});
         for (i, objects) in [&["visitor"][..], &["glass", "sound"], &["package"], &["package picked up"], &["car", "visitor"]].iter().enumerate() {
-            let (sent, why) = alert_goes_out("", person_only, objects, &review, &format!("a{i}"));
+            let (sent, why) = alert_goes_out("", person_only, objects, &review, &format!("a{i}"), true);
             assert!(sent, "{objects:?} on a people-only camera");
             assert_eq!(why.as_deref(), Some("sent"));
-            let (sent, _) = alert_goes_out(strip, "", objects, &review, &format!("b{i}"));
+            let (sent, _) = alert_goes_out(strip, "", objects, &review, &format!("b{i}"), true);
             assert!(sent, "{objects:?} in an area that does not notify");
         }
-        let (sent, _) = alert_goes_out(strip, "", &["car"], &review, "b-car");
+        let (sent, _) = alert_goes_out(strip, "", &["car"], &review, "b-car", false);
         assert!(!sent, "a car in the area stays quiet");
     }
 
     /// As `alert_goes_out`, on a people-only camera with or without AI.
-    fn alert_with_ai(ai_on: bool, objects: &[&str], eid: &str) -> (bool, Option<String>) {
+    fn alert_with_ai(ai_on: bool, objects: &[&str], eid: &str, want: bool) -> (bool, Option<String>) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.set_nonblocking(true).unwrap();
         let port = l.local_addr().unwrap().port();
@@ -593,7 +601,7 @@ mod tests {
             if l.accept().is_ok() {
                 break true;
             }
-            if t0.elapsed() > std::time::Duration::from_secs(6) {
+            if t0.elapsed() > wait(want) {
                 break false;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -607,12 +615,12 @@ mod tests {
         if !have_curl() {
             return;
         }
-        assert!(alert_with_ai(false, &[], "off1").0, "AI off: no object labels at all");
-        let (sent, why) = alert_with_ai(true, &[], "on1");
+        assert!(alert_with_ai(false, &[], "off1", true).0, "AI off: no object labels at all");
+        let (sent, why) = alert_with_ai(true, &[], "on1", false);
         assert!(!sent, "AI on and nothing found stays silent");
         assert_eq!(why.as_deref(), Some("notify_objects"));
-        assert!(!alert_with_ai(false, &["dog"], "off2").0, "the camera itself said dog");
-        assert!(alert_with_ai(true, &["person"], "on2").0);
+        assert!(!alert_with_ai(false, &["dog"], "off2", false).0, "the camera itself said dog");
+        assert!(alert_with_ai(true, &["person"], "on2", true).0);
     }
 
     #[test]

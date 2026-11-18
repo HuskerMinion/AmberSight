@@ -100,3 +100,7 @@
   .tlgoto span { display: none; }
   .tlexp { height: 26px; }
 }
+
+/* The time of the picture sits bottom center: the corners are where a camera puts its own clock. */
+.tlpills .pbot { justify-content: center; }
+.tlpills .pbr { margin: 0 auto; display: inline-flex; }

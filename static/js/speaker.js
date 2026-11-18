@@ -10,7 +10,7 @@
 
 import { api, ic, camFromId, toast } from './core.js';
 import * as Prefs from './prefs.js';
-import { startLive, noSound } from './live.js';
+import { startLive, noSound, liveStream, playableStream } from './live.js';
 
 const DEFAULT_VOL = 0.8;
 let active = null;       // the control that is currently audible
@@ -39,8 +39,9 @@ function liveInfo(id) {
 async function hasAudio(id, q) {
   const info = await liveInfo(id);
   if (!info) return false;
-  const s = info[q] || info[q === 'sub' ? 'main' : 'sub'];
-  return !!(s && s.audio);
+  const s = info[liveStream(info, q)];
+  // A stream this browser can't play as video gives pictures, without sound.
+  return !!(s && s.audio && playableStream(s));
 }
 
 // Stop whatever is audible (page or tab change).

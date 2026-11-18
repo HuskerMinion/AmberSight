@@ -189,7 +189,11 @@
   .ze-head { padding: var(--s2) var(--s3); }
   .ze-seg button { padding: 6px 8px; }
   .ze-head { gap: 6px var(--s2); }
-  .ze-title .muted { display: none; }
+  .ze-title { order: 0; flex: 1 1 0; min-width: 38%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs); }
+  .ze-title .muted { display: block; margin: 0; font-size: var(--fs-s); overflow: hidden; text-overflow: ellipsis; }
+  .ze-acts { order: 1; margin-left: 0; }
+  .ze-head > :not(.ze-title):not(.ze-acts) { order: 2; }
+  .ze-sp { display: none; }
   .ze-main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 34%); }
   .ze-side { border-left: 0; border-top: 1px solid var(--line); }
   .ze-hint { display: none; }

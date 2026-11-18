@@ -592,6 +592,12 @@ pub fn attach_store(db: std::sync::Arc<crate::db::Db>) {
     s.store = Some(db);
 }
 
+/// Tests: stop using the database a test attached (it goes away with the test).
+#[cfg(test)]
+pub fn detach_store() {
+    state().lock().unwrap().store = None;
+}
+
 fn store() -> Option<std::sync::Arc<crate::db::Db>> {
     state().lock().unwrap().store.clone()
 }

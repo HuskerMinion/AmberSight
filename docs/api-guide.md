@@ -946,7 +946,9 @@ found that is not a camera on this server yet and was not ignored: `{"ip", "kind
 `rtsp`)`, "name", "first_seen"}` (Unix seconds). It is information, not a problem. A folder that is full while the oldest recordings make room is not a
 warning; disk warnings come when free space is below what the drive should keep (a problem
 only when it cannot be freed, or under 2% free). Besides camera and disk problems, `warnings` may contain `AI object detection
-is stalled: no check has worked for the last two minutes` (problem key `ai`), and a camera whose
+is stalled: no check has worked for the last two minutes` (problem key `ai`), `curl is not installed, so AmberSight
+cannot use these: webhook, the AI server. Install curl and this warning clears within a minute` (problem key `curl`, only while
+something that sends with curl is set up and curl cannot be run), and a camera whose
 recording is re-encoded on the processor after it fell back to ffmpeg by itself. `notes` are
 information, not problems (`ok` stays true): graphics cards that cannot decode (`Hardware
 decoding unavailable on /dev/dri/renderD128 (…); /dev/dri/renderD129 is used instead`), hardware
@@ -3067,6 +3069,12 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.11.3**
+
+- `GET /api/health`: may warn that curl is missing while alerts (webhook, Telegram, ntfy,
+  Pushover, Home Assistant, picture posts) or the AI server option are set up (problem key
+  `curl`). The Docker images, .deb and .rpm now include curl.
 
 **New in 0.11.2**
 

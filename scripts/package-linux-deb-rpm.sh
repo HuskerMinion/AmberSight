@@ -78,7 +78,7 @@ Architecture: $2
 Maintainer: HuskerMinion <28571744+HuskerMinion@users.noreply.github.com>
 Homepage: https://github.com/HuskerMinion/AmberSight
 Installed-Size: $size
-Depends: ffmpeg, passwd, libc6 (>= $(glibc_of "$1")), libstdc++6 (>= 13), libgcc-s1
+Depends: ffmpeg, curl, passwd, libc6 (>= $(glibc_of "$1")), libstdc++6 (>= 13), libgcc-s1
 Suggests: intel-media-va-driver, libmfx-gen1.2
 Section: video
 Priority: optional

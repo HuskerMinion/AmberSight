@@ -137,6 +137,37 @@ pub fn curl_config(args: &[String]) -> String {
     out
 }
 
+/// Whether curl can be run here. Alerts, the AI server option and a few more
+/// send with it. Once found it is not looked for again; while missing, it is
+/// looked for again at most once a minute (so installing it clears the warning).
+pub fn curl_available() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static FOUND: AtomicBool = AtomicBool::new(false);
+    static LAST_MISSING: Mutex<Option<Instant>> = Mutex::new(None);
+    if FOUND.load(Ordering::Relaxed) {
+        return true;
+    }
+    if LAST_MISSING.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+        return false;
+    }
+    match Command::new("curl").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+        Ok(s) if s.success() => {
+            FOUND.store(true, Ordering::Relaxed);
+            true
+        }
+        // Only "no such program" (or one that fails) counts as missing; a
+        // start that failed for another reason (out of processes or files for
+        // a moment) says nothing either way, and it is looked for again.
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => true,
+        _ => {
+            *LAST_MISSING.lock().unwrap() = Some(Instant::now());
+            false
+        }
+    }
+}
+
 /// Run curl with `args` passed on stdin (see [`curl_config`]); stdout is
 /// captured, stderr dropped.
 pub fn curl(args: &[String]) -> std::io::Result<std::process::Output> {
