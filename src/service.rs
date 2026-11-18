@@ -389,10 +389,14 @@ pub fn init_logging() {
             }
         }
     }
-    // Console output follows RUST_LOG; the web log viewer always keeps the
-    // recent INFO/WARN/ERROR lines.
+    // Console output follows RUST_LOG. Without it, `run` (the server, as
+    // started by hand or in Docker) shows INFO and up, as the systemd unit
+    // and the Windows service do; the other commands only errors (their own
+    // output stays clean). The web log viewer always keeps the recent
+    // INFO/WARN/ERROR lines.
+    let console = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(if args.get(1).map(String::as_str) == Some("run") { "info" } else { "error" }));
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::from_default_env()))
+        .with(tracing_subscriber::fmt::layer().with_filter(console))
         .with(crate::logbuf::RingLayer)
         .init();
 }

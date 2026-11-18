@@ -893,6 +893,7 @@ function readForm(d, c, isNew) {
     copy_events_only_confirmed: v('copy_events_only_confirmed') === '1',
   }, o.motion, o.recording, o.alerts, o.ai);
   if (v('transport')) body.transport = v('transport');
+  if (d.querySelector('[data-k="homekit"]')) body.homekit = v('homekit') === '1';
   const stg = readStrangers(d);
   if (stg !== undefined) body.strangers = stg;
   if (isNew) { body.enabled = true; } else {
@@ -1187,7 +1188,9 @@ function sectionsOf(c, isNew, multi) {
       field('Corner', sel('overlay_pos', [['bottom-left', 'bottom left'], ['bottom-right', 'bottom right'], ['top-left', 'top left'], ['top-right', 'top right']], c.overlay_pos || 'bottom-left')) +
       field('Also burn it into recordings', onoff('overlay', !!c.overlay),
         'Off: the app draws the text, which costs nothing. On: the text becomes part of the video files too (without text set: name, date and time). This re-encodes the camera\'s video (on the graphics card when it has a video encoder that passed the test at start, else on the processor: about one core per 4K camera) and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Leave it off unless the files themselves must carry the text.') +
-      (isNew || multi ? '' : reencodeHtml(c))],
+      (isNew || multi ? '' : reencodeHtml(c)) +
+      (isNew || multi || c.remote ? '' : field('Show in Apple Home', onoff('homekit', !!c.homekit),
+        'Shown in the Home app with live video, a motion sensor and a snapshot while Apple Home is on (Settings, Connections, Apple Home). Everyone in that Home sees it. Not yet tested with real Apple devices.'))],
   };
   if (OP) return { motion: out.motion, alerts: out.alerts, ai: out.ai };
   if (!isNew && !multi && !c.remote) { out.tamper = tamperHtml(c); out.unusual = unusualHtml(c); }

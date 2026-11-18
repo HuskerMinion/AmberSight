@@ -51,7 +51,7 @@ mod zone_watch;
 pub use creds::{camera_url, check_urls as check_camera_urls, normalize_creds, redact_url, sub_url_problem, usable_sub_url};
 pub(crate) use worker::{redact_text, redact_text_with};
 pub(crate) use creds::{is_secret_key, shown_login};
-pub use worker::{caption_drawtext, clock_text, ffmpeg_input_args, overlay_download_drawtext, overlay_text_filter, video_filter};
+pub use worker::{caption_drawtext, clock_text, ffmpeg_input_args, overlay_download_drawtext, overlay_text_filter, recording_filters, second_reader_args, video_filter};
 
 use clip::*;
 use storage::*;

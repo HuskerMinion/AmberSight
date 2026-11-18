@@ -1,6 +1,6 @@
 [package]
 name = "ambersight"
-version = "0.11.3"
+version = "0.12.0-homekit.1"
 edition = "2021"
 description = "AmberSight - a self-hosted camera security and recording server"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -57,6 +57,11 @@ tokio-util = { version = "0.7.20", features = ["io"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 hkdf = "0.12"
 aes-gcm = "0.10"
+# Apple HomeKit (homekit/): the mDNS advertisement, and the big numbers of
+# pair-setup's SRP (constant-time; 0.7.6 or later: 0.5's constant-time code
+# leaked timing, RUSTSEC-2026-0387. p256 still brings 0.5 for Web Push).
+mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
+crypto-bigint = { version = "0.7.6", default-features = false, features = ["zeroize"] }
 # Baichuan (battery Reolink Argus) message encryption: AES-128-CFB, pure Rust.
 aes = "0.8"
 cfb-mode = "0.8"

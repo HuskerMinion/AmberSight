@@ -415,7 +415,8 @@ pub fn mac_info_plist() -> String {
         ("CFBundleExecutable", "AmberSight"),
         ("CFBundleIconFile", "AmberSight"),
         ("CFBundlePackageType", "APPL"),
-        ("CFBundleShortVersionString", env!("CARGO_PKG_VERSION")),
+        // (Apple wants numbers here: "0.12.0", not "0.12.0-homekit.1".)
+        ("CFBundleShortVersionString", env!("CARGO_PKG_VERSION").split(['-', '+']).next().unwrap_or("0.0.0")),
     ] {
         s.push_str(&format!("\t<key>{k}</key>\n\t<string>{v}</string>\n"));
     }
@@ -647,7 +648,7 @@ fn uninstall(env: &Env, l: &Layout, a: &SetupArgs) -> Result<()> {
     let data_dir = std::fs::read_to_string(&l.config)
         .map(|t| data_dir_of(&t, &config_dir))
         .unwrap_or_else(|_| l.data_dir.clone());
-    println!("Removing AmberSight: service, firewall rule, shortcuts{}.", if l.copy_program { ", program" } else { "" });
+    println!("Removing AmberSight: service, firewall rules, shortcuts{}.", if l.copy_program { ", program" } else { "" });
     println!("Kept: settings {} and recordings {}", l.config.display(), data_dir.display());
     if a.dry_run {
         println!("\n(dry run: nothing was changed)");
@@ -660,6 +661,8 @@ fn uninstall(env: &Env, l: &Layout, a: &SetupArgs) -> Result<()> {
     }
     if l.os == Os::Windows {
         let _ = run_quiet("netsh", &netsh_delete_args());
+        // (And the Apple Home rule the service added while HomeKit was on.)
+        let _ = run_quiet("netsh", &crate::homekit::firewall::delete_args());
     }
     for f in shortcut_files(l, "") {
         remove_file(&f.path);

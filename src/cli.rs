@@ -1298,6 +1298,7 @@ pub async fn run_server_until(config: String, shutdown: impl std::future::Future
     let app = web::build_router(engine.clone());
     crate::rtmp::start(engine.clone());
     crate::restream::start(engine.clone());
+    crate::homekit::start(engine.clone());
     crate::transcode::probe_in_background();
     crate::remote::start(engine.clone());
     let e = engine.clone();

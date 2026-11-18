@@ -44,6 +44,21 @@ pub fn overlay_text_filter(cfg: &CameraConfig, clock: crate::picture_text::Clock
     )
 }
 
+/// ffmpeg's input arguments for a second reader of this camera (Apple
+/// Home's live view of a camera read by ffmpeg): its main or sub stream,
+/// with its transport setting. None for a capture device, which opens only
+/// once.
+pub fn second_reader_args(cfg: &CameraConfig, sub: bool) -> Option<Vec<String>> {
+    if crate::local_source::is_device(&cfg.url) || crate::ingest::push::is_push_url(&cfg.url) || crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
+        return None;
+    }
+    let url = match cfg.sub_url.as_deref().filter(|u| sub && !u.trim().is_empty()) {
+        Some(s) => camera_url(&CameraConfig { url: s.to_string(), ..cfg.clone() }),
+        None => camera_url(cfg),
+    };
+    Some(input_args(cfg, false, &url))
+}
+
 /// Captions burned into a download: `label` and the date and time of each
 /// moment, centered at the bottom. `base_s`: the local wall time (seconds
 /// since the epoch, the time zone's offset added) of the input's first frame;

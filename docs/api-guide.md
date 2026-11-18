@@ -43,6 +43,10 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET | `/api/snapshot/:id` | viewer | Latest JPEG |
 | RTSP | `rtsp://host:8554/<camera>[/sub]` | account (Basic) | Shared camera streams for other apps (off by default; separate port) |
 | GET / PUT | `/api/restream` | **admin** | Sharing settings (on/off, port, which cameras) and state |
+| GET / PUT | `/api/homekit` | **admin** | Apple Home (HomeKit): settings, each accessory's pairing state, the pairing window; setup code while it is open |
+| POST | `/api/homekit/pairing` | **admin** | Open, stop or restart the pairing window (Apple devices can pair only while it is open) |
+| POST | `/api/homekit/unpair` | **admin** | One standalone camera forgets its paired Apple devices |
+| POST | `/api/homekit/reset` | **admin** | Forget every paired Apple device; new setup code |
 | POST | `/api/cameras/:id/wake` | viewer | Wake a battery/on-demand camera |
 | GET | `/api/events` | viewer | Event (alert) list with filters and paging |
 | GET | `/api/events/:id/thumb` | viewer | Event thumbnail (JPEG) |
@@ -1365,6 +1369,115 @@ camera's config). The answer is
 the same as `GET`. `400` with `{"error": ...}` for an unknown camera name or a port that is 0 or
 already used by the web page or the RTMP input. Turning sharing off, or a camera's share off,
 ends its clients' sessions at once.
+
+### Apple Home (HomeKit) (admin)
+
+The cameras with `homekit = true` show in Apple's Home app with live video, a motion sensor and
+snapshots. It is off by default (`[homekit] enabled`) and **not yet tested with real Apple
+devices**; testers are welcome in GitHub Discussions. By default each camera is its own HomeKit
+accessory (`[homekit] cameras = "standalone"`: own port from `port + 1` on, own pairing, the same
+setup code for all); `"bridged"` puts them behind one bridge on `port` (default 51830). Apple
+devices talk to them over HomeKit's own protocol, not over this API. These endpoints are for the
+Settings page; they are admin-only, and device tokens get `403`. Everyone in the Apple Home they
+are added to sees the cameras switched on: HomeKit does not know AmberSight's accounts.
+
+Apple devices can pair (HomeKit pair-setup) only while an admin has opened the **pairing window**
+for that accessory with `POST /api/homekit/pairing`: 5 minutes, for one accessory at a time. It
+closes when a pairing succeeds, when it is stopped, or after 5 minutes. While it is closed the
+accessory announces itself as not pairable (Bonjour `sf=0`, so Home does not list it) and refuses
+pair-setup. This applies to pairing again after **Remove pairings**, reset, or removal in the Home
+app too. A paired admin Apple device adding others (sharing the home in the Home app) does not
+need it.
+
+#### `GET /api/homekit` (admin)
+
+```json
+{
+  "enabled": true, "port": 51830, "bind": "[::]", "mode": "standalone", "name": null, "bridge_name": "Home NVR",
+  "listening": true, "error": null, "sessions": 1, "live_streams": 0, "paired": true,
+  "setup_code": "482-91-305",
+  "cameras": [ { "name": "Front Yard", "homekit": true }, { "name": "Garage", "homekit": true } ],
+  "accessories": [
+    { "kind": "camera", "camera": "Front Yard", "name": "Front Yard", "port": 51831, "paired": true,
+      "too_many_tries": false, "controllers": [ { "id": "…", "admin": true } ], "streams": 0,
+      "pairing_open": false },
+    { "kind": "camera", "camera": "Garage", "name": "Garage", "port": 51832, "paired": false,
+      "too_many_tries": false, "controllers": [], "streams": 0, "pairing_open": true,
+      "setup_uri": "X-HM://…", "qr_svg": "<svg ...>" }
+  ],
+  "pairing": { "kind": "camera", "camera": "Garage", "name": "Garage", "seconds_left": 271,
+               "pairing_from": "192.0.2.40", "pairing_for_seconds": 6, "pairing_from_this_device": false,
+               "refused": [] }
+}
+```
+
+`accessories` lists what is announced now: one per camera (`kind: "camera"`), or the bridge
+(`kind: "bridge"`) when bridged. Each has its port, whether it is paired, the paired Apple devices
+(`id`, `admin`) and its live views now (`streams`); `setup_uri` (what its QR code holds, with its
+own category and setup id) and `qr_svg` are there **only** while the pairing window is open for
+it (`pairing_open`). `setup_code` (the one code for all) is there only while the window is open
+for an accessory that can still be paired. `pairing` is `null` while the window is closed; while
+it is open: the accessory, the seconds left, the address of the Apple device pairing now
+(`pairing_from`, `null` while nobody is) and since how long, whether that is the address the
+request came from (`pairing_from_this_device`: the admin pairs the device the page is open on;
+behind a trusted proxy, the visitor's address), and the addresses stopped in this window
+(`refused`). `live_streams` counts live views in all. `name` is the configured bridge name (`null`: the
+server's name, shown as `bridge_name`; Home gets names with only letters, digits, spaces and
+apostrophes, at most 63 bytes). `bind` is the address HomeKit listens on, apart from the web page's
+(`"[::]"`: IPv6 and IPv4). `listening` says whether the ports are open; `error` why not (a port in
+use, or mDNS could not start). When the last admin device removes an accessory in the Home app, it
+can be paired again with the same setup code (in a pairing window). `too_many_tries`: 100 wrong setup codes were tried,
+and pairing it is closed until `POST /api/homekit/reset`.
+
+#### `PUT /api/homekit` (admin)
+
+`{"enabled": true, "name": "Home NVR", "port": 51830, "bind": "[::]", "mode": "standalone", "cameras": {"Front Yard": true}}`.
+All fields are optional; cameras left out keep their setting (`homekit` in the camera's config).
+`mode` is `"standalone"` or `"bridged"` (changing it means adding the cameras to Home again). An
+empty `name` means the server's name. The answer is the same as `GET`. `400` with
+`{"error": ...}` for an unknown field, mode or camera name, a name over 63 bytes, a `bind` that is
+not an address, or a port that is 0 or used by AmberSight already (web page, RTMP input, RTSP
+sharing, 5353; in standalone mode also any of the 64 ports after it). A port another program uses
+shows in `error` once the listener tries it.
+
+#### `POST /api/homekit/pairing` (admin)
+
+The pairing window. The answer is the same as `GET`; each change is written to the audit log.
+
+- `{"action": "open", "camera": "Garage"}`: open it for 5 minutes for that camera (standalone),
+  or `{"action": "open"}` for the bridge (bridged). Opening it again for the same accessory while
+  it is open sets the time left back to 5 minutes from now and keeps the same window: a pair-setup
+  in progress goes on and the stopped addresses stay refused. Opening it after it closed (stopped,
+  paired or past its 5 minutes) starts a new window: a pair-setup begun before cannot finish, and
+  no address is refused. Opening it for another accessory closes it for the first one (one at a
+  time), ending the first one's pair-setup in progress. `400` without a camera in
+  standalone mode, or with one when bridged; `404` when no camera of that name is announced now;
+  `409` when it is already paired (remove its pairings first) or after 100 wrong setup codes
+  (reset first).
+- `{"action": "stop"}`: close it now, ending a pair-setup in progress.
+- `{"action": "restart", "address": "192.0.2.40"}` ("Stop and start again"): end the pair-setup
+  from that address (`pairing_from`), refuse that address until the window closes, and set the
+  time left back to 5 minutes from now. It is the same window: a pair-setup from another address
+  (your own device, taking over) is not ended and can finish. For a device on the network that is
+  not yours, pairing in your window. `409` when the window is closed; `400` without a valid
+  address.
+
+`409` while HomeKit is off. One pair-setup runs at a time; one that has not sent its proof within
+30 s may be taken over by another device. After a wrong setup code everyone waits a little
+(longer with each one); after 100, pairing is closed until reset.
+
+#### `POST /api/homekit/unpair` (admin)
+
+`{"camera": "Garage"}`: that standalone camera forgets its paired Apple devices and ends their
+connections; it can be added again with the same setup code, in a pairing window. `404` when no camera of that name is
+announced on its own now. The answer is the same as `GET`.
+
+#### `POST /api/homekit/reset` (admin)
+
+For a setup code that got out. Every accessory (each camera, and the bridge) forgets every paired
+Apple device and ends their connections, and starts over with a new identity and one new setup
+code. Apple Home sees new accessories: remove the old ones in the Home app, and set up their rooms,
+scenes and automations again. The answer is the same as `GET`.
 
 ### Battery / on-demand cameras: `POST /api/cameras/:id/wake`
 
@@ -3069,6 +3182,18 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in the next release**
+
+- Apple Home (HomeKit), off by default and not yet tested with real Apple devices: cameras with
+  live video, a motion sensor and snapshots, each its own accessory or behind one bridge. New
+  admin `GET` / `PUT /api/homekit`, `POST /api/homekit/pairing` (the pairing window: Apple
+  devices can pair only for 5 minutes after an admin opens it), `POST /api/homekit/unpair` and
+  `POST /api/homekit/reset` (see
+  [Apple Home (HomeKit)](#apple-home-homekit-admin)); not for device tokens. New camera setting
+  `homekit` (`GET /api/cameras` shows it to admins; `PUT /api/cameras/:id`), and a new
+  `[homekit]` section in the settings file (`enabled`, `port` (default 51830), `bind`,
+  `cameras` (`"standalone"` or `"bridged"`), `name`).
 
 **New in 0.11.3**
 

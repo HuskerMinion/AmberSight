@@ -51,6 +51,29 @@ port = 8090
 # enabled = true
 # port = 8554
 
+# APPLE HOME (HomeKit): each camera with homekit = true shows in the Home app
+# with live video (encoded for Home, within [transcode]'s limits), a motion
+# sensor and snapshots. By default each camera is its own accessory (added to
+# Home one by one, with the same setup code, on ports port+1, port+2, ...);
+# cameras = "bridged" puts them behind one bridge on `port`. Not yet tested
+# with real Apple devices: testers welcome in GitHub Discussions. Off by
+# default; while off, no port is opened and nothing is announced. To pair,
+# press Pair a device in Settings > Connections > Apple Home: pairing is open
+# for 5 minutes (setup code and QR code shown then) and closed otherwise, so
+# nobody else on the network can pair in the meantime. Everyone in
+# that Apple Home sees the cameras shown there: HomeKit does not know
+# AmberSight's accounts. Needs the TCP ports, mDNS (UDP 5353) and rtp_ports
+# (UDP, RTCP of live video) open (Windows: AmberSight adds that rule itself
+# when it runs as Administrator); in Docker, host networking.
+# Pairing keys are kept in <data_dir>/homekit/.
+# [homekit]
+# enabled = true
+# port = 51830           # the bridge's TCP port; standalone cameras use the next ones (Homebridge uses 51826)
+# bind = "[::]"          # HomeKit's own address: "[::]" (IPv6 and IPv4), "0.0.0.0", or one address
+# cameras = "standalone" # or "bridged"
+# rtp_ports = "51900-51999"  # UDP ports live video's RTCP comes back to (two per live view)
+# name = "Home NVR"      # the bridge's name in the Home app (default: the server's name)
+
 # HARDWARE DECODING for motion detection, for cameras whose own hwaccel is Auto
 # (Settings > System > Hardware; it applies at once, without a restart).
 # "auto": an NVIDIA card (NVDEC) first, then Intel Quick Sync (Gen12+ Intel; VAAPI
@@ -344,6 +367,8 @@ post_roll = 10          # seconds of footage after the trigger
 # # (default) or bottom-right.
 # # overlay_text = "{short} {date} {time}"
 # # overlay_pos = "bottom-left"
+# # Show this camera in Apple Home (only while [homekit] is enabled; off by default).
+# # homekit = true
 # # Also burn that text into the recordings themselves. This re-encodes the
 # # camera's video (about one processor core per 4K camera, or the graphics
 # # card); without overlay_text it burns name, date and time. Off is enough for

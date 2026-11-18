@@ -197,6 +197,11 @@ body[data-tab="settings"] #dock { display: none; }
 .sh-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r2); background: var(--surface); }
 .sh-row { padding: 6px var(--s4); }
 .sh-row + .sh-row { border-top: 1px solid var(--line); }
+.hk-pair { display: flex; gap: var(--s4); align-items: center; flex-wrap: wrap; }
+.hk-pair .acct-qr { margin: 0; }
+.hk-pair .acct-qr svg { width: 180px; }
+.hk-pair > div:last-child { flex: 1 1 220px; min-width: 0; }
+.hk-code code { font-size: 1.4em; letter-spacing: .08em; }
 .sh-main { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; justify-content: space-between; }
 .sh-main .sw { flex: 1; min-width: 200px; margin: 4px 0; }
 .sh-copy { flex: none; display: inline-flex; align-items: center; gap: 6px; }

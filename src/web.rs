@@ -119,6 +119,10 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/push/devices", get(crate::push_http::devices))
         .route("/push/test", post(crate::push_http::test))
         .route("/restream", get(crate::restream::http::get).put(crate::restream::http::put))
+        .route("/homekit", get(crate::homekit::api::get).put(crate::homekit::api::put))
+        .route("/homekit/pairing", post(crate::homekit::api::pairing))
+        .route("/homekit/reset", post(crate::homekit::api::reset))
+        .route("/homekit/unpair", post(crate::homekit::api::unpair))
         .route("/presence", get(crate::presence_http::list).post(crate::presence_http::report))
         .route("/presence/:device_id", axum::routing::delete(crate::presence_http::remove))
         .route("/health", get(health))
@@ -1022,6 +1026,8 @@ fn gate(path: &str, method: &axum::http::Method, role: &Role, limited: bool) -> 
 fn admin_only_path(path: &str) -> bool {
     matches!(path, "/settings" | "/logs" | "/health" | "/hwdecode" | "/users" | "/addresses" | "/discover" | "/devices" | "/discover/logins" | "/discover/watch" | "/discover/ignore" | "/helpers" | "/connections" | "/storage/plan" | "/storage/privacy" | "/drives" | "/ai/reviews" | "/sound/status" | "/restream" | "/plates/status" | "/plates/known")
         || path.starts_with("/users/")
+        || path == "/homekit"
+        || path.starts_with("/homekit/")
         || path.starts_with("/storage/missing")
         || path.starts_with("/alert-rules")
         || path.starts_with("/faces")
@@ -1882,7 +1888,7 @@ async fn set_overlay_var_http(
 /// What GET /api/cameras leaves out for anyone not an admin (viewers and
 /// operators alike): logins, folders, event copies, capture helpers, pushed
 /// senders, hardware and the watchdog.
-const HIDDEN_FROM_NON_ADMINS: [&str; 21] = ["username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
+const HIDDEN_FROM_NON_ADMINS: [&str; 22] = ["homekit", "username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
 
 /// `GET /api/camera-defaults`: the shared detection and alert settings a
 /// camera uses where it sets none of its own (motion, AI, alert priority and
@@ -2053,6 +2059,8 @@ async fn list_cameras(
             // Why the camera is read by ffmpeg, and the setting that changes it (admins only).
             v["ffmpeg_why"] = crate::engine::ffpath::why_ffmpeg_now(&h.running.read().unwrap(), st.ingest).into();
             v["transport"] = crate::ingest::transport_setting(&cfg.transport).into();
+            // Shown in Apple Home (admins only).
+            v["homekit"] = cfg.homekit.into();
             // Viewers see what a camera is, not how to reach or impersonate it
             // (a push key is the only secret guarding its stream input).
             if !admin.0 {
@@ -2721,16 +2729,32 @@ async fn update_camera(
     // Renamed: everything that refers to the camera by name follows it, and
     // the camera takes the name in the same step (see rename_and_update_camera).
     let renamed = cur.name != cam.name;
+    let names = (cur.name.clone(), cam.name.clone());
+    if renamed {
+        // (Apple Home: the new name keeps the camera's accessory id from now on.)
+        crate::homekit::rename_begin(&engine, &names.0, &names.1);
+    }
     let merged = merge_password(engine.clone(), id, cam);
     let updated = if renamed {
         let (e, old) = (engine.clone(), cur.name.clone());
         match tokio::task::spawn_blocking(move || e.rename_and_update_camera(id, &old, merged)).await {
             Ok(Ok(done)) => done,
-            _ => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "the camera's recordings could not be moved to the new name, so it was not renamed (see the server log)" }))),
+            _ => {
+                crate::homekit::rename_abort(&engine, &names.0, &names.1);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "the camera's recordings could not be moved to the new name, so it was not renamed (see the server log)" })));
+            }
         }
     } else {
         engine.update_camera(id, merged)
     };
+    if renamed {
+        if updated {
+            // Apple Home keeps showing it as the same accessory (once the rename is saved).
+            crate::homekit::rename_camera(&engine, &names.0, &names.1);
+        } else {
+            crate::homekit::rename_abort(&engine, &names.0, &names.1);
+        }
+    }
     if updated {
         crate::helpers::sync_all(&engine);
         (
@@ -7819,6 +7843,10 @@ mod viewer_write_tests {
         "/push/devices",
         "/push/test",
         "/restream",
+        "/homekit",
+        "/homekit/pairing",
+        "/homekit/reset",
+        "/homekit/unpair",
         "/presence",
         "/presence/:device_id",
         "/health",
@@ -8056,6 +8084,11 @@ mod viewer_write_tests {
         ("/push/test", "POST", "viewer"),
         ("/restream", "GET", "admin"),
         ("/restream", "PUT", "admin"),
+        ("/homekit", "GET", "admin"),
+        ("/homekit", "PUT", "admin"),
+        ("/homekit/pairing", "POST", "admin"),
+        ("/homekit/reset", "POST", "admin"),
+        ("/homekit/unpair", "POST", "admin"),
         ("/presence", "GET", "viewer"),
         ("/presence", "POST", "viewer"),
         ("/presence/:device_id", "DELETE", "viewer"),
@@ -8435,7 +8468,7 @@ mod viewer_write_tests {
 
     #[test]
     fn admin_only_reads() {
-        for p in ["/settings", "/storage/missing", "/storage/missing/scan", "/storage/missing/apply", "/system/restart", "/system", "/update", "/logs", "/users", "/cameras/3/tamper", "/cameras/3/unusual", "/cameras/3/onvif", "/alert-rules", "/alert-rules/preview"] {
+        for p in ["/settings", "/storage/missing", "/storage/missing/scan", "/storage/missing/apply", "/system/restart", "/system", "/update", "/logs", "/users", "/cameras/3/tamper", "/cameras/3/unusual", "/cameras/3/onvif", "/alert-rules", "/alert-rules/preview", "/homekit", "/homekit/reset"] {
             assert!(super::admin_only_path(p), "{p}");
         }
         for p in ["/tls", "/whoami", "/cameras", "/status", "/cameras/3/tamper/ref/day", "/cameras/3/tamper/incidents/7/cur"] {
@@ -9444,6 +9477,31 @@ mod demo_and_snooze_tests {
         let body = serde_json::json!({ "code": code }).to_string();
         let (s, _, c) = send(&app, Call { body: Some(&body), ..call("POST", "/api/pair") }).await;
         assert_eq!((s, c.is_none()), (StatusCode::UNAUTHORIZED, true));
+    }
+
+    #[tokio::test]
+    async fn only_admins_open_the_homekit_pairing_window() {
+        let (e, app) = site("hk1", "");
+        let open = r#"{"action":"open"}"#;
+        // Viewers and operators: refused; nothing is written to the audit log for them.
+        for who in ["hk1vic", "hk1lim", "hk1otto"] {
+            for (m, p, body) in [("POST", "/api/homekit/pairing", Some(open)), ("POST", "/api/homekit/pairing", Some(r#"{"action":"stop"}"#)), ("GET", "/api/homekit", None)] {
+                let (s, _, _) = send(&app, Call { basic: Some(who.into()), body, ..call(m, p) }).await;
+                assert_eq!(s, StatusCode::FORBIDDEN, "{who} {m} {p}");
+            }
+        }
+        // An admin's device token, even with control rights: refused.
+        let (tok, _) = crate::auth::add_token("hk1ann", "app", true, crate::auth::generation("hk1ann")).unwrap().unwrap();
+        let (s, _, _) = send(&app, Call { bearer: Some(tok), body: Some(open), ..call("POST", "/api/homekit/pairing") }).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(!e.db.audit_rows().iter().any(|r| r.2.contains("homekit")), "{:?}", e.db.audit_rows());
+        // An admin is let through (HomeKit is off here: told so), and it is in the audit log.
+        let (s, b, _) = send(&app, Call { basic: Some("hk1ann".into()), body: Some(open), ..call("POST", "/api/homekit/pairing") }).await;
+        assert_ne!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(e.db.audit_rows().iter().any(|r| r.0 == "hk1ann" && r.2 == "/homekit/pairing"), "{:?}", e.db.audit_rows());
+        // A wrong action or unknown field: refused before anything is done.
+        let (s, _, _) = send(&app, Call { basic: Some("hk1ann".into()), body: Some(r#"{"action":"open","x":1}"#), ..call("POST", "/api/homekit/pairing") }).await;
+        assert!(s.is_client_error() && s != StatusCode::FORBIDDEN, "{s}");
     }
 
     #[tokio::test]

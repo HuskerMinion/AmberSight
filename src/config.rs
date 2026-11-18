@@ -569,6 +569,10 @@ pub struct CameraConfig {
     /// restream/); only while [restream] is enabled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub share: bool,
+    /// Show this camera in Apple Home (see homekit/); only while
+    /// [homekit] is enabled. Anyone in that Home sees it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub homekit: bool,
     /// Record triad: record=false -> off; record_motion_only=true -> only
     /// while motion is active; otherwise continuous.
     #[serde(default)]
@@ -2403,6 +2407,9 @@ pub struct Config {
     /// Sharing camera streams with other apps over RTSP (see restream/).
     #[serde(default, skip_serializing_if = "crate::restream::RestreamConfig::is_default")]
     pub restream: crate::restream::RestreamConfig,
+    /// Apple HomeKit bridge for the cameras with `homekit = true` (see homekit/).
+    #[serde(default, skip_serializing_if = "crate::homekit::HomekitConfig::is_default")]
+    pub homekit: crate::homekit::HomekitConfig,
     /// Re-encoding for players that cannot decode a stream as it is (see transcode/).
     #[serde(default, skip_serializing_if = "crate::transcode::TranscodeConfig::is_default")]
     pub transcode: crate::transcode::TranscodeConfig,

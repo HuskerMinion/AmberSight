@@ -14,6 +14,7 @@ mod offsite;
 mod timesync;
 mod rtmp;
 mod restream;
+mod homekit;
 mod helpers;
 mod links;
 mod remote;

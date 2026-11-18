@@ -86,6 +86,16 @@ simplest and is what the examples use. It is needed for:
   container on Docker's own network.
 - **Battery Reolink cameras** (Argus): they are found with a UDP broadcast,
   and their motion push arrives on port 80 (see the install guide).
+- **Apple Home (HomeKit)**: Apple devices find the bridge over mDNS
+  (Bonjour, multicast on UDP 5353), which does not cross Docker's bridge
+  network. Unraid's default (bridge) does not work for it; choose host
+  networking. (On a bridge network the Docker host itself still sees the
+  record, at the container's 172.17.x address; that is harmless. Other
+  machines cannot discover it, but a controller can still pair by the host's
+  address when the HomeKit port is published; live video then also needs the
+  UDP ports, which change each time, so use host networking.) HomeKit
+  support is not yet tested with real Apple devices; testers are welcome in
+  GitHub Discussions.
 
 On Docker's own network (bridge), publish the port (`-p 8090:8090`) and add
 cameras by address. RTSP, ONVIF events, PTZ and everything else work the same.
@@ -113,6 +123,8 @@ Ports, if you publish them one by one:
 | 8090/tcp | the web interface, API and live video (HTTP or HTTPS) |
 | 1935/tcp | only if cameras push RTMP to AmberSight |
 | 80/tcp | only for battery Reolink cameras' motion push |
+| 51830-51894/tcp | only for Apple Home (HomeKit), with host networking (mDNS needs it): the bridge, and one port per camera after it |
+| 51900-51999/udp | only for Apple Home live video: RTCP back from the Apple device (`[homekit] rtp_ports`) |
 
 Port 80: AmberSight does not run as root (unless `PUID=0`), so listening on port 80 needs
 `--sysctl net.ipv4.ip_unprivileged_port_start=80` on a bridge network. With

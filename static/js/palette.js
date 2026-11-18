@@ -37,6 +37,7 @@ const SETTINGS = [
   ['users/https', 'HTTPS', 'Users & security', 'secure certificate tls ssl remote access tailscale padlock'],
   ['users/displays', 'Displays', 'Users & security', 'wall tv tablet kiosk display mode pair code monitor'],
   ['connections/share', 'Share streams', 'Connections', 'rtsp restream home assistant vlc frigate scrypted'],
+  ['connections/homekit', 'Apple Home', 'Connections', 'homekit apple home iphone ipad siri bridge homebridge pairing setup code qr live video'],
   ['connections/servers', 'Servers', 'Connections', 'other site link servers second location cabin'],
   ['connections/detector', 'External detector', 'Connections', 'custom detector hook codeproject'],
   ['connections/watchdog', 'Watchdog', 'Connections', 'reboot camera power cycle frozen camera smart plug offline'],

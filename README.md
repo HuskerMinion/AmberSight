@@ -270,6 +270,11 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   errors, without user names or passwords, to attach to a bug report
   (Settings > Cameras > the camera > Network > Camera report).
 - **Linked servers:** several sites in one interface.
+- **Apple Home (HomeKit):** the cameras you pick show in the Home app with
+  live video (H.264, encoded on the graphics card when there is one, Opus
+  sound), a motion sensor and snapshots; each camera on its own or behind one
+  bridge. Off by default. Not yet tested with real Apple devices; testers are
+  welcome in GitHub Discussions.
 - **Users and per-camera access.** Three roles: viewers watch; operators also arm and
   disarm, move PTZ cameras, talk, record clips, keep and mark events and tune their cameras'
   detection and alerts (each right can be turned off); admins do everything. Viewers and operators
