@@ -8,7 +8,10 @@
 # ONNX Runtime's CUDA libraries for the NVIDIA add-on land beside it
 # (libonnxruntime_providers_shared.so and _cuda.so, as real files: cargo
 # leaves links into the container's download cache);
-# scripts/package-cuda-addon.sh packs them.
+# scripts/package-cuda-addon.sh packs them. The Intel graphics add-on
+# (OpenVINO) does not come from this build: scripts/package-openvino-addon.sh,
+# run at the end, makes dist/ambersight-openvino-<version>-linux-x86_64.tar.gz
+# from pinned downloads (SKIP_OPENVINO_ADDON=1 leaves it out).
 set -eu
 cd "$(dirname "$0")/.."
 # Made here first, so Docker does not create it owned by root.
@@ -31,3 +34,6 @@ docker run --rm \
     chown -R $(id -u):$(id -g) target/trixie
   "
 echo target/trixie/release/ambersight
+if [ -z "${SKIP_OPENVINO_ADDON:-}" ]; then
+  sh scripts/package-openvino-addon.sh
+fi

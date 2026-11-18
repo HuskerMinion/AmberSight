@@ -1040,9 +1040,9 @@ impl Engine {
             }
             let a = std::time::Instant::now();
             let seen = match &tiled {
-                Some(d) => {
+                Some(_) => {
                     let img = image::load_from_memory(jpeg).map_err(|e| anyhow::anyhow!("frame: {e}"))?.to_rgb8();
-                    d.detect_tiled(&img, 0.3)?
+                    self.ai_detect_tiled(&img, 0.3)?
                 }
                 None => self.ai_detect(jpeg, 0.3)?,
             };

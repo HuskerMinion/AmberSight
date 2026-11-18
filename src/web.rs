@@ -421,17 +421,7 @@ async fn ai_model_get(State(engine): State<Arc<Engine>>, Json(r): Json<AiModelRe
         let set = |f: &dyn Fn(&mut crate::ai_setup::Job)| f(&mut crate::ai_setup::job().lock().unwrap());
         let r = crate::ai_setup::ensure(&dir, m, &|b, t| set(&|j| { j.bytes = b; j.total = t; })).and_then(|path| {
             set(&|j| j.state = "loading");
-            // Load first; only a model that works goes into the settings.
-            let (threads, gpu, gpu_name, gpu_mb) = {
-                let c = engine.config.lock().unwrap();
-                (c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone(), c.ai.gpu_memory_mb)
-            };
-            let d = crate::ai::AiDetector::load_on(&path, threads, gpu, gpu_name.as_deref(), gpu_mb)?;
-            *engine.ai.write().unwrap() = Some(std::sync::Arc::new(d));
-            let mut c = engine.config.lock().unwrap();
-            c.ai.enabled = true;
-            c.ai.model = Some(std::path::PathBuf::from(crate::ai_setup::clean_path(&path)));
-            c.save(&engine.config_path)
+            engine.use_model(&path)
         });
         match r {
             Ok(()) => {
@@ -5003,6 +4993,10 @@ async fn get_settings(State(engine): State<Arc<Engine>>) -> Json<serde_json::Val
             "model_exists": cfg.ai.model.as_ref().map(|m| m.is_file()),
             // The graphics card it runs on (null: the CPU), and the cards there are.
             "running_on": engine.detector().and_then(|d| d.gpu_name().map(String::from)),
+            // What it runs the card with ("CUDA", "OpenVINO", "DirectML", "Core ML"; null: the CPU).
+            "running_api": engine.detector().and_then(|d| d.gpu_api()),
+            // The card "Automatic" uses (null: none).
+            "auto_gpu": crate::gpu::pick(&gpus, None).map(|g| g.name),
             "gpus": gpus,
             // Why it is not on the card although one was found (null: no reason to give).
             "gpu_note": gpu_note,

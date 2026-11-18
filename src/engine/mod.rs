@@ -234,6 +234,9 @@ pub struct Engine {
     /// Built-in AI object detector, when [ai] has a model.
     /// The built-in detector; replaced while running (Settings > Detection & alerts > Objects (AI)).
     pub ai: RwLock<Option<Arc<crate::ai::AiDetector>>>,
+    /// This engine (set once it is made), for work it starts in the
+    /// background (the AI moving onto the graphics card).
+    pub(crate) me: std::sync::OnceLock<std::sync::Weak<Engine>>,
     /// Active profile and the manual override (name, until epoch seconds).
     pub profile: RwLock<profiles::ActiveProfile>,
     /// Camera stream sessions currently running (for graceful shutdown).
@@ -417,10 +420,12 @@ impl Engine {
                 }
             });
         }
+        // On the processor first (quick): recording never waits for a graphics
+        // card, which takes over in the background once it works (move_to_card).
         let ai = timed_step("loading the AI", || match (&config.ai.enabled, &config.ai.model) {
-            (true, Some(model)) => match crate::ai::AiDetector::load_on(model, config.ai.threads, config.ai.gpu, config.ai.gpu_name.as_deref(), config.ai.gpu_memory_mb) {
+            (true, Some(model)) => match crate::ai::AiDetector::load_cpu(model, config.ai.threads) {
                 Ok(d) => {
-                    info!("AI: loaded {} ({}x{} input, on {})", model.display(), d.input_size(), d.input_size(), d.gpu_name().unwrap_or("CPU"));
+                    info!("AI: loaded {} ({}x{} input, on CPU)", model.display(), d.input_size(), d.input_size());
                     Some(Arc::new(d))
                 }
                 Err(e) => {
@@ -436,6 +441,7 @@ impl Engine {
             cameras: RwLock::new(Vec::new()),
             db,
             ai: RwLock::new(ai),
+            me: std::sync::OnceLock::new(),
             profile: RwLock::new(profiles::ActiveProfile::default()),
             live_sessions: std::sync::atomic::AtomicUsize::new(0),
             manual_profile: Mutex::new(manual),
@@ -457,6 +463,8 @@ impl Engine {
             overlay_vars: Mutex::new(std::collections::HashMap::new()),
             writers: Mutex::new(std::collections::HashMap::new()),
         });
+        let _ = engine.me.set(Arc::downgrade(&engine));
+        engine.move_to_card();
         timed_step("loading alert pauses", || engine.load_alert_pauses());
         // Once the NVIDIA add-on is downloaded, load the AI again onto the card.
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -622,6 +630,7 @@ impl Engine {
             cameras: RwLock::new(Vec::new()),
             db: Arc::new(crate::db::Db::open_in_memory().unwrap()),
             ai: RwLock::new(None),
+            me: std::sync::OnceLock::new(),
             profile: RwLock::new(profiles::ActiveProfile::default()),
             live_sessions: std::sync::atomic::AtomicUsize::new(0),
             manual_profile: Mutex::new(None),
@@ -803,26 +812,53 @@ impl Engine {
         self.ai.read().unwrap().clone()
     }
 
-    /// Load (or drop) the built-in detector to match the AI settings now.
-    /// One reload at a time, each reading the settings itself: a reload
-    /// started earlier (the NVIDIA add-on arriving) never stores a model
-    /// loaded with settings older than a later one's.
+    /// Load (or drop) the built-in detector to match the AI settings now:
+    /// on the processor at once, then on the graphics card in the background
+    /// (`move_to_card`). One reload at a time, each reading the settings
+    /// itself: a reload started earlier (the NVIDIA add-on arriving) never
+    /// stores a model loaded with settings older than a later one's.
     pub fn reload_ai(&self) -> anyhow::Result<()> {
+        self.reload_ai_cpu()?;
+        self.move_to_card();
+        Ok(())
+    }
+
+    /// Switch the built-in AI to `model` and turn it on. The model must load
+    /// (on the processor) before it goes into the settings; then it is
+    /// loaded like any reload (`reload_ai`: the processor first, the card
+    /// in the background), so it takes the same locked path.
+    pub fn use_model(&self, model: &std::path::Path) -> anyhow::Result<()> {
+        let threads = self.config.lock().unwrap().ai.threads;
+        crate::ai::AiDetector::load_cpu(model, threads)?;
+        {
+            let mut c = self.config.lock().unwrap();
+            c.ai.enabled = true;
+            c.ai.model = Some(std::path::PathBuf::from(crate::ai_setup::clean_path(model)));
+            c.save(&self.config_path)?;
+        }
+        self.reload_ai()
+    }
+
+    fn reload_ai_cpu(&self) -> anyhow::Result<()> {
         let _one = AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let (enabled, model, threads, gpu, gpu_name, gpu_mb) = {
+        // Never once AmberSight is stopping (stop_ai took the detector).
+        if crate::ai_card::stopping() {
+            return Ok(());
+        }
+        let (enabled, model, threads) = {
             let c = self.config.lock().unwrap();
-            (c.ai.enabled, c.ai.model.clone(), c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone(), c.ai.gpu_memory_mb)
+            (c.ai.enabled, c.ai.model.clone(), c.ai.threads)
         };
         let new = match (enabled, model) {
             (true, Some(m)) => {
-                let d = crate::ai::AiDetector::load_on(&m, threads, gpu, gpu_name.as_deref(), gpu_mb)?;
-                info!("AI: loaded {} ({}x{} input, on {})", m.display(), d.input_size(), d.input_size(), d.gpu_name().unwrap_or("CPU"));
+                let d = crate::ai::AiDetector::load_cpu(&m, threads)?;
+                info!("AI: loaded {} ({}x{} input, on CPU)", m.display(), d.input_size(), d.input_size());
                 Some(Arc::new(d))
             }
             _ => {
                 // The AI is off: no card wanted.
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-                crate::gpu_addon::not_wanted();
+                crate::gpu_addon::none_wanted();
                 None
             }
         };

@@ -1,0 +1,84 @@
+# AmberSight in a container with the AI on Intel graphics (OpenVINO).
+#
+#   docker build -f Dockerfile.openvino -t ambersight:openvino .
+#   docker run -d --device /dev/dri --network host -v ./config:/config -v ./data:/data ambersight:openvino
+#
+# Needs Intel graphics with the kernel's i915 or xe driver on the host and
+# /dev/dri passed in. The image carries Intel's compute driver
+# (intel-opencl-icd) and the Intel graphics add-on beside the program, so
+# nothing is downloaded. Debian has no package of Intel's compute driver, so
+# this image is Ubuntu 26.04 (Ubuntu 25.04 and newer carry intel-opencl-icd);
+# without Intel graphics use the plain Dockerfile. See docs/docker.md.
+
+# ---- build ----
+FROM rust:1-trixie AS build
+WORKDIR /src
+COPY . .
+RUN RUSTFLAGS='--remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo=~/.cargo' \
+    cargo build --release --locked \
+ && install -m 755 target/release/ambersight /ambersight
+
+# ---- the Intel graphics add-on (scripts/package-openvino-addon.sh: pinned downloads) ----
+FROM debian:trixie-slim AS addon
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl xz-utils python3 \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml THIRD-PARTY-NOTICES.txt ./
+COPY scripts/package-openvino-addon.sh scripts/
+RUN sh scripts/package-openvino-addon.sh \
+ && mkdir /addon \
+ && tar -xzf dist/ambersight-openvino-*-linux-x86_64.tar.gz -C /addon --strip-components=1 \
+ && chmod 644 /addon/*.so*
+
+# ---- run ----
+# Ubuntu 26.04 (the program needs glibc 2.41 or newer) with Intel's compute
+# driver for OpenVINO's GPU plugin, and the same video tools as the plain
+# image (Intel's VA-API driver and Quick Sync runtime for hardware decoding).
+FROM ubuntu:26.04
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tzdata tini fonts-dejavu-core \
+      intel-opencl-icd ocl-icd-libopencl1 intel-media-va-driver libmfx-gen1.2 mesa-va-drivers \
+ && curl --version >/dev/null && ffmpeg -version >/dev/null \
+ && ls /etc/OpenCL/vendors/*.icd >/dev/null \
+ && rm -rf /var/lib/apt/lists/* \
+ && (userdel -r ubuntu 2>/dev/null || true) \
+ && useradd --system --uid 1000 --user-group --home-dir /data --no-create-home ambersight \
+ && mkdir -p /config /data \
+ && chown ambersight:ambersight /config /data
+COPY --from=build /ambersight /opt/ambersight/ambersight
+# The add-on beside the program, owned by root: AmberSight uses this copy
+# (src/gpu_addon.rs) and downloads nothing.
+COPY --from=addon /addon/libonnxruntime_providers_shared.so /addon/libonnxruntime_providers_openvino.so \
+     /addon/libopenvino.so.2641 /addon/libopenvino_c.so.2641 /addon/libopenvino_onnx_frontend.so.2641 \
+     /addon/libopenvino_intel_gpu_plugin.so /addon/libtbb.so.12 /opt/ambersight/
+COPY --from=addon /addon/licenses/ /usr/share/doc/ambersight/openvino/
+RUN ln -s /opt/ambersight/ambersight /usr/local/bin/ambersight
+COPY docker/entrypoint.sh /usr/local/bin/ambersight-entrypoint
+COPY LICENSE THIRD-PARTY-NOTICES.txt /usr/share/doc/ambersight/
+
+# Starts as root only to fix folder ownership, then runs as PUID/PGID
+# (default 1000) with the groups of the devices in /dev/dri; see
+# docker/entrypoint.sh.
+ENV HOME=/data PUID=1000 PGID=1000
+# Intel's compute driver without "direct submission": a process stopped
+# mid-check then cannot leave the card faulted (AmberSight sets the same by
+# itself; see src/openvino.rs).
+ENV NEOReadDebugKeys=1 EnableDirectSubmission=0
+VOLUME ["/config", "/data"]
+EXPOSE 8090
+# Image labels (OCI). The release workflow (.github/workflows/docker.yml)
+# passes the real version, commit and date; a local build gets these defaults.
+# Last, so a new version does not rebuild the layers above.
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=unknown
+LABEL org.opencontainers.image.title="AmberSight" \
+      org.opencontainers.image.description="Self-hosted camera recording and AI detection, with the AI on Intel graphics (OpenVINO)" \
+      org.opencontainers.image.source="https://github.com/HuskerMinion/AmberSight" \
+      org.opencontainers.image.url="https://github.com/HuskerMinion/AmberSight" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION" \
+      org.opencontainers.image.created="$CREATED"
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ambersight-entrypoint"]

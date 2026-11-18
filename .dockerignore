@@ -10,3 +10,4 @@
 !LICENSE
 !THIRD-PARTY-NOTICES.txt
 !docker/entrypoint.sh
+!scripts/package-openvino-addon.sh

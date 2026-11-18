@@ -26,6 +26,22 @@ DirectML (DirectML.dll, Windows packages only: graphics-card AI)
   Copyright (c) Microsoft Corporation. Redistributed under the Microsoft
   DirectML license terms: https://www.nuget.org/packages/Microsoft.AI.DirectML
 
+OpenVINO (Intel graphics add-on and the :openvino Docker image, 64-bit Linux:
+graphics-card AI on Intel graphics)
+  Copyright (C) Intel Corporation. License: Apache-2.0.
+  https://github.com/openvinotoolkit/openvino . The add-on holds OpenVINO's
+  runtime, its ONNX reader and GPU plugin, and the OpenVINO C API, from
+  OpenVINO 2026.4.1, with OpenVINO's license and third-party notices
+  (licenses/ in the add-on; /usr/share/doc/ambersight/openvino/ in the image).
+
+oneTBB (libtbb, part of the Intel graphics add-on)
+  Copyright (C) Intel Corporation. License: Apache-2.0.
+  https://github.com/uxlfoundation/oneTBB
+
+ONNX Runtime OpenVINO and CUDA providers (the graphics-card add-ons)
+  Copyright (c) Microsoft Corporation. License: MIT. Built by pyke
+  (https://ort.pyke.io) from the same ONNX Runtime linked into AmberSight.
+
 AI models AmberSight downloads when you turn a feature on (not included in
 the AmberSight packages; each keeps its own license):
   - YOLOX object detection models, Megvii: Apache-2.0.

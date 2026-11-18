@@ -948,7 +948,9 @@ warning; disk warnings come when free space is below what the drive should keep 
 only when it cannot be freed, or under 2% free). Besides camera and disk problems, `warnings` may contain `AI object detection
 is stalled: no check has worked for the last two minutes` (problem key `ai`), `curl is not installed, so AmberSight
 cannot use these: webhook, the AI server. Install curl and this warning clears within a minute` (problem key `curl`, only while
-something that sends with curl is set up and curl cannot be run), and a camera whose
+something that sends with curl is set up and curl cannot be run), `the Intel graphics card
+stopped responding to the AI; using the processor until AmberSight restarts` (problem key
+`ai-card`, while the AI is on), and a camera whose
 recording is re-encoded on the processor after it fell back to ffmpeg by itself. `notes` are
 information, not problems (`ok` stays true): graphics cards that cannot decode (`Hardware
 decoding unavailable on /dev/dri/renderD128 (…); /dev/dri/renderD129 is used instead`), hardware
@@ -1662,7 +1664,8 @@ what is sent and answers the bookmark. `DELETE /api/bookmarks/:id` answers `{"id
 `fixed_spot`, `camera_only`, `near_miss`, `other_object`, `nothing`. Other values may exist for cases not traced here. The
 frames the AI checked are at `/api/events/:id/ai/:n` (JPEG). `summary` and `review` are `null`
 for events without an AI check. The full `review` structure is internal and may change.
-A check that failed has `error`, one plain line ("the graphics card gave an error (CUDA)", or the
+A check that failed has `error`, one plain line ("the graphics card gave an error (CUDA)", "the
+graphics card stopped responding (OpenVINO)", or the
 first line of another error, cut short), and may have `error_detail`, the longer text; both have file
 paths cut to the file name and no host name, also for reviews saved before.
 
@@ -3069,6 +3072,23 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.12.0**
+
+- The built-in AI runs on Intel graphics on 64-bit Linux (OpenVINO; an NVIDIA card is still
+  preferred). `GET /api/settings` `ai_status.gpus` lists Intel cards too; each card has `api`
+  (`"CUDA"`, `"OpenVINO"`, `"DirectML"` or `"Core ML"`). New `ai_status.running_api` (what the card
+  the AI runs on is used with, `null` on the processor) and `ai_status.auto_gpu` (the card
+  "Automatic" picks, `null` when there is none).
+- A graphics card that does not answer an AI check in time (20 times its usual time, 2 to 10
+  seconds) moves the built-in AI to the processor for 5 minutes (`ai_status.gpu_note` says so);
+  the check is done again on the processor. If that check has not come back by then, or on any
+  OpenVINO error, the AI stays on the processor until AmberSight restarts: `GET /api/health` then
+  warns (problem key
+  `ai-card`: "the Intel graphics card stopped responding to the AI; using the processor until
+  AmberSight restarts") and `ai_status.gpu_note` says the same. An AI review check that failed
+  that way has `error` "the graphics card stopped responding (OpenVINO)" or "the graphics card
+  gave an error (OpenVINO)".
 
 **New in 0.11.3**
 

@@ -70,6 +70,9 @@ deb_control() {
   cp scripts/linux/deb/postinst scripts/linux/deb/prerm scripts/linux/deb/postrm "$root/DEBIAN/"
   chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/prerm" "$root/DEBIAN/postrm"
   size=$(du -sk --exclude=DEBIAN "$root" | cut -f1)
+  # Intel's compute driver lets the AI run on Intel graphics (OpenVINO, amd64 only).
+  suggests="intel-media-va-driver, libmfx-gen1.2"
+  if [ "$2" = amd64 ]; then suggests="$suggests, intel-opencl-icd"; fi
   # The AI runtime needs the C++ library of GCC 13 or newer.
   cat > "$root/DEBIAN/control" <<CTL
 Package: ambersight
@@ -79,7 +82,7 @@ Maintainer: HuskerMinion <28571744+HuskerMinion@users.noreply.github.com>
 Homepage: https://github.com/HuskerMinion/AmberSight
 Installed-Size: $size
 Depends: ffmpeg, curl, passwd, libc6 (>= $(glibc_of "$1")), libstdc++6 (>= 13), libgcc-s1
-Suggests: intel-media-va-driver, libmfx-gen1.2
+Suggests: $suggests
 Section: video
 Priority: optional
 Description: self-hosted camera recorder (NVR) used from a web browser

@@ -499,14 +499,16 @@ function aiPage(el) {
     bind();
   }
   // Where the built-in model runs: a graphics card (Windows, Linux with
-  // NVIDIA, Apple silicon) or the CPU, and why not the card when one is there.
+  // NVIDIA or Intel, Apple silicon) or the CPU, and why not the card when one is there.
   function hardwareCard() {
     const gpus = status.gpus || [];
     const on = status.running_on;
-    const now = '<div class="hint">Running on: <b>' + esc(on || (status.builtin_loaded ? 'the CPU' : 'not loaded')) + '</b></div>' +
+    const now = '<div class="hint">Running on: <b>' + esc(on || (status.builtin_loaded ? 'the CPU' : 'not loaded')) + '</b>' +
+        (on && status.running_api ? ' (' + esc(status.running_api) + ')' : '') + '</div>' +
       (!on && status.builtin_loaded && draft.gpu && status.gpu_note ? '<div class="hint">Not on the graphics card: ' + esc(status.gpu_note) + '</div>' : '');
-    if (!gpus.length) return '<div class="ac-sub">Hardware</div>' + now + '<div class="hint">No graphics card the AI can use was found (Windows: a DirectX 12 card; Linux: an NVIDIA card with its driver; Mac: Apple silicon), so it uses the CPU.</div>';
-    const best = gpus.slice().sort((a, b) => b.memory_mb - a.memory_mb || a.index - b.index)[0];
+    if (!gpus.length) return '<div class="ac-sub">Hardware</div>' + now + '<div class="hint">No graphics card the AI can use was found (Windows: a DirectX 12 card; Linux: an NVIDIA card with its driver, or Intel graphics; Mac: Apple silicon), so it uses the CPU.</div>';
+    // (The server's own choice: NVIDIA over Intel, then the most memory.)
+    const best = gpus.find(g => g.name === status.auto_gpu) || gpus.slice().sort((a, b) => b.memory_mb - a.memory_mb || a.index - b.index)[0];
     const gb = (g) => g.memory_mb >= 1024 ? ' (' + Math.round(g.memory_mb / 1024) + ' GB)' : '';
     return '<div class="ac-sub">Hardware</div>' + now +
       swHtml('data-gpu', draft.gpu, 'Use a graphics card', 'Much faster than the CPU; the CPU takes over if the card cannot be used.') +

@@ -2,11 +2,16 @@
 //! are done again later, and a card that keeps failing is left for the
 //! processor for a while.
 //!
-//! - A graphics card error (CUDA, cuDNN, out of video memory, DirectML) is
-//!   told from an ordinary one (a bad picture, an AI server that is down).
-//! - Three of them in a row within a minute: the built-in AI moves to the
-//!   processor for five minutes, the check that failed is done again there,
-//!   and the card is tried again after that.
+//! - A graphics card error (CUDA, cuDNN, out of video memory, DirectML,
+//!   OpenVINO, a card that stopped answering) is told from an ordinary one
+//!   (a bad picture, an AI server that is down).
+//! - What follows is `ai_card::recovery`. A card that stopped answering, and
+//!   any OpenVINO error: the built-in AI moves to the processor at once, the
+//!   check that failed is done again there, and the card stays off for the
+//!   AI until AmberSight restarts (Settings and the Status page say so).
+//!   Other card errors: three in a row within a minute move the built-in AI
+//!   to the processor for five minutes, the check that failed is done again
+//!   there, and the card is tried again after that.
 //! - An event whose looks all failed that way is recorded as before (it
 //!   alerts as if AI were off); its saved pictures are looked at again
 //!   after 1, 5 and 15 minutes, and the result is added to the event and
@@ -32,9 +37,12 @@ const MAX_FRAMES: usize = 8;
 /// another try, or the processor, may work) and not from the picture.
 pub fn is_gpu_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
-    ["cuda", "cudnn", "cublas", "out of memory", "failed to allocate", "bfcarena", "directml", "dxgi", "d3d12", "device removed", "device hung", "coreml"]
-        .iter()
-        .any(|k| m.contains(k))
+    [
+        "cuda", "cudnn", "cublas", "out of memory", "failed to allocate", "bfcarena", "directml", "dxgi", "d3d12", "device removed", "device hung", "coreml", "core ml", "openvino",
+        "did not answer in time", "stopped answering", "stopped responding", "card thread", "cl_out_of_resources", "clfinish", "cl_invalid",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
 }
 
 /// An AI error in one plain line for people: what the card did ("the
@@ -51,7 +59,9 @@ pub fn plain_error(msg: &str) -> String {
             "CUDA"
         } else if ["directml", "dxgi", "d3d12"].iter().any(|k| m.contains(k)) {
             "DirectML"
-        } else if m.contains("coreml") {
+        } else if m.contains("openvino") {
+            "OpenVINO"
+        } else if m.contains("coreml") || m.contains("core ml") {
             "CoreML"
         } else if m.contains("device removed") {
             "device removed"
@@ -60,7 +70,14 @@ pub fn plain_error(msg: &str) -> String {
         } else {
             ""
         };
-        let what = if memory { "the graphics card ran out of memory" } else { "the graphics card gave an error" };
+        let stopped = m.contains("did not answer in time") || m.contains("stopped answering") || m.contains("stopped responding");
+        let what = if memory {
+            "the graphics card ran out of memory"
+        } else if stopped {
+            "the graphics card stopped responding"
+        } else {
+            "the graphics card gave an error"
+        };
         return if kind.is_empty() { what.to_string() } else { format!("{what} ({kind})") };
     }
     let clean = clean_error(msg);
@@ -206,6 +223,25 @@ impl Health {
 
 static HEALTH: Mutex<Option<Health>> = Mutex::new(None);
 
+/// The card's detector set aside after a check went over its limit, until
+/// it is judged (`Engine::judge_slow_card`).
+static SLOW_CARD: Mutex<Option<Arc<crate::ai::AiDetector>>> = Mutex::new(None);
+
+/// When checks on the card went over their limit lately (ms).
+static SLOW_EPISODES: Mutex<VecDeque<i64>> = Mutex::new(VecDeque::new());
+/// This many slow checks within `FLAP_WINDOW_MS` keep the card off until a restart.
+const FLAP_EPISODES: usize = 3;
+const FLAP_WINDOW_MS: i64 = 3_600_000;
+
+/// Note a slow check at `now`; true when it is the third within an hour.
+fn too_slow_too_often(episodes: &mut VecDeque<i64>, now: i64) -> bool {
+    episodes.push_back(now);
+    while episodes.front().is_some_and(|t| now - t > FLAP_WINDOW_MS) {
+        episodes.pop_front();
+    }
+    episodes.len() >= FLAP_EPISODES
+}
+
 fn health<R>(f: impl FnOnce(&mut Health) -> R) -> R {
     f(HEALTH.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Health::default))
 }
@@ -217,28 +253,138 @@ fn now_ms() -> i64 {
 impl Engine {
     /// `ai_detect_inner` with the card's errors handled (see the top of this file).
     pub(super) fn ai_detect_guarded(&self, jpeg: &[u8], min_score: f32) -> anyhow::Result<Vec<crate::ai::Detection>> {
+        self.guarded(&|e: &Engine| e.ai_detect_inner(jpeg, min_score))
+    }
+
+    /// The AI track (playback): on the card, the whole picture and its
+    /// tiles at full size; on the processor, the whole picture. With the
+    /// card's errors and time limit handled as for every other check.
+    pub fn ai_detect_tiled(&self, img: &image::RgbImage, min_score: f32) -> anyhow::Result<Vec<crate::ai::Detection>> {
+        self.guarded(&|e: &Engine| match e.detector() {
+            Some(d) if d.gpu_name().is_some() => d.detect_tiled(img, min_score),
+            Some(d) => d.detect_rgb(img, min_score),
+            None => anyhow::bail!("the built-in AI is not loaded"),
+        })
+    }
+
+    /// Run a check (`run`, which uses the detector loaded now) with the
+    /// card's errors handled (see the top of this file).
+    fn guarded(&self, run: &dyn Fn(&Engine) -> anyhow::Result<Vec<crate::ai::Detection>>) -> anyhow::Result<Vec<crate::ai::Detection>> {
+        use crate::ai_card::{recovery, CardFailure, FailureKind, Recovery};
         let used = self.detector().filter(|d| d.gpu_name().is_some());
-        let mut r = self.ai_detect_inner(jpeg, min_score);
+        let mut r = run(self);
         match (&r, &used) {
-            (Err(e), Some(d)) if is_gpu_error(&format!("{e:#}")) => {
+            (Err(e), Some(d)) if e.downcast_ref::<CardFailure>().is_some() || is_gpu_error(&format!("{e:#}")) => {
                 let msg = format!("{e:#}");
-                if health(|h| h.error(now_ms())) {
-                    self.leave_card(d, &msg);
+                let kind = e.downcast_ref::<CardFailure>().map_or(FailureKind::Error, |f| f.kind);
+                match recovery(d.gpu_api().unwrap_or(""), kind) {
+                    Recovery::OffUntilRestart => self.card_off(d, &msg),
+                    Recovery::RestThenJudge => self.card_slow(d, &msg),
+                    Recovery::CountThenRest => {
+                        if health(|h| h.error(now_ms())) {
+                            self.leave_card(d, &msg);
+                        }
+                    }
                 }
                 // Moved to the processor (by this call or another): do this check there.
                 if self.detector().is_some_and(|n| !Arc::ptr_eq(&n, d)) {
-                    r = self.ai_detect_inner(jpeg, min_score);
+                    r = run(self);
                 }
             }
             (Ok(_), Some(_)) => health(|h| h.ok()),
             (Ok(_), None) => {
-                if health(|h| h.card_due(now_ms())) {
+                if health(|h| h.card_due(now_ms())) && self.judge_slow_card() && crate::ai_card::blocked().is_none() {
                     self.try_card_again();
                 }
             }
             _ => {}
         }
         r
+    }
+
+    /// A check on the card went over its limit (`Recovery::RestThenJudge`):
+    /// the AI runs on the processor for five minutes, and the card's
+    /// detector is kept aside to be judged then (`judge_slow_card`).
+    fn card_slow(&self, used: &Arc<crate::ai::AiDetector>, msg: &str) {
+        let _one = super::AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.detector().is_some_and(|d| Arc::ptr_eq(&d, used)) {
+            return; // another thread did it
+        }
+        let (enabled, model, threads, mb) = {
+            let c = self.config.lock().unwrap();
+            (c.ai.enabled, c.ai.model.clone(), c.ai.threads, c.ai.gpu_memory_mb)
+        };
+        let Some(model) = model.filter(|_| enabled) else { return };
+        let api = used.gpu_api().unwrap_or("");
+        // The third slow check within an hour: the card stays off until a
+        // restart (it is still judged as below, and let go or left alone).
+        let flapping = too_slow_too_often(&mut SLOW_EPISODES.lock().unwrap_or_else(|e| e.into_inner()), now_ms());
+        let why = if flapping { crate::ai_card::keeps_slow_text(api) } else { crate::ai_card::slow_text(api) };
+        if flapping {
+            crate::ai_card::block(&why);
+        }
+        let short = msg.lines().next().unwrap_or("").chars().take(160).collect::<String>();
+        warn!("AI: {why} ({short})");
+        match crate::ai::AiDetector::load_on(&model, threads, false, None, mb) {
+            Ok(d) => {
+                crate::ai::set_gpu_note(Some(why));
+                *SLOW_CARD.lock().unwrap_or_else(|e| e.into_inner()) = Some(used.clone());
+                *self.ai.write().unwrap() = Some(Arc::new(d));
+                health(|h| h.left_card(now_ms()));
+            }
+            Err(e) => warn!("AI: the processor could not take over from the graphics card: {e:#}"),
+        }
+    }
+
+    /// Five minutes after a check on the card went over its limit: a card
+    /// thread still stuck in it means the card is wedged (off until restart,
+    /// its session left alone for good); one that came back means it was
+    /// only slow (it is let go, and the card is tried again). True when the
+    /// card may be tried again.
+    fn judge_slow_card(&self) -> bool {
+        let Some(slow) = SLOW_CARD.lock().unwrap_or_else(|e| e.into_inner()).take() else { return true };
+        if slow.card_stuck() {
+            let why = crate::ai_card::off_text(slow.gpu_api().unwrap_or(""));
+            warn!("AI: a check on the graphics card has not come back in five minutes: {why}");
+            crate::ai_card::block(&why);
+            {
+                let _one = super::AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+                crate::ai::set_gpu_note(Some(why));
+            }
+            // Never dropped: dropping could wait on the card.
+            std::mem::forget(slow);
+            crate::ai_card::mark_stuck();
+            return false;
+        }
+        info!("AI: the slow check on the graphics card came back; trying the card again");
+        true
+    }
+
+    /// The card stopped answering or gave an error that turns it off for
+    /// the AI (`ai_card::recovery`): the AI runs on the processor until
+    /// AmberSight restarts.
+    fn card_off(&self, used: &Arc<crate::ai::AiDetector>, msg: &str) {
+        let api = used.gpu_api().unwrap_or("");
+        let short = msg.lines().next().unwrap_or("").chars().take(160).collect::<String>();
+        let why = crate::ai_card::off_text(api);
+        crate::ai_card::block(&why);
+        let _one = super::AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.detector().is_some_and(|d| Arc::ptr_eq(&d, used)) {
+            return; // another thread did it
+        }
+        let (enabled, model, threads, mb) = {
+            let c = self.config.lock().unwrap();
+            (c.ai.enabled, c.ai.model.clone(), c.ai.threads, c.ai.gpu_memory_mb)
+        };
+        let Some(model) = model.filter(|_| enabled) else { return };
+        warn!("AI: {why} ({short})");
+        match crate::ai::AiDetector::load_on(&model, threads, false, None, mb) {
+            Ok(d) => {
+                crate::ai::set_gpu_note(Some(why));
+                *self.ai.write().unwrap() = Some(Arc::new(d));
+            }
+            Err(e) => warn!("AI: the processor could not take over from the graphics card: {e:#}"),
+        }
     }
 
     /// Replace the AI that runs on the card with one on the processor.
@@ -266,11 +412,147 @@ impl Engine {
     }
 
     /// Load the AI as the settings say again (on the card if it can).
+    /// Move the built-in AI (running on the processor) onto the graphics
+    /// card in the background, as the settings say: once the card's session
+    /// is made and has passed one check it takes over, unless the AI was
+    /// loaded again meanwhile (newer settings). Recording and the AI on the
+    /// processor never wait for the card.
+    pub fn move_to_card(&self) {
+        let (gpu, model, threads, gpu_name, mb) = {
+            let c = self.config.lock().unwrap();
+            (c.ai.gpu, c.ai.model.clone(), c.ai.threads, c.ai.gpu_name.clone(), c.ai.gpu_memory_mb)
+        };
+        let Some(cpu) = self.detector() else { return };
+        if !gpu || cpu.gpu_name().is_some() {
+            if !gpu {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                crate::gpu_addon::none_wanted();
+                self.note_for(&cpu, None);
+            }
+            return;
+        }
+        if let Some(b) = crate::ai_card::blocked() {
+            self.note_for(&cpu, Some(b));
+            return;
+        }
+        // Resting on the processor after a slow check (a reload meanwhile:
+        // settings saved, an add-on arrived): no new session on the card
+        // while that check may still be stuck there. When the rest is over
+        // the slow card is judged first, then the card is tried again.
+        if SLOW_CARD.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return;
+        }
+        let (Some(model), Some(me)) = (model, self.me.get().cloned()) else { return };
+        let spawned = thread::Builder::new().name("ai-to-card".into()).spawn(move || {
+            // The whole move, a session made and let go again included, is
+            // card work the program must not run the libraries' exit code under.
+            let _loading = crate::ai_card::LoadingGuard::new();
+            let tried = crate::ai::AiDetector::try_card(&model, threads, gpu_name.as_deref(), mb);
+            let stale = match me.upgrade() {
+                Some(engine) => {
+                    let _one = super::AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+                    // Not when AmberSight is stopping (stop_ai has taken the
+                    // detector, under the same lock), and only in place of
+                    // the processor's detector this move was started for;
+                    // Settings' note is written only by the move that counts.
+                    let current = !crate::ai_card::stopping() && engine.detector().is_some_and(|now| Arc::ptr_eq(&now, &cpu));
+                    match tried {
+                        crate::ai::CardTry::OnCard(d) if current => {
+                            info!("AI: moved onto the graphics card {} ({})", d.gpu_name().unwrap_or(""), d.gpu_api().unwrap_or(""));
+                            crate::ai::set_gpu_note(None);
+                            *engine.ai.write().unwrap() = Some(Arc::new(d));
+                            None
+                        }
+                        crate::ai::CardTry::OnCard(d) => Some(d),
+                        crate::ai::CardTry::NotUsed(note) => {
+                            if current {
+                                crate::ai::set_gpu_note(note);
+                            }
+                            None
+                        }
+                    }
+                }
+                None => match tried {
+                    crate::ai::CardTry::OnCard(d) => Some(d),
+                    crate::ai::CardTry::NotUsed(_) => None,
+                },
+            };
+            // A move overtaken by newer settings or shutdown: its session is
+            // let go here, before the guard above ends.
+            if let Some(d) = stale {
+                d.finish(std::time::Duration::from_secs(5));
+            }
+        });
+        if let Err(e) = spawned {
+            warn!("AI: could not start loading the model on the graphics card: {e}");
+        }
+    }
+
+    /// Write Settings' note about the card, under the AI lock, when `cpu` is
+    /// still the detector in use (a later reload's note wins).
+    fn note_for(&self, cpu: &Arc<crate::ai::AiDetector>, note: Option<String>) {
+        let _one = super::AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        if self.detector().is_some_and(|now| Arc::ptr_eq(&now, cpu)) {
+            crate::ai::set_gpu_note(note);
+        }
+    }
+
+    /// At shutdown, after the cameras have stopped: no new checks start on
+    /// the card; the one in progress gets up to `wait` to finish, then the
+    /// card's session is let go. A stuck or faulted card is left alone (the
+    /// program then leaves without the libraries' exit code, see main.rs).
+    pub fn stop_ai(&self, wait: std::time::Duration) {
+        crate::ai_card::begin_stop();
+        // (Under the lock a move onto the card installs with: once taken
+        // here, no move puts a detector back.)
+        let (slow, current) = {
+            let _one = super::AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            (SLOW_CARD.lock().unwrap_or_else(|e| e.into_inner()).take(), self.ai.write().unwrap().take())
+        };
+        // A card set aside after a slow check: let go if it came back.
+        if let Some(slow) = slow {
+            match Arc::try_unwrap(slow) {
+                Ok(d) if !d.card_stuck() => {
+                    d.finish(wait);
+                }
+                Ok(d) => std::mem::forget(d),
+                Err(a) => std::mem::forget(a),
+            }
+        }
+        let Some(mut d) = current else { return };
+        if d.gpu_api().is_none() {
+            return;
+        }
+        let until = std::time::Instant::now() + wait;
+        loop {
+            match Arc::try_unwrap(d) {
+                Ok(det) => {
+                    if det.finish(until.saturating_duration_since(std::time::Instant::now())) {
+                        info!("shutdown: the AI let go of the graphics card");
+                    } else {
+                        warn!("shutdown: the graphics card's AI session was left alone (the card stopped responding or a check did not finish)");
+                    }
+                    return;
+                }
+                // A check still holds it.
+                Err(back) => {
+                    if std::time::Instant::now() >= until {
+                        std::mem::forget(back);
+                        crate::ai_card::mark_stuck();
+                        warn!("shutdown: an AI check on the graphics card did not finish in time; its session is left alone");
+                        return;
+                    }
+                    d = back;
+                    thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
     fn try_card_again(&self) {
         info!("AI: trying the graphics card again");
-        if let Err(e) = self.reload_ai() {
-            warn!("AI: {e:#}");
-        }
+        // (The AI is on the processor already: only the card is loaded.)
+        self.move_to_card();
         // Still not on the card (it cannot take the model): look again later.
         if self.config.lock().unwrap().ai.gpu && self.detector().is_some_and(|d| d.gpu_name().is_none()) {
             health(|h| h.left_card(now_ms()));
@@ -450,8 +732,25 @@ mod tests {
         assert_eq!(plain_error("AI inference: CUDA failure 2: out of memory ; GPU=0"), "the graphics card ran out of memory (CUDA)");
         assert_eq!(plain_error("AI inference: DirectML: DXGI_ERROR_DEVICE_REMOVED"), "the graphics card gave an error (DirectML)");
         assert_eq!(plain_error("Failed to allocate memory for requested buffer"), "the graphics card ran out of memory");
+        // OpenVINO, and a card that stopped answering (ai_card.rs).
+        assert_eq!(plain_error("AI inference (OpenVINO): Exception from src/inference/src/cpp/infer_request.cpp:223: [GPU] clFinish, error code: -36"), "the graphics card gave an error (OpenVINO)");
+        assert_eq!(plain_error("the graphics card did not answer in time (OpenVINO, over 10 s)"), "the graphics card stopped responding (OpenVINO)");
+        assert_eq!(plain_error("the graphics card did not answer in time (CUDA, over 2 s)"), "the graphics card stopped responding (CUDA)");
+        // The OpenCL errors of a card that faulted.
+        assert_eq!(plain_error("AI inference: Exception from src/plugins/intel_gpu/src/runtime/ocl/ocl_stream.cpp:419: [GPU] clFinish, error code: -5 CL_OUT_OF_RESOURCES"), "the graphics card gave an error");
+        assert!(is_gpu_error("[GPU] CL_INVALID_COMMAND_QUEUE"));
         // Worded once, the same again, and still a card error for late looks.
-        for raw in [REAL, "AI inference: CUDA failure 2: out of memory", "DirectML: DXGI_ERROR_DEVICE_HUNG", "Failed to allocate memory", "device removed", "coreml failed"] {
+        for raw in [
+            REAL,
+            "AI inference: CUDA failure 2: out of memory",
+            "DirectML: DXGI_ERROR_DEVICE_HUNG",
+            "Failed to allocate memory",
+            "device removed",
+            "coreml failed",
+            "AI inference (OpenVINO): [GPU] error",
+            "the graphics card did not answer in time (OpenVINO, over 10 s)",
+            "AI inference (Core ML): failed",
+        ] {
             let p = plain_error(raw);
             assert_eq!(plain_error(&p), p);
             assert!(is_gpu_error(&p), "{p}");
@@ -547,6 +846,18 @@ mod tests {
     }
 
     #[test]
+    fn a_card_slow_three_times_in_an_hour_stays_off() {
+        let mut e = VecDeque::new();
+        assert!(!too_slow_too_often(&mut e, 0));
+        assert!(!too_slow_too_often(&mut e, 1_000_000));
+        assert!(too_slow_too_often(&mut e, 2_000_000), "the third within an hour");
+        let mut e = VecDeque::new();
+        assert!(!too_slow_too_often(&mut e, 0));
+        assert!(!too_slow_too_often(&mut e, 2_000_000));
+        assert!(!too_slow_too_often(&mut e, 4_000_000), "spread over more than an hour");
+    }
+
+    #[test]
     fn the_card_is_tried_again_after_five_minutes_once() {
         let mut h = Health::default();
         assert!(!h.card_due(10_000_000)); // never left it
@@ -586,5 +897,269 @@ mod tests {
         let mut r3 = serde_json::json!({ "alert": { "why": "ai_failed" }, "checks": [{ "n": 0, "error": "CUDA" }] });
         apply_results(&mut r3, &[], &wanted, 0.5, "x");
         assert_eq!(r3["alert"]["why"], "ai_failed");
+    }
+}
+
+/// The engine's handling of a card that is slow, stuck or overtaken, with
+/// fake detectors (ai::fake): no model, no card. One test, as the state is
+/// the process's own (one engine's AI at a time).
+#[cfg(all(test, not(all(target_os = "macos", target_arch = "x86_64"))))]
+mod card_state_tests {
+    use super::*;
+    use crate::ai::fake;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
+    use std::time::{Duration, Instant};
+
+    /// Notes when the runner it is kept in is dropped.
+    struct Dropped(Arc<AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    const FAST: u32 = 0;
+    const SLOW: u32 = 1;
+    const HANG: u32 = 2;
+
+    /// A fake card: answers at once (FAST), after 300 ms (SLOW), or not
+    /// until `mode` changes (HANG).
+    fn card(limit: Duration, mode: Arc<AtomicU32>, dropped: Arc<AtomicBool>) -> crate::ai::AiDetector {
+        let keep = Dropped(dropped);
+        fake::card(limit, move |_i| {
+            let _k = &keep;
+            loop {
+                match mode.load(Ordering::SeqCst) {
+                    FAST => return Ok(fake::nothing()),
+                    SLOW => {
+                        std::thread::sleep(Duration::from_millis(300));
+                        return Ok(fake::nothing());
+                    }
+                    _ => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        })
+    }
+
+    fn engine() -> Arc<Engine> {
+        let cfg: crate::config::Config = toml::from_str(&format!("[ai]\nenabled = true\ngpu = true\nmodel = \"{}\"\n", fake::MODEL)).unwrap();
+        let mut e = Engine::for_test(cfg);
+        Arc::get_mut(&mut e).unwrap().config_path = std::env::temp_dir().join(format!("ambersight-card-state-{}.toml", std::process::id())).to_string_lossy().into_owned();
+        // (As Engine::new does; for_test leaves it out: other tests take the
+        // engine back with Arc::get_mut.)
+        let _ = e.me.set(Arc::downgrade(&e));
+        e
+    }
+
+    fn reset() {
+        crate::ai_card::reset_for_test();
+        *HEALTH.lock().unwrap() = None;
+        if let Some(s) = SLOW_CARD.lock().unwrap().take() {
+            std::mem::forget(s);
+        }
+        SLOW_EPISODES.lock().unwrap().clear();
+        *fake::CARD.lock().unwrap() = None;
+        crate::ai::set_gpu_note(None);
+    }
+
+    fn jpeg() -> Vec<u8> {
+        let mut out = Vec::new();
+        image::RgbImage::from_pixel(64, 48, image::Rgb([90, 90, 90])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageOutputFormat::Jpeg(80)).unwrap();
+        out
+    }
+
+    fn rest_over() {
+        health(|h| h.cpu_since = Some(now_ms() - CPU_FOR_MS));
+    }
+
+    fn wait_for(f: impl Fn() -> bool) -> bool {
+        let t0 = Instant::now();
+        while !f() {
+            if t0.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    fn on_card(e: &Engine) -> bool {
+        e.detector().is_some_and(|d| d.gpu_name().is_some())
+    }
+
+    fn slow_card_back() -> bool {
+        SLOW_CARD.lock().unwrap().as_ref().is_some_and(|s| !s.card_stuck())
+    }
+
+    /// A fake card factory for moves onto the card, counting its calls.
+    fn cards(calls: Arc<AtomicUsize>, mode: Arc<AtomicU32>, dropped: Arc<AtomicBool>) {
+        *fake::CARD.lock().unwrap() = Some(Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some(card(Duration::from_secs(2), mode.clone(), dropped.clone()))
+        }));
+    }
+
+    #[test]
+    fn slow_stuck_reloaded_stopped_and_overtaken() {
+        let ms = Duration::from_millis;
+        let pic = jpeg();
+        let flag = || Arc::new(AtomicBool::new(false));
+
+        // 1. Slow, then back: a rest on the processor, then the card again.
+        reset();
+        let e = engine();
+        let (mode, dropped) = (Arc::new(AtomicU32::new(SLOW)), flag());
+        *e.ai.write().unwrap() = Some(Arc::new(card(ms(100), mode.clone(), dropped.clone())));
+        let before = fake::CPU_CHECKS.load(Ordering::SeqCst);
+        assert!(e.ai_detect(&pic, 0.5).is_ok(), "the slow check is done on the processor");
+        assert!(fake::CPU_CHECKS.load(Ordering::SeqCst) > before);
+        assert!(!on_card(&e));
+        assert_eq!(crate::ai::gpu_note(), Some(crate::ai_card::slow_text("OpenVINO")));
+        assert!(wait_for(slow_card_back), "the slow check comes back");
+        let (calls, mode2, dropped2) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicU32::new(FAST)), flag());
+        cards(calls.clone(), mode2.clone(), dropped2.clone());
+        rest_over();
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        assert!(wait_for(|| on_card(&e)), "on the card again");
+        assert!(SLOW_CARD.lock().unwrap().is_none() && crate::ai_card::blocked().is_none());
+        assert!(wait_for(|| dropped.load(Ordering::SeqCst)), "the slow card's session is let go, not leaked");
+        assert_eq!(crate::ai::gpu_note(), None);
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+
+        // 2. Slow, then still stuck: off until restart, left alone.
+        reset();
+        let e = engine();
+        let (mode, dropped) = (Arc::new(AtomicU32::new(HANG)), flag());
+        *e.ai.write().unwrap() = Some(Arc::new(card(ms(100), mode.clone(), dropped.clone())));
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        let calls = Arc::new(AtomicUsize::new(0));
+        cards(calls.clone(), Arc::new(AtomicU32::new(FAST)), flag());
+        rest_over();
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        let off = crate::ai_card::off_text("OpenVINO");
+        assert_eq!(crate::ai_card::blocked(), Some(off.clone()));
+        assert_eq!(crate::ai::gpu_note(), Some(off));
+        std::thread::sleep(ms(200));
+        assert!(!on_card(&e) && calls.load(Ordering::SeqCst) == 0, "not tried again");
+        assert!(!dropped.load(Ordering::SeqCst), "never dropped");
+        mode.store(FAST, Ordering::SeqCst); // (frees the test's thread)
+
+        // 3. A reload (settings saved, an add-on arriving) during the rest:
+        // no new card session until the slow one is judged.
+        reset();
+        let e = engine();
+        let (mode, dropped) = (Arc::new(AtomicU32::new(SLOW)), flag());
+        *e.ai.write().unwrap() = Some(Arc::new(card(ms(100), mode.clone(), dropped.clone())));
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        let calls = Arc::new(AtomicUsize::new(0));
+        cards(calls.clone(), Arc::new(AtomicU32::new(FAST)), flag());
+        e.reload_ai().unwrap();
+        std::thread::sleep(ms(300));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no move while resting");
+        assert!(!on_card(&e) && SLOW_CARD.lock().unwrap().is_some());
+        assert!(wait_for(slow_card_back));
+        rest_over();
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        assert!(wait_for(|| on_card(&e)), "judged, then moved");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(wait_for(|| dropped.load(Ordering::SeqCst)));
+
+        // 4. Shutdown during the rest, with the slow check still stuck: no wait.
+        reset();
+        let e = engine();
+        let (mode, dropped) = (Arc::new(AtomicU32::new(HANG)), flag());
+        *e.ai.write().unwrap() = Some(Arc::new(card(ms(100), mode.clone(), dropped.clone())));
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        let t0 = Instant::now();
+        e.stop_ai(Duration::from_secs(2));
+        assert!(t0.elapsed() < ms(1500), "{:?}", t0.elapsed());
+        assert!(e.detector().is_none() && SLOW_CARD.lock().unwrap().is_none());
+        assert!(!dropped.load(Ordering::SeqCst) && crate::ai_card::any_stuck());
+        mode.store(FAST, Ordering::SeqCst);
+
+        // 5. Shutdown during a move onto the card: the card is not put in,
+        // and its session is let go.
+        reset();
+        let e = engine();
+        e.reload_ai().unwrap();
+        assert!(e.detector().is_some() && !on_card(&e));
+        let (gate, entered, dropped) = (flag(), flag(), flag());
+        {
+            let (gate, entered, dropped) = (gate.clone(), entered.clone(), dropped.clone());
+            *fake::CARD.lock().unwrap() = Some(Arc::new(move || {
+                entered.store(true, Ordering::SeqCst);
+                while !gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Some(card(Duration::from_secs(2), Arc::new(AtomicU32::new(FAST)), dropped.clone()))
+            }));
+        }
+        e.move_to_card();
+        assert!(wait_for(|| entered.load(Ordering::SeqCst)));
+        e.stop_ai(Duration::from_secs(2));
+        gate.store(true, Ordering::SeqCst);
+        assert!(wait_for(|| dropped.load(Ordering::SeqCst)), "the late card's session is let go");
+        assert!(e.detector().is_none(), "nothing put back after shutdown");
+
+        // 6. A move overtaken by a reload: discarded, and its note not written.
+        reset();
+        let e = engine();
+        e.reload_ai().unwrap();
+        let (gate, entered, dropped) = (flag(), flag(), flag());
+        {
+            let (gate, entered, dropped) = (gate.clone(), entered.clone(), dropped.clone());
+            *fake::CARD.lock().unwrap() = Some(Arc::new(move || {
+                entered.store(true, Ordering::SeqCst);
+                while !gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Some(card(Duration::from_secs(2), Arc::new(AtomicU32::new(FAST)), dropped.clone()))
+            }));
+        }
+        e.move_to_card();
+        assert!(wait_for(|| entered.load(Ordering::SeqCst)));
+        let newer = Arc::new(fake::cpu());
+        *e.ai.write().unwrap() = Some(newer.clone());
+        crate::ai::set_gpu_note(Some("newer".into()));
+        gate.store(true, Ordering::SeqCst);
+        assert!(wait_for(|| dropped.load(Ordering::SeqCst)), "the stale move's card is let go");
+        assert!(e.detector().is_some_and(|d| Arc::ptr_eq(&d, &newer)), "the newer detector stays");
+        assert_eq!(crate::ai::gpu_note(), Some("newer".into()));
+
+        // 8. Choosing a model (POST /api/ai/model) takes the same locked path
+        // as any reload: in use at once, on the card in the background, and
+        // nothing put in once AmberSight is stopping.
+        reset();
+        let e = engine();
+        let (calls, dropped) = (Arc::new(AtomicUsize::new(0)), flag());
+        cards(calls.clone(), Arc::new(AtomicU32::new(FAST)), dropped.clone());
+        e.use_model(std::path::Path::new(fake::MODEL)).unwrap();
+        assert!(e.detector().is_some());
+        assert!(wait_for(|| on_card(&e)), "moved onto the card");
+        e.stop_ai(Duration::from_secs(2));
+        assert!(wait_for(|| dropped.load(Ordering::SeqCst)));
+        let calls_before = calls.load(Ordering::SeqCst);
+        e.use_model(std::path::Path::new(fake::MODEL)).unwrap();
+        std::thread::sleep(ms(200));
+        assert!(e.detector().is_none(), "never installs after stopping");
+        assert_eq!(calls.load(Ordering::SeqCst), calls_before, "no card session either");
+        let _ = std::fs::remove_file(&e.config_path);
+
+        // 7. Too slow three times within an hour: off until restart.
+        reset();
+        let e = engine();
+        let t = now_ms();
+        SLOW_EPISODES.lock().unwrap().extend([t - 1_000_000, t - 500_000]);
+        let (mode, dropped) = (Arc::new(AtomicU32::new(SLOW)), flag());
+        *e.ai.write().unwrap() = Some(Arc::new(card(ms(100), mode.clone(), dropped.clone())));
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        assert_eq!(crate::ai_card::blocked(), Some(crate::ai_card::keeps_slow_text("OpenVINO")));
+        assert!(wait_for(slow_card_back));
+        rest_over();
+        assert!(e.ai_detect(&pic, 0.5).is_ok());
+        std::thread::sleep(ms(200));
+        assert!(!on_card(&e), "not tried again");
+        assert!(wait_for(|| dropped.load(Ordering::SeqCst)), "the slow card came back, so it is let go");
+        reset();
     }
 }

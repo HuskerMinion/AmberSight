@@ -415,7 +415,8 @@ pub fn mac_info_plist() -> String {
         ("CFBundleExecutable", "AmberSight"),
         ("CFBundleIconFile", "AmberSight"),
         ("CFBundlePackageType", "APPL"),
-        ("CFBundleShortVersionString", env!("CARGO_PKG_VERSION")),
+        // (Apple wants numbers here: "0.12.0", not "0.12.0-openvino.1".)
+        ("CFBundleShortVersionString", env!("CARGO_PKG_VERSION").split(['-', '+']).next().unwrap_or("0.0.0")),
     ] {
         s.push_str(&format!("\t<key>{k}</key>\n\t<string>{v}</string>\n"));
     }
