@@ -56,7 +56,7 @@ Step-by-step instructions for every system are in the
 | Debian, Ubuntu, Linux Mint, Raspberry Pi OS (64-bit) | `ambersight_<version>_amd64.deb` or `_arm64.deb` | Add the [package repository](https://huskerminion.github.io/ambersight-packages/) once (`curl -fsSL https://huskerminion.github.io/ambersight-packages/setup.sh \| sudo sh`), then `sudo apt update && sudo apt install ambersight`; updates come with `apt upgrade`. Or install the file: `sudo apt install ./ambersight_<version>_amd64.deb`. Installs `/usr/bin/ambersight`, `/etc/ambersight/config.toml`, data in `/var/lib/ambersight`, a systemd service running as the user `ambersight`, an app menu entry, and ffmpeg. |
 | Fedora | `ambersight-<version>-1.x86_64.rpm` or `.aarch64.rpm` | Add [RPM Fusion](https://rpmfusion.org/Configuration) first, then add the same repository (the setup script above) and `sudo dnf install ambersight --allowerasing`, or install the file with `sudo dnf install ./ambersight-<version>-1.x86_64.rpm --allowerasing`. Same layout as the .deb. |
 | macOS and other Linux | `.tar.gz` (Windows also has a `.zip`) | Unpack, then run `./ambersight setup` (see below). |
-| Docker (and Unraid) | `ghcr.io/huskerminion/ambersight:latest` (`amd64` and `arm64`; `:cuda` for AI on an NVIDIA card) | See [docs/docker.md](docs/docker.md) for the run command, folders, networking and hardware decoding, or build the image from this repository. On Unraid, add the AmberSight template ([unraid/README.md](unraid/README.md)). |
+| Docker (and Unraid) | `ghcr.io/huskerminion/ambersight:latest` (`amd64` and `arm64`; `:cuda` for AI on an NVIDIA card, `:openvino` for AI on Intel graphics) | See [docs/docker.md](docs/docker.md) for the run command, folders, networking and hardware decoding, or build the image from this repository. On Unraid, add the AmberSight template ([unraid/README.md](unraid/README.md)). |
 
 The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer (and 64-bit
 Raspberry Pi OS, trixie or newer). Intel Macs have no built-in AI; use an AI
@@ -204,6 +204,10 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   while AmberSight missed its message (push off, Wi-Fi trouble, AmberSight down) are imported
   from the card later, marked "from card", without a notification. See the
   [install guide](docs/install.md#battery-reolink-cameras-without-a-hub-argus).
+- **Reolink's own protocol for always-on Reolinks:** a camera's "Connect with" setting can
+  read it over Reolink's port 9000 instead of RTSP, or use Auto: port 9000, moving to RTSP when
+  port 9000 keeps failing and back when it works again. See the
+  [camera guide](docs/cameras.md#reolink-wired-and-wi-fi).
 - **Recording:** continuous segments per camera, or a sub stream all the time
   with the main stream only around events. Motion clips with pre-roll and
   post-roll. By default recordings use what the disk can spare and keep 10% of
@@ -219,7 +223,7 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
 - **Events:** a list beside the player, filters, false alarms, protect (kept
   from cleanup), and export. Events are stored in a SQLite database.
 - **AI:** built-in YOLOX object detection on CPU or GPU (DirectML on Windows,
-  NVIDIA CUDA on Linux, Core ML on Apple silicon Macs),
+  NVIDIA CUDA or Intel graphics with OpenVINO on Linux, Core ML on Apple silicon Macs),
   with a Large model for the most accurate checks, an AI server option, or an
   external detector command. AI review explains why an event did or did not
   alert. AI remembers fixed spots it keeps mistaking for a person or a car (a
@@ -242,7 +246,11 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   schedule, including sunrise and sunset.
 - **Camera watchdog:** restarts a camera that stops sending video, or power
   cycles it through a smart plug or PoE port.
-- **PTZ and two-way talk** through ONVIF.
+- **PTZ and two-way talk** through ONVIF (talk also over Reolink's port 9000).
+- **Camera lights and siren (Reolink):** turn a camera's spotlight on, sound or stop its siren,
+  and switch its infrared and status lights, from Live, the camera's settings, MQTT and Home
+  Assistant, or as an action of an alert. Admins choose who may use them; every use is in the
+  audit log, and a siren is limited and always stopped when its time is up.
 - **Time-lapse:** each day of a camera in a short video.
 - **Off-site backup:** to a folder or S3, encrypted.
 - **Find cameras:** ONVIF discovery on this subnet and any other subnets you
@@ -284,6 +292,11 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
   start is still checking its recordings.
 - **Interface:** keyboard shortcuts, Ctrl+K command palette, and health and
   performance charts (CPU, AI, network, disk).
+- **Languages:** English, German, Spanish, French, Italian, Portuguese (Brazil), Dutch, Polish,
+  Swedish, Russian and Chinese (Simplified). The admin sets the server's default and everyone can
+  pick their own, with a 12-hour or 24-hour clock; a language is downloaded the first time it is
+  needed and checked against the release (or installed from the release file). The translations
+  are machine-made and reviewed; text the server writes (notifications, status) is in English.
 - **Command line:** `ambersight --help` lists the commands (`init`, `run`,
   `setup`, `service`, `cameras`, `events`, `snapshot`, `ai-model`, `discover`,
   `ptz`, `backup`, and more).

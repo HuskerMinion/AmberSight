@@ -2,8 +2,9 @@
 // hash (#events?cam=..&obj=..&range=..), the list pages in as you scroll, rows can be ticked for
 // bulk actions, and the keyboard moves through the events.
 
+import { t } from './i18n.js';
 import { renderVerdict, aiFrames } from './ai_review.js';
-import { $, state, api, esc, fmtTime, stillWaiting, openDlg, msgDlg, toast, lowQ, enc, topDlgOpen, overlayOpen, backLayer, overlaysChanged, afterOverlayClose, returnOnBack, viewOnlyNote, downloadUrl, speedOptions, applySpeed, safeRate, MAX_RATE, can } from './core.js';
+import { $, state, api, esc, fmtTime, stillWaiting, openDlg, msgDlg, toast, lowQ, enc, topDlgOpen, overlayOpen, backLayer, overlaysChanged, afterOverlayClose, returnOnBack, viewOnlyNote, downloadUrl, speedOptions, applySpeed, safeRate, MAX_RATE, can, objName } from './core.js';
 import { isActive, showTab } from './nav.js';
 import { openFullCam, closeFull, addOverlayText, paintOverlayText } from './live.js';
 import { burnTextSwitch, wireBurnText, burnTextQuery } from './export.js';
@@ -29,7 +30,7 @@ const ANI = ['dog', 'cat', 'bird', 'animal', 'pet', 'horse', 'cow', 'sheep', 'be
 const PER = ['person', 'visitor', 'people', 'human'];
 const CLASS_ICON = { unusual: 'alert', person: 'person', vehicle: 'car', animal: 'paw', package: 'pkg', face: 'face', other: 'dot', motion: 'dot' };
 const CLASS_COLOR = { unusual: '--warn', person: '--person', vehicle: '--vehicle', animal: '--animal', package: '--package', face: '--face', other: '--muted', motion: '--motion' };
-const CLASS_NAME = { unusual: 'Unusual', person: 'Person', vehicle: 'Vehicle', animal: 'Animal', package: 'Package', face: 'Face', other: 'Other', motion: 'Motion' };
+const CLASS_NAME = { unusual: t('events.unusual', 'Unusual'), person: t('events.person', 'Person'), vehicle: t('events.vehicle', 'Vehicle'), animal: t('events.animal', 'Animal'), package: t('events.package', 'Package'), face: t('events.face', 'Face'), other: t('events.other', 'Other'), motion: t('events.motion', 'Motion') };
 const CLASS_ORDER = ['unusual', 'person', 'face', 'package', 'vehicle', 'animal', 'other', 'motion'];
 const ico = (n) => n === 'check' ? '<svg class="ic ok" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></svg>' : '<svg class="ic"><use href="#i-' + n + '"/></svg>';
 
@@ -163,13 +164,13 @@ const isPhone = () => window.matchMedia('(max-width: 760px), (max-height: 520px)
 const sortItems = () => items.sort((a, b) => b.start - a.start || (a.id < b.id ? 1 : -1));
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDur = (s) => Math.floor(s / 60) + ':' + pad(Math.round(s % 60 === 0 ? 0 : s % 60));
-const fmtClock = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+const fmtClock = (ts) => new Date(ts * 1000).toLocaleTimeString();   // the header clock's form (two-digit hour on a 24-hour clock)
 function dayLabel(ts) {
-  const d = new Date(ts * 1000), t = new Date();
+  const d = new Date(ts * 1000), now = new Date();
   const k = (x) => x.getFullYear() * 400 + x.getMonth() * 32 + x.getDate();
-  const y = new Date(t); y.setDate(t.getDate() - 1);
-  if (k(d) === k(t)) return 'Today';
-  if (k(d) === k(y)) return 'Yesterday';
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (k(d) === k(now)) return t('events.today','Today');
+  if (k(d) === k(y)) return t('events.yesterday','Yesterday');
   return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 }
 const hourLabel = (ts) => { const d = new Date(ts * 1000); d.setMinutes(0, 0, 0); return dayLabel(ts) + ' · ' + d.toLocaleTimeString([], { hour: 'numeric' }); };
@@ -184,7 +185,7 @@ function noteNew(list) {
     if (seen.has(e.id)) continue;
     seen.add(e.id);
     if (state.toastsOn) alertFavicon();
-    if (state.toastsOn && alertPopups()) toast('Motion: ' + e.camera + ' ' + fmtTime(e.start), () => openFromAlert(e));
+    if (state.toastsOn && alertPopups()) toast(t('events.motion_alert', 'Motion: {camera} {time}', { camera: e.camera, time: fmtTime(e.start) }), () => openFromAlert(e));
   }
 }
 function absorb(list) {
@@ -269,13 +270,13 @@ export async function refreshEvents() {
 function paintStatus() {
   const m = $('evMoreRow'); if (!m) return;
   m.hidden = !(rawMore || loading);
-  const b = $('evLoadMore'); if (b) { b.disabled = loading; b.textContent = loading ? 'Loading...' : 'Load more'; }
+  const b = $('evLoadMore'); if (b) { b.disabled = loading; b.textContent = loading ? t('events.loading','Loading...') : t('events.load_more','Load more'); }
   // Still in view after a page came in (a short page): look again, so the next page loads.
   if (!m.hidden && !loading && moreIO) { moreIO.unobserve(m); moreIO.observe(m); }
 }
 let moreIO = null;
 const isNew = (e) => e.start * 1000 > visitCut && !reviewed.has(e.id) && !e.review;
-const DOT_TIP = 'Blue dot: you have not looked at this event yet';
+const DOT_TIP = t('events.dot_tip','Blue dot: you have not looked at this event yet');
 const typeText = (e) => classesOf(e).filter(c => c !== 'other' || classesOf(e).length === 1).map(c => CLASS_NAME[c]).slice(0, 2).join(', ');
 function decorate(el, e) {
   el.classList.toggle('on', e.id === selId);
@@ -290,8 +291,8 @@ function tileFor(e) {
     el = document.createElement('div');
     el.className = 'evtile'; el.dataset.id = e.id; el.setAttribute('role', 'option');
     const lab = e.camera + ', ' + fmtClock(e.start);
-    el.innerHTML = '<div class="tpic">' + (e.thumb ? '<img loading="lazy" decoding="async" src="/api/events/' + enc(e.id) + '/thumb" alt="' + esc(lab) + '">' : '<span class="nothumb" role="img" aria-label="' + esc(lab) + ', no picture"></span>') + '</div>' +
-      '<span class="tp tcam"><span class="ud" role="img" aria-label="New" title="' + DOT_TIP + '"></span><span class="nm">' + esc(e.camera) + '</span></span>' +
+    el.innerHTML = '<div class="tpic">' + (e.thumb ? '<img loading="lazy" decoding="async" src="/api/events/' + enc(e.id) + '/thumb" alt="' + esc(lab) + '">' : '<span class="nothumb" role="img" aria-label="' + t('events.no_picture_label', '{label}, no picture', { label: esc(lab) }) + '"></span>') + '</div>' +
+      '<span class="tp tcam"><span class="ud" role="img" aria-label="' + t('events.new', 'New') + '" title="' + DOT_TIP + '"></span><span class="nm">' + esc(e.camera) + '</span></span>' +
       '<span class="tp ttype"></span><span class="tp ttime"></span>';
     el.onclick = () => selectEvent(e.id, { open: true });
     tileEls.set(e.id, el);
@@ -306,7 +307,7 @@ function tileFor(e) {
     tt.innerHTML = '<svg class="ic"><use href="#i-' + CLASS_ICON[cl[0]] + '"/></svg><span class="tt">' + esc(typeText(e)) + '</span>';
   }
   decorate(el, e);
-  el.querySelector('.ttime').innerHTML = fmtClock(e.start) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · not real' : '') + (e.from_card ? ' · <span class="fromcard" title="Imported later from the camera\'s own card">from card</span>' : '') + (e.clip ? '' : ' · no clip');
+  el.querySelector('.ttime').innerHTML = fmtClock(e.start) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · ' + t('events.not_real_short', 'not real') : '') + (e.from_card ? ' · <span class="fromcard" title="' + t('events.from_card_tip', 'Imported later from the camera\'s own card') + '">' + t('events.from_card', 'from card') + '</span>' : '') + (e.clip ? '' : ' · ' + t('events.no_clip_short', 'no clip'));
   return el;
 }
 function rowFor(e) {
@@ -314,9 +315,9 @@ function rowFor(e) {
   if (!el) {
     el = document.createElement('div');
     el.className = 'evr'; el.dataset.id = e.id; el.setAttribute('role', 'option');
-    el.innerHTML = '<label class="evck" title="Select (Shift-click for a range)"><input type="checkbox" aria-label="Select event"></label>' +
+    el.innerHTML = '<label class="evck" title="' + t('events.select_range', 'Select (Shift-click for a range)') + '"><input type="checkbox" aria-label="' + t('events.select_event', 'Select event') + '"></label>' +
       (e.thumb ? '<img class="evt" loading="lazy" decoding="async" src="/api/events/' + enc(e.id) + '/thumb" alt="">' : '<span class="nothumb"></span>') +
-      '<div class="evi"><div class="t1"><span class="ud" role="img" aria-label="New" title="' + DOT_TIP + '"></span><span class="evk"></span><span class="nm">' + esc(e.camera) + '</span></div><div class="t2"></div></div>';
+      '<div class="evi"><div class="t1"><span class="ud" role="img" aria-label="' + t('events.new', 'New') + '" title="' + DOT_TIP + '"></span><span class="evk"></span><span class="nm">' + esc(e.camera) + '</span></div><div class="t2"></div></div>';
     el.querySelector('.evck').onclick = (ev) => ev.stopPropagation();
     el.querySelector('input').onclick = (ev) => { ev.stopPropagation(); tick(e.id, ev.target.checked, ev.shiftKey); };
     el.onclick = (ev) => { if (ev.shiftKey && anchorId) { ev.preventDefault(); tick(e.id, true, true); return; } selectEvent(e.id, { open: true }); };
@@ -333,7 +334,7 @@ function rowFor(e) {
   const ck = checks.has(e.id);
   el.classList.toggle('ck', ck);
   el.querySelector('input').checked = ck;
-  el.querySelector('.t2').innerHTML = fmtClock(e.start) + ' · ' + fmtDur(Math.max(0, e.end - e.start)) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · not a real alert' : '') + (e.from_card ? ' · <span class="fromcard" title="Imported later from the camera\'s own card">from card</span>' : '') + (e.clip ? '' : ' · no clip');
+  el.querySelector('.t2').innerHTML = fmtClock(e.start) + ' · ' + fmtDur(Math.max(0, e.end - e.start)) + (e.protect ? ' ' + ico('lock') : '') + (e.review === 'ok' ? ' ' + ico('check') : '') + (e.review === 'false_alarm' ? ' · ' + t('events.not_a_real_alert_short', 'not a real alert') : '') + (e.from_card ? ' · <span class="fromcard" title="' + t('events.from_card_tip', 'Imported later from the camera\'s own card') + '">' + t('events.from_card', 'from card') + '</span>' : '') + (e.clip ? '' : ' · ' + t('events.no_clip_short', 'no clip'));
   return el;
 }
 function render() {
@@ -360,10 +361,10 @@ function render() {
   if (!items.length) {
     const p = document.createElement('p'); p.className = 'empty';
     const filtered = F.cams.length || F.objs.size || F.range || F.prot || F.hfa;
-    p.textContent = loading ? 'Loading...' : (filtered ? 'No events match these filters.' : 'No events yet. Walk past a camera to test it. Events appear here when something moves.');
+    p.textContent = loading ? t('events.loading', 'Loading...') : (filtered ? t('events.no_match', 'No events match these filters.') : t('events.no_events', 'No events yet. Walk past a camera to test it. Events appear here when something moves.'));
     nodes.push(p);
     if (!loading && !filtered && !state.cams.length) {
-      const a = document.createElement('a'); a.className = 'btn primary'; a.href = '#settings/cameras/find'; a.textContent = 'Add a camera';
+      const a = document.createElement('a'); a.className = 'btn primary'; a.href = '#settings/cameras/find'; a.textContent = t('events.add_camera', 'Add a camera');
       const w = document.createElement('p'); w.className = 'evnone'; w.appendChild(a); nodes.push(w);
     }
   }
@@ -379,7 +380,7 @@ function render() {
       nodes.push(rowFor(e));
     }
   }
-  if (items.length && !rawMore && !loading) { const d = document.createElement('div'); d.className = 'evend'; d.textContent = 'End of list'; nodes.push(d); }
+  if (items.length && !rawMore && !loading) { const d = document.createElement('div'); d.className = 'evend'; d.textContent = t('events.end_of_list', 'End of list'); nodes.push(d); }
   rows.replaceChildren(...nodes);
   for (const id of [...rowEls.keys()]) if (!byId.has(id)) rowEls.delete(id);
   for (const id of [...tileEls.keys()]) if (!byId.has(id)) tileEls.delete(id);
@@ -403,7 +404,7 @@ async function openDeep(id) {
   // (Only that event: never another one in its place.)
   if (ev && ev.id !== id) ev = null;
   if (g !== gen || F.ev !== id) return;
-  if (!ev) { missingEv = id; deepId = ''; toast('That event is not there any more, or you are not allowed to see it.', { kind: 'err' }); return; }
+  if (!ev) { missingEv = id; deepId = ''; toast(t('events.event_gone', 'That event is not there any more, or you are not allowed to see it.'), { kind: 'err' }); return; }
   if (!byId.has(id)) { byId.set(id, ev); items.push(ev); sortItems(); }
   lastRender = ''; render();
   deepId = ''; selectEvent(id, { scroll: true, open: true });
@@ -471,8 +472,8 @@ function wireSwipe() {
 
 async function openOnTimeline(e) {
   const cam = state.cams.find(c => c.name === e.camera);
-  if (!cam) { toast(e.camera + ' is no longer a camera here', { kind: 'err' }); return; }
-  if (cam.remote) { toast(e.camera + ': its recordings are on ' + ((cam.remote && cam.remote.site) || 'the other server')); return; }
+  if (!cam) { toast(t('events.camera_gone', '{camera} is no longer a camera here', { camera: e.camera }), { kind: 'err' }); return; }
+  if (cam.remote) { toast(t('events.recordings_on', '{camera}: its recordings are on {site}', { camera: e.camera, site: ((cam.remote && cam.remote.site) || t('events.other_server', 'the other server')) })); return; }
   // (The phone sheet's history step is taken back first, so it does not undo the page change.)
   if (panelOpen) await afterOverlayClose(() => setPanel(false));
   const back = location.hash;
@@ -484,7 +485,7 @@ async function openOnTimeline(e) {
 // Open the camera's full view for an alert (its timeline button then starts at the alert).
 function openFromAlert(e) {
   const cam = state.cams.find(c => c.name === e.camera);
-  if (!cam) { toast(e.camera + ' is no longer a camera here', { kind: 'err' }); return; }
+  if (!cam) { toast(t('events.camera_gone', '{camera} is no longer a camera here', { camera: e.camera }), { kind: 'err' }); return; }
   showTab('live');
   openFullCam(cam.id, { alertAt: e.start * 1000 });
 }
@@ -513,7 +514,7 @@ const SAVED_KEY = 'ambs.evSaved', SAVED_MAX = 12;
 export function savedFilters() {
   try { const a = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]'); return Array.isArray(a) ? a.filter(x => x && typeof x.name === 'string' && typeof x.hash === 'string').slice(0, SAVED_MAX) : []; } catch (e) { return []; }
 }
-function storeSaved(list) { try { localStorage.setItem(SAVED_KEY, JSON.stringify(list.slice(0, SAVED_MAX))); } catch (e) { toast('Could not save in this browser', { kind: 'err' }); } paintSaved(); }
+function storeSaved(list) { try { localStorage.setItem(SAVED_KEY, JSON.stringify(list.slice(0, SAVED_MAX))); } catch (e) { toast(t('events.cannot_save', 'Could not save in this browser'), { kind: 'err' }); } paintSaved(); }
 function paintSaved() {
   const row = $('evChips'); if (!row) return;
   row.querySelectorAll('.evsaved').forEach(n => n.remove());
@@ -523,7 +524,7 @@ function paintSaved() {
     const b = document.createElement('span'); b.className = 'chip evchip evsaved'; b.dataset.hash = s.hash;
     const on = s.hash === cur;
     b.classList.toggle('on', on);
-    b.innerHTML = '<button type="button" class="evs-go" aria-pressed="' + on + '" title="Show these filters">' + esc(s.name) + '</button><button type="button" class="evs-x" aria-label="Remove ' + esc(s.name) + '" title="Remove">&times;</button>';
+    b.innerHTML = '<button type="button" class="evs-go" aria-pressed="' + on + '" title="' + t('events.show_filters', 'Show these filters') + '">' + esc(s.name) + '</button><button type="button" class="evs-x" aria-label="' + t('events.remove_named', 'Remove {name}', { name: esc(s.name) }) + '" title="' + t('events.remove', 'Remove') + '">&times;</button>';
     b.querySelector('.evs-go').onclick = () => { if (location.hash !== s.hash) location.hash = s.hash; };
     b.querySelector('.evs-x').onclick = () => storeSaved(savedFilters().filter(x => !(x.name === s.name && x.hash === s.hash)));
     frag.appendChild(b);
@@ -533,14 +534,14 @@ function paintSaved() {
 }
 function saveFiltersPopup(btn) {
   const h = hashSansEv();
-  if (h === '#events' || h === '#events?view=grid') { toast('Choose some filters first (cameras, what, when)', { kind: 'err' }); return; }
-  openPop(btn, '<label class="sub" style="display:block">Name for these filters<input type="text" id="evSaveName" maxlength="40" placeholder="Driveway people today"></label><div class="pr"><button type="button" class="btn primary" data-go>Save</button></div>', (d) => {
+  if (h === '#events' || h === '#events?view=grid') { toast(t('events.choose_filters', 'Choose some filters first (cameras, what, when)', {}), { kind: 'err' }); return; }
+  openPop(btn, '<label class="sub" style="display:block">' + t('events.filters_name', 'Name for these filters') + '<input type="text" id="evSaveName" maxlength="40" placeholder="' + t('events.filters_name_ph', 'Driveway people today') + '"></label><div class="pr"><button type="button" class="btn primary" data-go>' + t('events.save', 'Save') + '</button></div>', (d) => {
     const inp = d.querySelector('#evSaveName');
     const go = () => {
       const name = inp.value.trim(); if (!name) { inp.focus(); return; }
       const list = savedFilters().filter(x => x.name !== name);
-      if (list.length >= SAVED_MAX) { toast('You can keep ' + SAVED_MAX + ' saved filters; remove one first', { kind: 'err' }); return; }
-      list.push({ name, hash: h }); storeSaved(list); closePop(); toast('Saved "' + name + '"', { kind: 'ok', ms: 2000 });
+      if (list.length >= SAVED_MAX) { toast(t('events.max_saved', 'You can keep {max} saved filters; remove one first', { max: SAVED_MAX }), { kind: 'err' }); return; }
+      list.push({ name, hash: h }); storeSaved(list); closePop(); toast(t('events.saved_name', 'Saved "{name}"', { name }), { kind: 'ok', ms: 2000 });
     };
     d.querySelector('[data-go]').onclick = go;
     inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } e.stopPropagation(); };
@@ -553,17 +554,17 @@ function paintPlayer(e) {
   const box = $('evPlayer');
   if (shareFile && (!e || shareFile.id !== e.id)) shareFile = null;   // frees the fetched clip
   if (curVideo) { try { curVideo.pause(); curVideo.removeAttribute('src'); curVideo.load(); } catch (x) { /* gone */ } curVideo = null; }
-  if (!e) { box.innerHTML = '<p class="empty evnone">Select an event to see it here.</p>'; return; }
+  if (!e) { box.innerHTML = '<p class="empty evnone">' + t('events.select_hint', 'Select an event to see it here.') + '</p>'; return; }
   const cl = classesOf(e);
-  const objs = (e.objects && e.objects.length) ? e.objects.join(', ') : 'motion';
+  const objs = (e.objects && e.objects.length) ? e.objects.map(objName).join(', ') : objName('motion');
   box.style.setProperty('--c', 'var(' + CLASS_COLOR[cl[0]] + ')');
   box.innerHTML =
-    '<div class="evp-top"><button type="button" class="btn icon evp-back" aria-label="Close" title="Close"><svg class="ic"><use href="#i-x"/></svg></button>' +
+    '<div class="evp-top"><button type="button" class="btn icon evp-back" aria-label="' + t('events.close', 'Close') + '" title="' + t('events.close', 'Close') + '"><svg class="ic"><use href="#i-x"/></svg></button>' +
     '<h3>' + esc(e.camera) + '</h3><small>' + esc(fmtTime(e.start)) + ' · ' + fmtDur(Math.max(0, e.end - e.start)) + ' · ' + esc(objs) + '</small></div>' +
-    '<div class="evp-vid">' + (e.clip ? '<video controls playsinline preload="auto" poster="' + (e.thumb ? '/api/events/' + enc(e.id) + '/thumb' : '') + '"></video>' : (e.thumb ? '<img src="/api/events/' + enc(e.id) + '/thumb" alt="">' : '') + '<span class="nc">No clip</span>') + '</div>' +
-    (e.clip ? '<div class="evp-ctl"><div class="evp-mtl" title="Click to jump"><i></i><b></b></div><label class="evp-speed">Speed <select aria-label="Playback speed">' + speedOptions(state.speed, MAX_RATE) + '</select></label></div>' : '') +
+    '<div class="evp-vid">' + (e.clip ? '<video controls playsinline preload="auto" poster="' + (e.thumb ? '/api/events/' + enc(e.id) + '/thumb' : '') + '"></video>' : (e.thumb ? '<img src="/api/events/' + enc(e.id) + '/thumb" alt="">' : '') + '<span class="nc">' + t('events.no_clip', 'No clip') + '</span>') + '</div>' +
+    (e.clip ? '<div class="evp-ctl"><div class="evp-mtl" title="' + t('events.click_to_jump', 'Click to jump') + '"><i></i><b></b></div><label class="evp-speed">' + t('events.speed', 'Speed') + ' <select aria-label="' + t('events.playback_speed', 'Playback speed') + '">' + speedOptions(state.speed, MAX_RATE) + '</select></label></div>' : '') +
     '<div class="evp-acts"></div>' +
-    '<div class="evp-keys"><kbd>↑</kbd><kbd>↓</kbd> or <kbd>J</kbd><kbd>K</kbd> next and previous · <kbd>Space</kbd> play · ' + (can('events') ? '<kbd>P</kbd> keep forever · <kbd>X</kbd> not a real alert · ' : '') + '<kbd>O</kbd> looks fine · <kbd>Enter</kbd> open on the timeline</div>' +
+    '<div class="evp-keys">' + t('events.keys_move', '<kbd>↑</kbd><kbd>↓</kbd> or <kbd>J</kbd><kbd>K</kbd> next and previous') + ' · ' + t('events.keys_play', '<kbd>Space</kbd> play') + ' · ' + (can('events') ? t('events.keys_keep', '<kbd>P</kbd> keep forever') + ' · ' + t('events.keys_fa', '<kbd>X</kbd> not a real alert') + ' · ' : '') + t('events.keys_ok', '<kbd>O</kbd> looks fine') + ' · ' + t('events.keys_timeline', '<kbd>Enter</kbd> open on the timeline') + '</div>' +
     '<div class="evv" data-verdict></div><div data-evfaces></div><div data-evplates></div>';
   box.querySelector('.evp-back').onclick = () => setPanel(false);
   const v = box.querySelector('video');
@@ -619,22 +620,22 @@ function paintActions(e) {
   const fa = e.review === 'false_alarm', ok = isOk(e);
   const cam = can('pause') ? state.cams.find(c => c.id === e.camera_id && !c.remote) : null;
   const saveHref = () => '/api/clips/' + enc(e.id) + '?download=1' + burnTextQuery();
-  a.innerHTML = (e.clip ? '<a class="btn" data-a="save" href="' + saveHref() + '" download title="Download this clip">' + ico('dl') + '<span>Save</span></a>' +
-      '<button type="button" class="btn" data-a="share" title="Share this clip">' + ico('share') + '<span>Share</span></button>' : '') +
+  a.innerHTML = (e.clip ? '<a class="btn" data-a="save" href="' + saveHref() + '" download title="' + t('events.download_clip', 'Download this clip') + '">' + ico('dl') + '<span>' + t('events.save', 'Save') + '</span></a>' +
+      '<button type="button" class="btn" data-a="share" title="' + t('events.share_clip', 'Share this clip') + '">' + ico('share') + '<span>' + t('events.share', 'Share') + '</span></button>' : '') +
     // (Keeping and "not a real alert" change the event for everyone: admins and operators allowed to, as in the bulk bar.)
-    (!can('events') ? '' : '<button type="button" class="btn' + (e.protect ? ' on' : '') + '" data-a="p" aria-pressed="' + !!e.protect + '" title="' + (e.protect ? 'Kept: it will not be deleted. Click to let it expire normally (P)' : 'Keep this clip forever, even when old recordings are cleared (P)') + '">' + ico('lock') + '<span>' + (e.protect ? 'Kept' : 'Keep forever') + '</span></button>') +
-    '<button type="button" class="btn ok' + (ok ? ' on' : '') + '" data-a="ok" aria-pressed="' + ok + '" title="' + (ok ? 'Marked as looks fine. Click to undo (O)' : 'You looked at it and it is fine (O)') + '">' + ico('check') + '<span>Looks fine</span></button>' +
-    (!can('events') ? '' : '<button type="button" class="btn fa' + (fa ? ' on' : '') + '" data-a="fa" aria-pressed="' + fa + '" title="' + (fa ? 'Marked as not a real alert. Click to undo (X)' : 'Nothing was there: mark as not a real alert (X)') + '">' + ico('x') + '<span>Not a real alert</span></button>') +
-    (!cam ? '' : '<button type="button" class="btn' + (cam.alerts_paused ? ' on' : '') + '" data-a="np" aria-pressed="' + !!cam.alerts_paused + '" title="' + (cam.alerts_paused ? 'Notifications from this camera are paused; it is still recording. Click to resume.' : 'Stop notifications from this camera for an hour. It keeps recording and detecting.') + '">' + ico('belloff') + '<span>' + (cam.alerts_paused ? 'Resume notifications' : 'Pause notifications 1 h') + '</span></button>') +
-    (smartOn && classesOf(e).some(c => c === 'person' || c === 'vehicle') ? '<button type="button" class="btn" data-a="fw" title="Find this person or vehicle on other cameras around this time">' + ico('person') + '<span>Follow</span></button>' : '') +
-    '<button type="button" class="btn" data-a="tl" title="Play the recording around this event (Enter)">' + ico('timeline') + '<span>Open on timeline</span></button>';
+    (!can('events') ? '' : '<button type="button" class="btn' + (e.protect ? ' on' : '') + '" data-a="p" aria-pressed="' + !!e.protect + '" title="' + (e.protect ? t('events.kept_tip', 'Kept: it will not be deleted. Click to let it expire normally (P)') : t('events.keep_tip', 'Keep this clip forever, even when old recordings are cleared (P)')) + '">' + ico('lock') + '<span>' + (e.protect ? t('events.kept', 'Kept') : t('events.keep_forever', 'Keep forever')) + '</span></button>') +
+    '<button type="button" class="btn ok' + (ok ? ' on' : '') + '" data-a="ok" aria-pressed="' + ok + '" title="' + (ok ? t('events.ok_on_tip', 'Marked as looks fine. Click to undo (O)') : t('events.ok_tip', 'You looked at it and it is fine (O)')) + '">' + ico('check') + '<span>' + t('events.looks_fine', 'Looks fine') + '</span></button>' +
+    (!can('events') ? '' : '<button type="button" class="btn fa' + (fa ? ' on' : '') + '" data-a="fa" aria-pressed="' + fa + '" title="' + (fa ? t('events.fa_on_tip', 'Marked as not a real alert. Click to undo (X)') : t('events.fa_tip', 'Nothing was there: mark as not a real alert (X)')) + '">' + ico('x') + '<span>' + t('events.not_a_real_alert', 'Not a real alert') + '</span></button>') +
+    (!cam ? '' : '<button type="button" class="btn' + (cam.alerts_paused ? ' on' : '') + '" data-a="np" aria-pressed="' + !!cam.alerts_paused + '" title="' + (cam.alerts_paused ? t('events.np_on_tip', 'Notifications from this camera are paused; it is still recording. Click to resume.') : t('events.np_tip', 'Stop notifications from this camera for an hour. It keeps recording and detecting.')) + '">' + ico('belloff') + '<span>' + (cam.alerts_paused ? t('events.resume_notifications', 'Resume notifications') : t('events.pause_notifications', 'Pause notifications 1 h')) + '</span></button>') +
+    (smartOn && classesOf(e).some(c => c === 'person' || c === 'vehicle') ? '<button type="button" class="btn" data-a="fw" title="' + t('events.follow_tip', 'Find this person or vehicle on other cameras around this time') + '">' + ico('person') + '<span>' + t('events.follow', 'Follow') + '</span></button>' : '') +
+    '<button type="button" class="btn" data-a="tl" title="' + t('events.timeline_tip', 'Play the recording around this event (Enter)') + '">' + ico('timeline') + '<span>' + t('events.open_timeline', 'Open on timeline') + '</span></button>';
   // The download's option, under the buttons.
   if (e.clip) {
     a.insertAdjacentHTML('beforeend', '<div class="evp-burn">' + burnTextSwitch(true) + '</div>');
     wireBurnText(a, () => { const sv = a.querySelector('[data-a=save]'); if (sv) sv.href = saveHref(); if (shareFile && shareFile.id === e.id) shareFile = null; });
   }
   const sh = a.querySelector('[data-a=share]');
-  if (sh) { sh.onclick = () => shareClip(e, sh); if (shareFile && shareFile.id === e.id) shareLabel(sh, 'Share now'); }
+  if (sh) { sh.onclick = () => shareClip(e, sh); if (shareFile && shareFile.id === e.id) shareLabel(sh, t('events.share_now', 'Share now')); }
   const fw = a.querySelector('[data-a=fw]');
   if (fw) fw.onclick = () => import('./follow.js').then(m => m.openFollow(e.id));
   const np = a.querySelector('[data-a=np]');
@@ -654,7 +655,7 @@ function shareLabel(btn, text, busy) {
   if (!btn || !btn.isConnected) return;
   const s = btn.querySelector('span'); if (s) s.textContent = text;
   btn.disabled = !!busy;
-  btn.classList.toggle('primary', text === 'Share now');
+  btn.classList.toggle('primary', text === t('events.share_now', 'Share now'));
 }
 async function shareClip(e, btn) {
   const url = location.origin + '/api/clips/' + enc(e.id);
@@ -663,7 +664,7 @@ async function shareClip(e, btn) {
     let file = shareFile && shareFile.id === e.id ? shareFile.file : null;
     const ready = !!file;
     if (!file) {
-      shareLabel(btn, 'Preparing…', true);
+      shareLabel(btn, t('events.preparing', 'Preparing…'), true);
       try {
         const r = await fetch('/api/clips/' + enc(e.id) + '?download=1' + burnTextQuery(), { credentials: 'same-origin' });
         if (r.ok) {
@@ -673,16 +674,16 @@ async function shareClip(e, btn) {
           if (!navigator.canShare({ files: [file] })) file = null;
         }
       } catch (x) { file = null; }
-      shareLabel(btn, 'Share');
+      shareLabel(btn, t('events.share', 'Share'));
       if (selId !== e.id) return;   // another event was opened meanwhile
     }
     if (file) {
-      try { await navigator.share({ files: [file], title }); shareFile = null; shareLabel(btn, 'Share'); return; }
+      try { await navigator.share({ files: [file], title }); shareFile = null; shareLabel(btn, t('events.share', 'Share')); return; }
       catch (x) {
-        if (x && x.name === 'AbortError') { shareFile = null; shareLabel(btn, 'Share'); return; }
+        if (x && x.name === 'AbortError') { shareFile = null; shareLabel(btn, t('events.share', 'Share')); return; }
         // Refused for want of a fresh tap: keep the file for the next one.
-        if (x && x.name === 'NotAllowedError' && !ready) { shareFile = { id: e.id, file }; shareLabel(btn, 'Share now'); return; }
-        shareFile = null; shareLabel(btn, 'Share');
+        if (x && x.name === 'NotAllowedError' && !ready) { shareFile = { id: e.id, file }; shareLabel(btn, t('events.share_now', 'Share now')); return; }
+        shareFile = null; shareLabel(btn, t('events.share', 'Share'));
       }
     }
   }
@@ -692,7 +693,7 @@ async function shareClip(e, btn) {
     const t = document.createElement('textarea'); t.value = url; t.style.position = 'fixed'; t.style.opacity = '0';
     document.body.appendChild(t); t.select(); try { ok = document.execCommand('copy'); } catch (y) { /* no clipboard */ } t.remove();
   }
-  if (ok) toast('Link copied', { kind: 'ok', ms: 2000 }); else msgDlg('Copy this link: ' + url);
+  if (ok) toast(t('events.link_copied', 'Link copied'), { kind: 'ok', ms: 2000 }); else msgDlg(t('events.copy_link', 'Copy this link: {url}', { url }));
 }
 async function showFaces(e, box) {
   try {
@@ -723,7 +724,7 @@ async function setProtect(id, val, quiet) {
   } catch (x) { if (!quiet) msgDlg(x.message); return false; }
 }
 async function toggleProtect(e) {
-  if (await setProtect(e.id, !e.protect)) { lastRender = ''; render(); paintActions(e); toast(e.protect ? 'Kept: it will not be deleted' : 'No longer kept forever', { kind: 'ok', ms: 2500 }); }
+  if (await setProtect(e.id, !e.protect)) { lastRender = ''; render(); paintActions(e); toast(e.protect ? t('events.kept_toast', 'Kept: it will not be deleted') : t('events.unkept_toast', 'No longer kept forever'), { kind: 'ok', ms: 2500 }); }
 }
 
 // ---------- verdicts: false alarm / reviewed OK ----------
@@ -757,7 +758,7 @@ async function toggleReview(e, verdict) {
   if (next === 'false_alarm' && F.hfa) { dropItem(e.id); lastRender = ''; render(); }
   else { lastRender = ''; render(); paintActions(e); }
   // (Only "Not a person" under the AI verdict also teaches AI the spot: see ai_review.js markNotReal.)
-  toast(next === 'false_alarm' ? 'Marked as not a real alert' : next === 'ok' ? 'Marked as looks fine' : 'Mark cleared', { kind: 'ok', ms: 2000 });
+  toast(t('events.toggle_review_msg', '{next, select, false_alarm {Marked as not a real alert} ok {Marked as looks fine} other {Mark cleared}}', { next }), { kind: 'ok', ms: 2000 });
 }
 
 // ---------- moving by keyboard ----------
@@ -819,8 +820,8 @@ function paintBulk() {
   const b = $('evBulk'); if (!b) return;
   b.hidden = !checks.size;
   if (!checks.size) return;
-  b.innerHTML = '<b>' + checks.size + ' selected</b>' + (can('events') ? '<button type="button" class="btn" data-b="p">' + ico('lock') + ' Keep selected forever</button>' : '') +
-    (can('events') ? '<button type="button" class="btn" data-b="fa">' + ico('x') + ' Not a real alert</button>' : '') + '<button type="button" class="btn" data-b="x">' + ico('dl') + ' Export selected</button><button type="button" class="btn" data-b="c">Clear</button>';
+  b.innerHTML = '<b>' + t('events.n_selected', '{n} selected', { n: checks.size }) + '</b>' + (can('events') ? '<button type="button" class="btn" data-b="p">' + ico('lock') + ' ' + t('events.keep_selected', 'Keep selected forever') + '</button>' : '') +
+    (can('events') ? '<button type="button" class="btn" data-b="fa">' + ico('x') + ' ' + t('events.not_a_real_alert', 'Not a real alert') + '</button>' : '') + '<button type="button" class="btn" data-b="x">' + ico('dl') + ' ' + t('events.export_selected', 'Export selected') + '</button><button type="button" class="btn" data-b="c">' + t('events.clear', 'Clear') + '</button>';
   b.querySelector('[data-b=c]').onclick = () => { checks.clear(); lastRender = ''; render(); };
   // One ZIP of the selected events (clips + events.csv); a big selection comes as several.
   b.querySelector('[data-b=x]').onclick = async () => {
@@ -830,20 +831,20 @@ function paintBulk() {
       downloadUrl('/api/export?ids=' + ids.slice(i, i + BATCH).map(enc).join(','));
       if (i + BATCH < ids.length) await new Promise(r => setTimeout(r, 1500));
     }
-    toast('Preparing ' + Math.ceil(ids.length / BATCH) + ' ZIP of ' + ids.length + ' event' + (ids.length === 1 ? '' : 's'), { kind: 'ok', ms: 3000 });
+    toast(t('events.zip_preparing', 'Preparing {batches} ZIP of {n, plural, one {# event} other {# events}}', { batches: Math.ceil(ids.length / BATCH), n: ids.length }), { kind: 'ok', ms: 3000 });
   };
   const fa = b.querySelector('[data-b=fa]');
   if (fa) fa.onclick = async () => {
     fa.disabled = true; let n = 0; const total = checks.size;
     for (const id of [...checks]) if (await setReview(id, 'false_alarm', true)) { n++; if (F.hfa) dropItem(id); }
-    toast('Marked ' + n + ' of ' + total + ' as not a real alert', { kind: n ? 'ok' : 'err' });
+    toast(t('events.marked_n_fa', 'Marked {n} of {total} as not a real alert', { n, total }), { kind: n ? 'ok' : 'err' });
     checks.clear(); lastRender = ''; render(); const e = byId.get(selId); if (e) paintActions(e);
   };
   const p = b.querySelector('[data-b=p]');
   if (p) p.onclick = async () => {
     p.disabled = true; let n = 0; const total = checks.size;
     for (const id of [...checks]) if (await setProtect(id, true, true)) n++;
-    toast('Kept ' + n + ' of ' + total + ' forever', { kind: n ? 'ok' : 'err' });
+    toast(t('events.kept_forever','Kept {n} of {total} forever', { n, total }), { kind: n ? 'ok' : 'err' });
     checks.clear(); lastRender = ''; render(); const e = byId.get(selId); if (e) paintActions(e);
   };
 }
@@ -899,14 +900,14 @@ function filtersChanged() { gen++; started = true; writeHash(); paintChips(); lo
 function paintChips() {
   const cb = $('fCam');
   if (!cb) return;
-  const label = !F.cams.length ? 'All cameras' : F.cams.length === 1 ? F.cams[0] : F.cams.length + ' cameras';
+  const label = !F.cams.length ? t('events.all_cameras','All cameras') : F.cams.length === 1 ? F.cams[0] : t('events.n_cameras', '{n, plural, one {# camera} other {# cameras}}', { n: F.cams.length });
   cb.querySelector('span').textContent = label;
   cb.classList.toggle('on', F.cams.length > 0);
   document.querySelectorAll('#evChips [data-obj]').forEach(b => { const on = F.objs.has(b.dataset.obj); b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
   document.querySelectorAll('#evChips [data-range]:not([data-range=all])').forEach(b => { const on = F.range === b.dataset.range; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
   const cu = $('evCustom').querySelector('span');
   const f = (s) => new Date(s * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  cu.textContent = F.range === 'custom' ? (F.from ? f(F.from) : '...') + ' – ' + (F.to ? f(F.to) : 'now') : 'Custom';
+  cu.textContent = F.range === 'custom' ? (F.from ? f(F.from) : '...') + ' – ' + (F.to ? f(F.to) : t('events.now', 'now')) : t('events.custom','Custom');
   $('evHideFA').checked = F.hfa;
   $('evProt').classList.toggle('on', F.prot); $('evProt').setAttribute('aria-pressed', F.prot);
   document.querySelectorAll('#evView [data-view]').forEach(b => { const on = V === b.dataset.view; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
@@ -921,26 +922,26 @@ const toLocal = (s) => { if (!s) return ''; const d = new Date(s * 1000); return
 function camPopup(btn) {
   const names = state.cams.map(c => c.name);
   openPop(btn, names.map((n, i) => '<label><input type="checkbox" data-i="' + i + '"' + (F.cams.includes(n) ? ' checked' : '') + '> ' + esc(n) + '</label>').join('') +
-    '<div class="pr"><button type="button" class="btn" data-all>All cameras</button></div>', (d) => {
+    '<div class="pr"><button type="button" class="btn" data-all>' + t('events.all_cameras','All cameras') + '</button></div>', (d) => {
     d.querySelectorAll('[data-i]').forEach(c => { c.onchange = () => { F.cams = names.filter((n, i) => d.querySelector('[data-i="' + i + '"]').checked); F.ev = ''; filtersChanged(); }; });
     d.querySelector('[data-all]').onclick = () => { F.cams = []; F.ev = ''; closePop(); filtersChanged(); };
     const f = d.querySelector('input'); if (f) f.focus();
   });
 }
 function customPopup(btn) {
-  openPop(btn, '<label class="sub" style="display:block">From<input type="datetime-local" id="evFrom" value="' + toLocal(F.from) + '"></label>' +
-    '<label class="sub" style="display:block">To (blank: now)<input type="datetime-local" id="evTo" value="' + toLocal(F.to) + '"></label>' +
-    '<div class="pr"><button type="button" class="btn primary" data-go>Apply</button></div>', (d) => {
+  openPop(btn, '<label class="sub" style="display:block">' + t('events.from', 'From') + '<input type="datetime-local" id="evFrom" value="' + toLocal(F.from) + '"></label>' +
+    '<label class="sub" style="display:block">' + t('events.to_blank', 'To (blank: now)') + '<input type="datetime-local" id="evTo" value="' + toLocal(F.to) + '"></label>' +
+    '<div class="pr"><button type="button" class="btn primary" data-go>' + t('events.apply','Apply') + '</button></div>', (d) => {
     d.querySelector('[data-go]').onclick = () => {
       const a = d.querySelector('#evFrom').value, b = d.querySelector('#evTo').value;
       F.from = a ? Math.floor(new Date(a).getTime() / 1000) : 0; F.to = b ? Math.floor(new Date(b).getTime() / 1000) : 0;
-      if (F.to && F.from && F.to < F.from) { toast('The end is before the start', { kind: 'err' }); return; }
+      if (F.to && F.from && F.to < F.from) { toast(t('events.end_before_start','The end is before the start'), { kind: 'err' }); return; }
       F.range = (F.from || F.to) ? 'custom' : ''; F.ev = ''; closePop(); filtersChanged();
     };
   });
 }
 function morePopup(btn) {
-  openPop(btn, '<label title="Also show motion AI checked and found nothing that counts in, on cameras set to show only events AI confirms"><input type="checkbox" data-m="all"' + (F.all ? ' checked' : '') + '> Show motion AI did not confirm too</label><button type="button" class="mi" data-m="save">Save these filters...</button><button type="button" class="mi" data-m="zip">Export ZIP of these events</button><button type="button" class="mi" data-m="rd">Mark all shown as looked at</button>', (d) => {
+  openPop(btn, '<label title="' + t('events.show_all_tip', 'Also show motion AI checked and found nothing that counts in, on cameras set to show only events AI confirms') + '"><input type="checkbox" data-m="all"' + (F.all ? ' checked' : '') + '> ' + t('events.show_all', 'Show motion AI did not confirm too') + '</label><button type="button" class="mi" data-m="save">' + t('events.save_filters', 'Save these filters...') + '</button><button type="button" class="mi" data-m="zip">' + t('events.export_zip', 'Export ZIP of these events') + '</button><button type="button" class="mi" data-m="rd">' + t('events.mark_all_read', 'Mark all shown as looked at') + '</button>', (d) => {
     d.querySelector('[data-m=all]').onchange = (ev) => { F.all = ev.target.checked; F.ev = ''; closePop(); filtersChanged(); };
     d.querySelector('[data-m=save]').onclick = () => { closePop(); saveFiltersPopup(btn); };
     d.querySelector('[data-m=zip]').onclick = async () => {
@@ -948,7 +949,7 @@ function morePopup(btn) {
       if (!needsClient()) { window.location.href = '/api/export?zip=1' + buildFilterQuery(); return; }
       // The server cannot apply this filter, so export exactly the matching events loaded in the list.
       const ids = items.map(e => e.id), BATCH = 200;
-      if (!ids.length) { toast('No events to export', { kind: 'err' }); return; }
+      if (!ids.length) { toast(t('events.no_events_export','No events to export'), { kind: 'err' }); return; }
       for (let i = 0; i < ids.length; i += BATCH) {
         downloadUrl('/api/export?ids=' + ids.slice(i, i + BATCH).map(enc).join(','));
         if (i + BATCH < ids.length) await new Promise(r => setTimeout(r, 1500));
@@ -985,7 +986,7 @@ async function runSmart() {
   const [a, b] = rangeBounds();
   if (a) p += '&since=' + a;
   if (b) p += '&until=' + b;
-  showSmart('<p class="empty">Searching...</p>');
+  showSmart('<p class="empty">' + t('events.searching', 'Searching...') + '</p>');
   let r;
   try { r = await api('/api/smart/search?q=' + enc(q) + p); } catch (e) {
     if (gen2 !== smartGen) return;
@@ -994,14 +995,14 @@ async function runSmart() {
   }
   if (gen2 !== smartGen) return;
   const res = r.results.filter(x => F.cams.length < 2 || F.cams.includes(x.camera));
-  if (!res.length) { showSmart('<p class="empty">Nothing found for "' + esc(q) + '". Try other words, more cameras or more days. <button class="btn" data-smclose>Back to the list</button></p>'); wireSmartClose(); return; }
+  if (!res.length) { showSmart('<p class="empty">' + t('events.smart_none', 'Nothing found for "{q}". Try other words, more cameras or more days.', { q: esc(q) }) + ' <button class="btn" data-smclose>' + t('events.back_to_list', 'Back to the list') + '</button></p>'); wireSmartClose(); return; }
   const best = res[0].score;
-  const h = '<div class="smq-head"><b>' + res.length + '</b> event' + (res.length === 1 ? '' : 's') + ' that look most like "' + esc(q) + '", best first <button class="btn" data-smclose>Back to the list</button></div><div class="smq-grid">' +
+  const h = '<div class="smq-head"><b>' + res.length + '</b> ' + t('events.smart_found', '{n, plural, one {event} other {events}} that look most like "{q}", best first', { n: res.length, q: esc(q) }) + ' <button class="btn" data-smclose>' + t('events.back_to_list', 'Back to the list') + '</button></div><div class="smq-grid">' +
     res.map((x, i) => {
       const bx = x.box;
       // How close to the best match (the first is 100%).
       const rel = Math.max(0, Math.round(100 - (best - x.score) * 1000));
-      return '<button class="smq-card" data-i="' + i + '" title="Open ' + esc(x.camera) + ' at this moment"><span class="smq-pic"><img loading="lazy" src="/api/smart/pic/' + x.pic + '" alt="">' +
+      return '<button class="smq-card" data-i="' + i + '" title="' + t('events.open_cam', 'Open {camera} at this moment', { camera: esc(x.camera) }) + '"><span class="smq-pic"><img loading="lazy" src="/api/smart/pic/' + x.pic + '" alt="">' +
         (bx ? '<span class="smq-box" style="left:' + (bx[0] * 100) + '%;top:' + (bx[1] * 100) + '%;width:' + (bx[2] * 100) + '%;height:' + (bx[3] * 100) + '%"></span>' : '') + '</span>' +
         '<span class="smq-meta"><b>' + esc(x.camera) + '</b><small>' + esc(fmtAt(x.at_ms)) + ' · ' + rel + '%</small></span></button>';
     }).join('') + '</div>';
@@ -1010,8 +1011,8 @@ async function runSmart() {
   $('smartResults').querySelectorAll('[data-i]').forEach(el => { el.onclick = () => {
     const x = res[+el.dataset.i];
     const cam = state.cams.find(c => c.name === x.camera);
-    if (!cam) { toast(x.camera + ' is no longer a camera here'); return; }
-    if (cam.remote) { toast(x.camera + ': its recordings are on ' + ((cam.remote && cam.remote.site) || 'the other server')); return; }
+    if (!cam) { toast(t('events.cam_gone', '{camera} is no longer a camera here', { camera: x.camera })); return; }
+    if (cam.remote) { toast(t('events.cam_remote', '{camera}: its recordings are on {site}', { camera: x.camera, site: ((cam.remote && cam.remote.site) || t('events.other_server', 'the other server')) })); return; }
     showTab('live');
     import('./livetl.js').then(m => m.openAt(cam.id, x.at_ms));
   }; });

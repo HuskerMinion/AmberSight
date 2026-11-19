@@ -1275,6 +1275,22 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 backoff = 3;
             }
             let why = tail_summary(&main_text);
+            if !got_frames && ffmpeg_refused_password(&main_text) {
+                // A clear refusal of the sign-in: not asked again until the
+                // camera's settings are saved (that replaces this worker),
+                // since cameras lock an account out after a few.
+                let msg = "the camera refused the user name or password (RTSP 401/403). Not asking again until the camera's settings are saved";
+                warn!("camera '{}': {msg}", cfg.name);
+                {
+                    let mut st = handle.state.write().unwrap();
+                    st.last_error = Some(msg.to_string());
+                    st.last_error_at = Some(Utc::now().timestamp());
+                }
+                while handle.active.load(Ordering::Relaxed) {
+                    thread::sleep(std::time::Duration::from_millis(500));
+                }
+                continue;
+            }
             let reason = handle.state.read().unwrap().last_error.clone().unwrap_or_else(|| ended_text(why.as_deref()));
             crate::camreport::note_end(&cfg.name, &reason, handle.state.read().unwrap().frames > frames_at_start);
             warn!("camera '{}': {}, retrying in {}s", cfg.name, reason, backoff);
@@ -1290,6 +1306,14 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
         }
     }
+}
+
+/// ffmpeg's own words for an RTSP server refusing the sign-in it sent
+/// (ffmpeg answers a digest/basic challenge by itself before saying this).
+/// Timeouts, refused connections and 5xx are not it.
+pub(super) fn ffmpeg_refused_password(text: &str) -> bool {
+    let l = text.to_ascii_lowercase();
+    ["describe failed: 401", "describe failed: 403", "server returned 401 unauthorized", "server returned 403 forbidden"].iter().any(|p| l.contains(p))
 }
 
 /// After motion (the sub stream) stops, how long the main-stream recorder
@@ -2008,6 +2032,8 @@ pub(super) fn process_frame(
             });
             if let Some(d) = best {
                 handle.state.write().unwrap().ai_last = Some((d.label.clone(), d.score, Utc::now().timestamp_millis()));
+                // Camera actions next to alerts (spotlight, siren): only on what the AI itself saw now.
+                crate::controls::automation::on_confirmed(engine, handle.id, cfg, &d.label, armed);
             }
         }
         // A person: look for named faces in the live pictures right away.
@@ -2662,5 +2688,25 @@ mod recording_filter_tests {
         let j = a.join(" ");
         assert!(j.contains("-c copy") && !j.contains("-vf"), "{j}");
         assert_eq!(a.last().map(String::as_str), Some("out%06d.mp4"));
+    }
+}
+
+#[cfg(test)]
+mod refused_password_tests {
+    use super::ffmpeg_refused_password;
+
+    #[test]
+    fn only_a_clear_refusal_counts() {
+        assert!(ffmpeg_refused_password("[rtsp @ 0x1] method DESCRIBE failed: 401 Unauthorized\nError opening input files: Server returned 401 Unauthorized (authorization failed)\n"));
+        assert!(ffmpeg_refused_password("[rtsp @ 0x1] method DESCRIBE failed: 403 Forbidden\n"));
+        for t in [
+            "[rtsp @ 0x1] Connection to tcp://192.0.2.5:554?timeout=0 failed: Connection refused\n",
+            "[rtsp @ 0x1] method DESCRIBE failed: 503 Service Unavailable\n",
+            "Error opening input files: Connection timed out\n",
+            "[rtsp @ 0x1] method DESCRIBE failed: 404 Not Found\n",
+            "",
+        ] {
+            assert!(!ffmpeg_refused_password(t), "{t}");
+        }
     }
 }

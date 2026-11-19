@@ -160,6 +160,13 @@ impl TriggeredRecorder {
         self.writer.is_some()
     }
 
+    /// Nothing is being recorded at a keyframe at `ticks`: no clip is open,
+    /// or its post-roll is over (this keyframe would end it). The clean point
+    /// to end the stream at without cutting an event short.
+    pub fn idle_at(&self, ticks: i64) -> bool {
+        self.writer.is_none() || self.record_until.is_some_and(|u| ticks >= u)
+    }
+
     /// Start (or extend) a recording: it runs until `post_roll` seconds after
     /// the most recent trigger. Call repeatedly while motion continues.
     pub fn trigger(&mut self) -> std::io::Result<()> {
@@ -309,6 +316,25 @@ mod tests {
         let before = trigger_ms - s.start_ms;
         assert!((2800..=3100).contains(&before), "starts {before} ms before the trigger");
         assert!(!r.is_recording());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_only_once_the_post_roll_is_over() {
+        let dir = std::env::temp_dir().join(format!("amber-idle-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = TriggeredRecorder::new(dir.clone(), "cam", vec![video_track()], 60, 1, 2, 90000);
+        for i in 0..20 {
+            r.push(vframe(i)).unwrap();
+        }
+        assert!(r.idle_at(20 * TS / 10), "nothing triggered yet");
+        r.trigger().unwrap(); // at 1.9 s: records until 3.9 s
+        for i in 20..30 {
+            r.push(vframe(i)).unwrap();
+        }
+        assert!(r.is_recording());
+        assert!(!r.idle_at(30 * TS / 10), "a clip is being written");
+        assert!(r.idle_at(40 * TS / 10), "the post-roll is over at 4 s");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -8,6 +8,7 @@
 // Writes are debounced and send only the keys that changed (PATCH), so two open
 // pages cannot undo each other's changes to different settings.
 
+import { setLang, storedLang, setClock, storedClock } from './i18n.js';
 import { api, enc } from './core.js';
 import { paneKey } from './split.js';
 
@@ -28,6 +29,14 @@ export let serverOk = true;
 
 export async function load() {
   try { P = await api('/api/ui/prefs'); serverOk = true; } catch (e) { P = {}; serverOk = false; }
+  // The account's language choice wins over this browser's (compare with what is stored, not with the
+  // language in use, so a missing pack can't cause a reload loop).
+  // Odd values (not a string, an unknown clock) count as no choice, so they can't keep reloading the page.
+  const has = (k) => serverOk && P && typeof P === 'object' && Object.prototype.hasOwnProperty.call(P, k);
+  const plang = has('lang') && typeof P.lang === 'string' && P.lang ? P.lang : null;
+  const pclock = has('clock') && (P.clock === '12' || P.clock === '24') ? P.clock : null;
+  if (has('lang') && plang !== storedLang()) setLang(plang);
+  else if (has('clock') && pclock !== storedClock()) setClock(pclock);
   if (!P || typeof P !== 'object' || Array.isArray(P)) P = {};
   await loadOrders();
 }

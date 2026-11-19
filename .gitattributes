@@ -1,0 +1,2 @@
+# Language packs are pinned by the SHA-256 of their exact bytes (build.rs): never convert line ends.
+lang/*.json -text

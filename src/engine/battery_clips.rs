@@ -312,7 +312,7 @@ mod tests {
     use super::*;
 
     fn f(key: bool, micros: u32) -> Frame {
-        Frame { annexb: vec![0, 0, 0, 1, 0x65], key, micros }
+        Frame { annexb: vec![0, 0, 0, 1, 0x65], key, micros, ..Default::default() }
     }
 
     #[test]

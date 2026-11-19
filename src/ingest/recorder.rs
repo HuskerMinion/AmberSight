@@ -428,6 +428,13 @@ impl SegmentWriter {
     /// Add a video frame (length-prefixed NALs), in decode order: `ticks` is
     /// its decode time in ticks of the video timescale, `cts` how much later
     /// it is shown (B-frames; 0 otherwise).
+    /// A keyframe at `ticks` would start the next segment (the current one
+    /// is full): the clean point to end a recording at.
+    pub fn would_rotate(&self, ticks: i64) -> bool {
+        let t = self.tracks[self.video].secs(ticks);
+        self.file.as_ref().is_some_and(|f| t - f.start >= self.segment_seconds - 0.001)
+    }
+
     pub fn push_video_cts(&mut self, ticks: i64, cts: i32, data: Vec<u8>, is_key: bool) -> std::io::Result<()> {
         let v = self.video;
         self.anchor_track(v, ticks);
@@ -726,6 +733,10 @@ enum Reader {
     /// `MediaItem::Video` frames arrive on a channel; the handle stops preview
     /// when dropped. Video only (no audio track yet).
     Baichuan(super::baichuan::client::PreviewHandle),
+    /// An always-on Reolink over Baichuan TCP (the camera's `connect`
+    /// setting): converted video and AAC audio arrive on a channel; the
+    /// handle stops the stream when dropped.
+    Wired(super::baichuan::wired::WiredPreview),
 }
 
 /// A playing stream (RTSP, or HTTP-FLV) with its video and optional audio.
@@ -745,10 +756,13 @@ pub struct OpenStream {
     pub tap_audio: bool,
     /// What the current video parameters amount to (see `material_key`).
     video_key: Option<MaterialKey>,
-    /// Decode times for RTSP video (RTP gives presentation times only).
-    video_dts: super::dts::DtsFromPts,
+    /// Decode times for RTSP video (RTP gives presentation times only),
+    /// with jittery camera stamps smoothed (see dts.rs).
+    video_dts: super::dts::RtspVideoTimes,
     /// `video_dts` has been told what the codec configuration allows.
     video_dts_checked: bool,
+    /// The log said this stream's video timestamps are being smoothed.
+    smooth_noted: bool,
     /// RTSP: jumps of the camera's RTP clock are taken out (video, audio),
     /// timed against arrival on this clock.
     jumps: [super::clockjump::ClockJump; 2],
@@ -859,6 +873,10 @@ impl OpenStream {
                             // RTP timestamps are presentation times.
                             let pts = unjump(&mut self.jumps[0], self.opened_at, "video", f.timestamp());
                             let (ticks, cts) = self.video_dts.push(pts, f.is_random_access_point());
+                            if !self.smooth_noted && self.video_dts.smoothing() {
+                                self.smooth_noted = true;
+                                tracing::info!("camera video timestamps jitter; smoothing them (within 50 ms of the camera's time)");
+                            }
                             let item = MediaItem::Video {
                                 ticks,
                                 cts,
@@ -955,6 +973,16 @@ impl OpenStream {
                     let item = h.rx.recv().await?;
                     return Some(Ok(self.settle_params(item)));
                 }
+                Reader::Wired(h) => {
+                    let item = match h.rx.recv().await? {
+                        Ok(i) => i,
+                        Err(e) => return Some(Err(anyhow::anyhow!(e))),
+                    };
+                    if matches!(item, MediaItem::Audio { .. }) && !self.use_audio && !self.tap_audio {
+                        continue;
+                    }
+                    return Some(Ok(self.settle_params(item)));
+                }
             }
         }
     }
@@ -1018,6 +1046,7 @@ impl OpenStream {
                 }))
             }
             Reader::Baichuan(h) => Ok(h.video_params()),
+            Reader::Wired(h) => Ok(h.video_params()),
         }
     }
 
@@ -1034,6 +1063,7 @@ impl OpenStream {
             }
             Reader::Flv(f) => f.audio_config().map(|asc| AudioCodec::Aac { config: asc.to_vec() }),
             Reader::Baichuan(_) => None,
+            Reader::Wired(h) => h.audio_config().map(|config| AudioCodec::Aac { config }),
         }
     }
 
@@ -1074,6 +1104,15 @@ impl OpenStream {
                 })
             }
             Reader::Baichuan(_) => None,
+            Reader::Wired(h) => {
+                let asc = h.audio_config()?;
+                let (rate, _) = super::flv::parse_asc(&asc)?;
+                Some(AudioParams {
+                    codec: format!("mp4a.40.{}", asc[0] >> 3),
+                    sample_entry: super::flv::aac_sample_entry(&asc)?,
+                    clock_rate: rate,
+                })
+            }
         }
     }
 }
@@ -1102,13 +1141,27 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
         use_audio: with_audio,
         tap_audio: false,
         video_key: None,
-        video_dts: super::dts::DtsFromPts::new(90_000),
+        video_dts: super::dts::RtspVideoTimes::new(90_000),
         video_dts_checked: false,
+        smooth_noted: false,
         jumps: Default::default(),
         opened_at: std::time::Instant::now(),
         udp_auto: None,
         had_video: false,
     };
+    if let Some(t) = src.baichuan.clone() {
+        // An always-on Reolink over Baichuan TCP: one shared session per
+        // device (see baichuan/wired.rs); signing in blocks, so off this runtime.
+        let (user, pass) = (src.username.clone(), src.password.clone());
+        let h = tokio::task::spawn_blocking(move || {
+            let c = super::baichuan::wired::client_for(&t.host, t.port, &user, &pass, &t.owner)?;
+            c.start(t.channel, t.stream, &t.owner)
+        })
+        .await
+        .map_err(|e| anyhow!("Baichuan session: {e}"))?
+        .map_err(|e| anyhow!(e))?;
+        return Ok(opened(Reader::Wired(h)));
+    }
     if super::baichuan::is_baichuan_url(&src.url) {
         // The persistent session is created and kept connected by the event
         // poller (engine::camera_events); here we only ask it for frames.

@@ -3,7 +3,8 @@
 // and adding a camera. PUT /api/cameras/:id merges, so fields this window does not
 // show (zones, ONVIF port, folder ...) keep their stored values.
 
-import { state, bus, api, esc, ic, msgDlg, toast, openDlg, raiseDlg, refreshCameras, camFromId, backLayer, overlaysChanged, topDlgOpen, paletteOpen, can } from './core.js';
+import { t } from './i18n.js';
+import { state, bus, api, esc, ic, msgDlg, toast, openDlg, raiseDlg, refreshCameras, camFromId, backLayer, overlaysChanged, topDlgOpen, paletteOpen, can, objName } from './core.js';
 
 // An operator (not an admin) with the camera_detection right edits only a camera's detection and
 // alert settings: the panel shows those sections alone and saves only these keys, those that changed.
@@ -42,10 +43,11 @@ import { openZoneEditor, zonesSummary } from './zones.js';
 import { MOTION_PRESETS } from './sp_kit.js';
 import { armStrip, loadArmData } from './armstrip.js';
 import { tamperHtml, readTamper, wireTamper, unusualHtml, readUnusual, wireUnusual, summaries as watchSummaries } from './cam_watch.js';
+import { controlsHtml, readControls, wireControls, summary as controlsSummary } from './cam_controls.js';
 
 
 const sel = (k, opts, val) => '<select data-k="' + k + '">' + opts.map(([v, t]) => '<option value="' + v + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>';
-const onoff = (k, val) => sel(k, [['1', 'on'], ['0', 'off']], val ? '1' : '0');
+const onoff = (k, val) => sel(k, [['1', t('cameras.on_lc', 'on')], ['0', t('cameras.off_lc', 'off')]], val ? '1' : '0');
 const field = (label, input, hint) => '<label class="cs-f"><span>' + label + '</span>' + input + '</label>' + (hint ? '<div class="hint">' + hint + '</div>' : '');
 const text = (k, val, extra) => '<input data-k="' + k + '" value="' + esc(val == null ? '' : val) + '" ' + (extra || '') + '>';
 
@@ -71,14 +73,14 @@ function buildLocalUrl(kind, name, q) {
   return kind + '://' + encPart(name) + (qs ? '?' + qs : '');
 }
 
-const LOCAL_HINT = 'Raw video is encoded to H.264 for recording, which uses CPU. On Windows, the AmberSight service runs in session 0 and cannot capture the screen; some cameras (virtual ones especially) also refuse to open there. Run AmberSight in your own session (<code>ambersight run</code>) for those.';
+const LOCAL_HINT = t('cameras.local_hint', 'Raw video is encoded to H.264 for recording, which uses CPU. On Windows, the AmberSight service runs in session 0 and cannot capture the screen; some cameras (virtual ones especially) also refuse to open there. Run AmberSight in your own session (<code>ambersight run</code>) for those.');
 
 // Pan/tilt/zoom: the camera's ONVIF port, found by AmberSight when left empty.
 function onvifHtml(c) {
   return '<div class="cs-onvif" data-onvif>' +
-    field('ONVIF port', text('onvif_port', c.onvif_port, 'type="number" min="1" max="65535" placeholder="find automatically"'), 'Lets AmberSight move a camera that can pan, tilt or zoom. Leave empty to let it look for the port itself.') +
-    '<div class="cs-onvif-st" data-onvif-st role="status" aria-live="polite">Checking...</div>' +
-    '<div class="cs-onvif-act"><button type="button" class="btn" data-onvif-save hidden>Save</button><button type="button" class="btn" data-onvif-again>Look for PTZ again</button></div></div>';
+    field(t('cameras.onvif_port', 'ONVIF port'), text('onvif_port', c.onvif_port, 'type="number" min="1" max="65535" placeholder="' + t('cameras.find_automatically', 'find automatically') + '"'), t('cameras.onvif_hint', 'Lets AmberSight move a camera that can pan, tilt or zoom. Leave empty to let it look for the port itself.')) +
+    '<div class="cs-onvif-st" data-onvif-st role="status" aria-live="polite">' + t('cameras.checking', 'Checking...') + '</div>' +
+    '<div class="cs-onvif-act"><button type="button" class="btn" data-onvif-save hidden>' + t('cameras.save', 'Save') + '</button><button type="button" class="btn" data-onvif-again>' + t('cameras.look_ptz_again', 'Look for PTZ again') + '</button></div></div>';
 }
 
 function wireOnvif(d, c, ctx) {
@@ -89,10 +91,10 @@ function wireOnvif(d, c, ctx) {
   let found = null, gone = false, timer = 0;
   const paint = (r) => {
     found = null; save.hidden = true;
-    if (r.state === 'configured') st.textContent = 'ONVIF port ' + r.configured + ' is set.';
-    else if (r.state === 'found') { found = r.found; st.textContent = 'ONVIF found on port ' + r.found + '. Save it to keep using it.'; save.hidden = false; save.textContent = 'Save port ' + r.found; }
-    else if (r.state === 'searching') st.textContent = 'Looking for ONVIF on this camera...';
-    else if (r.state === 'none') st.textContent = 'This camera doesn\'t offer ONVIF, so AmberSight can\'t move it. Some firmware has an ONVIF switch in the camera\'s own app.';
+    if (r.state === 'configured') st.textContent = t('cameras.onvif_set', 'ONVIF port {configured} is set.', { configured: r.configured });
+    else if (r.state === 'found') { found = r.found; st.textContent = t('cameras.onvif_found', 'ONVIF found on port {found}. Save it to keep using it.', { found: r.found }); save.hidden = false; save.textContent = t('cameras.save_port', 'Save port {found}', { found: r.found }); }
+    else if (r.state === 'searching') st.textContent = t('cameras.onvif_searching', 'Looking for ONVIF on this camera...');
+    else if (r.state === 'none') st.textContent = t('cameras.onvif_unavailable', "This camera doesn't offer ONVIF, so AmberSight can't move it. Some firmware has an ONVIF switch in the camera's own app.");
     else st.textContent = '';
     again.hidden = r.state === 'na';
   };
@@ -106,9 +108,9 @@ function wireOnvif(d, c, ctx) {
     } catch (e) { if (!gone) st.textContent = ''; }
   };
   again.onclick = async () => {
-    again.disabled = true; st.textContent = 'Looking for ONVIF on this camera...'; save.hidden = true;
+    again.disabled = true; st.textContent = t('cameras.onvif_searching', 'Looking for ONVIF on this camera...'); save.hidden = true;
     try { paint(await api('/api/cameras/' + c.id + '/onvif/find', { json: {} })); refreshCameras(); }
-    catch (e) { st.textContent = 'Could not search just now.'; }
+    catch (e) { st.textContent = t('cameras.onvif_could_not_search', 'Could not search just now.'); }
     again.disabled = false;
   };
   save.onclick = async () => {
@@ -118,10 +120,10 @@ function wireOnvif(d, c, ctx) {
       await api('/api/cameras/' + c.id, { method: 'PUT', json: { onvif_port: found } });
       inp.value = found;
       ctx.rebaseEls([inp]);
-      toast('Saved', { kind: 'ok' });
+      toast(t('cameras.saved', 'Saved'), { kind: 'ok' });
       refreshCameras();
       load();
-    } catch (e) { st.textContent = 'Could not save: ' + (e.message || e); }
+    } catch (e) { st.textContent = t('cameras.could_not_save', 'Could not save: {error}', { error: e.message || e }); }
     save.disabled = false;
   };
   load();
@@ -160,17 +162,17 @@ function decodeNow(c) {
   const x = c.decode;
   if (!x || !x.stream) return '';
   const size = x.width && x.height ? ' ' + x.width + 'x' + x.height : '';
-  return 'Decoding now: ' + (x.on === 'gpu' ? 'on the graphics card (' + esc(x.gpu || '') + ')' : 'on the processor') + ', ' + esc(x.stream) + ' stream' + esc(size) + (x.codec ? ' ' + esc(x.codec) : '') + '.' +
+  return t('cameras.decoding_now', 'Decoding now: {where}, {stream} stream{size}{codec}.', { where: x.on === 'gpu' ? t('cameras.on_gpu', 'on the graphics card ({gpu})', { gpu: esc(x.gpu || '') }) : t('cameras.on_processor', 'on the processor'), stream: esc(x.stream), size: esc(size), codec: x.codec ? ' ' + esc(x.codec) : '' }) +
     (x.note ? ' ' + esc(x.note.charAt(0).toUpperCase() + x.note.slice(1)) + '.' : '');
 }
 function hwHtml(c, multi) {
   const h = hwParse(c.hwaccel);
-  const opts = [['auto', 'Auto (server setting)'], ['off', 'Off (processor)'], ['cuda', 'NVIDIA (NVDEC)'], ['vaapi', 'VAAPI'], ['qsv', 'Quick Sync (QSV)']];
+  const opts = [['auto', t('cameras.hw_auto', 'Auto (server setting)')], ['off', t('cameras.hw_off', 'Off (processor)')], ['cuda', 'NVIDIA (NVDEC)'], ['vaapi', 'VAAPI'], ['qsv', 'Quick Sync (QSV)']];
   if (h.other) opts.push([h.kind, h.kind]);
-  const nodeOpts = '<option value="">first one that works</option>' + (h.node ? '<option value="' + esc(h.node) + '" selected>' + esc(h.node) + '</option>' : '');
-  return '<div data-hwbox>' + field('Hardware decoding', sel('hw_kind', opts, h.kind),
-    'How motion detection decodes the picture. Auto follows Settings, System, Hardware (by default NVIDIA first, then Intel Quick Sync, then VAAPI, among the ways that passed a test decode at start; else the processor). A way that fails later is replaced at once and tried again later.') +
-    '<div data-hwnode hidden>' + field('Graphics card', '<select data-k="hw_node">' + nodeOpts + '</select>') + '</div>' +
+  const nodeOpts = '<option value="">' + t('cameras.first_that_works', 'first one that works') + '</option>' + (h.node ? '<option value="' + esc(h.node) + '" selected>' + esc(h.node) + '</option>' : '');
+  return '<div data-hwbox>' + field(t('cameras.hardware_decoding', 'Hardware decoding'), sel('hw_kind', opts, h.kind),
+    t('cameras.hw_decode_help', 'How motion detection decodes the picture. Auto follows Settings, System, Hardware (by default NVIDIA first, then Intel Quick Sync, then VAAPI, among the ways that passed a test decode at start; else the processor). A way that fails later is replaced at once and tried again later.', {})) +
+    '<div data-hwnode hidden>' + field(t('cameras.graphics_card', 'Graphics card'), '<select data-k="hw_node">' + nodeOpts + '</select>') + '</div>' +
     (multi ? '' : '<div class="hint" data-hwnow>' + decodeNow(c) + '</div>') + '</div>';
 }
 function wireHw(d, c) {
@@ -185,10 +187,10 @@ function wireHw(d, c) {
     nodeSel.dataset.loaded = '1';
     const keep = nodeSel.value;
     const k = kind.value === 'qsv' ? 'qsv' : 'vaapi';
-    nodeSel.innerHTML = '<option value="">first one that works</option>' + nodes.map(n => {
+    nodeSel.innerHTML = '<option value="">' + t('cameras.first_that_works', 'first one that works') + '</option>' + nodes.map(n => {
       const ts = (n.tests || []).filter(t => t.kind === k);
       const ok = ts.filter(t => t.ok).map(t => t.codec === 'hevc' ? 'H.265' : 'H.264');
-      const how = !n.tests ? '' : !ts.length ? ' (not tested)' : ok.length ? ' (decodes ' + ok.join(' and ') + ')' : ' (failed the test)';
+      const how = !n.tests ? '' : !ts.length ? ' ' + t('cameras.not_tested', '(not tested)') : ok.length ? ' ' + (ok.length > 1 ? t('cameras.decodes_two', '(decodes {a} and {b})', { a: ok[0], b: ok[1] }) : t('cameras.decodes_one', '(decodes {a})', { a: ok[0] })) : ' ' + t('cameras.failed_test', '(failed the test)');
       return '<option value="' + esc(n.path) + '"' + (n.path === keep ? ' selected' : '') + '>' + esc(n.path + (n.driver ? ' ' + n.driver : '') + how) + '</option>';
     }).join('');
     if (keep && !nodes.some(n => n.path === keep)) nodeSel.insertAdjacentHTML('beforeend', '<option value="' + esc(keep) + '" selected>' + esc(keep) + '</option>');
@@ -202,10 +204,10 @@ const NET_RE = /^(rtsps?|https?):\/\//i;
 function subWarnHtml(c) {
   const x = c.decode;
   if (c.sub_url || !x || !x.heavy_main || !NET_RE.test(c.url || '') || c.on_demand) return '';
-  if (c.no_sub_ok) return '<div class="hint" data-subok>Not noting the missing sub stream for this camera. <button type="button" class="btn link" data-subnote="1">Note it again</button></div>';
+  if (c.no_sub_ok) return '<div class="hint" data-subok>' + t('cameras.not_noting_sub', 'Not noting the missing sub stream for this camera.') + ' <button type="button" class="btn link" data-subnote="1">' + t('cameras.note_it_again', 'Note it again') + '</button></div>';
   const m = x.main || x;
-  return '<div class="cs-subwarn" data-subwarn role="status"><p>' + ic('alert') + ' Motion is decoding the full-size stream (' + esc(m.width + 'x' + m.height + ' ' + (m.codec || '')) + ') on the processor. Adding the camera\'s sub stream cuts CPU use a lot.</p>' +
-    '<div class="cs-subwarn-act"><button type="button" class="btn" data-subfind>Find the sub stream</button><button type="button" class="btn" data-subnote="0" title="For a camera that has only one stream">Don\'t warn about this camera</button></div><div data-subres></div></div>';
+  return '<div class="cs-subwarn" data-subwarn role="status"><p>' + ic('alert') + ' ' + t('cameras.motion_decoding', "Motion is decoding the full-size stream ({size}) on the processor. Adding the camera's sub stream cuts CPU use a lot.", { size: esc(m.width + 'x' + m.height + ' ' + (m.codec || '')) }) + '</p>' +
+    '<div class="cs-subwarn-act"><button type="button" class="btn" data-subfind>' + t('cameras.find_sub_stream', 'Find the sub stream') + '</button><button type="button" class="btn" data-subnote="0" title="' + t('cameras.only_one_stream', 'For a camera that has only one stream') + '">' + t('cameras.dont_warn', "Don't warn about this camera") + '</button></div><div data-subres></div></div>';
 }
 // "Don't warn about this camera" / "Note it again": saved at once (no_sub_ok), nothing else.
 function wireSubNote(d, c) {
@@ -214,10 +216,10 @@ function wireSubNote(d, c) {
       const ok = b.dataset.subnote === '0';
       b.disabled = true;
       try { await api('/api/cameras/' + c.id, { method: 'PUT', json: { no_sub_ok: ok } }); }
-      catch (e) { b.disabled = false; toast('Could not save: ' + (e.message || e)); return; }
+      catch (e) { b.disabled = false; toast(t('cameras.could_not_save', 'Could not save: {error}', { error: e.message || e })); return; }
       const box = b.closest('[data-subwarn], [data-subok]');
-      if (box) box.outerHTML = '<div class="hint">' + (ok ? 'Status no longer notes the missing sub stream for this camera.' : 'Status notes the missing sub stream again.') + '</div>';
-      toast('Saved', { kind: 'ok' });
+      if (box) box.outerHTML = '<div class="hint">' + (ok ? t('cameras.status_no_longer_notes', 'Status no longer notes the missing sub stream for this camera.', {}) : t('cameras.status_notes_again', 'Status notes the missing sub stream again.', {})) + '</div>';
+      toast(t('cameras.saved', 'Saved'), { kind: 'ok' });
       refreshCameras();
     };
   });
@@ -227,31 +229,31 @@ function wireSubFind(d, c, ctx) {
   if (!box) return;
   const btn = box.querySelector('[data-subfind]'), res = box.querySelector('[data-subres]');
   btn.onclick = async () => {
-    btn.disabled = true; res.textContent = 'Looking for the sub stream (this can take a few seconds)...';
+    btn.disabled = true; res.textContent = t('cameras.looking_sub_stream', 'Looking for the sub stream (this can take a few seconds)...', {});
     let r;
-    try { r = await api('/api/cameras/' + c.id + '/sub-suggest', { json: {} }); } catch (e) { res.textContent = 'Could not look just now: ' + (e.message || e); btn.disabled = false; return; }
+    try { r = await api('/api/cameras/' + c.id + '/sub-suggest', { json: {} }); } catch (e) { res.textContent = t('cameras.could_not_look_now', 'Could not look just now: {error}', { error: e.message || e }); btn.disabled = false; return; }
     btn.disabled = false;
     const list = r.suggestions || [];
-    if (!list.length) { res.textContent = 'No sub stream found. Look for "sub stream" or "substream" in the camera\'s manual, and enter its address above.'; return; }
-    res.innerHTML = list.map((x, i) => '<div class="cs-subcand"><code>' + esc(x.url) + '</code> <span class="muted">' + (x.from === 'onvif' ? 'from the camera (ONVIF)' : 'the usual address for this kind of camera') + (x.works ? '' : '; it did not play just now') + '</span>' +
-      (x.works ? ' <button type="button" class="btn" data-subuse="' + i + '">Use this sub stream</button>' : '') + '</div>').join('');
+    if (!list.length) { res.textContent = t('cameras.no_sub_stream_found', 'No sub stream found. Look for "sub stream" or "substream" in the camera\'s manual, and enter its address above.', {}); return; }
+    res.innerHTML = list.map((x, i) => '<div class="cs-subcand"><code>' + esc(x.url) + '</code> <span class="muted">' + (x.from === 'onvif' ? t('cameras.from_camera_onvif', 'from the camera (ONVIF)', {}) : t('cameras.usual_address', 'the usual address for this kind of camera', {})) + (x.works ? '' : t('cameras.not_played_now', '; it did not play just now', {})) + '</span>' +
+      (x.works ? ' <button type="button" class="btn" data-subuse="' + i + '">' + t('cameras.use_this_sub_stream', 'Use this sub stream') + '</button>' : '') + '</div>').join('');
     res.querySelectorAll('[data-subuse]').forEach(b => {
       b.onclick = () => {
         const u = list[Number(b.dataset.subuse)].url;
-        const dlg = openDlg('Use this sub stream?', '<p>Save <code>' + esc(u) + '</code> as the sub stream of ' + esc(c.name) + '? Motion detection and the Live grid then use it; recording keeps the main stream. The camera reconnects.</p>' +
-          '<div class="row"><button type="button" class="btn" data-no>Cancel</button><button type="button" class="primary" data-yes>Save</button></div>', true);
+        const dlg = openDlg(t('cameras.use_this_sub_stream_q', 'Use this sub stream?'), t('cameras.use_sub_stream_dialog', '<p>Save <code>{url}</code> as the sub stream of {name}? Motion detection and the Live grid then use it; recording keeps the main stream. The camera reconnects.</p>', { url: esc(u), name: esc(c.name) }) +
+          '<div class="row"><button type="button" class="btn" data-no>' + t('cameras.cancel', 'Cancel') + '</button><button type="button" class="primary" data-yes>' + t('cameras.save', 'Save') + '</button></div>', true);
         dlg.querySelector('[data-no]').onclick = () => dlg.__close();
         dlg.querySelector('[data-yes]').onclick = async (ev) => {
           ev.target.disabled = true;
           try { await api('/api/cameras/' + c.id, { method: 'PUT', json: { sub_url: u } }); }
-          catch (e) { ev.target.disabled = false; toast('Could not save the sub stream: ' + (e.message || e)); return; }
+          catch (e) { ev.target.disabled = false; toast(t('cameras.could_not_save_sub', 'Could not save the sub stream: {error}', { error: e.message || e })); return; }
           dlg.__close();
           addrSetSub(d, u);
           box.hidden = true;
           // Only what the PUT wrote is saved now; other edits in the section stay unsaved.
           addrRebaseSub(d);
           ctx.rebaseEls([d.querySelector('[data-k="sub_url"]')]);
-          toast('Saved. ' + c.name + ' now uses its sub stream for motion.', { kind: 'ok' });
+          toast(t('cameras.saved_sub_stream', 'Saved. {name} now uses its sub stream for motion.', { name: c.name }), { kind: 'ok' });
           refreshCameras();
         };
       };
@@ -264,7 +266,7 @@ function streamHtml(c, isNew) {
   if (c.capture) s.kind = 'helper';
   const net = s.kind === 'net';
   const q = s.q;
-  return field('Source', sel('src', [['net', 'Network camera (RTSP / HTTP)'], ['device', 'Local device (webcam or capture card)'], ['screen', 'Screen'], ['helper', 'Another computer (screen capture)'], ['push', 'Pushed stream (OBS, ffmpeg...)']], s.kind)) +
+  return field(t('cameras.source', 'Source'), sel('src', [['net', t('cameras.network_camera', 'Network camera (RTSP / HTTP)', {})], ['device', t('cameras.local_device', 'Local device (webcam or capture card)', {})], ['screen', t('cameras.screen', 'Screen', {})], ['helper', t('cameras.another_computer', 'Another computer (screen capture)', {})], ['push', t('cameras.pushed_stream', 'Pushed stream (OBS, ffmpeg...)', {})]], s.kind)) +
     helperHtml(c) +
     '<div data-src="net"' + (net ? '' : ' hidden') + '>' +
       addrHtml(c, isNew, net) +
@@ -272,32 +274,33 @@ function streamHtml(c, isNew) {
       (isNew || c.id == null ? '' : onvifHtml(c)) +
     '</div>' +
     '<div data-src="device"' + (s.kind === 'device' ? '' : ' hidden') + '>' +
-      field('Device', '<select data-k="dev"><option value="">loading...</option></select>') +
-      '<div data-devother hidden>' + field('Device name or path', text('dev_name', s.kind === 'device' ? s.name : '', 'placeholder="USB Video  or  /dev/video0" spellcheck="false"')) + '</div>' +
-      field('Size (optional)', text('dev_size', s.kind === 'device' ? q.size : '', 'placeholder="device default, e.g. 1920x1080" spellcheck="false"')) +
-      field('Frame rate (optional)', text('dev_fps', s.kind === 'device' ? q.fps : '', 'type="number" min="1" max="120" placeholder="device default"')) +
-      field('Audio input', '<select data-k="dev_audio"><option value="">none</option></select>') +
+      field(t('cameras.device', 'Device'), '<select data-k="dev"><option value="">' + t('cameras.loading_lc', 'loading...') + '</option></select>') +
+      '<div data-devother hidden>' + field(t('cameras.device_name_path', 'Device name or path', {}), text('dev_name', s.kind === 'device' ? s.name : '', 'placeholder="' + t('cameras.device_placeholder', 'USB Video  or  /dev/video0') + '" spellcheck="false"')) + '</div>' +
+      field(t('cameras.size_optional', 'Size (optional)', {}), text('dev_size', s.kind === 'device' ? q.size : '', 'placeholder="' + t('cameras.size_placeholder', 'device default, e.g. 1920x1080') + '" spellcheck="false"')) +
+      field(t('cameras.frame_rate_optional', 'Frame rate (optional)', {}), text('dev_fps', s.kind === 'device' ? q.fps : '', 'type="number" min="1" max="120" placeholder="' + t('cameras.device_default', 'device default') + '"')) +
+      field(t('cameras.audio_input', 'Audio input', {}), '<select data-k="dev_audio"><option value="">' + t('cameras.none_lc', 'none') + '</option></select>') +
     '</div>' +
     '<div data-src="screen"' + (s.kind === 'screen' ? '' : ' hidden') + '>' +
-      field('Monitor', text('scr_mon', s.kind === 'screen' ? s.name : '', 'type="number" min="0" placeholder="whole desktop"'), 'Blank captures the whole desktop. A number picks one monitor (0 = first; Windows).') +
-      field('Frame rate', text('scr_fps', s.kind === 'screen' ? (q.fps || 15) : 15, 'type="number" min="1" max="60"')) +
-      field('Region (optional)', text('scr_region', s.kind === 'screen' ? q.region : '', 'placeholder="x,y,width,height" spellcheck="false"')) +
+      field(t('cameras.monitor', 'Monitor'), text('scr_mon', s.kind === 'screen' ? s.name : '', 'type="number" min="0" placeholder="' + t('cameras.whole_desktop', 'whole desktop') + '"'), t('cameras.monitor_hint', 'Blank captures the whole desktop. A number picks one monitor (0 = first; Windows).')) +
+      field(t('cameras.frame_rate', 'Frame rate'), text('scr_fps', s.kind === 'screen' ? (q.fps || 15) : 15, 'type="number" min="1" max="60"')) +
+      field(t('cameras.region_optional', 'Region (optional)'), text('scr_region', s.kind === 'screen' ? q.region : '', 'placeholder="x,y,width,height" spellcheck="false"')) +
     '</div>' +
     '<div data-src="push"' + (s.kind === 'push' ? '' : ' hidden') + '>' +
-      field('Stream key', '<span class="cs-ovin"><input data-k="push_key" value="' + esc(s.kind === 'push' ? s.name : newKey()) + '" spellcheck="false" readonly><button type="button" class="cs-reset" data-newkey title="Make a new key (senders using the old one stop working)">New key</button></span>',
-        'The key is the password for sending to this camera. Keep it private.') +
+      field(t('cameras.stream_key', 'Stream key'), '<span class="cs-ovin"><input data-k="push_key" value="' + esc(s.kind === 'push' ? s.name : newKey()) + '" spellcheck="false" readonly><button type="button" class="cs-reset" data-newkey title="' + t('cameras.make_new_key', 'Make a new key (senders using the old one stop working)') + '">' + t('cameras.new_key', 'New key') + '</button></span>',
+        t('cameras.key_private', 'The key is the password for sending to this camera. Keep it private.')) +
       '<div class="cs-push" data-pushinfo></div>' +
       (isNew ? '' : '<div class="hint" data-pushstate>' + pushState(c) + '</div>') +
     '</div>' +
     '<div class="hint" data-localhint' + (s.kind === 'device' || s.kind === 'screen' ? '' : ' hidden') + '>' + LOCAL_HINT + '</div>' +
     '<div class="hint" data-devnote hidden></div>' +
-    (isNew ? '' : '<div class="hint">Receiving: ' + esc(c.ingest || 'unknown') + (c.ffmpeg_why ? '. Why: ' + esc(c.ffmpeg_why) + '.' : '') + '</div>' + reencodeHtml(c));
+    (isNew ? '' : '<div class="hint">' + (c.ffmpeg_why ? t('cameras.receiving_why', 'Receiving: {ingest}. Why: {why}.', { ingest: esc(c.ingest || t('cameras.unknown', 'unknown')), why: esc(c.ffmpeg_why) }) : t('cameras.receiving', 'Receiving: {ingest}', { ingest: esc(c.ingest || t('cameras.unknown', 'unknown')) })) + '</div>' + reencodeHtml(c)) +
+    (isNew || !c.via ? '' : '<div class="hint">' + (c.via_note ? t('cameras.connected_by_note', 'Connected by: {via}. {note}', { via: esc(c.via), note: esc(c.via_note) }) : t('cameras.connected_by', 'Connected by: {via}', { via: esc(c.via) })) + '</div>');
 }
 // The ffmpeg pipeline re-encodes the full-size recording (burned-in text, Direct copy off).
 function reencodeHtml(c) {
   const x = c.decode;
   if (!x || !x.reencode || !(c.ingest || '').startsWith('ffmpeg')) return '';
-  return '<div class="hint' + (x.reencode_hw ? '' : ' warn') + '" role="status">' + esc(x.reencode) + (x.encoder_note ? ' Not on the graphics card: ' + esc(x.encoder_note) + '.' : '') + '</div>';
+  return '<div class="hint' + (x.reencode_hw ? '' : ' warn') + '" role="status">' + esc(x.reencode) + (x.encoder_note ? ' ' + t('cameras.not_on_gpu', 'Not on the graphics card: {why}.', { why: esc(x.encoder_note) }) : '') + '</div>';
 }
 
 // A random stream key for a pushed camera (letters and digits only, URL-safe).
@@ -308,9 +311,9 @@ function newKey() {
 }
 function pushState(c) {
   const s = c.push_sender;
-  if (!s) return 'Waiting for a sender. Nothing is being received right now.';
+  if (!s) return t('cameras.waiting_sender', 'Waiting for a sender. Nothing is being received right now.');
   const m = Math.floor(s.seconds / 60);
-  return 'Receiving from ' + esc(s.from) + ' for ' + (m ? m + ' min' : s.seconds + ' s') + '.';
+  return t('cameras.receiving_from_for', 'Receiving from {from} for {time}.', { from: esc(s.from), time: m ? t('cameras.n_min', '{n} min', { n: m }) : s.seconds + ' s' });
 }
 // Where and how to send: OBS (RTMP) and ffmpeg (HTTPS) settings for this key.
 function drawPushInfo(d) {
@@ -321,15 +324,15 @@ function drawPushInfo(d) {
   const srv = (D && D.server) || {};
   const rtmp = srv.rtmp_port ? 'rtmp://' + host + ':' + srv.rtmp_port + '/live' : '';
   const https = location.origin + '/push/' + key;
-  const row = (label, val) => '<div class="cs-pushrow"><span>' + label + '</span><code>' + esc(val) + '</code><button type="button" class="cs-reset" data-copytext="' + esc(val) + '">Copy</button></div>';
+  const row = (label, val) => '<div class="cs-pushrow"><span>' + label + '</span><code>' + esc(val) + '</code><button type="button" class="cs-reset" data-copytext="' + esc(val) + '">' + t('cameras.copy', 'Copy') + '</button></div>';
   box.innerHTML =
-    '<div class="sec">OBS and other RTMP tools</div>' +
-    (rtmp ? row('Server', rtmp) + row('Stream key', key) : '<div class="hint">RTMP is turned off (rtmp_port = 0).</div>') +
-    '<div class="hint">In OBS: Settings, Stream, Service "Custom...", then paste these. Use H.264 video and AAC audio, with a keyframe every 2 seconds. RTMP is not encrypted: use it on your own network or over Tailscale.</div>' +
-    '<div class="sec">ffmpeg (over HTTPS)</div>' +
-    row('Address', https) +
-    row('Example', 'ffmpeg -re -i INPUT -c:v libx264 -preset veryfast -g 50 -c:a aac -f flv -tls_verify 0 ' + https) +
-    '<div class="hint">Any FLV stream (H.264 or H.265 video, AAC audio) sent with PUT or POST works. The port opens automatically when you save.</div>';
+    '<div class="sec">' + t('cameras.obs_tools', 'OBS and other RTMP tools') + '</div>' +
+    (rtmp ? row(t('cameras.server', 'Server'), rtmp) + row(t('cameras.stream_key', 'Stream key'), key) : '<div class="hint">' + t('cameras.rtmp_off', 'RTMP is turned off (rtmp_port = 0).') + '</div>') +
+    '<div class="hint">' + t('cameras.obs_instructions', 'In OBS: Settings, Stream, Service "Custom...", then paste these. Use H.264 video and AAC audio, with a keyframe every 2 seconds. RTMP is not encrypted: use it on your own network or over Tailscale.') + '</div>' +
+    '<div class="sec">' + t('cameras.ffmpeg_https', 'ffmpeg (over HTTPS)') + '</div>' +
+    row(t('cameras.address', 'Address'), https) +
+    row(t('cameras.example', 'Example'), 'ffmpeg -re -i INPUT -c:v libx264 -preset veryfast -g 50 -c:a aac -f flv -tls_verify 0 ' + https) +
+    '<div class="hint">' + t('cameras.any_flv', 'Any FLV stream (H.264 or H.265 video, AAC audio) sent with PUT or POST works. The port opens automatically when you save.') + '</div>';
 }
 
 // Show the fields for the chosen source; fill the device lists from the server once.
@@ -356,25 +359,25 @@ function wireSource(d, c) {
   if (nk) nk.onclick = () => { d.querySelector('[data-k="push_key"]').value = newKey(); drawPushInfo(d); };
   d.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-copytext]'); if (!b) return;
-    try { await navigator.clipboard.writeText(b.dataset.copytext); b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy'; }, 1200); }
-    catch (err) { toast('Copy did not work here: select the text instead'); }
+    try { await navigator.clipboard.writeText(b.dataset.copytext); b.textContent = t('cameras.copied', 'Copied'); setTimeout(() => { b.textContent = t('cameras.copy', 'Copy'); }, 1200); }
+    catch (err) { toast(t('cameras.copy_failed', 'Copy did not work here: select the text instead')); }
   });
   devSel.onchange = () => { other.hidden = devSel.value !== OTHER; };
   async function load() {
     let r = { video: [], audio: [], screen: [] };
-    try { r = await api('/api/devices'); } catch (e) { r.note = 'Could not list devices: ' + (e.body || e.message); }
+    try { r = await api('/api/devices'); } catch (e) { r.note = t('cameras.could_not_list_devices', 'Could not list devices: {why}', { why: e.body || e.message }); }
     const curName = cur.kind === 'device' ? cur.name : '';
     const names = (r.video || []).map(v => [parseSource(v.url).name, v.name]);
-    if (curName && !names.some(([n]) => n === curName)) names.unshift([curName, curName + ' (not found now)']);
-    devSel.innerHTML = (names.length ? '' : '<option value="">no devices found</option>') +
+    if (curName && !names.some(([n]) => n === curName)) names.unshift([curName, t('cameras.not_found_now', '{name} (not found now)', { name: curName })]);
+    devSel.innerHTML = (names.length ? '' : '<option value="">' + t('cameras.no_devices_found', 'no devices found') + '</option>') +
       names.map(([n, label]) => '<option value="' + esc(n) + '"' + (n === curName ? ' selected' : '') + '>' + esc(label) + '</option>').join('') +
-      '<option value="' + OTHER + '">Other (type a name or path)...</option>';
+      '<option value="' + OTHER + '">' + t('cameras.other_type_name', 'Other (type a name or path)...') + '</option>';
     if (!names.length) devSel.value = OTHER;
     devSel.onchange();
     const curAud = cur.kind === 'device' ? (cur.q.audio || '') : '';
     const auds = (r.audio || []).map(a => a.name);
     if (curAud && !auds.includes(curAud)) auds.unshift(curAud);
-    audSel.innerHTML = '<option value="">none</option>' + auds.map(a => '<option value="' + esc(a) + '"' + (a === curAud ? ' selected' : '') + '>' + esc(a) + '</option>').join('');
+    audSel.innerHTML = '<option value="">' + t('cameras.none_lc', 'none') + '</option>' + auds.map(a => '<option value="' + esc(a) + '"' + (a === curAud ? ' selected' : '') + '>' + esc(a) + '</option>').join('');
     note.textContent = r.note || '';
     note.hidden = srcSel.value === 'net' || !note.textContent;
   }
@@ -400,32 +403,32 @@ function sourceUrl(d) {
 // ---- "Default or custom" fields: blank/Default = use the shared setting ----
 // D holds the shared defaults (from /api/settings) while a window is being built.
 let D = null;
-const CH_LABEL = { push: 'Browser notifications', email: 'Email', telegram: 'Telegram', ntfy: 'ntfy', pushover: 'Pushover', webhook: 'Webhook', home_assistant: 'Home Assistant', image_post: 'Image post', action: 'Action command' };
+const CH_LABEL = { push: t('cameras.ch_browser', 'Browser notifications'), email: t('cameras.ch_email', 'Email'), telegram: 'Telegram', ntfy: 'ntfy', pushover: 'Pushover', webhook: 'Webhook', home_assistant: 'Home Assistant', image_post: t('cameras.ch_image_post', 'Image post'), action: t('cameras.ch_action', 'Action command') };
 const pct = (x, dp) => (x == null ? '' : +(x * 100).toFixed(dp == null ? 3 : dp));
 // A number override: placeholder shows the default; the reset link clears it.
 function ovNum(k, label, val, dflt, extra, hint) {
-  const ph = dflt == null || dflt === '' ? 'Default' : 'Default: ' + dflt;
+  const ph = dflt == null || dflt === '' ? t('cameras.default', 'Default') : t('cameras.default_value', 'Default: {value}', { value: dflt });
   return '<label class="cs-f cs-ov"><span>' + label + '</span><span class="cs-ovin"><input data-ov data-k="' + k + '" value="' + esc(val == null ? '' : val) + '" placeholder="' + esc(ph) + '" ' + (extra || '') + '>' +
-    '<button type="button" class="cs-reset" data-reset="' + k + '" title="Use the default"' + (val == null || val === '' ? ' hidden' : '') + '>Default</button></span></label>' +
+    '<button type="button" class="cs-reset" data-reset="' + k + '" title="' + t('cameras.use_the_default', 'Use the default') + '"' + (val == null || val === '' ? ' hidden' : '') + '>' + t('cameras.default', 'Default') + '</button></span></label>' +
     (hint ? '<div class="hint">' + hint + '</div>' : '');
 }
 // A choice override: the first option is "Default (current default)".
 function ovSel(k, label, opts, val, dfltLabel, hint) {
-  return field(label, sel(k, [['', 'Default (' + dfltLabel + ')']].concat(opts), val == null ? '' : val).replace('<select ', '<select data-ov '), hint);
+  return field(label, sel(k, [['', t('cameras.default_paren', 'Default ({what})', { what: dfltLabel })]].concat(opts), val == null ? '' : val).replace('<select ', '<select data-ov '), hint);
 }
 
 // ---- Remembered spots (AI): how many, and a button to forget them. No inputs here: it is not
 // part of the form's saved values. ----
 function spotsHtml() {
-  return '<div class="cs-f" data-spots><span>Remembered spots</span><span class="cs-spots-v"><span class="muted" data-spots-text>Looking…</span>' +
-    '<button type="button" class="btn" data-spots-forget hidden>Forget remembered spots</button></span></div>';
+  return '<div class="cs-f" data-spots><span>' + t('cameras.remembered_spots', 'Remembered spots') + '</span><span class="cs-spots-v"><span class="muted" data-spots-text>' + t('cameras.looking', 'Looking…') + '</span>' +
+    '<button type="button" class="btn" data-spots-forget hidden>' + t('cameras.forget_remembered_spots', 'Forget remembered spots') + '</button></span></div>';
 }
 function spotsText(v) {
   const n = v.remembered + v.marked;
-  if (!n) return v.learning ? 'None yet. AI is watching ' + v.learning + ' spot' + (v.learning === 1 ? '' : 's') + ' where it has seen something.' : 'None.';
+  if (!n) return v.learning ? t('cameras.none_yet_ai_watching', 'None yet. AI is watching {n, plural, one {# spot} other {# spots}} where it has seen something.', { n: v.learning }) : t('cameras.none', 'None.');
   const parts = [];
-  if (v.remembered) parts.push(v.remembered + ' remembered' + (v.on ? '' : ' (not used while “Ignore objects that have not moved” is off)'));
-  if (v.marked) parts.push(v.marked + ' marked not real');
+  if (v.remembered) parts.push(v.on ? t('cameras.n_remembered', '{n} remembered', { n: v.remembered }) : t('cameras.n_remembered_off', '{n} remembered (not used while “Ignore objects that have not moved” is off)', { n: v.remembered }));
+  if (v.marked) parts.push(t('cameras.n_marked_not_real', '{n} marked not real', { n: v.marked }));
   return parts.join(', ') + '.';
 }
 function wireSpots(d, c) {
@@ -437,17 +440,17 @@ function wireSpots(d, c) {
       const v = await api('/api/cameras/' + c.id + '/spots');
       txt.textContent = spotsText(v);
       btn.hidden = !(v.remembered + v.marked + v.learning);
-    } catch (e) { txt.textContent = 'Could not be read.'; }
+    } catch (e) { txt.textContent = t('cameras.could_not_be_read', 'Could not be read.'); }
   };
   btn.onclick = () => {
-    confirmDlg('Forget remembered spots', 'This happens right now, not when you press Save. <b>' + esc(c.name) + '</b> forgets every spot it has learned and every spot marked not real, so what AI sees there alerts again until it learns them again. Recordings and past events are not touched.', 'Forget them', async () => {
+    confirmDlg(t('cameras.forget_remembered_spots', 'Forget remembered spots'), t('cameras.forget_msg', 'This happens right now, not when you press Save. <b>{name}</b> forgets every spot it has learned and every spot marked not real, so what AI sees there alerts again until it learns them again. Recordings and past events are not touched.', { name: esc(c.name) }), t('cameras.forget_them', 'Forget them'), async () => {
       btn.disabled = true;
       try {
         const r = await api('/api/cameras/' + c.id + '/spots/forget', { json: {} });
-        toast('Forgot ' + r.forgot + ' spot' + (r.forgot === 1 ? '' : 's') + ': what AI sees there alerts again.', { kind: 'ok' });
+        toast(t('cameras.forgot_n', '{n, plural, one {Forgot # spot} other {Forgot # spots}}: what AI sees there alerts again.', { n: r.forgot }), { kind: 'ok' });
         await load();
       } finally { btn.disabled = false; }
-    }, (e) => toast('Could not forget them: ' + (e.message || e), { kind: 'err' }));
+    }, (e) => toast(t('cameras.could_not_forget_them', 'Could not forget them: {error}', { error: e.message || e }), { kind: 'err' }));
   };
   load();
 }
@@ -455,7 +458,7 @@ function wireSpots(d, c) {
 // ---- Motion sensitivity: Low / Medium / High, like Settings. The five fields it sets stay below
 // under More settings; a camera whose five fields hold no override uses the server's choice. ----
 const MO_FIELDS = { stMinObj: 'min_object', stContrast: 'contrast', stTravel: 'min_travel', stMinFrames: 'min_frames', stSens: 'sensitivity' };
-const MO_NAMES = { low: 'Low', medium: 'Medium', high: 'High' };
+const MO_NAMES = { low: t('cameras.mo_low', 'Low'), medium: t('cameras.mo_medium', 'Medium'), high: t('cameras.mo_high', 'High') };
 const moNear = (a, b) => a !== '' && Math.abs(parseFloat(a) - b) < 1e-6;
 // The level the server-wide motion settings amount to ('' when none of the three fits).
 function serverMotionLevel() {
@@ -468,10 +471,10 @@ function serverMotionLevel() {
 }
 function motionLevelHtml() {
   const sv = serverMotionLevel();
-  return '<div class="cs-f"><span>Motion sensitivity</span><select data-lv aria-label="Motion sensitivity">' +
-    '<option value="">Use the server\'s setting' + (sv ? ' (' + MO_NAMES[sv] + ')' : '') + '</option>' +
-    Object.entries(MO_NAMES).map(([k, t]) => '<option value="' + k + '">' + t + '</option>').join('') + '</select></div>' +
-    '<div class="hint" data-lvhint>Low ignores more (shadows, rain, trees). High notices smaller and fainter movement. The exact numbers are under More settings.</div>';
+  return '<div class="cs-f"><span>' + t('cameras.motion_sensitivity', 'Motion sensitivity') + '</span><select data-lv aria-label="' + t('cameras.motion_sensitivity', 'Motion sensitivity') + '">' +
+    '<option value="">' + (sv ? t('cameras.use_server_setting_level', "Use the server's setting ({level})", { level: MO_NAMES[sv] }) : t('cameras.use_server_setting', "Use the server's setting")) + '</option>' +
+    Object.entries(MO_NAMES).map(([k, name]) => '<option value="' + k + '">' + name + '</option>').join('') + '</select></div>' +
+    '<div class="hint" data-lvhint>' + t('cameras.motion_level_hint', 'Low ignores more (shadows, rain, trees). High notices smaller and fainter movement. The exact numbers are under More settings.') + '</div>';
 }
 // Keep the level choice in step with the five fields (and the other way round on a change).
 function wireMotionLevel(d) {
@@ -491,7 +494,7 @@ function wireMotionLevel(d) {
     for (const [k, key] of Object.entries(MO_FIELDS)) {
       const el = f(key); if (!el) return;
       vals[k] = el.value.trim();
-      if (vals[k] === '') { empty++; if (el.classList.contains('mixed') && el.placeholder === 'Mixed') mixed = true; }
+      if (vals[k] === '') { empty++; if (el.classList.contains('mixed') && el.placeholder === t('cameras.mixed', 'Mixed')) mixed = true; }
     }
     let level = null;
     if (mixed) level = 'mixed';
@@ -499,11 +502,11 @@ function wireMotionLevel(d) {
     else for (const [name, p] of Object.entries(MOTION_PRESETS)) if (Object.entries(p).every(([k, x]) => moNear(vals[k], x))) level = name;
     if (level === null) {
       level = 'custom';
-      setOpt('custom', 'Custom' + (vals.stMinObj !== '' ? ' (smallest object ' + vals.stMinObj + '%)' : ''));
-    } else if (level === 'mixed') setOpt('mixed', 'Mixed');
+      setOpt('custom', vals.stMinObj !== '' ? t('cameras.custom_smallest', 'Custom (smallest object {pct}%)', { pct: vals.stMinObj }) : t('cameras.custom', 'Custom'));
+    } else if (level === 'mixed') setOpt('mixed', t('cameras.mixed', 'Mixed'));
     else setOpt('', '');
     lv.value = level;
-    hint.textContent = level === 'custom' ? 'Custom: set under More settings. Pick Low, Medium or High to replace it.' : level === 'mixed' ? 'These cameras differ. Pick a level to set it on all of them.' : base;
+    hint.textContent = level === 'custom' ? t('cameras.custom_hint', 'Custom: set under More settings. Pick Low, Medium or High to replace it.') : level === 'mixed' ? t('cameras.mixed_hint', 'These cameras differ. Pick a level to set it on all of them.') : base;
   };
   lv.addEventListener('change', () => {
     const val = lv.value;
@@ -511,7 +514,7 @@ function wireMotionLevel(d) {
     for (const [k, key] of Object.entries(MO_FIELDS)) {
       const el = f(key);
       el.value = val === '' ? '' : MOTION_PRESETS[val][k];
-      if (val === '') el.placeholder = 'Default';
+      if (val === '') el.placeholder = t('cameras.default', 'Default');
       el.dispatchEvent(new Event('input', { bubbles: true }));
     }
     sync();
@@ -524,10 +527,10 @@ function wireMotionLevel(d) {
 function groupsHtml(c) {
   const all = [...new Set(state.cams.flatMap(x => x.groups || (x.group ? [x.group] : [])))].sort((x, y) => x.localeCompare(y));
   const mine = new Set(c.groups || []);
-  return '<div class="cs-f"><span>Groups</span><div class="cs-groups" data-groups>' +
+  return '<div class="cs-f"><span>' + t('cameras.groups', 'Groups') + '</span><div class="cs-groups" data-groups>' +
     all.map(g => '<button type="button" class="chip' + (mine.has(g) ? ' on' : '') + '" data-g="' + esc(g) + '" aria-pressed="' + mine.has(g) + '">' + esc(g) + '</button>').join('') +
-    '<input data-k="newgroup" placeholder="New group..." class="cs-newgroup"></div></div>' +
-    '<div class="hint">A camera can be in several groups. Click a group to add or remove it; type a new name and press Enter.</div>';
+    '<input data-k="newgroup" placeholder="' + t('cameras.new_group', 'New group...') + '" class="cs-newgroup"></div></div>' +
+    '<div class="hint">' + t('cameras.groups_hint', 'A camera can be in several groups. Click a group to add or remove it; type a new name and press Enter.') + '</div>';
 }
 function readGroups(d) {
   const out = [...d.querySelectorAll('[data-groups] .chip.on')].map(b => b.dataset.g);
@@ -555,25 +558,25 @@ function wireGroups(d) {
 function alertsHtml(c, multi) {
   const chans = (D && D.alert_channels) || [];
   const all = c.alert_channels == null;
-  const arm = multi || !c.name || OP ? '' : '<div class="cs-arm"><div class="sec" style="margin-top:0">When this camera watches</div><div class="hint" style="margin-top:0">From the active profile and schedule, whether you are Armed and this camera\'s windows. Includes your unsaved changes.</div><div data-armhost><span class="muted">Loading...</span></div></div>';
+  const arm = multi || !c.name || OP ? '' : '<div class="cs-arm"><div class="sec" style="margin-top:0">' + t('cameras.when_watches', 'When this camera watches') + '</div><div class="hint" style="margin-top:0">' + t('cameras.when_watches_hint', "From the active profile and schedule, whether you are Armed and this camera's windows. Includes your unsaved changes.") + '</div><div data-armhost><span class="muted">' + t('cameras.loading', 'Loading...') + '</span></div></div>';
   return [arm +
-    ovSel('alerts', 'Notifications', [['1', 'on'], ['0', 'off']], c.alerts == null ? null : c.alerts ? '1' : '0', 'on',
-      'Off: events are still recorded and still reported over MQTT, just not sent anywhere.') +
-    timeRange('alert_schedule', 'Alert window', c.alert_schedule, '07:00', '22:00', 'Notify only during these hours. Recording is not affected.') +
+    ovSel('alerts', t('cameras.notifications', 'Notifications'), [['1', t('cameras.on_lc', 'on')], ['0', t('cameras.off_lc', 'off')]], c.alerts == null ? null : c.alerts ? '1' : '0', t('cameras.on_lc', 'on'),
+      t('cameras.off_events', 'Off: events are still recorded and still reported over MQTT, just not sent anywhere.')) +
+    timeRange('alert_schedule', t('cameras.alert_window', 'Alert window'), c.alert_schedule, '07:00', '22:00', t('cameras.notify_hours_note', 'Notify only during these hours. Recording is not affected.')) +
     (multi ? '' : notifyForHtml(c)) +
-    (multi || OP ? '' : '<div class="cs-f"><span>Send through</span><div class="cs-chans">' +
-    '<label class="asys-chk"><input type="checkbox" data-chall' + (all ? ' checked' : '') + '> All services that are set up (default)</label>' +
+    (multi || OP ? '' : '<div class="cs-f"><span>' + t('cameras.send_through', 'Send through') + '</span><div class="cs-chans">' +
+    '<label class="asys-chk"><input type="checkbox" data-chall' + (all ? ' checked' : '') + '> ' + t('cameras.all_services', 'All services that are set up (default)') + '</label>' +
     chans.map(ch => '<label class="asys-chk' + (ch.configured ? '' : ' muted') + '"><input type="checkbox" data-ch="' + ch.id + '"' +
-      (all ? ' checked disabled' : (c.alert_channels.includes(ch.id) ? ' checked' : '')) + '> ' + esc(CH_LABEL[ch.id] || ch.id) + (ch.configured ? '' : ' (not set up)') + '</label>').join('') +
-    '</div></div><div class="hint">Services are set up once under Settings, Detection &amp; alerts, Alerts.</div>') + '',
-    ovSel('alert_priority', 'Priority', [['low', 'low (quiet)'], ['normal', 'normal'], ['high', 'high'], ['urgent', 'urgent']], c.alert_priority, (D && D.alerts.priority) || 'normal',
-      'For ntfy and Pushover. High usually gets through Do Not Disturb; urgent makes Pushover repeat until you acknowledge it.') +
-    ovNum('alert_interval', 'At most one alert every (s)', c.alert_interval, D ? (D.alerts.min_interval || 0) + ' s' : '', 'type="number" min="0" step="5"', '0 = no limit.') +
+      (all ? ' checked disabled' : (c.alert_channels.includes(ch.id) ? ' checked' : '')) + '> ' + esc(CH_LABEL[ch.id] || ch.id) + (ch.configured ? '' : ' ' + t('cameras.not_set_up', '(not set up)')) + '</label>').join('') +
+    '</div></div><div class="hint">' + t('cameras.services_set_up_once', 'Services are set up once under Settings, Detection &amp; alerts, Alerts.') + '</div>') + '',
+    ovSel('alert_priority', t('cameras.priority', 'Priority'), [['low', t('cameras.prio_low', 'low (quiet)')], ['normal', t('cameras.prio_normal', 'normal')], ['high', t('cameras.prio_high', 'high')], ['urgent', t('cameras.prio_urgent', 'urgent')]], c.alert_priority, { low: t('cameras.prio_low', 'low (quiet)'), normal: t('cameras.prio_normal', 'normal'), high: t('cameras.prio_high', 'high'), urgent: t('cameras.prio_urgent', 'urgent') }[(D && D.alerts.priority) || 'normal'] || (D && D.alerts.priority),
+      t('cameras.priority_hint', 'For ntfy and Pushover. High usually gets through Do Not Disturb; urgent makes Pushover repeat until you acknowledge it.')) +
+    ovNum('alert_interval', t('cameras.alert_interval_label', 'At most one alert every (s)'), c.alert_interval, D ? (D.alerts.min_interval || 0) + ' s' : '', 'type="number" min="0" step="5"', t('cameras.alert_interval_note', '0 = no limit.')) +
     (multi || OP ? '' : strangersHtml(c)) +
-    '<div class="sec">No-motion alert</div>' +
-    field('Alert after no motion for (min)', text('no_motion_minutes', c.no_motion_minutes || '', 'type="number" min="0" max="10080" step="5" placeholder="off"'),
-      'For a pet or a person living alone: a message when nothing has moved here for this long, and another once something moves again. Empty or 0 = off. Works even when you are Disarmed.') +
-    timeRange('no_motion_schedule', 'Watch only during', c.no_motion_schedule, '07:00', '21:00', 'Counting starts when this window opens.') +
+    '<div class="sec">' + t('cameras.no_motion_alert_sec', 'No-motion alert') + '</div>' +
+    field(t('cameras.no_motion_label', 'Alert after no motion for (min)'), text('no_motion_minutes', c.no_motion_minutes || '', 'type="number" min="0" max="10080" step="5" placeholder="' + t('cameras.off_lc', 'off') + '"'),
+      t('cameras.no_motion_desc', 'For a pet or a person living alone: a message when nothing has moved here for this long, and another once something moves again. Empty or 0 = off. Works even when you are Disarmed.')) +
+    timeRange('no_motion_schedule', t('cameras.no_motion_schedule_label', 'Watch only during'), c.no_motion_schedule, '07:00', '21:00', t('cameras.no_motion_schedule_desc', 'Counting starts when this window opens.')) +
     (multi ? '' : soundHtml(c))];
 }
 // "Notify me for": everything (default) or only some objects. The rest are still
@@ -583,31 +586,31 @@ function notifyForHtml(c) {
   const some = mine.length > 0;
   const base = ['person', 'vehicle', 'animal'].concat(c.ai_labels || (D && D.ai && D.ai.labels) || []);
   const names = [...new Set(base.map(x => String(x).toLowerCase()).concat(mine.map(x => String(x).toLowerCase())))];
-  return field('Notify me for', sel('nf', [['all', 'Everything it detects'], ['some', 'Only certain objects']], some ? 'some' : 'all'), '') +
-    '<div class="cs-f" data-nfbox' + (some ? '' : ' hidden') + '><span>Objects</span><div class="cs-groups" data-nflist>' +
-    names.map(n => '<button type="button" class="chip' + (mine.map(x => x.toLowerCase()).includes(n) ? ' on' : '') + '" data-nl="' + esc(n) + '" aria-pressed="' + mine.map(x => x.toLowerCase()).includes(n) + '">' + esc(n) + '</button>').join('') +
-    '</div></div><div class="hint">Doorbell presses, sounds and packages always notify. Other objects are still detected, recorded and searchable; they just don\'t send a notification.' + (some ? '' : ' Pick this to cut down on notifications.') + '</div>' +
+  return field(t('cameras.notify_me_for', 'Notify me for'), sel('nf', [['all', t('cameras.everything_it_detects', 'Everything it detects')], ['some', t('cameras.only_certain_objects', 'Only certain objects')]], some ? 'some' : 'all'), '') +
+    '<div class="cs-f" data-nfbox' + (some ? '' : ' hidden') + '><span>' + t('cameras.objects', 'Objects') + '</span><div class="cs-groups" data-nflist>' +
+    names.map(n => '<button type="button" class="chip' + (mine.map(x => x.toLowerCase()).includes(n) ? ' on' : '') + '" data-nl="' + esc(n) + '" aria-pressed="' + mine.map(x => x.toLowerCase()).includes(n) + '">' + esc(objName(n)) + '</button>').join('') +
+    '</div></div><div class="hint">' + t('cameras.doorbell_always', "Doorbell presses, sounds and packages always notify. Other objects are still detected, recorded and searchable; they just don't send a notification.") + (some ? '' : ' ' + t('cameras.pick_cut_down', 'Pick this to cut down on notifications.')) + '</div>' +
     quietAreasHtml(c);
 }
 // "Areas that don't notify": drawn with the zone editor in its quiet mode. Saved by the editor itself.
 function quietAreasHtml(c) {
   const n = (c.alert_ignore_polys || []).length;
-  return '<div class="cs-f"><span>Areas that don\'t notify</span><div class="cs-zones"><span data-qsum>' + quietSummary(n) + '</span>' +
-    (c.id == null || c.remote ? '<span class="muted"> Save the camera first to draw areas.</span>' : ' <button type="button" class="btn" data-qedit>Draw areas</button>') + '</div></div>' +
-    '<div class="hint">Things here are still detected, recorded and searchable. They just don\'t send a notification.</div>';
+  return '<div class="cs-f"><span>' + t('cameras.areas_no_notify', "Areas that don't notify") + '</span><div class="cs-zones"><span data-qsum>' + quietSummary(n) + '</span>' +
+    (c.id == null || c.remote ? '<span class="muted"> ' + t('cameras.save_camera_first_areas', 'Save the camera first to draw areas.') + '</span>' : ' <button type="button" class="btn" data-qedit>' + t('cameras.draw_areas', 'Draw areas') + '</button>') + '</div></div>' +
+    '<div class="hint">' + t('cameras.things_here_detected', "Things here are still detected, recorded and searchable. They just don't send a notification.") + '</div>';
 }
-const quietSummary = (n) => (n ? n + ' area' + (n === 1 ? '' : 's') + ' (nothing seen only there sends a notification)' : 'None: every object it detects can notify.');
+const quietSummary = (n) => (n ? t('cameras.n_quiet_areas', '{n, plural, one {# area} other {# areas}} (nothing seen only there sends a notification)', { n }) : t('cameras.none_notify', 'None: every object it detects can notify.'));
 // Strangers: alert only for unknown faces and plates.
 function strangersHtml(c) {
   const s = c.strangers || {};
-  return '<div class="sec">Strangers</div>' +
-    '<div class="hint" style="margin-top:0">Alert only when the person or vehicle is not known. Known faces (Settings, Smart features, Faces) and known plates (License plates) stay quiet: the event is still recorded and labeled. Needs AI on this camera, and faces or plates turned on for it. Alerts then say \u201cUnknown person at ...\u201d or \u201cUnknown car ABC123 in ...\u201d.</div>' +
-    swHtml('data-st-en', !!s.enabled, 'Only alert for unknown people and vehicles', 'Off by default. The alert for this camera waits a few seconds for the faces to be looked at.') +
-    swHtml('data-st-un', s.unidentified_is_unknown !== false, 'Count people and vehicles that could not be identified as unknown', 'A person with no face visible, or a car whose plate was not read. Off: they stay quiet.') +
-    timeRange('strangers_schedule', 'Only during', s.schedule, '22:00', '06:00', 'Leave off to use this filter all day. With hours, it applies only inside them.') +
-    field('Outside those hours', sel('st_outside', [['normal', 'Alert as usual'], ['quiet', 'No alerts for people and vehicles']], s.outside || 'normal'), '') +
-    swHtml('data-st-first', !!s.first_seen, 'Alert only the first time an unknown person or vehicle appears', 'Someone or something unknown that was already seen in the last days stays quiet. Needs faces / plates on.') +
-    field('Not seen in the last (days)', '<input data-k="st_days" type="number" min="1" max="60" step="1" value="' + (s.first_seen_days || 30) + '">', 'Up to 60: unnamed faces are forgotten after 60 days.');
+  return '<div class="sec">' + t('cameras.strangers', 'Strangers') + '</div>' +
+    '<div class="hint" style="margin-top:0">' + t('cameras.strangers_hint', 'Alert only when the person or vehicle is not known. Known faces (Settings, Smart features, Faces) and known plates (License plates) stay quiet: the event is still recorded and labeled. Needs AI on this camera, and faces or plates turned on for it. Alerts then say \u201cUnknown person at ...\u201d or \u201cUnknown car ABC123 in ...\u201d.') + '</div>' +
+    swHtml('data-st-en', !!s.enabled, t('cameras.strangers_only_unknown', 'Only alert for unknown people and vehicles'), t('cameras.strangers_off_default', 'Off by default. The alert for this camera waits a few seconds for the faces to be looked at.')) +
+    swHtml('data-st-un', s.unidentified_is_unknown !== false, t('cameras.strangers_count_unknown', 'Count people and vehicles that could not be identified as unknown'), t('cameras.strangers_count_desc', 'A person with no face visible, or a car whose plate was not read. Off: they stay quiet.')) +
+    timeRange('strangers_schedule', t('cameras.strangers_schedule_label', 'Only during'), s.schedule, '22:00', '06:00', t('cameras.strangers_schedule_desc', 'Leave off to use this filter all day. With hours, it applies only inside them.')) +
+    field(t('cameras.strangers_outside_label', 'Outside those hours'), sel('st_outside', [['normal', t('cameras.alert_as_usual', 'Alert as usual')], ['quiet', t('cameras.no_alerts_people_vehicles', 'No alerts for people and vehicles')]], s.outside || 'normal'), '') +
+    swHtml('data-st-first', !!s.first_seen, t('cameras.strangers_first_alert', 'Alert only the first time an unknown person or vehicle appears'), t('cameras.strangers_first_desc', 'Someone or something unknown that was already seen in the last days stays quiet. Needs faces / plates on.')) +
+    field(t('cameras.strangers_days_label', 'Not seen in the last (days)'), '<input data-k="st_days" type="number" min="1" max="60" step="1" value="' + (s.first_seen_days || 30) + '">', t('cameras.strangers_days_desc', 'Up to 60: unnamed faces are forgotten after 60 days.'));
 }
 function readStrangers(d) {
   const en = d.querySelector('[data-st-en]');
@@ -623,17 +626,19 @@ function readStrangers(d) {
 // Loud-sound trigger: switch, two levels, a live meter, and (with sound
 // names on) which sounds count.
 const SOUND_NAMES = ['glass break', 'dog bark', 'alarm', 'shouting', 'bang', 'doorbell', 'knock', 'car horn', 'crying'];
+// What each sound shows as (the English name is what is sent and stored).
+const SOUND_LABEL = () => ({ 'glass break': t('cameras.snd_glass_break', 'glass break'), 'dog bark': t('cameras.snd_dog_bark', 'dog bark'), alarm: t('cameras.snd_alarm', 'alarm'), shouting: t('cameras.snd_shouting', 'shouting'), bang: t('cameras.snd_bang', 'bang'), doorbell: t('cameras.snd_doorbell', 'doorbell'), knock: t('cameras.snd_knock', 'knock'), 'car horn': t('cameras.snd_car_horn', 'car horn'), crying: t('cameras.snd_crying', 'crying') });
 function soundHtml(c) {
   const mine = new Set(c.audio_sounds || []);
-  return '<div class="sec">Loud sounds</div>' +
+  return '<div class="sec">' + t('cameras.loud_sounds', 'Loud sounds') + '</div>' +
     '<label class="sw"><input type="checkbox" role="switch" data-snd' + (c.audio_trigger ? ' checked' : '') + '><span class="sw-track" aria-hidden="true"></span>' +
-    '<span class="sw-text"><b>A loud sound starts an event</b><small>A sudden sound much louder than usual here (glass, a bang, a shout, a dog) is recorded and alerts like motion, in the same arm window. The camera must send sound; the Audio setting can stay off.</small></span></label>' +
-    ovNum('audio_margin_db', 'Louder than usual by (dB)', c.audio_margin_db, '20 dB', 'type="number" min="3" max="60" step="1"', 'Lower hears quieter sounds, and gives more false alarms.') +
-    ovNum('audio_min_db', 'And at least (dB)', c.audio_min_db, '-45 dB', 'type="number" min="-90" max="0" step="1"', 'How loud in itself: 0 is the loudest the microphone reports, a quiet room is about -60.') +
-    (c.id == null || OP ? '' : '<div class="snd-meter" data-sndm><div class="snd-bar" title="Sound level now (bar), usual level (gray line), loud from (amber line)"><span class="snd-lvl"></span><span class="snd-bg"></span><span class="snd-thr"></span></div><div class="hint" data-sndt>Listening...</div></div>') +
-    '<div class="cs-f"><span>Only these sounds</span><div class="cs-groups" data-sndlist>' +
-    SOUND_NAMES.map(n => '<button type="button" class="chip' + (mine.has(n) ? ' on' : '') + '" data-sn="' + esc(n) + '" aria-pressed="' + mine.has(n) + '">' + esc(n) + '</button>').join('') +
-    '</div></div><div class="hint" data-sndhint>None picked: any loud sound counts. Picking some needs sound names on (Settings &rsaquo; Smart features &rsaquo; Sounds).</div>';
+    '<span class="sw-text"><b>' + t('cameras.loud_starts_event', 'A loud sound starts an event') + '</b><small>' + t('cameras.loud_starts_event_desc', 'A sudden sound much louder than usual here (glass, a bang, a shout, a dog) is recorded and alerts like motion, in the same arm window. The camera must send sound; the Audio setting can stay off.') + '</small></span></label>' +
+    ovNum('audio_margin_db', t('cameras.louder_by', 'Louder than usual by (dB)'), c.audio_margin_db, '20 dB', 'type="number" min="3" max="60" step="1"', t('cameras.louder_by_hint', 'Lower hears quieter sounds, and gives more false alarms.')) +
+    ovNum('audio_min_db', t('cameras.at_least_db', 'And at least (dB)'), c.audio_min_db, '-45 dB', 'type="number" min="-90" max="0" step="1"', t('cameras.at_least_db_hint', 'How loud in itself: 0 is the loudest the microphone reports, a quiet room is about -60.')) +
+    (c.id == null || OP ? '' : '<div class="snd-meter" data-sndm><div class="snd-bar" title="' + t('cameras.sound_level_title', 'Sound level now (bar), usual level (gray line), loud from (amber line)') + '"><span class="snd-lvl"></span><span class="snd-bg"></span><span class="snd-thr"></span></div><div class="hint" data-sndt>' + t('cameras.listening', 'Listening...') + '</div></div>') +
+    '<div class="cs-f"><span>' + t('cameras.only_these_sounds', 'Only these sounds') + '</span><div class="cs-groups" data-sndlist>' +
+    SOUND_NAMES.map(n => '<button type="button" class="chip' + (mine.has(n) ? ' on' : '') + '" data-sn="' + esc(n) + '" aria-pressed="' + mine.has(n) + '">' + esc(SOUND_LABEL()[n] || n) + '</button>').join('') +
+    '</div></div><div class="hint" data-sndhint>' + t('cameras.none_picked', 'None picked: any loud sound counts. Picking some needs sound names on (Settings &rsaquo; Smart features &rsaquo; Sounds).') + '</div>';
 }
 const dbNum = (x) => Math.round(x) + ' dB';
 // Poll the camera's sound level while its Alerts tab is open.
@@ -642,7 +647,7 @@ function wireSound(d, c) {
   if (box) box.onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; b.classList.toggle('on'); b.setAttribute('aria-pressed', String(b.classList.contains('on'))); };
   if (state.isAdmin) api('/api/sound/status').then(st => {
     const h = d.querySelector('[data-sndhint]');
-    if (h && st.loaded) h.textContent = 'None picked: any loud sound counts (and is named when it can be).';
+    if (h && st.loaded) h.textContent = t('cameras.sound_hint_update', 'None picked: any loud sound counts (and is named when it can be).');
   }).catch(() => {});
   const m = d.querySelector('[data-sndm]');
   if (!m) return;
@@ -654,11 +659,11 @@ function wireSound(d, c) {
     if (m.offsetParent !== null && d.__inView && d.__inView('alerts')) {
       try {
         const r = await api('/api/cameras/' + c.id + '/sound');
-        const t = m.querySelector('[data-sndt]');
+        const lbl = m.querySelector('[data-sndt]');
         const lvl = m.querySelector('.snd-lvl'), bg = m.querySelector('.snd-bg'), thr = m.querySelector('.snd-thr');
         if (r.level == null) {
           lvl.style.width = '0'; bg.hidden = thr.hidden = true;
-          t.textContent = r.error ? r.error : !r.native ? 'Sound is only heard on cameras using the built-in stream reader.' : 'No sound from this camera (yet). Does it send audio?';
+          lbl.textContent = r.error ? r.error : !r.native ? t('cameras.sound_only_builtin', 'Sound is only heard on cameras using the built-in stream reader.') : t('cameras.sound_no_input', 'No sound from this camera (yet). Does it send audio?');
         } else {
           // Loud from: the usual level plus the margin, but never below the floor (as typed, before saving).
           const from = Math.max(r.background + num('audio_margin_db', 20), num('audio_min_db', -45));
@@ -666,10 +671,10 @@ function wireSound(d, c) {
           lvl.classList.toggle('loud', r.level >= from);
           bg.hidden = thr.hidden = false;
           bg.style.left = pos(r.background); thr.style.left = pos(from);
-          let txt = 'Now ' + dbNum(r.level) + ', usually ' + dbNum(r.background) + ', loud from ' + dbNum(from) + '.';
-          if (r.heard_at) txt += ' Last loud sound ' + new Date(r.heard_at * 1000).toLocaleTimeString() + ((r.heard || []).length > 1 ? ' (' + r.heard.slice(1).join(', ') + ')' : '') + '.';
-          if (!r.trigger) txt += ' Turn the switch on and save to use it.';
-          t.textContent = txt;
+          let txt = t('cameras.sound_now', 'Now {now}, usually {usual}, loud from {from}.', { now: dbNum(r.level), usual: dbNum(r.background), from: dbNum(from) });
+          if (r.heard_at) txt += ' ' + ((r.heard || []).length > 1 ? t('cameras.last_loud_names', 'Last loud sound {time} ({names}).', { time: new Date(r.heard_at * 1000).toLocaleTimeString(), names: r.heard.slice(1).join(', ') }) : t('cameras.last_loud', 'Last loud sound {time}.', { time: new Date(r.heard_at * 1000).toLocaleTimeString() }));
+          if (!r.trigger) txt += ' ' + t('cameras.turn_switch_on', 'Turn the switch on and save to use it.');
+          lbl.textContent = txt;
         }
       } catch (e) { /* the next tick tries again */ }
     }
@@ -696,16 +701,16 @@ function triggerHtml(c) {
   const groups = [...new Set(state.cams.flatMap(x => x.groups || []))].sort((a, b) => a.localeCompare(b));
   const cams = state.cams.filter(x => x.id !== c.id && !x.remote);
   const box = (val, label) => '<label class="asys-chk"><input type="checkbox" data-trig="' + esc(val) + '"' + (mine.has(val) ? ' checked' : '') + '> ' + label + '</label>';
-  return '<div class="sec" style="margin-top:0">Also trigger</div>' +
-    '<div class="hint">When this camera detects motion, these record an event too (each with its own pre- and post-roll). Off unless you tick something. Cameras that are only triggered never pass it on.</div>' +
-    '<div class="cs-copygrid">' + groups.map(g => box('group:' + g, '<b>Group:</b> ' + esc(g))).join('') + cams.map(x => box(x.name, esc(x.name))).join('') + '</div>';
+  return '<div class="sec" style="margin-top:0">' + t('cameras.also_trigger', 'Also trigger') + '</div>' +
+    '<div class="hint">' + t('cameras.also_trigger_hint', 'When this camera detects motion, these record an event too (each with its own pre- and post-roll). Off unless you tick something. Cameras that are only triggered never pass it on.') + '</div>' +
+    '<div class="cs-copygrid">' + groups.map(g => box('group:' + g, t('cameras.group_label', '<b>Group:</b> {name}', { name: esc(g) }))).join('') + cams.map(x => box(x.name, esc(x.name))).join('') + '</div>';
 }
 
 // ---------- watchdog: restart a camera that lost its video, cut its power, tell the owner ----------
 const errText = (e) => { try { const j = JSON.parse(e.body); if (j && j.error) return j.error; } catch (x) { /* not JSON */ } return e.body || e.message; };
 const isNetCam = (c) => /^(rtsp|https?):\/\//i.test(c.url || '') && !c.capture;
-const WD_METHODS = [['auto', 'Automatic'], ['onvif', 'ONVIF'], ['reolink', 'Reolink'], ['dahua', 'Dahua / Amcrest'], ['hikvision', 'Hikvision'], ['none', 'Don\'t restart it']];
-const PLUGS = [['', 'None'], ['shelly', 'Shelly plug (Gen1)'], ['shelly2', 'Shelly Plus / Pro / Gen2'], ['tasmota', 'Tasmota plug'], ['urls', 'Other (an off and an on address)']];
+const WD_METHODS = [['auto', t('cameras.wd_auto', 'Automatic')], ['onvif', 'ONVIF'], ['reolink', 'Reolink'], ['dahua', 'Dahua / Amcrest'], ['hikvision', 'Hikvision'], ['none', t('cameras.wd_none', "Don't restart it")]];
+const PLUGS = [['', t('cameras.plug_none', 'None')], ['shelly', t('cameras.plug_shelly', 'Shelly plug (Gen1)')], ['shelly2', t('cameras.plug_shelly2', 'Shelly Plus / Pro / Gen2')], ['tasmota', t('cameras.plug_tasmota', 'Tasmota plug')], ['urls', t('cameras.plug_urls', 'Other (an off and an on address)')]];
 function swHtml(attr, on, title, small) {
   return '<label class="sw"><input type="checkbox" role="switch" ' + attr + (on ? ' checked' : '') + '><span class="sw-track" aria-hidden="true"></span>' +
     '<span class="sw-text"><b>' + title + '</b>' + (small ? '<small>' + small + '</small>' : '') + '</span></label>';
@@ -716,31 +721,31 @@ function watchdogHtml(c) {
   const g = (D && D.watchdog) || {};
   const on = w.enabled == null ? !!g.enabled : w.enabled;
   return [
-    '<div class="hint" style="margin-top:0">When this camera has no video for ' + (g.minutes || 10) + ' min, AmberSight restarts it, then cuts its power for a moment (if a switch is set up under More settings), then tells you if it is still down.' +
-      (g.enabled ? '' : ' The watchdog is off in Settings, Connections, Watchdog: turning it on here watches just this camera.') + '</div>' +
-    swHtml('data-wd-en', on, 'Watch this camera', 'Default: ' + (g.enabled ? 'on' : 'off') + ' (Settings, Connections, Watchdog)') +
+    '<div class="hint" style="margin-top:0">' + t('cameras.wd_hint', 'When this camera has no video for {min} min, AmberSight restarts it, then cuts its power for a moment (if a switch is set up under More settings), then tells you if it is still down.', { min: g.minutes || 10 }) +
+      (g.enabled ? '' : ' ' + t('cameras.wd_off_hint', 'The watchdog is off in Settings, Connections, Watchdog: turning it on here watches just this camera.')) + '</div>' +
+    swHtml('data-wd-en', on, t('cameras.watch_this_camera', 'Watch this camera'), g.enabled ? t('cameras.wd_default_on', 'Default: on (Settings, Connections, Watchdog)') : t('cameras.wd_default_off', 'Default: off (Settings, Connections, Watchdog)')) +
     '<div class="wd-state" data-wdstate></div>' +
-    field('How to restart it', sel('wd_reboot', WD_METHODS, w.reboot || 'auto'), 'Automatic picks by what the camera is (Reolink, Dahua/Amcrest, Hikvision), else ONVIF. It signs in with the stream user and password.'),
-    field('Web port (optional)', text('wd_port', w.http_port || '', 'type="number" min="1" max="65535" placeholder="the usual one"')) +
-    '<div class="sec">Power switch (optional)</div>' +
-    '<div class="hint">A smart plug or a PoE switch port that powers this camera. Used when a restart did not help, or the camera does not answer at all.</div>' +
-    field('Switch', sel('wd_kind', PLUGS, p.kind || '')) +
+    field(t('cameras.how_restart', 'How to restart it'), sel('wd_reboot', WD_METHODS, w.reboot || 'auto'), t('cameras.wd_auto_hint', 'Automatic picks by what the camera is (Reolink, Dahua/Amcrest, Hikvision), else ONVIF. It signs in with the stream user and password.')),
+    field(t('cameras.web_port_opt', 'Web port (optional)'), text('wd_port', w.http_port || '', 'type="number" min="1" max="65535" placeholder="' + t('cameras.the_usual_one', 'the usual one') + '"')) +
+    '<div class="sec">' + t('cameras.power_switch_opt', 'Power switch (optional)') + '</div>' +
+    '<div class="hint">' + t('cameras.power_hint', 'A smart plug or a PoE switch port that powers this camera. Used when a restart did not help, or the camera does not answer at all.') + '</div>' +
+    field(t('cameras.switch_label', 'Switch'), sel('wd_kind', PLUGS, p.kind || '')) +
     '<div data-wdplug' + (p.kind && p.kind !== 'urls' ? '' : ' hidden') + '>' +
-      field('Plug address', text('wd_host', p.host, 'placeholder="192.168.1.50" spellcheck="false"')) +
-      field('Outlet', text('wd_ch', p.channel || 0, 'type="number" min="0" max="15"'), '0 = the first (most plugs have just one).') +
+      field(t('cameras.plug_address', 'Plug address'), text('wd_host', p.host, 'placeholder="192.168.1.50" spellcheck="false"')) +
+      field(t('cameras.outlet_label', 'Outlet'), text('wd_ch', p.channel || 0, 'type="number" min="0" max="15"'), t('cameras.outlet_hint', '0 = the first (most plugs have just one).')) +
     '</div>' +
     '<div data-wdurls' + (p.kind === 'urls' ? '' : ' hidden') + '>' +
-      field('Off address', text('wd_off', p.off_url, 'placeholder="http://192.168.1.2/port/4/off" spellcheck="false"')) +
-      field('On address', text('wd_on', p.on_url, 'placeholder="http://192.168.1.2/port/4/on" spellcheck="false"')) +
-      field('Send as', sel('wd_method', [['GET', 'GET'], ['POST', 'POST']], (p.method || 'GET').toUpperCase())) +
+      field(t('cameras.off_address', 'Off address'), text('wd_off', p.off_url, 'placeholder="http://192.168.1.2/port/4/off" spellcheck="false"')) +
+      field(t('cameras.on_address', 'On address'), text('wd_on', p.on_url, 'placeholder="http://192.168.1.2/port/4/on" spellcheck="false"')) +
+      field(t('cameras.send_as', 'Send as'), sel('wd_method', [['GET', 'GET'], ['POST', 'POST']], (p.method || 'GET').toUpperCase())) +
     '</div>' +
     '<div data-wdlogin' + (p.kind ? '' : ' hidden') + '>' +
-      field('Switch user', text('wd_user', p.username, 'autocomplete="off" placeholder="if it has a sign-in"')) +
-      field('Switch password', '<input data-k="wd_pass" type="password" autocomplete="new-password" placeholder="' + (p.has_password ? 'blank keeps the stored password' : 'if it has a sign-in') + '">') +
-      field('Power off for (s)', text('wd_secs', p.off_seconds || 10, 'type="number" min="3" max="120"')) +
-      '<div class="row"><button type="button" class="btn" data-wdtest>Test power cycle</button><span class="hint" data-wdtestout></span></div>' +
+      field(t('cameras.switch_user', 'Switch user'), text('wd_user', p.username, 'autocomplete="off" placeholder="' + t('cameras.if_signin', 'if it has a sign-in') + '"')) +
+      field(t('cameras.switch_password', 'Switch password'), '<input data-k="wd_pass" type="password" autocomplete="new-password" placeholder="' + (p.has_password ? t('cameras.blank_keep', 'blank keeps the stored password') : t('cameras.if_signin', 'if it has a sign-in')) + '">') +
+      field(t('cameras.power_off_seconds', 'Power off for (s)'), text('wd_secs', p.off_seconds || 10, 'type="number" min="3" max="120"')) +
+      '<div class="row"><button type="button" class="btn" data-wdtest>' + t('cameras.test_power_cycle', 'Test power cycle') + '</button><span class="hint" data-wdtestout></span></div>' +
     '</div>' +
-    '<div class="sec">Recent actions</div><div class="wd-acts" data-wdacts><div class="hint">None yet.</div></div>'];
+    '<div class="sec">' + t('cameras.recent_actions', 'Recent actions') + '</div><div class="wd-acts" data-wdacts><div class="hint">' + t('cameras.none_yet', 'None yet.') + '</div></div>'];
 }
 // The watchdog settings from the form (undefined when this window has no Watchdog tab).
 function readWatchdog(d) {
@@ -766,7 +771,7 @@ function readPower(d) {
   else Object.assign(p, { host: v('wd_host'), channel: Math.max(0, Math.round(Number(v('wd_ch')) || 0)) });
   return p;
 }
-const ACT_LABEL = { 'camera restart': 'Restart', 'camera power cycle': 'Power cycle', 'watchdog gave up': 'Told you' };
+const ACT_LABEL = { 'camera restart': t('cameras.act_restart', 'Restart'), 'camera power cycle': t('cameras.act_power_cycle', 'Power cycle'), 'watchdog gave up': t('cameras.act_told_you', 'Notified you') };
 function wireWatchdog(d, c) {
   const kind = d.querySelector('[data-k="wd_kind"]');
   if (!kind) return;
@@ -779,10 +784,10 @@ function wireWatchdog(d, c) {
   d.querySelector('[data-wdtest]').onclick = () => {
     const power = readPower(d);
     if (!power) return;
-    confirmDlg('Test power cycle', 'Turn the power to <b>' + esc(c.name) + '</b> off for ' + power.off_seconds + ' s and on again? It will be offline for a minute or two while it starts up.', 'Power cycle', async () => {
-      out.textContent = 'Power off, waiting ' + power.off_seconds + ' s, power on...';
+    confirmDlg(t('cameras.test_power_cycle', 'Test power cycle'), t('cameras.power_cycle_q', 'Turn the power to <b>{name}</b> off for {secs} s and on again? It will be offline for a minute or two while it starts up.', { name: esc(c.name), secs: power.off_seconds }), t('cameras.power_cycle', 'Power cycle'), async () => {
+      out.textContent = t('cameras.power_cycle_progress', 'Power off, waiting {secs} s, power on...', { secs: power.off_seconds });
       await api('/api/cameras/' + c.id + '/powercycle', { json: { power } });
-      out.textContent = 'Done: the power went off and on again.';
+      out.textContent = t('cameras.test_cycle_done', 'Done: the power went off and on again.');
       loadWatchdog(d, c);
     }, (e) => { out.textContent = errText(e); });
   };
@@ -793,14 +798,13 @@ async function loadWatchdog(d, c) {
   try { st = await api('/api/cameras/' + c.id + '/watchdog'); } catch (e) { return; }
   const box = d.querySelector('[data-wdstate]');
   if (!box) return;
-  const how = st.can_reboot ? 'Restarts it through ' + st.method : 'Cannot restart it from here';
-  box.innerHTML = '<span class="badge' + (st.enabled ? ' on dot' : '') + '">' + esc(st.state) + '</span><span class="hint">' + esc(how) +
-    (st.can_power ? ', then uses the power switch' : '') + '.' + (st.network_down ? ' Most cameras are offline right now, so it waits.' : '') + '</span>';
+  const how = st.can_reboot ? t('cameras.restarts_through', 'Restarts it through {method}', { method: st.method }) : t('cameras.cannot_restart', 'Cannot restart it from here');
+  box.innerHTML = '<span class="badge' + (st.enabled ? ' on dot' : '') + '">' + esc(st.state) + '</span><span class="hint">' + esc(t('cameras.wd_status', '{how}{power, select, yes {, then uses the power switch} other {}}.{down, select, yes { Most cameras are offline right now, so it waits.} other {}}', { how, power: st.can_power ? 'yes' : 'no', down: st.network_down ? 'yes' : 'no' })) + '</span>';
   const acts = d.querySelector('[data-wdacts]');
   if (acts && st.actions.length) {
     acts.innerHTML = st.actions.map(a => '<div class="wd-act"><span class="muted">' + esc(new Date(a.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })) + '</span>' +
       '<span class="badge' + (a.ok ? '' : ' off') + '">' + esc(ACT_LABEL[a.action] || a.action) + '</span><span>' + esc(a.detail.replace(/^[^:]*:\s*/, '')) + '</span>' +
-      '<span class="muted">' + esc(a.user === '(watchdog)' ? 'automatic' : a.user) + '</span></div>').join('');
+      '<span class="muted">' + esc(a.user === '(watchdog)' ? t('cameras.automatic_lc', 'automatic') : a.user) + '</span></div>').join('');
   }
 }
 // A small centered "are you sure" window, one at a time per title. `go` runs on
@@ -809,7 +813,7 @@ const confirmDlgs = {};
 function confirmDlg(title, html, yes, go, fail) {
   if (raiseDlg(confirmDlgs[title])) return;
   const d = confirmDlgs[title] = openDlg(title, '<div>' + html + '</div>' +
-    '<div class="row"><button class="primary" data-yes>' + esc(yes) + '</button><button class="btn" data-no>Cancel</button></div>', true);
+    '<div class="row"><button class="primary" data-yes>' + esc(yes) + '</button><button class="btn" data-no>' + t('cameras.cancel', 'Cancel') + '</button></div>', true);
   const close = () => { delete confirmDlgs[title]; d.__close(); };
   d.querySelector('.bar button').onclick = close;
   d.querySelector('[data-no]').onclick = close;
@@ -820,11 +824,11 @@ function confirmDlg(title, html, yes, go, fail) {
 }
 // "Reboot camera..." in a camera's menu (admins).
 export function rebootDlg(c) {
-  confirmDlg('Reboot camera', 'Restart <b>' + esc(c.name) + '</b> now? Its video stops for a minute or two while it starts up again.', 'Restart', async () => {
-    toast('Restarting ' + c.name + '...');
+  confirmDlg(t('cameras.reboot_camera', 'Reboot camera'), t('cameras.restart_now_q', 'Restart <b>{name}</b> now? Its video stops for a minute or two while it starts up again.', { name: esc(c.name) }), t('cameras.restart', 'Restart'), async () => {
+    toast(t('cameras.restarting', 'Restarting {name}...', { name: c.name }));
     const r = await api('/api/cameras/' + c.id + '/reboot', { json: {} });
-    toast(c.name + ' is restarting (' + r.method + ')');
-  }, (e) => msgDlg('Could not restart ' + c.name + ': ' + errText(e)));
+    toast(t('cameras.is_restarting', '{name} is restarting ({method})', { name: c.name, method: r.method }));
+  }, (e) => msgDlg(t('cameras.could_not_restart', 'Could not restart {name}: {why}', { name: c.name, why: errText(e) })));
 }
 export const canReboot = (c) => !c.remote && isNetCam(c) && !(c.watchdog && c.watchdog.reboot === 'none');
 
@@ -893,6 +897,7 @@ function readForm(d, c, isNew) {
     copy_events_only_confirmed: v('copy_events_only_confirmed') === '1',
   }, o.motion, o.recording, o.alerts, o.ai);
   if (v('transport')) body.transport = v('transport');
+  if (v('connect')) body.connect = v('connect');
   const stg = readStrangers(d);
   if (stg !== undefined) body.strangers = stg;
   if (isNew) { body.enabled = true; } else {
@@ -909,6 +914,8 @@ function readForm(d, c, isNew) {
     if (tp !== undefined) body.tamper = tp;
     const un = readUnusual(d);
     if (un !== undefined) body.unusual = un;
+    const ct = readControls(d);
+    if (ct !== undefined && v('src') === 'net') body.controls = ct;
   }
   // GET /api/cameras "motion" is the LIVE motion flag, not the setting, so the switch starts on
   // (or at `motion_enabled` if the API ever reports it) and is only written when the user changes it.
@@ -936,15 +943,15 @@ function readForm(d, c, isNew) {
 // Copy chosen sections of this window's settings to other cameras.
 function copyDlg(d, c) {
   const others = state.cams.filter(x => x.id !== c.id && !x.remote);
-  const secs = [['motion', 'Motion'], ['recording', 'Pre- and post-roll'], ['alerts', 'Alerts'], ['ai', 'AI'], ['own', 'Loud sounds and no-motion alert']];
+  const secs = [['motion', t('cameras.sec_motion', 'Motion')], ['recording', t('cameras.sec_roll', 'Pre- and post-roll')], ['alerts', t('cameras.sec_alerts', 'Alerts')], ['ai', 'AI'], ['own', t('cameras.sec_own', 'Loud sounds and no-motion alert')]];
   // Loud sounds and the no-motion alert suit one camera (a microphone, a
   // pet's room), so they are copied only when picked.
   const OWN = ['audio_trigger', 'audio_margin_db', 'audio_min_db', 'audio_sounds', 'no_motion_minutes', 'no_motion_schedule'];
-  const cd = openDlg('Copy settings from ' + c.name,
-    '<div class="hint">Copies what is in the camera window now (saved or not). Fields left on Default stay on Default.</div>' +
-    '<div class="sec">What to copy</div><div class="cs-copygrid">' + secs.map(([k, l]) => '<label class="asys-chk"><input type="checkbox" data-sec="' + k + '"' + (k === 'own' ? '' : ' checked') + '> ' + l + '</label>').join('') + '</div>' +
-    '<div class="sec">To these cameras</div><div class="cs-copygrid">' + others.map(x => '<label class="asys-chk"><input type="checkbox" data-to="' + x.id + '"> ' + esc(x.name) + '</label>').join('') + '</div>' +
-    '<div class="asys-err" data-err></div><div class="row"><button class="primary" data-go>Copy</button><button class="btn" data-no>Cancel</button></div>', true);
+  const cd = openDlg(t('cameras.copy_from', 'Copy settings from {name}', { name: c.name }),
+    '<div class="hint">' + t('cameras.copy_hint', 'Copies what is in the camera window now (saved or not). Fields left on Default stay on Default.') + '</div>' +
+    '<div class="sec">' + t('cameras.what_to_copy', 'What to copy') + '</div><div class="cs-copygrid">' + secs.map(([k, l]) => '<label class="asys-chk"><input type="checkbox" data-sec="' + k + '"' + (k === 'own' ? '' : ' checked') + '> ' + l + '</label>').join('') + '</div>' +
+    '<div class="sec">' + t('cameras.to_these_cameras', 'To these cameras') + '</div><div class="cs-copygrid">' + others.map(x => '<label class="asys-chk"><input type="checkbox" data-to="' + x.id + '"> ' + esc(x.name) + '</label>').join('') + '</div>' +
+    '<div class="asys-err" data-err></div><div class="row"><button class="primary" data-go>' + t('cameras.copy', 'Copy') + '</button><button class="btn" data-no>' + t('cameras.cancel', 'Cancel') + '</button></div>', true);
   cd.querySelector('[data-no]').onclick = () => cd.__close();
   cd.querySelector('[data-go]').onclick = async () => {
     const o = readOverrides(d);
@@ -954,11 +961,11 @@ function copyDlg(d, c) {
     const patch = {};
     cd.querySelectorAll('[data-sec]:checked').forEach(x => Object.assign(patch, o[x.dataset.sec]));
     const to = [...cd.querySelectorAll('[data-to]:checked')].map(x => +x.dataset.to);
-    if (!to.length || !Object.keys(patch).length) { cd.querySelector('[data-err]').textContent = 'Pick at least one camera and one kind of setting.'; return; }
+    if (!to.length || !Object.keys(patch).length) { cd.querySelector('[data-err]').textContent = t('cameras.pick_one', 'Pick at least one camera and one kind of setting.'); return; }
     try {
       for (const id of to) await api('/api/cameras/' + id, { method: 'PUT', json: patch });
       cd.__close();
-      toast('Copied to ' + to.length + ' camera' + (to.length === 1 ? '' : 's'));
+      toast(t('cameras.copied_to', 'Copied to {count, plural, one {# camera} other {# cameras}}', { count: to.length }));
       refreshCameras();
     } catch (e) { cd.querySelector('[data-err]').textContent = e.body || e.message; }
   };
@@ -976,12 +983,12 @@ function trParse(v) {
 // A stored value the pickers cannot express stays editable as text.
 function timeRange(k, label, val, dFrom, dTo, hint) {
   const v = (val || '').trim();
-  const t = trParse(v);
-  const raw = v !== '' && !t;
+  const tr = trParse(v);
+  const raw = v !== '' && !tr;
   return '<div class="cs-f cs-tr" data-trf="' + k + '" data-dfrom="' + dFrom + '" data-dto="' + dTo + '"><span>' + label + '</span><div class="cs-trbox">' +
-    '<label class="asys-chk"><input type="checkbox" data-tron' + (v ? ' checked' : '') + '> Only between</label>' +
-    '<span class="cs-trin" data-trpick' + (v && !raw ? '' : ' hidden') + '><input type="time" data-trs aria-label="' + esc(label) + ' from" value="' + (t ? t[0] : dFrom) + '"> <em>and</em> <input type="time" data-tre aria-label="' + esc(label) + ' until" value="' + (t ? t[1] : dTo) + '"> <button type="button" class="cs-reset" data-trtype title="Type it instead">Type</button></span>' +
-    '<span class="cs-trin" data-trraw' + (raw ? '' : ' hidden') + '><input data-k="' + k + '" value="' + esc(v) + '" placeholder="07:00-21:00" spellcheck="false"> <button type="button" class="cs-reset" data-trbacktopick title="Use the time pickers">Pickers</button></span>' +
+    '<label class="asys-chk"><input type="checkbox" data-tron' + (v ? ' checked' : '') + '> ' + t('cameras.only_between', 'Only between') + '</label>' +
+    '<span class="cs-trin" data-trpick' + (v && !raw ? '' : ' hidden') + '><input type="time" data-trs aria-label="' + esc(t('cameras.label_from', '{label} from', { label })) + '" value="' + (tr ? tr[0] : dFrom) + '"> <em>' + t('cameras.and', 'and') + '</em> <input type="time" data-tre aria-label="' + esc(t('cameras.label_until', '{label} until', { label })) + '" value="' + (tr ? tr[1] : dTo) + '"> <button type="button" class="cs-reset" data-trtype title="' + t('cameras.type_it_instead', 'Type it instead') + '">' + t('cameras.type', 'Type') + '</button></span>' +
+    '<span class="cs-trin" data-trraw' + (raw ? '' : ' hidden') + '><input data-k="' + k + '" value="' + esc(v) + '" placeholder="07:00-21:00" spellcheck="false"> <button type="button" class="cs-reset" data-trbacktopick title="' + t('cameras.use_time_pickers', 'Use the time pickers') + '">' + t('cameras.pickers', 'Pickers') + '</button></span>' +
     '<span class="cs-trnote" data-trnote></span></div></div>' + (hint ? '<div class="hint">' + hint + '</div>' : '');
 }
 // The text field data-k=k holds the value in both modes; in picker mode it is kept in step.
@@ -996,7 +1003,7 @@ function wireTimeRanges(d) {
     const sync = () => {
       if (rawMode()) return;
       raw.value = on.checked && s.value && e.value ? s.value + '-' + e.value : '';
-      note.textContent = on.checked && s.value && e.value && s.value > e.value ? 'overnight: ends the next day' : '';
+      note.textContent = on.checked && s.value && e.value && s.value > e.value ? t('cameras.overnight_note', 'overnight: ends the next day') : '';
       raw.dispatchEvent(new Event('input', { bubbles: true }));
     };
     const show = () => {
@@ -1013,12 +1020,12 @@ function wireTimeRanges(d) {
     s.oninput = e.oninput = sync;
     box.querySelector('[data-trtype]').onclick = () => { rawBox.hidden = false; pick.hidden = true; raw.focus(); };
     box.querySelector('[data-trbacktopick]').onclick = () => {
-      const t = trParse(raw.value);
-      s.value = t ? t[0] : box.dataset.dfrom; e.value = t ? t[1] : box.dataset.dto;
+      const pr = trParse(raw.value);
+      s.value = pr ? pr[0] : box.dataset.dfrom; e.value = pr ? pr[1] : box.dataset.dto;
       rawBox.hidden = true; pick.hidden = false; clearFieldErr(raw); sync();
     };
-    raw.addEventListener('change', () => { if (raw.value.trim() && !trParse(raw.value)) fieldErr(raw, 'Write it like 07:00-21:00 (hours 00-23).'); });
-    note.textContent = on.checked && !rawMode() && s.value > e.value ? 'overnight: ends the next day' : '';
+    raw.addEventListener('change', () => { if (raw.value.trim() && !trParse(raw.value)) fieldErr(raw, t('cameras.write_time_format', 'Write it like 07:00-21:00 (hours 00-23).')); });
+    note.textContent = on.checked && !rawMode() && s.value > e.value ? t('cameras.overnight_note', 'overnight: ends the next day') : '';
   });
 }
 
@@ -1043,33 +1050,33 @@ function fieldErr(el, msg) {
 }
 
 // ---------- event clips also saved to a folder ----------
-const agoText = (t) => { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? s + ' s ago' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' days ago'; };
+const agoText = (ts) => { const s = Math.max(0, Math.round(Date.now() / 1000 - ts)); return s < 90 ? t('cameras.ago_s', '{n} s ago', { n: s }) : s < 5400 ? t('cameras.ago_min', '{n} min ago', { n: Math.round(s / 60) }) : s < 129600 ? t('cameras.ago_h', '{n} h ago', { n: Math.round(s / 3600) }) : t('cameras.ago_days', '{n, plural, one {# day ago} other {# days ago}}', { n: Math.round(s / 86400) }); };
 function copyStatus(c) {
   const s = c.copy_events_status;
   if (!c.copy_events_to || !s) return ['', ''];
-  const wait = s.waiting ? ' · ' + s.waiting + ' waiting' : '';
-  if (s.failing_since) return ['bad', 'Not saving since ' + agoText(s.failing_since) + ': ' + s.last_error + '.' + (s.hint ? ' ' + s.hint + '.' : '') + wait];
-  const skip = s.skipped ? ' · ' + s.skipped + ' skipped (' + s.last_skip + ')' : '';
-  if (s.last_ok) return ['ok', 'Last copy ' + agoText(s.last_ok) + ': ' + s.last_file + ' · ' + s.copied + ' since the server started' + wait + skip];
-  return ['', (s.waiting ? s.waiting + ' waiting for their event to end' : 'No copies yet since the server started') + skip + '.'];
+  const wait = s.waiting ? ' · ' + t('cameras.n_waiting', '{n} waiting', { n: s.waiting }) : '';
+  if (s.failing_since) return ['bad', t('cameras.not_saving_since', 'Not saving since {when}: {error}.', { when: agoText(s.failing_since), error: s.last_error }) + (s.hint ? ' ' + s.hint + '.' : '') + wait];
+  const skip = s.skipped ? ' · ' + t('cameras.n_skipped', '{n} skipped ({why})', { n: s.skipped, why: s.last_skip }) : '';
+  if (s.last_ok) return ['ok', t('cameras.last_copy', 'Last copy {when}: {file} · {n} since the server started', { when: agoText(s.last_ok), file: s.last_file, n: s.copied }) + wait + skip];
+  return ['', (s.waiting ? t('cameras.n_waiting_event', '{n} waiting for their event to end', { n: s.waiting }) : t('cameras.no_copies_yet', 'No copies yet since the server started')) + skip + '.'];
 }
 function copyHtml(c, multi) {
   const [cls, txt] = copyStatus(c);
-  return '<div class="cs-f"><span id="cs-cp-l">Also save event clips to</span><span class="cs-cprow">' +
-      text('copy_events_to', c.copy_events_to || '', 'aria-labelledby="cs-cp-l" spellcheck="false" autocomplete="off" maxlength="300" placeholder="Folder, e.g. a OneDrive or Google Drive folder"') +
-      (multi ? '' : '<button type="button" class="btn" data-cptest>Test</button>') + '</span></div>' +
-    '<div class="hint">Each event\'s clip is also saved here as an .mp4 a few seconds after it ends, in folders by camera and date. In a folder OneDrive, Google Drive or Dropbox syncs, events are off-site within minutes. Recording does not change. The full path of an existing folder; empty = off.</div>' +
+  return '<div class="cs-f"><span id="cs-cp-l">' + t('cameras.also_save_clips', 'Also save event clips to') + '</span><span class="cs-cprow">' +
+      text('copy_events_to', c.copy_events_to || '', 'aria-labelledby="cs-cp-l" spellcheck="false" autocomplete="off" maxlength="300" placeholder="' + t('cameras.folder_placeholder', 'Folder, e.g. a OneDrive or Google Drive folder') + '"') +
+      (multi ? '' : '<button type="button" class="btn" data-cptest>' + t('cameras.test', 'Test') + '</button>') + '</span></div>' +
+    '<div class="hint">' + t('cameras.clips_hint', "Each event's clip is also saved here as an .mp4 a few seconds after it ends, in folders by camera and date. In a folder OneDrive, Google Drive or Dropbox syncs, events are off-site within minutes. Recording does not change. The full path of an existing folder; empty = off.") + '</div>' +
     (multi ? '' : '<div class="hint cs-cpst' + (cls ? ' ' + cls : '') + '" data-cpst aria-live="polite"' + (txt ? '' : ' hidden') + '>' + esc(txt) + '</div>') +
     '<div data-cpopts' + (multi || c.copy_events_to ? '' : ' hidden') + '>' +
-      field('Keep copies (days)', text('copy_events_keep_days', c.copy_events_keep_days || 0, 'type="number" min="0" max="3650" step="1"'), '0 = keep them. Only the clips and pictures AmberSight saved there are deleted.') +
-      field('Only events AI confirmed', onoff('copy_events_only_confirmed', !!c.copy_events_only_confirmed), 'Only events with a person, vehicle or other object AI confirmed, a sound, or the camera\'s own detection (with AI off: every event). Notification settings never leave a copy out. Off: every event.') +
+      field(t('cameras.keep_copies_days', 'Keep copies (days)'), text('copy_events_keep_days', c.copy_events_keep_days || 0, 'type="number" min="0" max="3650" step="1"'), t('cameras.keep_copies_desc', '0 = keep them. Only the clips and pictures AmberSight saved there are deleted.')) +
+      field(t('cameras.only_events_ai_confirmed', 'Only events AI confirmed'), onoff('copy_events_only_confirmed', !!c.copy_events_only_confirmed), t('cameras.only_confirmed_hint', "Only events with a person, vehicle or other object AI confirmed, a sound, or the camera's own detection (with AI off: every event). Notification settings never leave a copy out. Off: every event.")) +
     '</div>';
 }
 // ---------- fill holes in the recording from the camera's own card ----------
 function cardFillHtml(c) {
   const st = c.card_fill_status;
-  return swHtml('data-cardfill', !!c.fill_from_card, 'Fill gaps from the camera\'s card',
-    'When the camera drops off (Wi-Fi, a router restart, AmberSight restarting) and is back, the missing part is copied from its memory card and appears on the timeline marked as from the card. Reolink cameras with a card, recording continuously. Holes up to 2 hours.') +
+  return swHtml('data-cardfill', !!c.fill_from_card, t('cameras.fill_gaps', "Fill gaps from the camera's card"),
+    t('cameras.fill_gaps_desc', "When the camera drops off (Wi-Fi, a router restart, AmberSight restarting) and is back, the missing part is copied from its memory card and appears on the timeline marked as from the card. Reolink cameras with a card, recording continuously. Holes up to 2 hours.")) +
     '<div class="hint cs-cfst" data-cfst aria-live="polite">' + (st && st.text ? esc(st.text) : '') + '</div>';
 }
 // ---------- battery cameras: events the card has and AmberSight missed ----------
@@ -1077,10 +1084,10 @@ function catchUpHtml(c) {
   const st = c.card_catchup_status;
   const every = String(c.catch_up_every != null ? c.catch_up_every : 60);
   const opts = catchUpOptions(every);
-  return swHtml('data-catchup', !!c.catch_up_from_card, 'Import missed events from the camera\'s card',
-    'When a push is missed (push off in the Reolink app, Wi-Fi or DNS trouble) or AmberSight was down, the camera still records to its card. Its recordings of the last 12 hours that AmberSight has no event for are imported as events, marked "from card". Events older than a few minutes send no notification. Each look wakes the camera.') +
-    field('Look at the card', sel('catch_up_every', opts, every),
-      'Always after AmberSight starts, after the camera was unreachable, and after a push that brought no recording. If the camera stays asleep, it is woken to look at most every three times the period.') +
+  return swHtml('data-catchup', !!c.catch_up_from_card, t('cameras.import_missed', "Import missed events from the camera's card"),
+    t('cameras.import_missed_desc', 'When a push is missed (push off in the Reolink app, Wi-Fi or DNS trouble) or AmberSight was down, the camera still records to its card. Its recordings of the last 12 hours that AmberSight has no event for are imported as events, marked "from card". Events older than a few minutes send no notification. Each look wakes the camera.')) +
+    field(t('cameras.look_at_card', 'Look at the card'), sel('catch_up_every', opts, every),
+      t('cameras.look_at_card_hint', 'Always after AmberSight starts, after the camera was unreachable, and after a push that brought no recording. If the camera stays asleep, it is woken to look at most every three times the period.')) +
     '<div class="hint cs-cfst" aria-live="polite">' + (st && st.text ? esc(st.text) : '') + '</div>';
 }
 function wireCardFill(d, c) {
@@ -1088,10 +1095,10 @@ function wireCardFill(d, c) {
   if (!cb || c.id == null) return;
   api('/api/cameras/' + c.id + '/card-fill').then(r => {
     if (r.offered) {
-      if (!c.fill_from_card) st.textContent = 'Card found (' + Math.round(r.card_mb / 1024) + ' GB). Holes are filled from its ' + r.stream + ' stream.';
+      if (!c.fill_from_card) st.textContent = t('cameras.card_found', 'Card found ({gb} GB). Holes are filled from its {stream} stream.', { gb: Math.round(r.card_mb / 1024), stream: r.stream });
     } else {
       cb.disabled = !cb.checked; // an old setting can still be turned off
-      st.textContent = 'Not offered: ' + r.why;
+      st.textContent = t('cameras.not_offered', 'Not offered: {why}', { why: r.why });
     }
   }).catch(() => {});
 }
@@ -1104,7 +1111,7 @@ function wireCopy(d) {
   btn.onclick = async () => {
     const path = inp.value.trim();
     if (!path) return;
-    btn.disabled = true; show('', 'Testing...');
+    btn.disabled = true; show('', t('cameras.testing', 'Testing...'));
     try {
       const r = await api('/api/event-copy/test', { json: { path } });
       show(r.ok ? 'ok' : 'bad', r.message);
@@ -1114,7 +1121,7 @@ function wireCopy(d) {
 }
 
 // ---------- the sections ----------
-const SECTIONS = [['general', 'General'], ['stream', 'Stream'], ['network', 'Network'], ['recording', 'Recording'], ['motion', 'Motion'], ['alerts', 'Alerts'], ['ai', 'AI'], ['av', 'Audio & text'], ['tamper', 'Tamper'], ['unusual', 'Unusual activity'], ['watchdog', 'Watchdog']];
+const SECTIONS = [['general', t('cameras.section_general', 'General')], ['stream', t('cameras.section_stream', 'Stream')], ['network', t('cameras.section_network', 'Network')], ['recording', t('cameras.section_recording', 'Recording')], ['motion', t('cameras.section_motion', 'Motion')], ['alerts', t('cameras.section_alerts', 'Alerts')], ['ai', t('cameras.section_ai', 'AI')], ['av', t('cameras.section_av', 'Audio & text')], ['controls', t('cameras.section_controls', 'Lights & siren')], ['tamper', t('cameras.section_tamper', 'Tamper')], ['unusual', t('cameras.section_unusual', 'Unusual activity')], ['watchdog', t('cameras.section_watchdog', 'Watchdog')]];
 const MORE_KEY = 'ambs.cs.more';
 const moreState = () => { try { return JSON.parse(localStorage.getItem(MORE_KEY) || '{}') || {}; } catch (e) { return {}; } };
 const setMore = (k, v) => { try { const s = moreState(); s[k] = v; localStorage.setItem(MORE_KEY, JSON.stringify(s)); } catch (e) { /* not remembered */ } };
@@ -1125,74 +1132,77 @@ function sectionsOf(c, isNew, multi) {
   const ai = (D && D.ai) || {};
   const out = {
     general: [
-      field('Name', text('name', c.name, 'placeholder="Porch"')) +
-      (isNew ? '' : field('Enabled', onoff('enabled', c.enabled !== false))) +
+      field(t('cameras.name','Name'), text('name', c.name, 'placeholder="' + t('cameras.example_porch', 'Porch') + '"')) +
+      (isNew ? '' : field(t('cameras.enabled','Enabled'), onoff('enabled', c.enabled !== false))) +
       groupsHtml(c),
-      field('Short name', text('short_name', c.short_name, 'placeholder="Door"'), 'Shown where space is tight.')],
+      field(t('cameras.short_name','Short name'), text('short_name', c.short_name, 'placeholder="' + t('cameras.example_door', 'Door') + '"'), t('cameras.shown_where_space_is_tight','Shown where space is tight.'))],
     stream: [streamHtml(c, isNew),
       (OP ? '' : hwHtml(c, multi)) +
-      (OP ? '' : field('RTSP transport', sel('transport', [['auto', 'Auto (TCP; UDP when the camera refuses TCP)'], ['tcp', 'TCP'], ['udp', 'UDP']], c.transport || 'auto'),
-        'How the video travels from the camera. Auto uses TCP, the most reliable; a camera that answers "461 Unsupported Transport" (it offers only UDP) is asked again over UDP, and UDP is kept for it. Pick UDP only for such a camera: UDP loses pictures on a busy or Wi-Fi network.')) +
-      field('Battery camera (connect only when needed)', onoff('on_demand', !!c.on_demand)) +
-      field('Disconnect after idle (s)', text('idle_timeout', c.idle_timeout || 300, 'type="number" min="30" max="604800" step="10"'))],
+      (OP ? '' : field(t('cameras.rtsp_transport','RTSP transport'), sel('transport', [['auto', t('cameras.transport_auto', 'Auto (TCP; UDP when the camera refuses TCP)')], ['tcp', 'TCP'], ['udp', 'UDP']], c.transport || 'auto'),
+        t('cameras.transport_hint', 'How the video travels from the camera. Auto uses TCP, the most reliable; a camera that answers "461 Unsupported Transport" (it offers only UDP) is asked again over UDP, and UDP is kept for it. Pick UDP only for such a camera: UDP loses pictures on a busy or Wi-Fi network.'))) +
+      (OP ? '' : field(t('cameras.connect_with', 'Connect with'), sel('connect', [['rtsp', 'RTSP'], ['auto', t('cameras.connect_auto', 'Auto (port 9000, then RTSP)')], ['baichuan', t('cameras.connect_port9000', 'Reolink port 9000 (Baichuan)')]], c.connect || 'rtsp'),
+        t('cameras.connect_hint', 'For always-on Reolink cameras, not battery cameras. Auto moves to RTSP after port 9000 fails 3 times or sends no video for 2 minutes, and tries port 9000 again every 30 minutes. A wrong password stops both. Burned-in text keeps the camera on RTSP.'))) +
+      field(t('cameras.battery_camera','Battery camera (connect only when needed)'), onoff('on_demand', !!c.on_demand)) +
+      field(t('cameras.disconnect_after_idle','Disconnect after idle (s)'), text('idle_timeout', c.idle_timeout || 300, 'type="number" min="30" max="604800" step="10"'))],
     recording: [
-      field('Record', onoff('record', c.record !== false)) +
-      field('Record mode', sel('record_mode', [['0', 'continuous'], ['2', 'continuous: sub stream, main stream around events'], ['1', 'motion only']], c.record_motion_only ? '1' : (c.record_sub ? '2' : '0')),
-        'The middle choice keeps the full picture only around events and the sub stream the rest of the time, using far less space. It needs a sub stream URL; without one the camera records continuously.') +
+      field(t('cameras.record', 'Record'), onoff('record', c.record !== false)) +
+      field(t('cameras.record_mode', 'Record mode'), sel('record_mode', [['0', t('cameras.rm_continuous', 'continuous')], ['2', t('cameras.rm_sub_main', 'continuous: sub stream, main stream around events')], ['1', t('cameras.rm_motion_only', 'motion only')]], c.record_motion_only ? '1' : (c.record_sub ? '2' : '0')),
+        t('cameras.record_mode_hint', 'The middle choice keeps the full picture only around events and the sub stream the rest of the time, using far less space. It needs a sub stream URL; without one the camera records continuously.')) +
       (isNew || multi || OP ? '' : c.catch_up_from_card != null ? catchUpHtml(c) : cardFillHtml(c)) +
       copyHtml(c, multi),
-      ovNum('pre_roll', 'Pre-roll (s)', c.pre_roll, m.pre_roll != null ? m.pre_roll + ' s' : '', 'type="number" min="0"', 'Video kept from before an event starts.') +
-      ovNum('post_roll', 'Post-roll (s)', c.post_roll, m.post_roll != null ? m.post_roll + ' s' : '', 'type="number" min="0"', 'Video kept after it ends.') +
-      field('Direct copy', onoff('direct', !!c.direct), 'Saves the camera\'s own video without re-encoding (lowest CPU).')],
+      ovNum('pre_roll', t('cameras.pre_roll', 'Pre-roll (s)'), c.pre_roll, m.pre_roll != null ? m.pre_roll + ' s' : '', 'type="number" min="0"', t('cameras.pre_roll_hint', 'Video kept from before an event starts.')) +
+      ovNum('post_roll', t('cameras.post_roll', 'Post-roll (s)'), c.post_roll, m.post_roll != null ? m.post_roll + ' s' : '', 'type="number" min="0"', t('cameras.post_roll_hint', 'Video kept after it ends.')) +
+      field(t('cameras.direct_copy', 'Direct copy'), onoff('direct', !!c.direct), t('cameras.direct_copy_hint', "Saves the camera's own video without re-encoding (lowest CPU)."))],
     motion: [
-      (isNew || multi ? '' : '<div class="cs-prev" data-prev><img alt="Live picture from this camera" hidden><span class="cs-pstate" data-pst>Quiet</span><span class="cs-pnone" data-pnone hidden>No picture right now</span></div>') +
-      field('Motion detection', onoff('motion', c.motion_enabled !== false)) +
+      (isNew || multi ? '' : '<div class="cs-prev" data-prev><img alt="' + t('cameras.live_picture_alt', 'Live picture from this camera') + '" hidden><span class="cs-pstate" data-pst>' + t('cameras.quiet', 'Quiet') + '</span><span class="cs-pnone" data-pnone hidden>' + t('cameras.no_picture_now', 'No picture right now') + '</span></div>') +
+      field(t('cameras.motion_detection', 'Motion detection'), onoff('motion', c.motion_enabled !== false)) +
       motionLevelHtml() +
       (multi ? '' : '<div class="cs-zones"><span data-zsum>' + zonesSummary(c) + '</span>' +
-        (isNew || c.remote ? '<span class="muted"> Save the camera first to edit its zones.</span>' : ' <button type="button" class="btn" data-zedit>Edit zones</button>') + '</div>') +
-      timeRange('schedule', 'Arm window', c.schedule, '20:00', '07:00', m.schedule ? 'Motion counts only during these hours. Shared default: ' + esc(m.schedule) + '.' : 'Motion counts only during these hours. Off: all day.'),
-      ovSel('motion_algorithm', 'Algorithm', [['objects', 'objects (moving objects)'], ['frame-diff', 'frame-diff (whole-frame change)']], c.motion_algorithm, m.algorithm || 'objects') +
-      ovNum('max_object', 'Max object size (% of frame)', pct(c.max_object, 2), m.max_object != null ? pct(m.max_object, 2) + '%' : '', 'type="number" min="1" max="100" step="1"', 'Larger changes are treated as lighting changes.') +
-      ovNum('min_object', 'Min object size (% of frame)', pct(c.min_object), m.min_object != null ? pct(m.min_object) + '%' : '', 'type="number" min="0.01" max="50" step="0.05"',
-        'The smallest moving object that counts. Lower notices smaller things (and more false alarms).') +
-      ovNum('contrast', 'Contrast (0-255)', c.contrast, m.contrast, 'type="number" min="0" max="255"', 'How much a pixel must change. Raise it to ignore shadows and noise.') +
-      ovNum('min_travel', 'Min travel (% of frame)', pct(c.min_travel, 2), m.min_travel != null ? pct(m.min_travel, 2) + '%' : '', 'type="number" min="0" max="20" step="0.5"', 'How far something must move before it counts. Filters swaying branches.') +
-      ovNum('min_frames', 'Min frames', c.min_frames, m.min_frames, 'type="number" min="1"', 'Frames in a row with motion before an event starts.') +
-      ovNum('break_time', 'Event break time (s)', c.break_time, m.break_time != null ? m.break_time + ' s' : '', 'type="number" min="0"', 'An event ends only after this long without motion.') +
-      ovNum('sensitivity', 'Threshold (frame-diff only)', c.sensitivity, m.sensitivity, 'type="number" step="0.001"') +
-      (OP ? '' : field('Analysis FPS', text('fps', c.fps || 10, 'type="number" min="1" max="30"')) +
-      field('Analysis width (px)', text('scale', c.scale || 640, 'type="number" min="160" step="32"'))) +
+        (isNew || c.remote ? '<span class="muted"> ' + t('cameras.save_first_zones', 'Save the camera first to edit its zones.') + '</span>' : ' <button type="button" class="btn" data-zedit>' + t('cameras.edit_zones', 'Edit zones') + '</button>') + '</div>') +
+      timeRange('schedule', t('cameras.arm_window','Arm window'), c.schedule, '20:00', '07:00', m.schedule ? t('cameras.motion_counts_shared', 'Motion counts only during these hours. Shared default: {value}.', { value: esc(m.schedule) }) : t('cameras.motion_counts_off','Motion counts only during these hours. Off: all day.')),
+      ovSel('motion_algorithm', t('cameras.algorithm','Algorithm'), [['objects', t('cameras.alg_objects', 'objects (moving objects)')], ['frame-diff', t('cameras.alg_frame_diff', 'frame-diff (whole-frame change)')]], c.motion_algorithm, m.algorithm || 'objects') +
+      ovNum('max_object', t('cameras.max_object_size','Max object size (% of frame)'), pct(c.max_object, 2), m.max_object != null ? pct(m.max_object, 2) + '%' : '', 'type="number" min="1" max="100" step="1"', t('cameras.max_object_hint', 'Larger changes are treated as lighting changes.')) +
+      ovNum('min_object', t('cameras.min_object_size','Min object size (% of frame)'), pct(c.min_object), m.min_object != null ? pct(m.min_object) + '%' : '', 'type="number" min="0.01" max="50" step="0.05"',
+        t('cameras.min_object_help','The smallest moving object that counts. Lower notices smaller things (and more false alarms).')) +
+      ovNum('contrast', t('cameras.contrast','Contrast (0-255)'), c.contrast, m.contrast, 'type="number" min="0" max="255"', t('cameras.contrast_hint', 'How much a pixel must change. Raise it to ignore shadows and noise.')) +
+      ovNum('min_travel', t('cameras.min_travel','Min travel (% of frame)'), pct(c.min_travel, 2), m.min_travel != null ? pct(m.min_travel, 2) + '%' : '', 'type="number" min="0" max="20" step="0.5"', t('cameras.min_travel_hint', 'How far something must move before it counts. Filters swaying branches.')) +
+      ovNum('min_frames', t('cameras.min_frames','Min frames'), c.min_frames, m.min_frames, 'type="number" min="1"', t('cameras.min_frames_hint', 'Frames in a row with motion before an event starts.')) +
+      ovNum('break_time', t('cameras.event_break_time','Event break time (s)'), c.break_time, m.break_time != null ? m.break_time + ' s' : '', 'type="number" min="0"', t('cameras.break_time_hint', 'An event ends only after this long without motion.')) +
+      ovNum('sensitivity', t('cameras.threshold','Threshold (frame-diff only)'), c.sensitivity, m.sensitivity, 'type="number" step="0.001"') +
+      (OP ? '' : field(t('cameras.analysis_fps','Analysis FPS'), text('fps', c.fps || 10, 'type="number" min="1" max="30"')) +
+      field(t('cameras.analysis_width', 'Analysis width (px)'), text('scale', c.scale || 640, 'type="number" min="160" step="32"'))) +
       (isNew || multi || OP ? '' : triggerHtml(c))],
     alerts: alertsHtml(c, multi),
     ai: [
-      ovSel('ai', 'Object detection', [['1', 'on'], ['0', 'off']], c.ai == null ? null : c.ai ? '1' : '0', ai.enabled ? 'on' : 'off') +
-      ovNum('ai_labels', 'Objects that count', (c.ai_labels || null) && c.ai_labels.join(', '), (ai.labels || []).join(', '), '', 'Comma separated, e.g. person, car, dog.') +
-      ovNum('ai_min_score', 'Min confidence (0-1)', c.ai_min_score, ai.min_score, 'type="number" min="0.05" max="0.99" step="0.05"') +
+      ovSel('ai', t('cameras.object_detection','Object detection'), [['1', t('cameras.on_lc', 'on')], ['0', t('cameras.off_lc', 'off')]], c.ai == null ? null : c.ai ? '1' : '0', ai.enabled ? t('cameras.on_lc', 'on') : t('cameras.off_lc', 'off')) +
+      ovNum('ai_labels', t('cameras.objects_that_count','Objects that count'), (c.ai_labels || null) && c.ai_labels.join(', '), (ai.labels || []).join(', '), '', t('cameras.comma_separated', 'Comma separated, e.g. person, car, dog.')) +
+      ovNum('ai_min_score', t('cameras.min_confidence','Min confidence (0-1)'), c.ai_min_score, ai.min_score, 'type="number" min="0.05" max="0.99" step="0.05"') +
       // (Only "on" changes anything: there is no shared setting, and the default is off.)
-      ovSel('ai_confirm_camera', 'Camera\'s own detection needs AI to agree', [['1', 'on']], c.ai_confirm_camera === true ? '1' : null, 'off',
-        'When the camera itself reports a person, vehicle or animal, it alerts only if AI sees one too (AI keeps looking while the camera reports). Doorbell presses, sounds and packages always count. If AI cannot look, the camera\'s word counts. Off: the camera\'s own detection alerts on its own.') +
+      ovSel('ai_confirm_camera', t('cameras.camera_own_detection', "Camera's own detection needs AI to agree"), [['1', t('cameras.on_lc', 'on')]], c.ai_confirm_camera === true ? '1' : null, t('cameras.off_lc', 'off'),
+        t('cameras.camera_own_hint', "When the camera itself reports a person, vehicle or animal, it alerts only if AI sees one too (AI keeps looking while the camera reports). Doorbell presses, sounds and packages always count. If AI cannot look, the camera's word counts. Off: the camera's own detection alerts on its own.")) +
       (isNew || multi || c.remote || OP ? '' : spotsHtml()),
-      ovSel('ai_ignore_parked', 'Ignore objects that have not moved', [['1', 'yes'], ['0', 'no']], c.ai_ignore_parked == null ? null : c.ai_ignore_parked ? '1' : '0', ai.ignore_parked === false ? 'no' : 'yes',
-        'A car parked in view (or someone sitting still) for a few minutes no longer confirms every motion event; one that arrives or leaves still does. AI also remembers spots where the same kind of thing is seen event after event (a bush or a bin it takes for a person, a parked car): they stop alerting until they move or go.') +
-      ovSel('ai_strict', 'Stricter confirmation', [['1', 'on'], ['0', 'off']], c.ai_strict == null ? null : c.ai_strict ? '1' : '0', ai.strict ? 'on' : 'off',
-        'Alert only when AI sees the object in 2 of 3 looks in a row and it moved between them. Fewer false alerts; someone passing very quickly may be missed.') +
-      ovSel('ai_hide_unconfirmed', 'Show only events AI confirms', [['1', 'on'], ['0', 'off']], c.ai_hide_unconfirmed == null ? null : c.ai_hide_unconfirmed ? '1' : '0', ai.hide_unconfirmed ? 'on' : 'off',
-        'Motion where AI found none of the objects that count (a flag or branches in the wind, or only an umbrella) stays out of Events and the timeline. Nothing is deleted and recording is unaffected; Events can still show them.') +
-      (OP ? '' : field('Package detection', onoff('packages', !!c.packages),
-        'For doorbells: after someone has been at the door, AmberSight compares the picture from before the visit with one a little after. Something new that looks like a box, parcel or mailer is a delivery ("Package at ..." alert, event and Home Assistant sensor); when it is gone after a later visit, "Package picked up". Uses the smart search picture model (downloaded the first time).'))],
+      ovSel('ai_ignore_parked', t('cameras.ignore_unmoved','Ignore objects that have not moved'), [['1', t('cameras.yes_lc', 'yes')], ['0', t('cameras.no_lc', 'no')]], c.ai_ignore_parked == null ? null : c.ai_ignore_parked ? '1' : '0', ai.ignore_parked === false ? t('cameras.no_lc', 'no') : t('cameras.yes_lc', 'yes'),
+        t('cameras.ignore_parked_hint', 'A car parked in view (or someone sitting still) for a few minutes no longer confirms every motion event; one that arrives or leaves still does. AI also remembers spots where the same kind of thing is seen event after event (a bush or a bin it takes for a person, a parked car): they stop alerting until they move or go.')) +
+      ovSel('ai_strict', t('cameras.stricter_confirmation','Stricter confirmation'), [['1', t('cameras.on_lc', 'on')], ['0', t('cameras.off_lc', 'off')]], c.ai_strict == null ? null : c.ai_strict ? '1' : '0', ai.strict ? t('cameras.on_lc', 'on') : t('cameras.off_lc', 'off'),
+        t('cameras.strict_hint', 'Alert only when AI sees the object in 2 of 3 looks in a row and it moved between them. Fewer false alerts; someone passing very quickly may be missed.')) +
+      ovSel('ai_hide_unconfirmed', t('cameras.show_only_ai_events','Show only events AI confirms'), [['1', t('cameras.on_lc', 'on')], ['0', t('cameras.off_lc', 'off')]], c.ai_hide_unconfirmed == null ? null : c.ai_hide_unconfirmed ? '1' : '0', ai.hide_unconfirmed ? t('cameras.on_lc', 'on') : t('cameras.off_lc', 'off'),
+        t('cameras.hide_unconfirmed_hint', 'Motion where AI found none of the objects that count (a flag or branches in the wind, or only an umbrella) stays out of Events and the timeline. Nothing is deleted and recording is unaffected; Events can still show them.')) +
+      (OP ? '' : field(t('cameras.package_detection','Package detection'), onoff('packages', !!c.packages),
+        t('cameras.package_hint', 'For doorbells: after someone has been at the door, AmberSight compares the picture from before the visit with one a little after. Something new that looks like a box, parcel or mailer is a delivery ("Package at ..." alert, event and Home Assistant sensor); when it is gone after a later visit, "Package picked up". Uses the smart search picture model (downloaded the first time).')))],
     av: [
-      field('Audio', onoff('audio', isNew ? true : !!c.audio), 'Sound in the live view and in recordings, when the camera sends it.') +
-      field('Text on the picture', text('overlay_text', c.overlay_text || '', 'maxlength="120" placeholder="e.g. {short} · {site}   {date} {time}"'),
-        'Drawn by the app over this camera\'s live view and playback (playback shows the recording\'s own date and time), and put into its snapshots, event pictures and time-lapse frames. Downloads carry the time as subtitles, or the text itself when "Burn the text into this clip" is on. Fill-ins: {name}, {short} (short name), {site} (this server), {date}, {time}, and {v:NAME} for a value an automation sends in (weather or a temperature from Home Assistant, for example) over MQTT (<code>&lt;prefix&gt;/overlay/NAME/set</code>) or <code>POST /api/overlay/NAME</code>. Empty = no text. {v:NAME} shows in live view only.'),
-      field('Corner', sel('overlay_pos', [['bottom-left', 'bottom left'], ['bottom-right', 'bottom right'], ['top-left', 'top left'], ['top-right', 'top right']], c.overlay_pos || 'bottom-left')) +
-      field('Also burn it into recordings', onoff('overlay', !!c.overlay),
-        'Off: the app draws the text, which costs nothing. On: the text becomes part of the video files too (without text set: name, date and time). This re-encodes the camera\'s video (on the graphics card when it has a video encoder that passed the test at start, else on the processor: about one core per 4K camera) and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Leave it off unless the files themselves must carry the text.') +
+      field(t('cameras.audio','Audio'), onoff('audio', isNew ? true : !!c.audio), t('cameras.audio_hint', 'Sound in the live view and in recordings, when the camera sends it.')) +
+      field(t('cameras.text_on_picture','Text on the picture'), text('overlay_text', c.overlay_text || '', 'maxlength="120" placeholder="e.g. {short} · {site}   {date} {time}"'),
+        t('cameras.overlay_hint', "Drawn by the app over this camera's live view and playback (playback shows the recording's own date and time), and put into its snapshots, event pictures and time-lapse frames. Downloads carry the time as subtitles, or the text itself when \"Burn the text into this clip\" is on. Fill-ins: {fname}, {fshort} (short name), {fsite} (this server), {fdate}, {ftime}, and {fv} for a value an automation sends in (weather or a temperature from Home Assistant, for example) over MQTT (<code>&lt;prefix&gt;/overlay/NAME/set</code>) or <code>POST /api/overlay/NAME</code>. Empty = no text. {fv} shows in live view only.", { fname: '{name}', fshort: '{short}', fsite: '{site}', fdate: '{date}', ftime: '{time}', fv: '{v:NAME}' })),
+      field(t('cameras.corner','Corner'), sel('overlay_pos', [['bottom-left', t('cameras.corner_bl', 'bottom left')], ['bottom-right', t('cameras.corner_br', 'bottom right')], ['top-left', t('cameras.corner_tl', 'top left')], ['top-right', t('cameras.corner_tr', 'top right')]], c.overlay_pos || 'bottom-left')) +
+      field(t('cameras.also_burn','Also burn it into recordings'), onoff('overlay', !!c.overlay),
+        t('cameras.also_burn_help','Off: the app draws the text, which costs nothing. On: the text becomes part of the video files too (without text set: name, date and time). This re-encodes the camera\'s video (on the graphics card when it has a video encoder that passed the test at start, else on the processor: about one core per 4K camera) and turns off smooth live view for this camera: Live and the apps fall back to a snapshot that refreshes, with no sound. Leave it off unless the files themselves must carry the text.')) +
       (isNew || multi ? '' : reencodeHtml(c))],
   };
   if (OP) return { motion: out.motion, alerts: out.alerts, ai: out.ai };
   if (!isNew && !multi && !c.remote) { out.tamper = tamperHtml(c); out.unusual = unusualHtml(c); }
   if (!isNew && !multi && !c.remote && isNetCam(c)) out.network = [netinfoHtml(), ''];
   if (!isNew && !multi && isNetCam(c)) out.watchdog = watchdogHtml(c);
+  if (!isNew && !multi && !c.remote && isNetCam(c)) out.controls = controlsHtml(c);
   if (multi) {
     // Per-camera things make no sense in bulk: name, groups, stream URLs, credentials, zones, sounds, watchdog.
     delete out.general;
@@ -1208,14 +1218,14 @@ function sectionsHtml(c, isNew, multi) {
     '<section class="cs-sec" data-p="' + k + '" aria-labelledby="cs-h-' + k + '"><div class="cs-sechd"><h3 id="cs-h-' + k + '">' + title + '</h3><span class="cs-chg" data-chg hidden></span></div>' +
     '<div class="cs-sum" data-sum></div>' +
     '<div class="cs-pane cs-basic">' + secs[k][0] + '</div>' +
-    (secs[k][1] ? '<details class="cs-extra" data-more="' + k + '"' + (open[k] ? ' open' : '') + '><summary>More settings</summary><div class="cs-pane">' + secs[k][1] + '</div></details>' : '') +
+    (secs[k][1] ? '<details class="cs-extra" data-more="' + k + '"' + (open[k] ? ' open' : '') + '><summary>' + t('cameras.more_settings', 'More settings') + '</summary><div class="cs-pane">' + secs[k][1] + '</div></details>' : '') +
     '</section>').join('');
 }
 
 function motionLevelText(d) {
   const lv = d.querySelector('[data-lv]');
   if (!lv) return '?';
-  return lv.value === '' ? 'server\'s setting' : lv.value === 'mixed' ? 'mixed' : (MO_NAMES[lv.value] || 'custom').toLowerCase();
+  return lv.value === '' ? t('cameras.servers_setting', "server's setting") : lv.value === 'mixed' ? t('cameras.mixed_lc', 'mixed') : (MO_NAMES[lv.value] || t('cameras.custom_lc', 'custom')).toLowerCase();
 }
 
 // ---------- one-line summaries and "N changed from defaults" ----------
@@ -1225,27 +1235,29 @@ function updateSummaries(d, c, base) {
   const chk = (a) => { const el = d.querySelector('[' + a + ']'); return el ? el.checked : false; };
   const num = (k, dflt) => v(k) !== '' ? v(k) : dflt;
   const set = (k, txt) => { const el = d.querySelector('.cs-sec[data-p="' + k + '"] [data-sum]'); if (el) el.textContent = txt; };
-  const onOff = (x) => (x ? 'on' : 'off');
+  const onOff = (x) => (x ? t('cameras.on_lc', 'on') : t('cameras.off_lc', 'off'));
   const grp = readGroups(d);
-  set('general', [v('name') || 'Unnamed', grp.length ? grp.length + ' group' + (grp.length === 1 ? '' : 's') : 'no groups', d.querySelector('[data-k="enabled"]') && v('enabled') === '0' ? 'disabled' : 'enabled'].join(' · '));
+  set('general', [v('name') || t('cameras.unnamed', 'Unnamed'), grp.length ? t('cameras.n_groups', '{n, plural, one {# group} other {# groups}}', { n: grp.length }) : t('cameras.no_groups', 'no groups'), d.querySelector('[data-k="enabled"]') && v('enabled') === '0' ? t('cameras.disabled_lc', 'disabled') : t('cameras.enabled_lc', 'enabled')].join(' · '));
   const src = v('src');
   let where = '';
-  if (src === 'net') { try { where = new URL(v('url')).host; } catch (e) { where = v('url') ? 'custom URL' : 'no URL yet'; } }
-  set('stream', ({ net: 'Network camera', device: 'Local device', screen: 'Screen', helper: 'Another computer', push: 'Pushed stream' }[src] || '') + (where ? ' · ' + where : '') + (src === 'net' && v('sub_url') ? ' · with sub stream' : ''));
-  set('recording', (v('record') === '0' ? 'Recording: off' : 'Recording: ' + ({ 0: 'continuous', 1: 'motion only', 2: 'continuous sub stream, main around events' }[v('record_mode')] || 'continuous')) + (v('copy_events_to') ? ' · event clips also saved to a folder' : ''));
+  if (src === 'net') { try { where = new URL(v('url')).host; } catch (e) { where = v('url') ? t('cameras.custom_url', 'custom URL') : t('cameras.no_url_yet', 'no URL yet'); } }
+  set('stream', ({ net: t('cameras.src_net', 'Network camera'), device: t('cameras.src_device', 'Local device'), screen: t('cameras.src_screen', 'Screen'), helper: t('cameras.src_helper', 'Another computer'), push: t('cameras.src_push', 'Pushed stream') }[src] || '') + (where ? ' · ' + where : '') + (src === 'net' && v('sub_url') ? ' · ' + t('cameras.with_sub_stream', 'with sub stream') : ''));
+  set('recording', (v('record') === '0' ? t('cameras.recording_off', 'Recording: off') : t('cameras.recording_mode', 'Recording: {mode}', { mode: { 0: t('cameras.rm_continuous', 'continuous'), 1: t('cameras.rm_motion_only', 'motion only'), 2: t('cameras.rm_sub_around', 'continuous sub stream, main around events') }[v('record_mode')] || t('cameras.rm_continuous', 'continuous') })) + (v('copy_events_to') ? ' · ' + t('cameras.clips_also_saved', 'event clips also saved to a folder') : ''));
   const zn = (c.zones || []).length + (c.zone_polys || []).length;
-  set('motion', v('motion') === '0' ? 'Motion: off' : 'Motion: ' + (v('motion_algorithm') || m.algorithm || 'objects') + ' · ' + zn + ' zone' + (zn === 1 ? '' : 's') + ' · sensitivity ' + motionLevelText(d) + (v('schedule') ? ' · ' + v('schedule') : ''));
+  set('motion', v('motion') === '0' ? t('cameras.motion_off', 'Motion: off') : t('cameras.motion_summary', 'Motion: {alg} · {zones} · sensitivity {level}', { alg: v('motion_algorithm') || m.algorithm || 'objects', zones: t('cameras.n_zones', '{n, plural, one {# zone} other {# zones}}', { n: zn }), level: motionLevelText(d) }) + (v('schedule') ? ' · ' + v('schedule') : ''));
   const al = v('alerts');
   const chans = d.querySelector('[data-chall]');
-  set('alerts', 'Alerts: ' + (al === '' ? 'on (default)' : al === '1' ? 'on' : 'off') + ' · ' + (v('alert_schedule') || 'any time') + ' · ' + (v('nf') === 'some' && d.querySelector('[data-nflist] .chip.on') ? 'only ' + [...d.querySelectorAll('[data-nflist] .chip.on')].map(b => b.dataset.nl).join(', ') + ' · ' : '') + (OP ? '' : !chans || chans.checked ? 'all services' : d.querySelectorAll('[data-ch]:checked').length + ' service(s)'));
+  set('alerts', t('cameras.alerts_state', 'Alerts: {state}', { state: al === '' ? t('cameras.on_default', 'on (default)') : al === '1' ? t('cameras.on_lc', 'on') : t('cameras.off_lc', 'off') }) + ' · ' + (v('alert_schedule') || t('cameras.any_time', 'any time')) + ' · ' + (v('nf') === 'some' && d.querySelector('[data-nflist] .chip.on') ? t('cameras.only_list', 'only {list}', { list: [...d.querySelectorAll('[data-nflist] .chip.on')].map(b => objName(b.dataset.nl)).join(', ') }) + ' · ' : '') + (OP ? '' : !chans || chans.checked ? t('cameras.all_services_lc', 'all services') : t('cameras.n_services', '{n} service(s)', { n: d.querySelectorAll('[data-ch]:checked').length })));
   const aiOn = v('ai') === '' ? !!ai.enabled : v('ai') === '1';
-  set('ai', 'AI: ' + onOff(aiOn) + (aiOn ? ' · ' + (v('ai_labels') || (ai.labels || []).join(', ') || 'default objects') + ' · min ' + num('ai_min_score', ai.min_score != null ? ai.min_score : '?') : ''));
-  set('av', 'Audio: ' + onOff(v('audio') === '1') + ' · text ' + (v('overlay_text') ? 'set' : 'none'));
+  set('ai', t('cameras.ai_state', 'AI: {state}', { state: onOff(aiOn) }) + (aiOn ? ' · ' + (v('ai_labels') || (ai.labels || []).join(', ') || t('cameras.default_objects', 'default objects')) + ' · ' + t('cameras.min_score', 'min {score}', { score: num('ai_min_score', ai.min_score != null ? ai.min_score : '?') }) : ''));
+  set('av', t('cameras.audio_summary', 'Audio: {state} · text {text}', { state: onOff(v('audio') === '1'), text: v('overlay_text') ? t('cameras.text_set', 'set') : t('cameras.text_none', 'none') }));
   const ws = watchSummaries(d);
   if (ws.tamper) set('tamper', ws.tamper);
   if (ws.unusual) set('unusual', ws.unusual);
+  const cs = controlsSummary(d);
+  if (cs) set('controls', cs);
   const wdEl = d.querySelector('[data-wd-en]');
-  if (wdEl) set('watchdog', 'Watchdog: ' + onOff(wdEl.checked) + ' · restart via ' + (v('wd_reboot') || 'auto') + (v('wd_kind') ? ' · power switch' : ''));
+  if (wdEl) set('watchdog', t('cameras.watchdog_summary', 'Watchdog: {state} · restart via {how}', { state: onOff(wdEl.checked), how: v('wd_reboot') || 'auto' }) + (v('wd_kind') ? ' · ' + t('cameras.power_switch_lc', 'power switch') : ''));
   // "N changed": how many fields of the section differ from the saved values (formSig's order).
   const parts = base ? base.split('\u0001') : null;
   const els = parts ? [...d.querySelectorAll(SIG_SEL)] : [];
@@ -1258,7 +1270,7 @@ function updateSummaries(d, c, base) {
       chips.forEach((b, i) => { if (sec.contains(b) && String(b.classList.contains('on') ? 1 : 0) !== parts[els.length + i * 2 + 1]) n++; });
     }
     const b = sec.querySelector('[data-chg]');
-    b.hidden = !n; b.textContent = n + ' changed';
+    b.hidden = !n; b.textContent = t('cameras.changed', '{n} changed', { n });
   });
 }
 
@@ -1279,15 +1291,15 @@ function camFromForm(d, c) {
 function wireArmStrip(d, c, cleanups) {
   const host = d.querySelector('[data-armhost]');
   if (!host) return;
-  let strip = null, data = null, t = 0, dead = false;
+  let strip = null, data = null, timer = 0, dead = false;
   const redraw = () => { if (strip) strip.update(camFromForm(d, c), data); };
-  const onChange = () => { clearTimeout(t); t = setTimeout(redraw, 250); };
+  const onChange = () => { clearTimeout(timer); timer = setTimeout(redraw, 250); };
   loadArmData(api).then(dt => {
     if (dead || !host.isConnected) return;
     data = dt; strip = armStrip(host, camFromForm(d, c), dt);
-  }).catch(() => { host.textContent = 'Could not work out the schedule.'; });
+  }).catch(() => { host.textContent = t('cameras.could_not_work_out_schedule', 'Could not work out the schedule.'); });
   d.addEventListener('input', onChange); d.addEventListener('change', onChange);
-  cleanups.push(() => { dead = true; clearTimeout(t); if (strip) strip.destroy(); });
+  cleanups.push(() => { dead = true; clearTimeout(timer); if (strip) strip.destroy(); });
 }
 
 // ---------- the side panel ----------
@@ -1309,7 +1321,7 @@ function ensureDrawer() {
   drawer = document.createElement('aside');
   drawer.className = 'cs-drawer';
   drawer.setAttribute('role', 'dialog');
-  drawer.setAttribute('aria-label', 'Camera settings');
+  drawer.setAttribute('aria-label', t('cameras.settings_label', 'Camera settings'));
   drawer.setAttribute('aria-modal', 'true');
   drawer.tabIndex = -1;
   // Tab stays inside the panel (Esc closes it and gives the focus back to what opened it).
@@ -1357,7 +1369,7 @@ function idxFade(root) {
   upd();
 }
 const dotClass = (c) => (c.enabled === false ? 'off' : c.online ? 'ok' : c.sleeping ? 'sleep' : 'bad');
-const dotTitle = (c) => (c.enabled === false ? 'Disabled' : c.online ? 'Online' : c.sleeping ? 'Asleep (a battery camera saving power)' : 'Offline');
+const dotTitle = (c) => (c.enabled === false ? t('cameras.disabled', 'Disabled') : c.online ? t('cameras.online', 'Online') : c.sleeping ? t('cameras.asleep', 'Asleep (a battery camera saving power)') : t('cameras.offline', 'Offline'));
 
 // Everything the user can change, as one string: dirty = it differs from the opening state.
 // (data-nosig: fields that only feed another field, such as the address parts of the stream URL.)
@@ -1373,8 +1385,8 @@ function unsavedDlg(name) {
   return new Promise(res => {
     let done = false;
     const fin = (v) => { if (!done) { done = true; res(v); } d.__close(); };
-    const d = openDlg('Unsaved changes', '<div>You changed settings for <b>' + esc(name) + '</b> and have not saved them.</div>' +
-      '<div class="row"><button class="primary" data-s>Save</button><button class="btn danger" data-d>Discard changes</button><button class="btn" data-keep>Keep editing</button></div>', true);
+    const d = openDlg(t('cameras.unsaved_changes', 'Unsaved changes'), t('cameras.unsaved_msg', '<div>You changed settings for <b>{name}</b> and have not saved them.</div>', { name: esc(name) }) +
+      '<div class="row"><button class="primary" data-s>' + t('cameras.save', 'Save') + '</button><button class="btn danger" data-d>' + t('cameras.discard_changes', 'Discard changes') + '</button><button class="btn" data-keep>' + t('cameras.keep_editing', 'Keep editing') + '</button></div>', true);
     const orig = d.__close;
     d.__close = () => { if (!done) { done = true; res('keep'); } orig(); };
     d.querySelector('[data-s]').onclick = () => fin('save');
@@ -1387,7 +1399,7 @@ function unsavedDlg(name) {
 // True when it is fine to replace/close the panel (nothing unsaved, or the user chose).
 async function leave() {
   if (!cur || !cur.dirty()) return true;
-  const r = await unsavedDlg(cur.c.name || 'this camera');
+  const r = await unsavedDlg(cur.c.name || t('cameras.this_camera', 'this camera'));
   if (r === 'keep') return false;
   if (r === 'save') return await cur.save();
   return true;
@@ -1423,15 +1435,15 @@ window.addEventListener('keydown', (ev) => {
 }, true);
 
 function panelHtml(c, isNew) {
-  const head = '<div class="cs-head"><div class="cs-title"><span class="cs-dot ' + (isNew ? 'off' : dotClass(c)) + '" data-dot title="' + (isNew ? '' : dotTitle(c)) + '"></span><h2>' + esc(isNew ? 'Add camera' : c.name) + '</h2></div>' +
+  const head = '<div class="cs-head"><div class="cs-title"><span class="cs-dot ' + (isNew ? 'off' : dotClass(c)) + '" data-dot title="' + (isNew ? '' : dotTitle(c)) + '"></span><h2>' + esc(isNew ? t('cameras.add_camera', 'Add camera') : c.name) + '</h2></div>' +
     '<span class="cs-state" data-state aria-live="polite"></span>' + helpButton('camera') +
-    '<button type="button" class="cs-x" data-x title="Close (Esc)" aria-label="Close"><svg class="ic"><use href="#i-x"/></svg></button></div>';
+    '<button type="button" class="cs-x" data-x title="' + t('cameras.close_esc', 'Close (Esc)') + '" aria-label="' + t('cameras.close', 'Close') + '"><svg class="ic"><use href="#i-x"/></svg></button></div>';
   const secs = sectionsOf(c, isNew);
-  const idx = '<div class="cs-idx" role="navigation" aria-label="Sections">' + SECTIONS.filter(([k]) => secs[k]).map(([k, t]) => '<button type="button" data-jump="' + k + '">' + t + '</button>').join('') + '</div>';
-  const actions = isNew || OP ? '' : '<div class="cs-acts"><button class="btn" data-copy title="Copy motion, recording, alert or AI settings to other cameras">Copy to...</button><span class="cs-sp"></span><button class="btn danger" data-remove>Remove camera</button></div>';
-  const opNote = OP ? '<div class="hint cs-opnote">You can change when and where this camera detects and alerts. Its other settings are changed by an admin.</div>' : '';
+  const idx = '<div class="cs-idx" role="navigation" aria-label="' + t('cameras.sections', 'Sections') + '">' + SECTIONS.filter(([k]) => secs[k]).map(([k, label]) => '<button type="button" data-jump="' + k + '">' + label + '</button>').join('') + '</div>';
+  const actions = isNew || OP ? '' : '<div class="cs-acts"><button class="btn" data-copy title="' + t('cameras.copy_to', 'Copy motion, recording, alert or AI settings to other cameras') + '">' + t('cameras.copy_to_btn', 'Copy to...') + '</button><span class="cs-sp"></span><button class="btn danger" data-remove>' + t('cameras.remove_camera', 'Remove camera') + '</button></div>';
+  const opNote = OP ? '<div class="hint cs-opnote">' + t('cameras.op_note', 'You can change when and where this camera detects and alerts. Its other settings are changed by an admin.') + '</div>' : '';
   return head + idx + '<div class="cs-body" data-body>' + opNote + sectionsHtml(c, isNew) + actions + '</div>' +
-    '<div class="cs-foot"><div class="asys-err" data-err role="alert"></div><div class="cs-footrow"><button class="primary" data-save disabled>' + (isNew ? 'Add camera' : 'Save') + '</button><button class="btn" data-cancel>Close</button></div></div>';
+    '<div class="cs-foot"><div class="asys-err" data-err role="alert"></div><div class="cs-footrow"><button class="primary" data-save disabled>' + (isNew ? t('cameras.add_camera', 'Add camera') : t('cameras.save', 'Save')) + '</button><button class="btn" data-cancel>' + t('cameras.close', 'Close') + '</button></div></div>';
 }
 
 // Build the panel contents for camera c (or a new one) and wire everything.
@@ -1468,6 +1480,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
   const stopSound = wireSound(d, c);
   if (stopSound) cleanups.push(stopSound);
   if (!isNew && !OP) wireWatchdog(d, c);
+  if (!isNew && !OP) wireControls(d, c);
   if (!isNew && !OP) { const stopN = wireNetinfo(d, c); if (stopN) cleanups.push(stopN); }
   if (!isNew) cleanups.push(wirePreview(d, id));
   const zb = d.querySelector('[data-zedit]');
@@ -1509,7 +1522,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
     const dirty = state.dirty();
     saveBtn.disabled = !dirty;
     stEl.className = 'cs-state' + (dirty ? ' dirty' : saved ? ' saved' : '');
-    stEl.textContent = dirty ? 'Unsaved changes' : saved ? 'Saved' : '';
+    stEl.textContent = dirty ? t('cameras.unsaved_changes', 'Unsaved changes') : saved ? t('cameras.saved', 'Saved') : '';
     updateSummaries(d, c, state.base);
   };
   const touch = (e) => { if (e.isTrusted) { state.touched = true; saved = false; } paint(); };
@@ -1580,7 +1593,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
     if (!validate(d, isNew)) return false;
     const rawBody = OP ? operatorBody(d, c) : readForm(d, c, isNew);
     if (!isNew && !rawBody.password) delete rawBody.password;
-    saveBtn.disabled = true; stEl.className = 'cs-state'; stEl.textContent = 'Saving...';
+    saveBtn.disabled = true; stEl.className = 'cs-state'; stEl.textContent = t('cameras.saving', 'Saving...');
     try {
       if (isNew) await api('/api/cameras', { json: rawBody });
       else await api('/api/cameras/' + id, { method: 'PUT', json: rawBody });
@@ -1589,7 +1602,7 @@ function render(id, c, isNew, keepScroll, savedNote) {
       paint();
       return false;
     }
-    toast(isNew ? 'Camera added' : 'Saved ' + (rawBody.name || c.name), { kind: 'ok' });
+    toast(isNew ? t('cameras.camera_added', 'Camera added') : t('cameras.saved_name', 'Saved {name}', { name: rawBody.name || c.name }), { kind: 'ok' });
     if (isNew) { cur = state; teardown(); await refreshCameras(); return true; }
     const scroll = body.scrollTop;
     await refreshCameras();
@@ -1627,21 +1640,21 @@ function validate(d, isNew) {
   let first = null;
   const bad = (k, msg) => { const el = d.querySelector('[data-k="' + k + '"]') || d.querySelector('[data-k="src"]'); const x = fieldErr(el, msg); if (!first) first = el; return x; };
   const v = (k) => { const el = d.querySelector('[data-k="' + k + '"]'); return el ? el.value.trim() : ''; };
-  if (!OP && !v('name')) bad('name', 'Give the camera a name.');
+  if (!OP && !v('name')) bad('name', t('cameras.give_name', 'Give the camera a name.'));
   const src = v('src');
   if (!OP && src === 'net') addrValidate(d).forEach(([k, msg]) => bad(k, msg));
   else if (!OP && !sourceUrl(d) && src !== 'helper') {
-    if (src === 'device') bad('dev', 'Pick a capture device (or type its name).');
-    else bad('url', 'A stream URL is needed.');
-  } else if (src === 'helper' && !readHelper(d)) bad('src', 'Pick a computer and what to capture.');
+    if (src === 'device') bad('dev', t('cameras.pick_device', 'Pick a capture device (or type its name).'));
+    else bad('url', t('cameras.stream_url_needed', 'A stream URL is needed.'));
+  } else if (src === 'helper' && !readHelper(d)) bad('src', t('cameras.pick_computer', 'Pick a computer and what to capture.'));
   if (!OP && src === 'net') {
     const u = v('url'), su = v('sub_url');
-    if (u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) bad('url', 'Stream URL must start with rtsp:// (or another stream address such as http://).');
-    if (su && !/^(rtsps?|https?|rtmp):\/\/[^/?#\s]+/i.test(su)) bad('sub_url', 'Sub stream URL must start with rtsp:// (or rtsps://, http://, https://), e.g. rtsp://192.168.1.50/sub.');
+    if (u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) bad('url', t('cameras.stream_url_format', 'Stream URL must start with rtsp:// (or another stream address such as http://).'));
+    if (su && !/^(rtsps?|https?|rtmp):\/\/[^/?#\s]+/i.test(su)) bad('sub_url', t('cameras.sub_stream_url_format', 'Sub stream URL must start with rtsp:// (or rtsps://, http://, https://), e.g. rtsp://192.168.1.50/sub.'));
   }
   d.querySelectorAll('[data-trf]').forEach(box => {
     const raw = box.querySelector('[data-trraw] input');
-    if (raw.value.trim() && !trParse(raw.value)) bad(raw.dataset.k, 'Write it like 07:00-21:00 (hours 00-23).');
+    if (raw.value.trim() && !trParse(raw.value)) bad(raw.dataset.k, t('cameras.time_range_format', 'Write it like 07:00-21:00 (hours 00-23).'));
   });
   if (first) {
     first.scrollIntoView({ block: 'center', behavior: reduced() ? 'auto' : 'smooth' });
@@ -1673,9 +1686,15 @@ function wirePreview(d, id) {
     if (stop || !d.isConnected) return;
     const c = camFromId(id);
     const mo = !!(c && c.motion);
-    st.textContent = mo ? 'Motion now' : 'Quiet';
+    st.textContent = mo ? t('cameras.motion_now', 'Motion now') : t('cameras.quiet', 'Quiet');
     st.classList.toggle('now', mo);
     if (!d.__inView || !d.__inView('motion') || (c && c.enabled === false)) { timer = setTimeout(tick, 1000); return; }
+    // A battery camera asleep has no picture (the server answers 503): say so, and look again once it wakes.
+    if (c && c.sleeping && !c.online) {
+      img.hidden = true; none.hidden = false; none.textContent = t('cameras.asleep', 'Asleep (a battery camera saving power)');
+      timer = setTimeout(tick, 2000); return;
+    }
+    none.textContent = t('cameras.no_picture_now', 'No picture right now');
     const n = new Image();
     n.onload = () => { img.src = n.src; img.hidden = false; none.hidden = true; timer = setTimeout(tick, 1000); };
     n.onerror = () => { img.hidden = true; none.hidden = false; timer = setTimeout(tick, 3000); };
@@ -1688,16 +1707,16 @@ function wirePreview(d, id) {
 // The settings panel for one camera (id), or for a new camera (id null).
 export async function openCameraDialog(id) {
   if (!state.isAdmin && !(id != null && can('camera_detection'))) {
-    msgDlg(state.role === 'operator' ? 'This account cannot change camera settings: an admin can allow it to change detection and alert settings' : 'View-only account: camera settings need an admin sign-in');
+    msgDlg(state.role === 'operator' ? t('cameras.operator_cannot', 'This account cannot change camera settings: an admin can allow it to change detection and alert settings') : t('cameras.view_only', 'View-only account: camera settings need an admin sign-in'));
     return;
   }
   const c0 = id == null ? null : camFromId(id);
-  if (!state.isAdmin && c0 && c0.remote) { msgDlg('Settings of a camera on another server are changed on that server'); return; }
+  if (!state.isAdmin && c0 && c0.remote) { msgDlg(t('cameras.remote_settings', 'Settings of a camera on another server are changed on that server')); return; }
   const isNew = id == null;
   const key = isNew ? 'new' : String(id);
   if (cur && cur.key === key) { ensureDrawer().focus({ preventScroll: true }); return; }
   const c = isNew ? { fps: 10, scale: 640 } : camFromId(id);
-  if (!c) { msgDlg('That camera no longer exists'); return; }
+  if (!c) { msgDlg(t('cameras.not_exists', 'That camera no longer exists')); return; }
   const seq = ++openSeq;
   if (!(await leave())) return;
   // (Operators: the shared defaults are an admin's; fields show their own values.)
@@ -1725,6 +1744,7 @@ const BULK_BASE = (v, num) => ({
   overlay_text: v('overlay_text') || null, overlay_pos: v('overlay_pos') || null,
   copy_events_to: v('copy_events_to') || null, copy_events_keep_days: Math.min(3650, Math.max(0, Math.round(num('copy_events_keep_days', 0)) || 0)),
   copy_events_only_confirmed: v('copy_events_only_confirmed') === '1', transport: v('transport') || 'auto',
+  connect: v('connect') || 'rtsp',
 });
 // What each chosen camera's form would hold, per field.
 function fieldValues(c) {
@@ -1751,7 +1771,7 @@ function bulkBody(d, touched) {
 }
 
 export async function openCamerasBulk(ids) {
-  if (!state.isAdmin) { msgDlg('Editing several cameras at once needs an admin sign-in'); return; }
+  if (!state.isAdmin) { msgDlg(t('cameras.bulk_admin_needed', 'Editing several cameras at once needs an admin sign-in')); return; }
   OP = false;
   const cams = ids.map(camFromId).filter(Boolean);
   if (cams.length < 1) return;
@@ -1771,16 +1791,16 @@ function renderMulti(cams) {
   root.className = 'cs-root';
   const secs = sectionsOf(cams[0], false, true);
   const keys = SECTIONS.filter(([k]) => secs[k]);
-  root.innerHTML = '<div class="cs-head"><div class="cs-title"><h2>Edit ' + n + ' camera' + (n === 1 ? '' : 's') + '</h2></div><span class="cs-state" data-state aria-live="polite"></span>' +
-    '<button type="button" class="cs-x" data-x title="Close (Esc)" aria-label="Close"><svg class="ic"><use href="#i-x"/></svg></button></div>' +
-    '<div class="cs-idx" role="navigation" aria-label="Sections">' + keys.map(([k, t]) => '<button type="button" data-jump="' + k + '">' + t + '</button>').join('') + '</div>' +
-    '<div class="cs-body" data-body><div class="cs-bulkhint"><b>' + cams.map(c => esc(c.name)).join(', ') + '</b><div class="hint">A field that differs between these cameras says Mixed and is left alone. Change a field and it is set on all of them; nothing else is touched. Name, groups, stream, sign-in, zones and sounds are per camera, so they are edited one at a time.</div></div>' +
+  root.innerHTML = '<div class="cs-head"><div class="cs-title"><h2>' + t('cameras.edit_n', '{n, plural, one {Edit # camera} other {Edit # cameras}}', { n }) + '</h2></div><span class="cs-state" data-state aria-live="polite"></span>' +
+    '<button type="button" class="cs-x" data-x title="' + t('cameras.close_esc', 'Close (Esc)') + '" aria-label="' + t('cameras.close', 'Close') + '"><svg class="ic"><use href="#i-x"/></svg></button></div>' +
+    '<div class="cs-idx" role="navigation" aria-label="' + t('cameras.sections', 'Sections') + '">' + keys.map(([k, label]) => '<button type="button" data-jump="' + k + '">' + label + '</button>').join('') + '</div>' +
+    '<div class="cs-body" data-body><div class="cs-bulkhint"><b>' + cams.map(c => esc(c.name)).join(', ') + '</b><div class="hint">' + t('cameras.bulk_hint', 'A field that differs between these cameras says Mixed and is left alone. Change a field and it is set on all of them; nothing else is touched. Name, groups, stream, sign-in, zones and sounds are per camera, so they are edited one at a time.') + '</div></div>' +
     sectionsHtml(cams[0], false, true) + '<div class="cs-bulkres" data-res hidden></div></div>' +
-    '<div class="cs-foot"><div class="asys-err" data-err role="alert"></div><div class="cs-footrow"><button class="primary" data-save disabled>Save to ' + n + ' camera' + (n === 1 ? '' : 's') + '</button><button class="btn" data-cancel>Close</button></div></div>';
+    '<div class="cs-foot"><div class="asys-err" data-err role="alert"></div><div class="cs-footrow"><button class="primary" data-save disabled>' + t('cameras.save_to_n', '{n, plural, one {Save to # camera} other {Save to # cameras}}', { n }) + '</button><button class="btn" data-cancel>' + t('cameras.close', 'Close') + '</button></div></div>';
   dr.replaceChildren(root);
   idxFade(root);
   const d = root, body = d.querySelector('[data-body]');
-  const st = { key: 'multi', id: null, isNew: false, multi: true, root, c: { name: n + ' cameras' }, opener, touched: false, base: '' };
+  const st = { key: 'multi', id: null, isNew: false, multi: true, root, c: { name: t('cameras.n_cameras', '{n, plural, one {# camera} other {# cameras}}', { n }) }, opener, touched: false, base: '' };
   const cleanups = [];
   st.cleanup = () => { cleanups.forEach(f => { try { f(); } catch (e) { /* nothing */ } }); clearInterval(markTimer); };
   cur = st;
@@ -1797,7 +1817,7 @@ function renderMulti(cams) {
     el.classList.add('mixed');
     if (el.tagName === 'SELECT') {
       const o = document.createElement('option');
-      o.value = MIXED; o.textContent = 'Mixed'; el.insertBefore(o, el.firstChild); el.value = MIXED;
+      o.value = MIXED; o.textContent = t('cameras.mixed', 'Mixed'); el.insertBefore(o, el.firstChild); el.value = MIXED;
     } else if (el.closest('[data-trf]')) {
       const box = el.closest('[data-trf]');
       el.value = '';
@@ -1805,15 +1825,15 @@ function renderMulti(cams) {
       box.querySelector('[data-trpick]').hidden = true; box.querySelector('[data-trraw]').hidden = true;
       box.dataset.mixed = '1';
       const note = box.querySelector('[data-trnote]');
-      note.textContent = 'Mixed: tick to set the same window on all ';
+      note.textContent = t('cameras.mixed_tick', 'Mixed: tick to set the same window on all') + ' ';
       const none = document.createElement('button');
-      none.type = 'button'; none.className = 'cs-reset'; none.textContent = 'Remove it on all';
-      none.onclick = () => { box.dataset.none = '1'; note.textContent = 'The window will be removed on all'; touched.add(box.dataset.trf); paint(); };
+      none.type = 'button'; none.className = 'cs-reset'; none.textContent = t('cameras.remove_all', 'Remove it on all');
+      none.onclick = () => { box.dataset.none = '1'; note.textContent = t('cameras.will_remove_all', 'The window will be removed on all'); touched.add(box.dataset.trf); paint(); };
       box.dataset.noteMixed = note.textContent;
       note.after(none); box.__none = none;
     } else {
-      el.value = ''; el.placeholder = 'Mixed';
-      const r = d.querySelector('[data-reset="' + k + '"]'); if (r) { r.hidden = false; r.title = 'Use the default on all'; }
+      el.value = ''; el.placeholder = t('cameras.mixed','Mixed');
+      const r = d.querySelector('[data-reset="' + k + '"]'); if (r) { r.hidden = false; r.title = t('cameras.use_default','Use the default on all'); }
     }
   });
   wireMotionLevel(d);
@@ -1824,10 +1844,10 @@ function renderMulti(cams) {
   const paint = () => {
     saveBtn.disabled = touched.size === 0;
     stEl.className = 'cs-state' + (touched.size ? ' dirty' : '');
-    stEl.textContent = touched.size ? touched.size + ' field' + (touched.size === 1 ? '' : 's') + ' to change' : '';
+    stEl.textContent = touched.size ? t('cameras.n_fields_to_change', '{n, plural, one {# field} other {# fields}} to change', { n: touched.size }) : '';
     d.querySelectorAll('.cs-sec').forEach(sec => {
       const c = [...sec.querySelectorAll('[data-k]')].filter(el => touched.has(el.dataset.k)).length;
-      const b = sec.querySelector('[data-chg]'); b.hidden = !c; b.textContent = c + ' to change';
+      const b = sec.querySelector('[data-chg]'); b.hidden = !c; b.textContent = t('cameras.n_to_change', '{n} to change', { n: c });
       const sm = sec.querySelector('[data-sum]'); if (sm) sm.textContent = '';
     });
   };
@@ -1848,7 +1868,7 @@ function renderMulti(cams) {
   d.addEventListener('click', (e) => {
     const r = e.target.closest('[data-reset]');
     if (!r) return;
-    const inp = d.querySelector('[data-k="' + r.dataset.reset + '"]'); inp.value = ''; inp.placeholder = 'Default'; r.hidden = true;
+    const inp = d.querySelector('[data-k="' + r.dataset.reset + '"]'); inp.value = ''; inp.placeholder = t('cameras.default', 'Default'); r.hidden = true;
     touched.add(r.dataset.reset); paint();
   });
   d.querySelectorAll('details.cs-more').forEach(det => { det.open = true; });
@@ -1863,7 +1883,7 @@ function renderMulti(cams) {
     let bad = null;
     d.querySelectorAll('[data-trf]').forEach(box => {
       const raw = box.querySelector('[data-trraw] input');
-      if (touched.has(box.dataset.trf) && raw.value.trim() && !trParse(raw.value)) bad = bad || fieldErr(raw, 'Write it like 07:00-21:00 (hours 00-23).');
+      if (touched.has(box.dataset.trf) && raw.value.trim() && !trParse(raw.value)) bad = bad || fieldErr(raw, t('cameras.time_format','Write it like 07:00-21:00 (hours 00-23).'));
     });
     if (bad) return false;
     const patch = bulkBody(d, touched);
@@ -1872,7 +1892,7 @@ function renderMulti(cams) {
     const fails = [];
     let done = 0;
     for (const c of cams) {
-      stEl.className = 'cs-state'; stEl.textContent = 'Saving ' + (done + 1) + ' of ' + n + '...';
+      stEl.className = 'cs-state'; stEl.textContent = t('cameras.saving_n_of', 'Saving {i} of {n}...', { i: done + 1, n });
       // A card chosen for this camera stays when the way (VAAPI, QSV) is set for all of them.
       const own = hwParse(c.hwaccel).node;
       const body = own && /^(vaapi|qsv)$/.test(patch.hwaccel || '') ? Object.assign({}, patch, { hwaccel: patch.hwaccel + ':' + own }) : patch;
@@ -1882,11 +1902,11 @@ function renderMulti(cams) {
     }
     await refreshCameras();
     res.hidden = false;
-    res.innerHTML = '<div class="' + (fails.length ? 'bad' : 'ok') + '"><b>' + (n - fails.length) + ' of ' + n + ' saved.</b></div>' +
+    res.innerHTML = '<div class="' + (fails.length ? 'bad' : 'ok') + '"><b>' + t('cameras.n_of_saved', '{ok} of {n} saved.', { ok: n - fails.length, n }) + '</b></div>' +
       fails.map(f => '<div class="cs-bulkfail"><b>' + esc(f[0]) + '</b>: ' + esc(f[1]) + '</div>').join('');
     res.scrollIntoView({ block: 'nearest' });
-    if (!fails.length) { touched.clear(); stEl.className = 'cs-state saved'; stEl.textContent = 'Saved'; toast('Saved ' + n + ' cameras', { kind: 'ok' }); renderMulti(cams.map(c => camFromId(c.id) || c)); return true; }
-    stEl.className = 'cs-state dirty'; stEl.textContent = fails.length + ' failed';
+    if (!fails.length) { touched.clear(); stEl.className = 'cs-state saved'; stEl.textContent = t('cameras.saved', 'Saved'); toast(t('cameras.saved_n_cameras', 'Saved {n} cameras', { n }), { kind: 'ok' }); renderMulti(cams.map(c => camFromId(c.id) || c)); return true; }
+    stEl.className = 'cs-state dirty'; stEl.textContent = t('cameras.n_failed', '{n} failed', { n: fails.length });
     saveBtn.disabled = false;
     return false;
   };
@@ -1910,11 +1930,11 @@ function renderMulti(cams) {
 function confirmRemove(id, after) {
   const c = camFromId(id);
   if (!c) return;
-  const d = openDlg('Remove camera', '<div>Remove <b>' + esc(c.name) + '</b>? Its recordings stay on disk until they age out.</div>' +
-    '<div class="asys-err" data-err></div><div class="row"><button class="primary danger" data-yes>Remove</button><button class="btn" data-no>Cancel</button></div>', true);
+  const d = openDlg(t('cameras.remove_camera_title', 'Remove camera'), '<div>' + t('cameras.remove_camera_q', 'Remove <b>{name}</b>? Its recordings stay on disk until they age out.', { name: esc(c.name) }) + '</div>' +
+    '<div class="asys-err" data-err></div><div class="row"><button class="primary danger" data-yes>' + t('cameras.remove', 'Remove') + '</button><button class="btn" data-no>' + t('cameras.cancel', 'Cancel') + '</button></div>', true);
   d.querySelector('[data-no]').onclick = () => d.__close();
   d.querySelector('[data-yes]').onclick = async () => {
-    try { await api('/api/cameras/' + id, { method: 'DELETE' }); d.__close(); if (after) after(); toast('Removed ' + c.name); await refreshCameras(); }
+    try { await api('/api/cameras/' + id, { method: 'DELETE' }); d.__close(); if (after) after(); toast(t('cameras.removed','Removed {name}', { name: c.name })); await refreshCameras(); }
     catch (e) { d.querySelector('[data-err]').textContent = e.body || e.message; }
   };
 }
@@ -1929,29 +1949,28 @@ export async function setCameraEnabled(id, on) {
 const lbl = (c) => c.short_name || c.name;
 export function pausedText(c) {
   if (!c.alerts_paused) return '';
-  if (!c.alerts_paused_until) return 'until resumed';
+  if (!c.alerts_paused_until) return t('cameras.until_resumed', 'until resumed');
   const end = new Date(c.alerts_paused_until * 1000);
   const mins = Math.max(1, Math.round((end - Date.now()) / 60000));
-  return 'until ' + end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + ' (' + (mins >= 60 ? Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min' : mins + ' min') + ' left)';
+  return t('cameras.until_time_left', 'until {time} ({left} left)', { time: end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }), left: mins >= 60 ? t('cameras.h_min', '{h} h {m} min', { h: Math.floor(mins / 60), m: mins % 60 }) : t('cameras.n_min', '{n} min', { n: mins }) });
 }
 async function setPause(c, minutes) {
   try {
     await api('/api/cameras/' + c.id + '/pause', { json: { minutes } });
     await refreshCameras();
     const cur = camFromId(c.id) || c;
-    toast(minutes === 0 ? 'Notifications on again for ' + lbl(cur) : 'Notifications paused for ' + lbl(cur) + ' ' + pausedText(cur) + '. It still records.');
+    toast(minutes === 0 ? t('cameras.notif_on','Notifications on again for {name}', { name: lbl(cur) }) : t('cameras.notif_paused','Notifications paused for {name} {time}. It still records.', { name: lbl(cur), time: pausedText(cur) }));
   } catch (e) { msgDlg(e.message); }
 }
 export function resumeAlerts(c) { return setPause(c, 0); }
 export function pauseAlertsFor(c, minutes) { return setPause(c, minutes); }
 export function pauseAlertsDlg(c) {
   // (Operators pause for a day at most.)
-  const opts = [[30, '30 min'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours'], state.isAdmin ? [null, 'Until I resume'] : [1440, '1 day']];
-  const d = openDlg('Pause notifications', '<div class="hint"><b>' + esc(lbl(c)) + '</b>: no notifications for a while. ' +
-    'It is still recording, detecting motion and listing events (and MQTT still reports them).</div>' +
-    (c.alerts_paused ? '<div class="hint">Notifications paused ' + esc(pausedText(c)) + '.</div>' : '') +
+  const opts = [[30, t('cameras.opt_30_min','30 min')], [60, t('cameras.opt_1_hour','1 hour')], [120, t('cameras.opt_2_hours','2 hours')], [240, t('cameras.opt_4_hours','4 hours')], [480, t('cameras.opt_8_hours','8 hours')], state.isAdmin ? [null, t('cameras.opt_until_resume','Until I resume')] : [1440, t('cameras.opt_1_day','1 day')]];
+  const d = openDlg(t('cameras.pause_notifications', 'Pause notifications'), '<div class="hint">' + t('cameras.pause_msg', '<b>{name}</b>: no notifications for a while. It is still recording, detecting motion and listing events (and MQTT still reports them).', { name: esc(lbl(c)) }) + '</div>' +
+    (c.alerts_paused ? '<div class="hint">' + t('cameras.notifications_paused_when', 'Notifications paused {when}.', { when: esc(pausedText(c)) }) + '</div>' : '') +
     '<div class="pausebtns">' + opts.map((o, i) => '<button class="btn" data-i="' + i + '">' + o[1] + '</button>').join('') + '</div>' +
-    (c.alerts_paused ? '<div class="pausebtns"><button class="btn primary" data-resume>Resume notifications now</button></div>' : ''), true);
+    (c.alerts_paused ? '<div class="pausebtns"><button class="btn primary" data-resume>' + t('cameras.resume_notifications', 'Resume notifications now') + '</button></div>' : ''), true);
   d.querySelectorAll('[data-i]').forEach(b => { b.onclick = () => { d.__close(); setPause(c, opts[+b.dataset.i][0]); }; });
   const r = d.querySelector('[data-resume]');
   if (r) r.onclick = () => { d.__close(); setPause(c, 0); };
@@ -1959,7 +1978,7 @@ export function pauseAlertsDlg(c) {
 
 // Create a camera from a ready config (Discovery uses this); refreshes the list.
 export async function addCameraConfig(body) {
-  if (!state.isAdmin) throw new Error('view-only account');
+  if (!state.isAdmin) throw new Error(t('cameras.view_only_account', 'view-only account'));
   const r = await api('/api/cameras', { json: body });
   await refreshCameras();
   return r;
@@ -1982,7 +2001,7 @@ export function mountCameraList(host) {
     box.querySelectorAll('[data-hren]').forEach(b => {
       b.onclick = () => {
         const h = list.find(x => x.id === b.dataset.hren);
-        const dd = openDlg('Rename computer', '<label>Name <input data-n value="' + esc(h.name) + '"></label><div class="asys-err" data-err></div><div class="row"><button class="primary" data-ok>Save</button><button class="btn" data-no>Cancel</button></div>', true);
+        const dd = openDlg(t('cameras.rename_computer', 'Rename computer'), '<label>' + t('cameras.name', 'Name') + ' <input data-n value="' + esc(h.name) + '"></label><div class="asys-err" data-err></div><div class="row"><button class="primary" data-ok>' + t('cameras.save', 'Save') + '</button><button class="btn" data-no>' + t('cameras.cancel', 'Cancel') + '</button></div>', true);
         dd.querySelector('[data-no]').onclick = () => dd.__close();
         dd.querySelector('[data-ok]').onclick = async () => {
           try { await api('/api/helpers/' + encodeURIComponent(h.id), { method: 'PUT', json: { name: dd.querySelector('[data-n]').value } }); dd.__close(); drawHelpers(); }
@@ -1993,10 +2012,10 @@ export function mountCameraList(host) {
     box.querySelectorAll('[data-hdel]').forEach(b => {
       b.onclick = () => {
         const h = list.find(x => x.id === b.dataset.hdel);
-        const dd = openDlg('Remove computer', '<div>Remove <b>' + esc(h.name) + '</b>? It stops sending at once and has to be added again to come back. Cameras that used it stop receiving.</div><div class="asys-err" data-err></div><div class="row"><button class="primary danger" data-ok>Remove</button><button class="btn" data-no>Cancel</button></div>', true);
+        const dd = openDlg(t('cameras.remove_computer', 'Remove computer'), '<div>' + t('cameras.remove_computer_q', 'Remove <b>{name}</b>? It stops sending at once and has to be added again to come back. Cameras that used it stop receiving.', { name: esc(h.name) }) + '</div><div class="asys-err" data-err></div><div class="row"><button class="primary danger" data-ok>' + t('cameras.remove', 'Remove') + '</button><button class="btn" data-no>' + t('cameras.cancel', 'Cancel') + '</button></div>', true);
         dd.querySelector('[data-no]').onclick = () => dd.__close();
         dd.querySelector('[data-ok]').onclick = async () => {
-          try { await api('/api/helpers/' + encodeURIComponent(h.id), { method: 'DELETE' }); dd.__close(); toast(h.name + ' removed'); drawHelpers(); }
+          try { await api('/api/helpers/' + encodeURIComponent(h.id), { method: 'DELETE' }); dd.__close(); toast(t('cameras.computer_removed', '{name} removed', { name: h.name })); drawHelpers(); }
           catch (e) { dd.querySelector('[data-err]').textContent = e.body || e.message; }
         };
       };
@@ -2012,7 +2031,7 @@ export function mountCameraList(host) {
     const rest = pre.slice(pre.lastIndexOf('@') + 1);
     m[2] = rest.startsWith('[') ? rest.slice(0, rest.indexOf(']') + 1) : rest.split(/[:\/]/)[0];
     const s = m[1].toLowerCase();
-    const kinds = { rtsp: 'RTSP', rtsps: 'RTSP', http: 'Web stream', https: 'Web stream', rtmp: 'RTMP', lavfi: 'Test picture', device: 'Attached camera', screen: 'Screen', helper: 'Other computer' };
+    const kinds = { rtsp: 'RTSP', rtsps: 'RTSP', http: t('cameras.kind_web', 'Web stream'), https: t('cameras.kind_web', 'Web stream'), rtmp: 'RTMP', lavfi: t('cameras.kind_test', 'Test picture'), device: t('cameras.kind_attached', 'Attached camera'), screen: t('cameras.src_screen', 'Screen'), helper: t('cameras.kind_other_computer', 'Other computer') };
     const k = kinds[s] || m[1].toUpperCase();
     return m[2] && !['lavfi', 'device', 'screen'].includes(s) ? k + ' \u00b7 ' + m[2] : k;
   }
@@ -2020,20 +2039,20 @@ export function mountCameraList(host) {
     const n = own().length;
     const touch = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
     host.innerHTML =
-      '<div class="cs-listbar"><span class="hint">' + n + ' camera' + (n === 1 ? '' : 's') + '. ' + (touch ? 'Tap a camera\'s gear for its settings.' : 'Right-click a camera (or its gear) in the live view for the same settings.') + '</span>' +
-      '<a class="btn" href="#settings/cameras/find">Find cameras</a><button class="btn primary" data-add>Add by address</button></div>' +
-      (n > 1 ? '<label class="cs-all asys-chk"><input type="checkbox" data-all aria-label="Select all cameras"> Select all</label>' : '') +
+      '<div class="cs-listbar"><span class="hint">' + (touch ? t('cameras.list_hint_touch', "{n, plural, one {# camera} other {# cameras}}. Tap a camera's gear for its settings.", { n }) : t('cameras.list_hint_mouse', '{n, plural, one {# camera} other {# cameras}}. Right-click a camera (or its gear) in the live view for the same settings.', { n })) + '</span>' +
+      '<a class="btn" href="#settings/cameras/find">' + t('cameras.find_cameras', 'Find cameras') + '</a><button class="btn primary" data-add>' + t('cameras.add_by_address', 'Add by address') + '</button></div>' +
+      (n > 1 ? '<label class="cs-all asys-chk"><input type="checkbox" data-all aria-label="' + t('cameras.select_all_cameras', 'Select all cameras') + '"> ' + t('cameras.select_all', 'Select all') + '</label>' : '') +
       '<div class="cs-list">' + state.cams.filter(c => !c.remote).map(c => {
         const off = c.enabled === false;
-        const st = off ? '<span class="badge">off</span>' : c.online ? '<span class="badge on dot">online</span>' : c.sleeping ? '<span class="badge info dot" title="A battery camera asleep to save power. It wakes for motion or when you open it.">asleep</span>' : '<span class="badge off dot">offline</span>';
-        return '<div class="cs-item"><label class="cs-pick" title="Select for editing several cameras"><input type="checkbox" data-pick="' + c.id + '"' + (picked.has(c.id) ? ' checked' : '') + ' aria-label="Select ' + esc(c.name) + '"></label>' +
+        const st = off ? '<span class="badge">' + t('cameras.off_lc', 'off') + '</span>' : c.online ? '<span class="badge on dot">' + t('cameras.online_lc', 'online') + '</span>' : c.sleeping ? '<span class="badge info dot" title="' + t('cameras.asleep_tip', 'A battery camera asleep to save power. It wakes for motion or when you open it.') + '">' + t('cameras.asleep_lc', 'asleep') + '</span>' : '<span class="badge off dot">' + t('cameras.offline_lc', 'offline') + '</span>';
+        return '<div class="cs-item"><label class="cs-pick" title="' + t('cameras.select_edit', 'Select for editing several cameras') + '"><input type="checkbox" data-pick="' + c.id + '"' + (picked.has(c.id) ? ' checked' : '') + ' aria-label="' + esc(t('cameras.select_name', 'Select {name}', { name: c.name })) + '"></label>' +
           '<div class="cs-name"><b title="' + esc(c.name) + '">' + esc(c.name) + '</b>' + '' +
           '<div class="cs-url">' + esc(srcLabel(c) + ((c.groups || []).length ? ' \u00b7 ' + c.groups.join(', ') : '')) + '</div>' +
-          (c.alerts_paused ? '<div class="cs-np"><span class="badge paused" title="' + esc('Notifications paused ' + pausedText(c) + '. It is still recording.') + '">' + ic('belloff') + ' Notifications paused \u00b7 still recording</span></div>' : '') + '</div>' + st +
-          '<span class="cs-acts"><button class="btn" data-set="' + c.id + '">Settings</button>' +
-          '<label class="sw" title="Off stops live view and recording; old footage is kept"><input type="checkbox" role="switch" data-en="' + c.id + '"' + (off ? '' : ' checked') + ' aria-label="' + esc(c.name) + ' on"><span class="sw-track" aria-hidden="true"></span><span class="sw-text">' + (off ? 'Off' : 'On') + '</span></label></span></div>';
+          (c.alerts_paused ? '<div class="cs-np"><span class="badge paused" title="' + esc(t('cameras.notifications_paused', 'Notifications paused {msg}. It is still recording.', { msg: pausedText(c) })) + '">' + ic('belloff') + ' ' + t('cameras.paused_still_recording', 'Notifications paused \u00b7 still recording') + '</span></div>' : '') + '</div>' + st +
+          '<span class="cs-acts"><button class="btn" data-set="' + c.id + '">' + t('cameras.settings', 'Settings') + '</button>' +
+          '<label class="sw" title="' + t('cameras.off_stops_tip', 'Off stops live view and recording; old footage is kept') + '"><input type="checkbox" role="switch" data-en="' + c.id + '"' + (off ? '' : ' checked') + ' aria-label="' + esc(t('cameras.name_on', '{name} on', { name: c.name })) + '"><span class="sw-track" aria-hidden="true"></span><span class="sw-text">' + (off ? t('cameras.off', 'Off') : t('cameras.on', 'On')) + '</span></label></span></div>';
       }).join('') + '</div><div class="cs-bulkbar" data-bulk hidden></div>' +
-      '<div class="cs-aside"><button class="btn link" data-addpc title="Record another computer\'s screen with AmberSight">Capture from another computer</button></div>';
+      '<div class="cs-aside"><button class="btn link" data-addpc title="' + t('cameras.record_another', "Record another computer's screen with AmberSight") + '">' + t('cameras.capture_from_another', 'Capture from another computer') + '</button></div>';
     host.querySelector('[data-add]').onclick = () => openCameraDialog(null);
     host.querySelector('[data-addpc]').onclick = () => pairDialog(() => drawHelpers());
     const ids = own().map(c => c.id);
@@ -2044,8 +2063,8 @@ export function mountCameraList(host) {
       const k = picked.size;
       if (all) { all.checked = k > 0 && k === ids.length; all.indeterminate = k > 0 && k < ids.length; }
       bar.hidden = !k;
-      bar.innerHTML = k ? '<b>' + k + ' selected</b><span class="cs-sp"></span><button class="primary" data-bedit>Edit ' + k + ' camera' + (k === 1 ? '' : 's') + '</button>' +
-        '<button class="btn" data-ben="1">Enable</button><button class="btn" data-ben="0">Disable</button><button class="btn" data-bclr>Clear</button><span class="cs-bres" data-bres></span>' : '';
+      bar.innerHTML = k ? '<b>' + t('cameras.n_selected', '{n} selected', { n: k }) + '</b><span class="cs-sp"></span><button class="primary" data-bedit>' + t('cameras.edit_n', '{n, plural, one {Edit # camera} other {Edit # cameras}}', { n: k }) + '</button>' +
+        '<button class="btn" data-ben="1">' + t('cameras.enable', 'Enable') + '</button><button class="btn" data-ben="0">' + t('cameras.disable', 'Disable') + '</button><button class="btn" data-bclr>' + t('cameras.clear', 'Clear') + '</button><span class="cs-bres" data-bres></span>' : '';
       if (!k) return;
       bar.querySelector('[data-bedit]').onclick = () => openCamerasBulk([...picked]);
       bar.querySelector('[data-bclr]').onclick = () => { picked.clear(); host.querySelectorAll('[data-pick]').forEach(x => { x.checked = false; }); paintBar(); };
@@ -2055,11 +2074,11 @@ export function mountCameraList(host) {
         const fails = [];
         let i = 0;
         for (const id of [...picked]) {
-          res.textContent = (on ? 'Enabling ' : 'Disabling ') + (++i) + ' of ' + picked.size + '...';
+          res.textContent = on ? t('cameras.enabling', 'Enabling {i} of {total}...', { i: ++i, total: picked.size }) : t('cameras.disabling', 'Disabling {i} of {total}...', { i: ++i, total: picked.size });
           try { await api('/api/cameras/' + id + '/enable', { json: { enabled: on } }); } catch (e) { const c = camFromId(id); fails.push((c ? c.name : id) + ': ' + errText(e)); }
         }
         await refreshCameras();
-        toast(fails.length ? 'Some cameras failed: ' + fails.join('; ') : (on ? 'Enabled ' : 'Disabled ') + i + ' camera' + (i === 1 ? '' : 's'), { kind: fails.length ? undefined : 'ok' });
+        toast(fails.length ? t('cameras.some_failed', 'Some cameras failed: {list}', { list: fails.join('; ') }) : on ? t('cameras.enabled_n', 'Enabled {i, plural, one {# camera} other {# cameras}}', { i }) : t('cameras.disabled_n', 'Disabled {i, plural, one {# camera} other {# cameras}}', { i }), { kind: fails.length ? undefined : 'ok' });
         bar.querySelectorAll('button').forEach(x => { x.disabled = false; });
         const r2 = bar.querySelector('[data-bres]'); if (r2) r2.textContent = fails.join('; ');
       }; });

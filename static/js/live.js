@@ -1,7 +1,8 @@
 // live.js - Live tab: grid with paging/layouts/cycle, full screen (swipe / arrows), motion boxes,
 // zone drawing. The players (MSE video, JPEG pictures) are in player.js.
 
-import { savedToast, $, state, bus, api, refreshCameras, esc, msgDlg, toast, camFromId, ic, downloadUrl, bigQ, openDlg, overlayOpen, backLayer, overlaysChanged, can } from './core.js';
+import { t } from './i18n.js';
+import { savedToast, $, state, bus, api, refreshCameras, esc, msgDlg, toast, camFromId, ic, downloadUrl, bigQ, openDlg, overlayOpen, backLayer, overlaysChanged, can, objName } from './core.js';
 import { isActive } from './nav.js';
 import { tvOn, tvOne, enterTv, setOne, onTvChange } from './fullscreen.js';
 import * as Layouts from './layouts.js';
@@ -10,6 +11,7 @@ import { enableArrange } from './arrange.js';
 import { openClipsFor } from './events.js';
 import * as Speaker from './speaker.js';
 import * as Zoom from './zoom.js';
+import { controlsButton, mayControls, lightOn, togglePop, closePop } from './controls.js';
 import { plan, BIG, STYLES } from './viewfit.js';
 import { mark } from './diag.js';
 import { isPhone, device } from './device.js';
@@ -26,7 +28,7 @@ function smoothGrid() { return Layouts.getPrefs().quality === 'smooth'; }
 export function popOut(id) {
   const c = camFromId(id);
   const w = window.open('/?cam=' + id + '#live', 'ambs-cam-' + id, 'popup,width=1280,height=760');
-  if (!w) toast('The browser blocked the new window: allow pop-ups for this site');
+  if (!w) toast(t('live.browser_blocked', 'The browser blocked the new window: allow pop-ups for this site'));
   else if (c) try { w.focus(); } catch (e) { /* ignore */ }
 }
 let ctxMenu = null;
@@ -38,7 +40,7 @@ backLayer(20, () => fullCamId !== null && !document.body.classList.contains('pop
 
 // ---------- what a double-click on a camera opens (per user) ----------
 // Prefs 'dblclick': { all: 'full' | 'timeline', cams: { <camera name>: 'full' | 'timeline' } }.
-const DBL = { full: 'Full view (live)', timeline: 'Timeline, at live' };
+const DBL = { full: t('live.full_view_live', 'Full view (live)'), timeline: t('live.timeline_at_live', 'Timeline, at live') };
 function dblPref() {
   const d = Prefs.get('dblclick', null);
   return { all: d && d.all === 'timeline' ? 'timeline' : 'full', cams: (d && d.cams && typeof d.cams === 'object') ? d.cams : {} };
@@ -61,14 +63,14 @@ export function dblClickDlg(c) {
     '<span class="sw-text"><b>' + esc(label) + '</b>' + (hint ? '<small>' + esc(hint) + '</small>' : '') + '</span></label>';
   const d = dblPref();
   const own = c ? d.cams[c.name] : undefined;
-  const html = '<div class="hint">Your choice only, kept by this server (set it on each server you use). Off: the live full view. The Timeline button or L opens the timeline either way.</div>' +
-    '<div class="sec">All cameras</div>' +
-    sw('data-one', oneClickOpens(), 'A single click opens the camera', 'Instead of only selecting it. Double-click then does the same.') +
-    sw('data-all', d.all === 'timeline', 'Double-click opens the timeline, at live') +
+  const html = '<div class="hint">' + esc(t('live.dbl_hint', 'Your choice only, kept by this server (set it on each server you use). Off: the live full view. The Timeline button or L opens the timeline either way.')) + '</div>' +
+    '<div class="sec">' + esc(t('live.all_cameras', 'All cameras')) + '</div>' +
+    sw('data-one', oneClickOpens(), t('live.single_click_opens', 'A single click opens the camera'), t('live.single_click_hint', 'Instead of only selecting it. Double-click then does the same.')) +
+    sw('data-all', d.all === 'timeline', t('live.dblclick_timeline', 'Double-click opens the timeline, at live')) +
     (c ? '<div class="sec">' + esc(camLabel(c)) + '</div>' +
-      sw('data-own', own === 'full' || own === 'timeline', 'Its own setting', 'Otherwise it follows all cameras') +
-      sw('data-cam', dblOpens(c) === 'timeline', 'Double-click opens the timeline, at live') : '');
-  const dlg = openDlg('Double-click opens', html, true);
+      sw('data-own', own === 'full' || own === 'timeline', t('live.its_own_setting', 'Its own setting'), t('live.otherwise_follows', 'Otherwise it follows all cameras')) +
+      sw('data-cam', dblOpens(c) === 'timeline', t('live.dblclick_timeline', 'Double-click opens the timeline, at live')) : '');
+  const dlg = openDlg(t('live.double_click_opens', 'Double-click opens'), html, true);
   const q = (a) => dlg.querySelector('[' + a + ']');
   const sync = () => {
     if (!c) return;
@@ -108,35 +110,35 @@ function tileMenu(ev, c, anchor) {
   const spk = inFull ? fullSpk : (liveTiles[c.id] && liveTiles[c.id].spk);
   const items = [];
   const sep = () => { if (items.length && items[items.length - 1] !== null) items.push(null); };
-  if (!inFull) items.push(['expand', 'Open full size', () => openFullCam(c.id)]);
-  items.push(['grid', 'Open in new window', () => popOut(c.id)]);
+  if (!inFull) items.push(['expand', t('live.open_full_size', 'Open full size'), () => openFullCam(c.id)]);
+  items.push(['grid', t('live.open_new_window', 'Open in new window'), () => popOut(c.id)]);
   sep();
-  if (spk && c.audio) items.push([spk.muted ? 'vol' : 'mute', spk.muted ? 'Sound on' : 'Sound off', () => spk.toggle()]);
-  items.push(['camera', 'Save snapshot', () => snapshot(c.id)]);
+  if (spk && c.audio) items.push([spk.muted ? 'vol' : 'mute', spk.muted ? t('live.sound_on', 'Sound on') : t('live.sound_off', 'Sound off'), () => spk.toggle()]);
+  items.push(['camera', t('live.save_snapshot', 'Save snapshot'), () => snapshot(c.id)]);
   if (c.remote) {
     // Another server's camera: recordings, clips and settings live there.
     sep();
-    items.push(['timeline', 'Open on ' + c.remote.site, () => openOnSite(c)]);
+    items.push(['timeline', t('live.open_on', 'Open on {site}', { site: c.remote.site }), () => openOnSite(c)]);
   } else {
-  if (can('talk_clip')) items.push(['rec', 'Record a 20 s clip', () => clipNow(c.id)]);
+  if (can('talk_clip')) items.push(['rec', t('live.record_20s_clip', 'Record a 20 s clip'), () => clipNow(c.id)]);
   sep();
-  items.push(['timeline', 'Timeline', () => bus.emit('timeline-for', c.id)]);
-  items.push(['play', 'Clips', () => { if (inFull) closeFull(); openClipsFor(c); }]);
-  items.push(['expand', 'Double-click opens: ' + (dblOpens(c) === 'timeline' ? 'Timeline' : 'Full view') + '...', () => dblClickDlg(c)]);
+  items.push(['timeline', t('live.timeline', 'Timeline'), () => bus.emit('timeline-for', c.id)]);
+  items.push(['play', t('live.clips', 'Clips'), () => { if (inFull) closeFull(); openClipsFor(c); }]);
+  items.push(['expand', t('live.dbl_menu', 'Double-click opens: {what}...', { what: dblOpens(c) === 'timeline' ? t('live.timeline', 'Timeline') : t('live.full_view', 'Full view') }), () => dblClickDlg(c)]);
   }
   if ((can('pause') || can('camera_detection')) && !c.remote) {
     sep();
     if (can('pause')) {
-      if (c.alerts_paused) items.push(['play', 'Resume notifications (paused ' + pausedText(c) + ')', () => resumeAlerts(c)]);
-      else items.push(['pause', 'Pause notifications...', () => pauseAlertsDlg(c)]);
+      if (c.alerts_paused) items.push(['play', t('live.resume_notifications', 'Resume notifications (paused {text})', { text: pausedText(c) }), () => resumeAlerts(c)]);
+      else items.push(['pause', t('live.pause_notifications', 'Pause notifications...'), () => pauseAlertsDlg(c)]);
     }
     if (can('camera_detection')) {
-      if (!inFull) items.push(['zone', 'Draw a motion zone', () => { setSelected(c.id); import('./zones.js').then(m => m.openZoneEditor(c.id)); }]);
-      items.push(['gear', state.isAdmin ? 'Camera settings...' : 'Detection and alert settings...', () => openCameraDialog(c.id)]);
+      if (!inFull) items.push(['zone', t('live.draw_motion_zone', 'Draw a motion zone'), () => { setSelected(c.id); import('./zones.js').then(m => m.openZoneEditor(c.id)); }]);
+      items.push(['gear', state.isAdmin ? t('live.camera_settings', 'Camera settings...') : t('live.detection_alert_settings', 'Detection and alert settings...'), () => openCameraDialog(c.id)]);
     }
     if (state.isAdmin) {
-      if (canReboot(c)) items.push(['power', 'Reboot camera...', () => rebootDlg(c)]);
-      items.push([c.enabled === false ? 'play' : 'pause', c.enabled === false ? 'Enable camera' : 'Disable camera', () => setCameraEnabled(c.id, c.enabled === false)]);
+      if (canReboot(c)) items.push(['power', t('live.reboot_camera', 'Reboot camera...'), () => rebootDlg(c)]);
+      items.push([c.enabled === false ? 'play' : 'pause', c.enabled === false ? t('live.enable_camera', 'Enable camera') : t('live.disable_camera', 'Disable camera'), () => setCameraEnabled(c.id, c.enabled === false)]);
     }
   }
   const m = document.createElement('div');
@@ -161,10 +163,10 @@ function layoutsMenu(ev, anchor) {
   const was = ctxMenu && ctxMenu.dataset.layouts;
   closeCtx();
   if (was) return;
-  const items = [['grid', 'Edit layouts...', () => Layouts.openEditor()]];
-  if (canArrange()) items.push(['arrange', 'Arrange cameras...', () => startArrange()]);
+  const items = [['grid', t('live.edit_layouts', 'Edit layouts...', {}), () => Layouts.openEditor()]];
+  if (canArrange()) items.push(['arrange', t('live.arrange_cameras', 'Arrange cameras...', {}), () => startArrange()]);
   // Display mode: a page of its own for a wall TV or tablet (display.js).
-  items.push(['expand', 'Display mode (wall TV, tablet)', () => { location.href = '/display'; }]);
+  items.push(['expand', t('live.display_mode', 'Display mode (wall TV, tablet)', {}), () => { location.href = '/display'; }]);
   const m = document.createElement('div');
   m.className = 'ctxmenu'; m.setAttribute('role', 'menu'); m.dataset.layouts = '1';
   m.innerHTML = items.map((it, i) => '<button role="menuitem" data-i="' + i + '">' + ic(it[0]) + '<span>' + esc(it[1]) + '</span></button>').join('');
@@ -219,12 +221,12 @@ export function snapshot(id) {
   downloadUrl('/api/snapshot/' + id + '?download=1&t=' + Date.now(), ((c && c.name) || 'camera') + '-' + new Date().toISOString().replace(/[:.]/g, '-') + '.jpg');
 }
 export async function clipNow(id) {
-  if (!can('talk_clip')) { msgDlg('This account cannot record clips'); return; }
+  if (!can('talk_clip')) { msgDlg(t('live.cannot_record_clips', 'This account cannot record clips', {})); return; }
   try {
     const r = await api('/api/clips/record', { json: { camera: id, seconds: 20 } });
     if (r.error) { msgDlg(r.error); return; }
     const c = camFromId(id);
-    toast('Recording a 20 s clip from ' + ((c && c.name) || id));
+    toast(t('live.recording_clip', 'Recording a 20 s clip from {name}', { name: (c && c.name) || id }));
   } catch (e) { msgDlg(e.message); }
 }
 // Timeline mode (see livetl.js): while a hook is installed the tiles play recordings
@@ -370,7 +372,7 @@ export function setHud(l, quiet) {
   if (!HUD_LEVELS.includes(l) || l === hud) return;
   hud = l; document.body.dataset.hud = l;
   try { localStorage.setItem(HUD_KEY, l); } catch (e) { /* not remembered */ }
-  if (!quiet) toast('Labels on pictures: ' + l[0].toUpperCase() + l.slice(1), { ms: 1500 });
+  if (!quiet) toast(t('live.labels_on_pictures', 'Labels on pictures: {l}', { l: l === 'clean' ? t('live.hud_clean', 'Clean') : l === 'standard' ? t('live.hud_standard', 'Standard') : t('live.hud_detailed', 'Detailed') }), { ms: 1500 });
   bus.emit('hud');
   if (l === 'detailed') pollRates();
 }
@@ -379,7 +381,7 @@ export function cycleHud() { setHud(HUD_LEVELS[(HUD_LEVELS.indexOf(hud) + 1) % H
 export function toggleBoxes() {
   const on = Layouts.getPrefs().boxes !== 'motion';
   Layouts.setPrefs({ boxes: on ? 'motion' : 'off' });
-  toast('Motion outlines ' + (on ? 'on' : 'off'), { ms: 1500 });
+  toast(t('live.motion_outlines', 'Motion outlines {state}', { state: on ? t('live.state_on', 'on') : t('live.state_off', 'off') }), { ms: 1500 });
 }
 // Bitrate and frames per second come from the server's figures (admins); polled only while Detailed is on.
 let rates = {}, ratesAt = 0;
@@ -447,10 +449,10 @@ function statusOf(c, now) {
   if (c.motion || c.push_motion) return { edge: 'motion', dot: 'motion', s };
   return { edge: '', dot: 'ok', s };
 }
-const fmtClock = (d) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const fmtClock = (d) => d.toLocaleTimeString();   // the header clock's form: the language and the user's clock choice
 function ago(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
-  return s < 60 ? s + ' s' : (s < 3600 ? Math.floor(s / 60) + ' min' : Math.floor(s / 3600) + ' h ' + (Math.floor(s / 60) % 60) + ' min');
+  return s < 60 ? t('live.ago_s', '{n} s', { n: s }) : (s < 3600 ? t('live.ago_min', '{n} min', { n: Math.floor(s / 60) }) : t('live.ago_h_min', '{h} h {m} min', { h: Math.floor(s / 3600), m: Math.floor(s / 60) % 60 }));
 }
 
 // Build the pills inside `host` (a tile's frame or the full view's content). `root` carries
@@ -459,13 +461,13 @@ function buildPills(host, root, c, o) {
   const mk = (cls, html, into) => { const e = document.createElement('div'); e.className = cls; if (html) e.innerHTML = html; (into || host).appendChild(e); return e; };
   const p = { root, c, retry: o.retry || null, chipKey: null };
   const top = mk('ptop'), bot = mk('pbot');
-  p.tl = o.name === false ? null : mk('pill ptl', '<i class="sdot"></i><span class="nm"></span><span class="pz" hidden>' + ic('belloff') + '<span class="pzt">Notifications paused</span></span>', top);
+  p.tl = o.name === false ? null : mk('pill ptl', '<i class="sdot"></i><span class="nm"></span><span class="pz" hidden>' + ic('belloff') + '<span class="pzt">' + esc(t('live.notifications_paused', 'Notifications paused')) + '</span></span>', top);
   if (p.tl) { p.dot = p.tl.querySelector('.sdot'); p.nm = p.tl.querySelector('.nm'); p.pz = p.tl.querySelector('.pz'); }
   p.tr = mk('ptr', '', top);
   p.chip = document.createElement('span'); p.chip.className = 'pill dchip'; p.chip.hidden = true;
   p.tr.appendChild(p.chip);
   if (o.actions) p.tr.appendChild(o.actions);
-  p.bl = mk('pill pbl', '<i class="rdot"></i>REC', bot); p.bl.hidden = true;
+  p.bl = mk('pill pbl', '<i class="rdot"></i>' + t('live.rec','REC'), bot); p.bl.hidden = true;
   p.det = mk('pill pdet', '', bot); p.det.hidden = true;
   p.br = mk('pill pbr', '', bot);
   p.cover = mk('cover'); p.cover.hidden = true;
@@ -485,7 +487,7 @@ function paintPills(p, c, now) {
     const label = camLabel(c);
     if (p.nm.textContent !== label) p.nm.textContent = label;
     const groups = (c.groups || []).concat(Array.isArray(c.labels) ? c.labels : []);
-    const tip = label + (groups.length ? '\n' + groups.join(', ') : '') + (c.enabled === false ? '\nDisabled' : '') + (c.alerts_paused ? '\nNotifications paused ' + pausedText(c) + ' (still recording)' : '');
+    const tip = label + (groups.length ? '\n' + groups.join(', ') : '') + (c.enabled === false ? '\n' + t('live.disabled_word', 'Disabled') : '') + (c.alerts_paused ? '\n' + t('live.paused_tip', 'Notifications paused {text} (still recording)', { text: pausedText(c) }) : '');
     if (p.tl.title !== tip) p.tl.title = tip;
     p.pz.hidden = !c.alerts_paused;
   }
@@ -495,15 +497,15 @@ function paintPills(p, c, now) {
   if (p.chipKey !== chipKey) {
     p.chipKey = chipKey;
     p.chip.hidden = !st.ai;
-    p.chip.innerHTML = st.ai ? ic(AI_ICON[st.ai.cls] || 'alert') + '<span>' + esc(st.ai.label) + (showScore ? ' ' + Math.round(st.ai.score * 100) + '%' : '') + '</span>' : '';
+    p.chip.innerHTML = st.ai ? ic(AI_ICON[st.ai.cls] || 'alert') + '<span>' + esc(objName(st.ai.label)) + (showScore ? ' ' + Math.round(st.ai.score * 100) + '%' : '') + '</span>' : '';
     p.chip.dataset.cls = st.ai ? st.ai.cls : '';
     p.tr.classList.toggle('has-chip', !!st.ai);
   }
   const rec = !!c.record && !c.remote && c.enabled !== false && c.online && (!c.record_motion_only || !!c.motion);
   p.bl.hidden = !rec;
-  if (rec) p.bl.title = c.record_motion_only ? 'Recording (motion)' : (c.record_sub && c.sub_url ? 'Recording (sub stream and events)' : 'Recording');
+  if (rec) p.bl.title = c.record_motion_only ? t('live.recording_motion','Recording (motion)') : (c.record_sub && c.sub_url ? t('live.recording_sub','Recording (sub stream and events)') : t('live.recording','Recording'));
   p.br.textContent = fmtClock(new Date(now));
-  const tip = c.schedule ? 'Armed ' + c.schedule : '';
+  const tip = c.schedule ? t('live.armed_schedule', 'Armed {schedule}', { schedule: c.schedule }) : '';
   if (p.br.title !== tip) p.br.title = tip;
   if (hud === 'detailed') { const t = detailText(p, c); p.det.hidden = !t; if (p.det.textContent !== t) p.det.textContent = t; pollRates(); } else if (!p.det.hidden) p.det.hidden = true;
   // Cover: Reconnecting... / Offline.
@@ -513,8 +515,8 @@ function paintPills(p, c, now) {
   if (cv.dataset.k !== st.edge) {
     cv.dataset.k = st.edge;
     cv.innerHTML = st.edge === 'recon'
-      ? '<span class="cv-spin"></span><span class="cv-big">Reconnecting…</span><span class="cv-small"></span>'
-      : '<span class="cv-big"></span><span class="cv-small"></span>' + (p.retry ? '<button type="button" class="cv-rbtn">Retry</button>' : '');
+      ? '<span class="cv-spin"></span><span class="cv-big">' + esc(t('live.reconnecting', 'Reconnecting…')) + '</span><span class="cv-small"></span>'
+      : '<span class="cv-big"></span><span class="cv-small"></span>' + (p.retry ? '<button type="button" class="cv-rbtn">' + esc(t('live.retry', 'Retry')) + '</button>' : '');
     const rb = cv.querySelector('.cv-rbtn');
     if (rb) {
       rb.onpointerdown = (ev) => ev.stopPropagation();
@@ -523,10 +525,10 @@ function paintPills(p, c, now) {
     }
   }
   const s = st.s, small = cv.querySelector(".cv-small");
-  if (st.edge === 'recon') small.textContent = 'dropped ' + ago(now - s.down) + ' ago';
+  if (st.edge === 'recon') small.textContent = t('live.dropped_ago', 'dropped {ago} ago', { ago: ago(now - s.down) });
   else {
-    cv.querySelector(".cv-big").textContent = s.seen ? 'Offline · ' + ago(now - s.down) : 'Offline';
-    small.textContent = s.lastOk ? 'Last picture ' + fmtClock(new Date(s.lastOk)) : '';
+    cv.querySelector(".cv-big").textContent = s.seen ? t('live.offline_for', 'Offline · {ago}', { ago: ago(now - s.down) }) : t('live.offline','Offline');
+    small.textContent = s.lastOk ? t('live.last_picture', 'Last picture {time}', { time: fmtClock(new Date(s.lastOk)) }) : '';
   }
   return st;
 }
@@ -560,7 +562,7 @@ function setAr(t, id, ar) {
 let fitRaf2 = 0;
 const scheduleFit = () => { cancelAnimationFrame(fitRaf2); fitRaf2 = requestAnimationFrame(() => fitGrid()); };
 
-function camStatus(c) { return c.online ? 'LIVE' : (c.enabled === false ? 'DISABLED' : 'OFFLINE'); }
+function camStatus(c) { return c.online ? t('live.live','LIVE') : (c.enabled === false ? t('live.disabled','DISABLED') : t('live.offline_caps', 'OFFLINE')); }
 // What a tile shows: 'live' video, 'asleep' (battery camera: tap to wake; the grid
 // never wakes it on its own), or 'offline'. A live tile rides out short drops (its
 // player reconnects by itself) and only turns 'offline' after 15 s.
@@ -597,29 +599,29 @@ function setTileMedia(t, c) {
   placeTileMedia(t, c);
   if (t.zoom) t.zoom.refresh();
 }
-function placeTileMedia(t, c) {
-  const mode = wantedMode(t, c);
-  if (mode === t.mode) return;
-  if (t.spk) t.spk.reset();
-  if (t.mode === 'live') grabLast(t);
-  if (t.player) { t.player.stop(); t.player = null; }
-  if (t.media) { t.media.remove(); t.media = null; }
-  t.mode = mode;
-  const frame = t.frame;
+function placeTileMedia(tl, c) {
+  const mode = wantedMode(tl, c);
+  if (mode === tl.mode) return;
+  if (tl.spk) tl.spk.reset();
+  if (tl.mode === 'live') grabLast(tl);
+  if (tl.player) { tl.player.stop(); tl.player = null; }
+  if (tl.media) { tl.media.remove(); tl.media = null; }
+  tl.mode = mode;
+  const frame = tl.frame;
   if (mode === 'tl') {
     const h = tlHook.mount(frame, c);
     frame.insertBefore(h.el, frame.firstChild);
-    t.media = h.el; t.player = h;
+    tl.media = h.el; tl.player = h;
     return;
   }
   // Another server's camera always comes as its video sub stream (far less
   // data over the link than JPEG pictures; see Light/Smooth).
-  if (mode === 'live' && !smoothGrid() && !t.big && !c.remote) {
+  if (mode === 'live' && !smoothGrid() && !tl.big && !c.remote) {
     const img = document.createElement('img');
     img.className = 'livevid'; img.alt = c.name;
     frame.insertBefore(img, frame.firstChild);
-    t.media = img;
-    t.player = startJpeg(img, c.id);
+    tl.media = img;
+    tl.player = startJpeg(img, c.id);
     return;
   }
   if (mode === 'live') {
@@ -627,37 +629,37 @@ function placeTileMedia(t, c) {
     video.className = 'livevid';
     video.muted = true; video.autoplay = true; video.playsInline = true;
     frame.insertBefore(video, frame.firstChild);
-    t.media = video;
+    tl.media = video;
     // Sub stream in the grid; ffmpeg-pipeline cameras fall back to the MJPEG <img>.
     video.addEventListener('playing', markFirstFrame, { once: true });
-    t.player = startLive(video, c.id, t.big && !c.remote ? bigQ() : 'sub', () => {
-      if (t.spk) t.spk.reset();
+    tl.player = startLive(video, c.id, tl.big && !c.remote ? bigQ() : 'sub', () => {
+      if (tl.spk) tl.spk.reset();
       video.remove();
       const img = document.createElement('img');
       img.className = 'livevid'; img.alt = c.name;
       frame.insertBefore(img, frame.firstChild);
-      t.media = img;
-      t.player = startJpeg(img, c.id);
+      tl.media = img;
+      tl.player = startJpeg(img, c.id);
     });
     return;
   }
   const ph = document.createElement('div');
   ph.className = 'tileph';
   if (mode === 'asleep') {
-    ph.innerHTML = '<span>' + ic('moon') + 'Asleep</span><button class="btn">Tap to wake</button>';
+    ph.innerHTML = '<span>' + ic('moon') + esc(t('live.asleep', 'Asleep')) + '</span><button class="btn">' + esc(t('live.tap_to_wake', 'Tap to wake')) + '</button>';
     const wb = ph.querySelector('button');
     wb.onpointerdown = (ev) => ev.stopPropagation();
-    wb.onclick = (ev) => { ev.stopPropagation(); wakeTile(t, c); };
+    wb.onclick = (ev) => { ev.stopPropagation(); wakeTile(tl, c); };
   } else if (c.enabled === false) {
-    ph.innerHTML = '<span>Disabled</span>';
-  } else if (t.last) {
+    ph.innerHTML = '<span>' + esc(t('live.disabled_word', 'Disabled')) + '</span>';
+  } else if (tl.last) {
     // Keep the last picture (dimmed by CSS) under the Offline cover.
     ph.classList.add('lastpic');
-    t.last.cv.style.transform = '';  // reused: setTileMedia applies the current zoom
-    ph.appendChild(t.last.cv);
+    tl.last.cv.style.transform = '';  // reused: setTileMedia applies the current zoom
+    ph.appendChild(tl.last.cv);
   }
   frame.insertBefore(ph, frame.firstChild);
-  t.media = ph;
+  tl.media = ph;
 }
 
 // Wake a battery camera from its tile and show it for its idle timeout; then the
@@ -675,6 +677,23 @@ function updateTile(t, c) {
   if (tlHook) return;   // (timeline mode: the player draws its own corner pills)
   if (t.pills) paintPills(t.pills, c);
   drawBlobs(t.blobs, c);
+  syncCtl(t.act, c, () => t.act.querySelector('[data-menu]'));
+  if (fullCamId === c.id) syncFullCtl(c);
+}
+
+// The lights-and-siren button: there while the camera has something this account may use
+// (known once the server has asked the camera), lit while the spotlight is on.
+function syncCtl(act, c, before) {
+  if (!act) return;
+  let b = act.querySelector('[data-ctl]');
+  if (!mayControls(c)) { if (b) b.remove(); return; }
+  if (!b) { b = controlsButton(c); act.insertBefore(b, before()); }
+  b.classList.toggle('lit', lightOn(c));
+}
+function syncFullCtl(c) {
+  const b = $('fullCtl');
+  b.hidden = !mayControls(c);
+  b.classList.toggle('lit', lightOn(c));
 }
 
 // A camera's groups ('Ungrouped' when it has none). A camera can be in several.
@@ -686,7 +705,7 @@ function updateGroupFilter() {
   const key = groups.join('|');
   if (key === gsel.dataset.groups) return;
   const cur = gsel.value;
-  gsel.innerHTML = '<option value="">All groups</option>' + groups.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
+  gsel.innerHTML = '<option value="">' + esc(t('live.all_groups', 'All groups')) + '</option>' + groups.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
   if ([...gsel.options].some(o => o.value === cur)) gsel.value = cur;
   gsel.dataset.groups = key;
 }
@@ -945,14 +964,14 @@ function syncArrangeUi() {
   const on = !!arrange;
   b.classList.toggle('on', on);
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
-  b.querySelector('span').textContent = 'Done';
+  b.querySelector('span').textContent = t('live.done', 'Done');
   b.hidden = !on;
   const ok = on || canArrange();
   b.disabled = !ok;
-  b.title = on ? 'Save this order (Esc cancels)'
-    : (tlHook ? 'Leave timeline mode to arrange the tiles'
-      : (!state.isAdmin && !Layouts.isCustom(Layouts.active()) ? 'Only an administrator can change the shared camera order (make a layout for your own)'
-        : 'Drag the tiles into the order you want' + (BIG[Layouts.styleFor(styleKey())] ? ' (the first places get the large tiles)' : '')));
+  b.title = on ? t('live.save_order', 'Save this order (Esc cancels)')
+    : (tlHook ? t('live.leave_timeline_arrange', 'Leave timeline mode to arrange the tiles')
+      : (!state.isAdmin && !Layouts.isCustom(Layouts.active()) ? t('live.admin_only_order', 'Only an administrator can change the shared camera order (make a layout for your own)')
+        : t('live.drag_tiles', 'Drag the tiles into the order you want{extra}', { extra: BIG[Layouts.styleFor(styleKey())] ? t('live.first_places_large', ' (the first places get the large tiles)') : '' })));
   $('arrangeCancel').hidden = !on;
   $('camGrid').classList.toggle('arranging', on);
 }
@@ -974,10 +993,10 @@ export async function finishArrange(save) {
   if (save) {
     if (a.layout) {
       Layouts.reorderLayout(a.layout, a.names);
-      toast('Camera order saved for ' + Layouts.active().name);
+      toast(t('live.camera_order_saved', 'Camera order saved for {name}', { name: Layouts.active().name }));
     } else {
-      try { await Prefs.saveOrder(a.key, a.names); toast('Camera order saved for ' + (a.key === 'all' ? 'all cameras' : a.key.slice(6))); }
-      catch (e) { msgDlg('Could not save the order: ' + e.message); return; }
+      try { await Prefs.saveOrder(a.key, a.names); toast(t('live.camera_order_saved_key', 'Camera order saved for {target}', { target: a.key === 'all' ? t('live.all_cameras_lc', 'all cameras') : a.key.slice(6) })); }
+      catch (e) { msgDlg(t('live.could_not_save_order', 'Could not save the order: {msg}', { msg: e.message })); return; }
     }
   }
   if (a.ctl) a.ctl.disable();
@@ -992,12 +1011,12 @@ function firstCameraCard() {
   const admin = state.isAdmin;
   return '<div class="firstcam"><div class="fc-card">' +
     '<svg class="ic fc-ic" aria-hidden="true"><use href="#i-camera"/></svg>' +
-    '<h2>' + (admin ? 'Add your first camera' : 'No cameras to show') + '</h2>' +
+    '<h2>' + (admin ? t('live.add_first_camera', 'Add your first camera') : t('live.no_cameras_to_show', 'No cameras to show')) + '</h2>' +
     (admin
-      ? '<p>All you need is the camera\'s user name and password, from the camera\'s own app.</p>' +
-        '<div class="fc-btns"><a class="btn primary" href="#settings/cameras/find">Find cameras</a>' +
-        '<button type="button" class="btn" data-fc-add>Add by address</button></div>'
-      : '<p>No cameras are shared with this account. Ask an administrator.</p>') +
+      ? '<p>' + t('live.fc_need', 'All you need is the camera\'s user name and password, from the camera\'s own app.') + '</p>' +
+        '<div class="fc-btns"><a class="btn primary" href="#settings/cameras/find">' + t('live.find_cameras', 'Find cameras') + '</a>' +
+        '<button type="button" class="btn" data-fc-add>' + t('live.add_by_address', 'Add by address') + '</button></div>'
+      : '<p>' + t('live.fc_none_shared', 'No cameras are shared with this account. Ask an administrator.') + '</p>') +
     '</div></div>';
 }
 function wireFirstCameraCard(grid) {
@@ -1067,7 +1086,7 @@ export function renderLive() {
     fitGrid();
     stopTiles();
     liveSig = '';
-    grid.innerHTML = state.cams.length ? '<p class="empty">No cameras in this layout.</p>' : firstCameraCard();
+    grid.innerHTML = state.cams.length ? '<p class="empty">' + t('live.no_cameras_layout', 'No cameras in this layout.') + '</p>' : firstCameraCard();
     if (!state.cams.length) wireFirstCameraCard(grid);
     return;
   }
@@ -1088,21 +1107,21 @@ export function renderLive() {
     const frame = document.createElement('div');
     frame.className = 'frame';
     // Large tiles (Focus styles) play the main stream; the rest the light sub stream.
-    const t = { frame, tile, camId: c.id, player: null, media: null, mode: null, offSince: 0, wakeUntil: 0, big: shown.indexOf(c) < bigN };
-    setTileMedia(t, c);
+    const tl = { frame, tile, camId: c.id, player: null, media: null, mode: null, offSince: 0, wakeUntil: 0, big: shown.indexOf(c) < bigN };
+    setTileMedia(tl, c);
     frame.addEventListener('contextmenu', (ev) => tileMenu(ev, c));
     // Zones and motion boxes sit on a layer the size of the picture itself
     // (cameras that are not 16:9, and the Fit/Focus styles, letterbox it).
-    t.pic = document.createElement('div'); t.pic.className = 'pic'; frame.appendChild(t.pic);
-    t.blobs = document.createElement('div'); t.blobs.className = 'blobs'; t.pic.appendChild(t.blobs);
-    for (const z of (c.zones || [])) addZoneBox(t.pic, z, false);
-    for (const z of (c.ignore_zones || [])) addZoneBox(t.pic, z, true);
+    tl.pic = document.createElement('div'); tl.pic.className = 'pic'; frame.appendChild(tl.pic);
+    tl.blobs = document.createElement('div'); tl.blobs.className = 'blobs'; tl.pic.appendChild(tl.blobs);
+    for (const z of (c.zones || [])) addZoneBox(tl.pic, z, false);
+    for (const z of (c.ignore_zones || [])) addZoneBox(tl.pic, z, true);
     const fit = () => {
-      fitPic(frame, t.pic);
-      if (t.zoom) t.zoom.refresh();
-      const m = t.media;
+      fitPic(frame, tl.pic);
+      if (tl.zoom) tl.zoom.refresh();
+      const m = tl.media;
       const w = m && (m.videoWidth || m.naturalWidth), h = m && (m.videoHeight || m.naturalHeight);
-      if (w && h && !tlHook && setAr(t, c.id, w / h) && frame.closest('.grid.fill')) scheduleFit();
+      if (w && h && !tlHook && setAr(tl, c.id, w / h) && frame.closest('.grid.fill')) scheduleFit();
     };
     frame._fit = fit;  // the resize observer runs it too (the zoom follows the layer)
     frame.addEventListener('loadedmetadata', fit, true);
@@ -1115,7 +1134,7 @@ export function renderLive() {
     tile.tabIndex = 0;
     tile.setAttribute('aria-label', c.name);
     if (!arrange) attachTileInput(tile, frame, c.id);
-    if (!arrange && !tlHook) t.zoom = tileZoomFor(t, frame, c.id);
+    if (!arrange && !tlHook) tl.zoom = tileZoomFor(tl, frame, c.id);
     // The camera's own text on the picture (drawn here; costs the server
     // nothing). When it is burned into the video, the picture already has it.
     // (Timeline mode: the player draws it with the recording's time, livetl.js.)
@@ -1130,35 +1149,37 @@ export function renderLive() {
       b.onclick = (ev) => { ev.stopPropagation(); fn(); };
       act.appendChild(b);
     };
-    mk('camera', 'Save snapshot (P)', () => snapshot(c.id));
-    if (can('talk_clip') && !c.remote) mk('rec', 'Record a 20 s clip now (C)', () => clipNow(c.id));
-    mk('expand', 'Full screen', () => enterTv(c.id));
+    mk('camera', t('live.save_snapshot_p', 'Save snapshot (P)'), () => snapshot(c.id));
+    if (can('talk_clip') && !c.remote) mk('rec', t('live.record_clip', 'Record a 20 s clip now (C)'), () => clipNow(c.id));
+    mk('expand', t('live.full_screen', 'Full screen'), () => enterTv(c.id));
+    if (!c.remote) { const cb = controlsButton(c); if (cb) act.appendChild(cb); }
+    tl.act = act;
     const gear = document.createElement('button');
-    gear.className = 'btn glass'; gear.title = 'Camera menu (or right-click the picture)'; gear.setAttribute('aria-label', 'Camera menu');
+    gear.className = 'btn glass'; gear.title = t('live.camera_menu', 'Camera menu (or right-click the picture)'); gear.setAttribute('aria-label', t('live.camera_menu_aria', 'Camera menu'));
     gear.dataset.menu = '1'; gear.innerHTML = ic('gear');
     gear.onclick = (ev) => tileMenu(ev, c, gear);
     act.appendChild(gear);
     // Corner pills (name, detection or buttons, REC, clock), the edge and the cover.
     // (Timeline mode: the player adds its own name and time pills.)
     if (!tlHook) {
-      t.pills = buildPills(frame, frame, c, { actions: act, retry: () => { t.forceLive = Date.now() + 20000; setTileMedia(t, camFromId(c.id) || c); paintPills(t.pills, camFromId(c.id) || c); } });
+      tl.pills = buildPills(frame, frame, c, { actions: act, retry: () => { tl.forceLive = Date.now() + 20000; setTileMedia(tl, camFromId(c.id) || c); paintPills(tl.pills, camFromId(c.id) || c); } });
       const ar = arCache[c.id];
-      if (ar) setAr(t, c.id, ar);
+      if (ar) setAr(tl, c.id, ar);
     }
     tile.onmouseenter = () => { hoverId = c.id; };
     if (!arrange && (!tlHook || solo)) {
-      t.spk = Speaker.attach(frame, {
-        id: c.id, q: t.big && !c.remote ? bigQ() : 'sub', above: true, info: !tlHook,
+      tl.spk = Speaker.attach(frame, {
+        id: c.id, q: tl.big && !c.remote ? bigQ() : 'sub', above: true, info: !tlHook,
         videos: () => {
-          return t.media && t.media.tagName === 'VIDEO' ? [t.media] : [];
+          return tl.media && tl.media.tagName === 'VIDEO' ? [tl.media] : [];
         },
         apply: tlHook ? (on, vol) => { if (tlHook && tlHook.sound) tlHook.sound(c.id, on, vol); } : undefined,
       });
     }
     tile.appendChild(frame);
     grid.appendChild(tile);
-    updateTile(t, c);
-    liveTiles[c.id] = t;
+    updateTile(tl, c);
+    liveTiles[c.id] = tl;
   }
   fitGrid();
   markSelection();
@@ -1303,7 +1324,7 @@ async function aimAt(id, spot, sx, sy) {
   pingAt(sx, sy);
   const body = spot.w !== undefined ? { x: spot.x, y: spot.y, w: spot.w, h: spot.h } : { x: spot.x, y: spot.y };
   try { await api('/api/cameras/' + id + '/ptz/aim', { json: body }); }
-  catch (e) { toast('Aim failed: ' + (e.body || e.message)); }
+  catch (e) { toast(t('live.aim_failed', 'Aim failed: {msg}', { msg: e.body || e.message })); }
 }
 
 // Tiles. A plain click selects the camera (the dock then shows its controls); double-click,
@@ -1347,16 +1368,16 @@ function attachTileInput(tile, frame, id) {
 // keeps tap-to-open (the full view has pinch zoom). The zoom of each camera
 // stays while this page is open (groups, pages and layouts rebuild the tiles).
 const tileViews = new Map();   // camera id -> {s, fx, fy}
-function tileZoomFor(t, frame, id) {
+function tileZoomFor(tl, frame, id) {
   return Zoom.createZoom(frame, {
     scrollAt1: true,  // out at 1x the wheel scrolls the page
     box: true, dblclick: false, touch: false,
     on: () => id === selId && !tool && !tlHook && !arrange,
-    layers: () => (t.pic ? [t.pic] : []),
+    layers: () => (tl.pic ? [tl.pic] : []),
     initial: tileViews.get(id),
     onChange: (v) => { if (v) tileViews.set(id, v); else tileViews.delete(id); },
     onPan: () => { lastDrag = performance.now(); },
-    badgeTitle: 'Zoomed in: click to reset, or scroll out',
+    badgeTitle: t('live.zoom_badge', 'Zoomed in: click to reset, or scroll out'),
   });
 }
 
@@ -1368,6 +1389,7 @@ let fullSpk = null;
 let fullPills = null;   // corner pills + edge of the full view
 
 export function stopFull() {
+  closePop();
   if (fullSpk) { fullSpk.destroy(); fullSpk = null; }
   if (fullPlayer) { fullPlayer.stop(); fullPlayer = null; }
   clearInterval(window.__fullTimer);
@@ -1406,6 +1428,8 @@ function mountFull() {
   for (const b of ['fullTl', 'fullClips', 'fullClip']) $(b).hidden = !!(c && c.remote);
   // Recording a clip: admins and operators allowed to (as in the tile menus).
   if (!can('talk_clip')) $('fullClip').hidden = true;
+  closePop();
+  if (c) syncFullCtl(c); else $('fullCtl').hidden = true;
   fullSpk = Speaker.attach(content, { id: fullCamId, q: bigQ(), videos: () => [$('fullVid')] });
   if (keepAudio && c && c.audio) fullSpk.unmute();
   fullPlayer = startLive(video, fullCamId, bigQ(), () => {
@@ -1414,7 +1438,7 @@ function mountFull() {
     fullSpk = null;
     video.remove();
     const img = document.createElement('img');
-    img.id = 'fullImg'; img.alt = c ? c.name : 'camera';
+    img.id = 'fullImg'; img.alt = c ? c.name : t('live.full_alt_camera', 'camera');
     img.addEventListener('load', () => placeFull(), { once: true });
     content.appendChild(img);
     Zoom.reset();
@@ -1503,6 +1527,7 @@ function initFull() {
   $('fullNext').onclick = () => stepFull(1);
   $('fullSnap').onclick = fullSnapshot;
   $('fullClip').onclick = fullClip;
+  $('fullCtl').onclick = (ev) => { ev.stopPropagation(); if (fullCamId !== null) togglePop($('fullCtl'), fullCamId); };
   $('fullClips').onclick = () => { const c = camFromId(fullCamId); if (c) openClipsFor(c); };
   // As F does: leave the full view for full screen of this camera alone.
   $('fullFs').onclick = async () => { if (fullCamId !== null) (await import('./shortcuts.js')).fullToTv(); };

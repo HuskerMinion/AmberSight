@@ -14,6 +14,8 @@ for f in static/js/*.js static/sw.js; do
   fi
 done
 [ $bad = 0 ] && echo "all scripts parse"
+# Translated text in an attribute must be quoted (an unquoted attribute lets a translation add attributes).
+if grep -nE "[a-zA-Z-]+=' *\+ *(esc\()?t\(" static/js/*.js; then echo "FAIL: unquoted attribute with translated text (above)"; bad=1; fi
 # Unit tests of the pure modules.
 node scripts/test-camaddr.mjs || bad=1
 node scripts/test-display.mjs || bad=1

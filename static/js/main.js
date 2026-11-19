@@ -4,6 +4,7 @@
 // Admin-only pages (AI, automation, users, health, logs) are Settings pages: register with
 // registerAdminPage() (admin.js) and give them a place in SECTIONS (settings.js).
 
+import { t } from './i18n.js';
 import { mark } from './diag.js';
 import { $, state, bus, api, refreshCameras, closeAllDialogs, openDlg, toast } from './core.js';
 import { registerTab, buildNav, showTab, applyRole, hideAllTabs, activeTab, hashTab, allTabs, startEventBadge } from './nav.js';
@@ -42,11 +43,11 @@ import { syncPush } from './push.js';
 import './palette.js';   // Ctrl/Cmd+K command search (installs itself)
 
 // (The getting-started reminder waits a moment for the camera list.)
-registerTab({ id: 'live', label: 'Live', order: 10, show: (el) => { showLive(el); setTimeout(() => refreshGettingStarted().catch(() => {}), 1200); }, hide: hideLive });
-registerTab({ id: 'events', label: 'Events', order: 20, show: showEvents, hide: hideEvents });
+registerTab({ id: 'live', label: t('main.live_label','Live'), order: 10, show: (el) => { showLive(el); setTimeout(() => refreshGettingStarted().catch(() => {}), 1200); }, hide: hideLive });
+registerTab({ id: 'events', label: t('main.events_label','Events'), order: 20, show: showEvents, hide: hideEvents });
 // Clips is now the Grid view of Events: #clips (any old link or bookmark) goes there. Its camera=<name>
 // becomes the Events camera filter (each name encoded on its own, as events.js writes it); id= is dropped.
-registerTab({ id: 'clips', label: 'Clips', order: 31, noNav: true,
+registerTab({ id: 'clips', label: t('main.clips_label','Clips'), order: 31, noNav: true,
   redirect: () => {
     const p = new URLSearchParams(location.hash.split('?')[1] || ''), out = ['view=grid'];
     for (const [k, v] of p) {
@@ -57,7 +58,7 @@ registerTab({ id: 'clips', label: 'Clips', order: 31, noNav: true,
   } });
 registerTab(settingsTab);
 // The old Timeline tab is retired: #timeline and G T open Live with the timeline on.
-registerTab({ id: 'timeline', label: 'Timeline', order: 60, noNav: true,
+registerTab({ id: 'timeline', label: t('main.timeline_label','Timeline'), order: 60, noNav: true,
   redirect: () => { setTimeout(() => enterLiveTimeline().catch(() => {}), 0); return { id: 'live', hash: 'live' }; } });
 registerTab(Object.assign({}, timelapseTab, { order: 30 }));   // desktop nav: Live, Events, Time-lapse, Settings, Help
 registerTab(adminTab);
@@ -98,16 +99,16 @@ function goHome() {
 function startPageDlg() {
   const cur = startTab() === 'clips' ? 'events' : startTab();
   const tabs = allTabs().filter(t => !t.noNav && (!t.admin || state.isAdmin));
-  const d = openDlg('Start page',
-    '<div class="hint">The page AmberSight opens on, and where the AmberSight logo takes you.</div>' +
+  const d = openDlg(t('main.start_page','Start page'),
+    '<div class="hint">' + t('main.start_page_hint','The page AmberSight opens on, and where the AmberSight logo takes you.') + '</div>' +
     '<div class="startlist">' + tabs.map(t => '<label class="asys-chk"><input type="radio" name="startTab" value="' + t.id + '"' + (t.id === cur ? ' checked' : '') + '> ' + t.label + '</label>').join('') + '</div>' +
-    '<div class="row"><button class="primary" id="spSave">Save</button><button class="btn" id="spCancel">Cancel</button></div>', true);
+    '<div class="row"><button class="primary" id="spSave">' + t('main.save','Save') + '</button><button class="btn" id="spCancel">' + t('main.cancel','Cancel') + '</button></div>', true);
   d.querySelector('#spCancel').onclick = () => d.__close();
   d.querySelector('#spSave').onclick = () => {
     const v = d.querySelector('input[name=startTab]:checked');
     if (v) Prefs.set({ startTab: v.value });
     d.__close();
-    toast('Start page: ' + (tabs.find(t => t.id === (v && v.value)) || {}).label);
+    toast(t('main.start_page_toast','Start page: {label}', { label: (tabs.find(t => t.id === (v && v.value)) || {}).label }));
   };
 }
 
@@ -148,7 +149,7 @@ function start() {
     if (popCam !== null) {
       const id = parseInt(popCam, 10);
       const c = state.cams.find(x => x.id === id);
-      if (c) { document.title = (c.short_name || c.name) + ' · AmberSight'; openFullCam(id); }
+      if (c) { document.title = t('main.doc_title', '{name} · AmberSight', { name: c.short_name || c.name }); openFullCam(id); }
       else document.body.classList.remove('popout');   // that camera is gone: the normal page, not a blank one
     }
     refreshEvents().catch(() => {}).finally(() => { state.toastsOn = true; });
@@ -169,7 +170,7 @@ function openAlertLink(qp, hash) {
       closeAllDialogs(); showTab('live'); openFullCam(id, at ? { alertAt: at } : undefined);
       // An alert from a while ago: show that moment (a very recent one may still be happening, so it stays live).
       if (at && Date.now() - at > 2 * 60 * 1000) {
-        import('./livetl.js').then(m => m.enterFromFull()).then(() => toast('Showing the alert from ' + new Date(at).toLocaleString([], { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' }) + '. Close the timeline to go back to live.')).catch(() => {});
+        import('./livetl.js').then(m => m.enterFromFull()).then(() => toast(t('main.showing_alert', 'Showing the alert from {date}. Close the timeline to go back to live.', { date: new Date(at).toLocaleString([], { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' }) }))).catch(() => {});
       }
     }
     return;
@@ -213,7 +214,7 @@ async function checkSession() {
   let who;
   mark('main');
   try { who = await whoami(); mark('whoami'); } catch (e) {
-    $('statusText').textContent = 'server unreachable';
+    $('statusText').textContent = t('main.server_unreachable', 'server unreachable');
     markUnreachable();
     setTimeout(checkSession, 3000);
     return;
@@ -248,7 +249,7 @@ function boot() {
   bus.on('signedout', stop);
   bus.on('ui-updated', () => {
     if (paneId && paneId !== 'a') return;   // (split view: the first pane says it for both)
-    toast('AmberSight was updated. Reload this page to use the new version.', { action: { label: 'Reload', run: () => location.reload() }, dismiss: true, ms: 24 * 3600 * 1000 });
+    toast(t('main.updated_reload', 'AmberSight was updated. Reload this page to use the new version.'), { action: { label: t('main.reload', 'Reload'), run: () => location.reload() }, dismiss: true, ms: 24 * 3600 * 1000 });
   });
   checkSession();
 }

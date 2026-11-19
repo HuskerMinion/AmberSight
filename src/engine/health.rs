@@ -188,6 +188,13 @@ impl Engine {
                 warnings.push(w);
             }
         }
+        // The graphics card stopped answering the AI (or gave an error that
+        // turns it off): the AI runs on the processor until a restart.
+        if let Some(why) = crate::ai_card::blocked().filter(|_| self.config.lock().unwrap().ai.enabled) {
+            problem("ai-card".into(), &why);
+            shorts.push("AI moved off the graphics card".into());
+            warnings.push(why);
+        }
         // The AI was asked for checks and none has worked for two minutes.
         {
             let det = self.detector();

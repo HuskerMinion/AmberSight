@@ -15,6 +15,7 @@
 //    session keeps itself (POST /api/display/renew).
 // Settings are per device (localStorage), in the panel the gear button opens.
 
+import { t } from './i18n.js';
 import { api, bus, esc, sleep, setTheme, themeMode } from './core.js';
 import { startLive, startJpeg } from './player.js';
 import { initWake, wakeSupported, keepAwake } from './wake.js';
@@ -56,7 +57,7 @@ async function whoami() {
 
 async function boot() {
   for (let wait = 2000; ; wait = Math.min(30000, wait * 2)) {
-    try { who = await whoami(); break; } catch (e) { message('<p>Cannot reach AmberSight. Trying again…</p>'); await sleep(wait); }
+    try { who = await whoami(); break; } catch (e) { message('<p>' + t('display.cannot_reach', 'Cannot reach AmberSight. Trying again…') + '</p>'); await sleep(wait); }
   }
   if (who.auth_required && !who.signed_in) { pairing(); return; }
   displaySession = !!who.display;
@@ -67,9 +68,9 @@ async function boot() {
 
 // Not signed in: show a display code until an admin approves it (or it expires: a new one).
 // Why a display asks for a code again (shown on the pairing screen).
-const WHY_SIGNED_OUT = 'This display was signed out: by an admin, a password change, or after two weeks unused.';
-const WHY_NO_DEVICE = 'This browser cannot keep the display signed in (its device cookie is gone, for example after clearing site data).';
-const WHY_SIX_MONTHS = 'Displays are paired again every six months, so one that leaves the house stops by itself.';
+const WHY_SIGNED_OUT = t('display.signed_out', 'This display was signed out: by an admin, a password change, or after two weeks unused.');
+const WHY_NO_DEVICE = t('display.cannot_keep_signed_in', 'This browser cannot keep the display signed in (its device cookie is gone, for example after clearing site data).');
+const WHY_SIX_MONTHS = t('display.pair_again_six_months', 'Displays are paired again every six months, so one that leaves the house stops by itself.');
 
 async function pairing(reason) {
   stop();
@@ -78,26 +79,26 @@ async function pairing(reason) {
   const draw = (code, left, extra) => {
     box.hidden = false;
     box.innerHTML = '<div class="dsp-pair"><div class="dsp-brand"><svg class="ic mark"><use href="#i-logo"/></svg><span><b>Amber</b>Sight</span></div>' +
-      '<h1>Pair this display</h1>' +
-      (code ? '<div class="dsp-code" aria-label="Display code">' + esc(code) + '</div>' : '<div class="dsp-code wait">…</div>') +
-      '<ol class="dsp-steps"><li>On a phone or computer, sign in to AmberSight as an admin.</li>' +
-      '<li>Open <b>Settings</b> &rsaquo; <b>Users &amp; security</b> &rsaquo; <b>Displays</b>.</li>' +
-      '<li>Enter this code and pick the account this display uses.</li></ol>' +
-      '<p class="dsp-sub">' + (left > 0 ? 'The code works for ' + Math.ceil(left / 60000) + ' more min; a new one comes by itself.' : '') + (extra ? ' ' + extra : '') + '</p>' +
-      '<p class="dsp-alt"><a href="/">Sign in with a password instead</a></p></div>';
+      '<h1>' + t('display.pair_this_display', 'Pair this display') + '</h1>' +
+      (code ? '<div class="dsp-code" aria-label="' + t('display.display_code', 'Display code') + '">' + esc(code) + '</div>' : '<div class="dsp-code wait">…</div>') +
+      '<ol class="dsp-steps"><li>' + t('display.step_signin', 'On a phone or computer, sign in to AmberSight as an admin.') + '</li>' +
+      '<li>' + t('display.open_settings_path', 'Open <b>Settings</b> &rsaquo; <b>Users &amp; security</b> &rsaquo; <b>Displays</b>.') + '</li>' +
+      '<li>' + t('display.step_enter_code', 'Enter this code and pick the account this display uses.') + '</li></ol>' +
+      '<p class="dsp-sub">' + (left > 0 ? t('display.code_works', 'The code works for {min, plural, one {# more min} other {# more min}}; a new one comes by itself.', { min: Math.ceil(left / 60000) }) : '') + (extra ? ' ' + extra : '') + '</p>' +
+      '<p class="dsp-alt"><a href="/">' + t('display.signin_password', 'Sign in with a password instead') + '</a></p></div>';
   };
   // A display past its six months: say why it asks for a code again.
   let again = reason || '';
   try { const by = +localStorage.getItem(PAIR_BY_KEY) || 0; if (by && Date.now() / 1000 > by - 60) again = WHY_SIX_MONTHS; } catch (e) { /* no storage */ }
-  if (again) again += ' Pair it again with the code below.';
+  if (again) again += ' ' + t('display.pair_again_below', 'Pair it again with the code below.');
   window.__dsp.pairReason = again;
   const draw0 = draw;
   const drawWith = (code, left, extra) => draw0(code, left, [again, extra].filter(Boolean).join(' '));
   drawWith('', 0);
   while (my === pairToken) {
     let r;
-    try { r = await fetch('/api/display/start', { method: 'POST', credentials: 'same-origin', cache: 'no-store' }); } catch (e) { drawWith('', 0, 'Cannot reach AmberSight. Trying again…'); await sleep(5000); continue; }
-    if (r.status === 429) { let why = ''; try { why = (await r.text()).trim(); } catch (e) { /* none */ } drawWith('', 0, esc(why || 'Too many displays are waiting.') + ' Trying again in a minute…'); await sleep(60000); continue; }
+    try { r = await fetch('/api/display/start', { method: 'POST', credentials: 'same-origin', cache: 'no-store' }); } catch (e) { drawWith('', 0, t('display.cannot_reach', 'Cannot reach AmberSight. Trying again…')); await sleep(5000); continue; }
+    if (r.status === 429) { let why = ''; try { why = (await r.text()).trim(); } catch (e) { /* none */ } drawWith('', 0, esc(why || t('display.too_many_waiting', 'Too many displays are waiting.')) + ' ' + t('display.try_again_minute', 'Trying again in a minute…')); await sleep(60000); continue; }
     if (!r.ok) { await sleep(10000); continue; }
     const d = await r.json().catch(() => ({}));
     if (d.open) { location.reload(); return; }
@@ -108,7 +109,7 @@ async function pairing(reason) {
       await sleep(3000);
       if (my !== pairToken) return;
       let w;
-      try { w = await fetch('/api/display/wait', { method: 'POST', credentials: 'same-origin', cache: 'no-store' }); } catch (e) { drawWith(code, until - Date.now(), 'Cannot reach AmberSight. Trying again…'); continue; }
+      try { w = await fetch('/api/display/wait', { method: 'POST', credentials: 'same-origin', cache: 'no-store' }); } catch (e) { drawWith(code, until - Date.now(), t('display.cannot_reach_again', 'Cannot reach AmberSight. Trying again…')); continue; }
       if (w.status === 410) break;   // expired (or the server restarted): a new code
       if (!w.ok) continue;
       const x = await w.json().catch(() => ({}));
@@ -228,7 +229,7 @@ async function pollStatus() {
     const armed = !!s.armed;
     el.hidden = false;
     el.className = 'dsp-chip ' + (armed ? 'ok' : 'off');
-    el.innerHTML = '<svg class="ic"><use href="#i-shield"/></svg>' + (armed ? 'Armed' : 'Disarmed');
+    el.innerHTML = '<svg class="ic"><use href="#i-shield"/></svg>' + (armed ? t('display.armed','Armed') : t('display.disarmed','Disarmed'));
   } catch (e) { /* keep the last */ }
 }
 
@@ -241,7 +242,7 @@ function buildGrid(sig) {
   const grid = $('dspGrid');
   grid.innerHTML = '';
   if (!shown.length) {
-    grid.innerHTML = '<div class="dsp-empty"><p>No cameras to show.</p><p class="dsp-sub">' + (cams.length ? 'Open Settings (move the mouse or tap the screen) and choose cameras.' : 'This account cannot see any cameras.') + '</p></div>';
+    grid.innerHTML = '<div class="dsp-empty"><p>' + t('display.no_cams','No cameras to show.') + '</p><p class="dsp-sub">' + (cams.length ? t('display.open_settings','Open Settings (move the mouse or tap the screen) and choose cameras.') : t('display.no_account_cams','This account cannot see any cameras.')) + '</p></div>';
     return;
   }
   layoutGrid();
@@ -275,23 +276,23 @@ function tileMode(c) {
 }
 
 function updateTile(c) {
-  const t = tiles.get(c.id);
-  if (!t) return;
-  t.cam = c;
+  const tile = tiles.get(c.id);
+  if (!tile) return;
+  tile.cam = c;
   const mode = tileMode(c);
-  if (c.online || mode !== 'live') t.offSince = 0; else if (!t.offSince) t.offSince = Date.now();
-  if (mode === t.mode) return;
-  dropMedia(t);
-  t.mode = mode;
+  if (c.online || mode !== 'live') tile.offSince = 0; else if (!tile.offSince) tile.offSince = Date.now();
+  if (mode === tile.mode) return;
+  dropMedia(tile);
+  tile.mode = mode;
   if (mode === 'live') {
-    t.player = mountPlayer(t.frame, c, S.grid === 'sub' || c.remote ? 'sub' : 'light', (m) => { t.media = m; });
+    tile.player = mountPlayer(tile.frame, c, S.grid === 'sub' || c.remote ? 'sub' : 'light', (m) => { tile.media = m; });
     return;
   }
   const ph = document.createElement('div');
   ph.className = 'dsp-ph';
-  ph.innerHTML = mode === 'asleep' ? '<span><svg class="ic"><use href="#i-moon"/></svg>Asleep</span>' : '<span>Off</span>';
-  t.frame.appendChild(ph);
-  t.media = ph;
+  ph.innerHTML = mode === 'asleep' ? '<span><svg class="ic"><use href="#i-moon"/></svg>' + t('display.asleep', 'Asleep') + '</span>' : '<span>' + t('display.off', 'Off') + '</span>';
+  tile.frame.appendChild(ph);
+  tile.media = ph;
 }
 
 // Live pictures into `frame`: JPEG frames ('light'), or video ('sub' / 'main') falling back to
@@ -323,12 +324,12 @@ function dropTile(t) { dropMedia(t); t.el.onclick = null; }
 
 // "Offline" on a tile whose camera has been down for a while (its player keeps trying).
 function paintTilesOffline(now) {
-  for (const t of tiles.values()) {
-    const off = t.mode === 'live' && t.offSince && now - t.offSince > OFFLINE_AFTER;
-    if (t.offEl.hidden === !off) continue;
-    t.offEl.hidden = !off;
-    t.offEl.textContent = off ? 'Offline' : '';
-    t.el.classList.toggle('offline', !!off);
+  for (const tile of tiles.values()) {
+    const off = tile.mode === 'live' && tile.offSince && now - tile.offSince > OFFLINE_AFTER;
+    if (tile.offEl.hidden === !off) continue;
+    tile.offEl.hidden = !off;
+    tile.offEl.textContent = off ? t('display.offline', 'Offline') : '';
+    tile.el.classList.toggle('offline', !!off);
   }
 }
 
@@ -473,50 +474,50 @@ function closeSettings() {
 }
 
 function sel(name, label, opts, val) {
-  return '<label class="dsp-f"><span>' + label + '</span><select name="' + name + '">' + opts.map(([v, t]) => '<option value="' + esc(v) + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select></label>';
+  return '<label class="dsp-f"><span>' + label + '</span><select name="' + name + '">' + opts.map(([v, label]) => '<option value="' + esc(v) + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + esc(label) + '</option>').join('') + '</select></label>';
 }
 const chk = (name, label, on) => '<label class="dsp-c"><input type="checkbox" name="' + name + '"' + (on ? ' checked' : '') + '><span>' + label + '</span></label>';
 
 function openSettings() {
   closeSettings();
   const groups = [...new Set(cams.flatMap(c => (c.groups && c.groups.length) ? c.groups : (c.group ? [c.group] : [])))].sort();
-  const src = [['all', 'All cameras']].concat(layouts.map(l => ['layout:' + l.id, 'Layout: ' + l.name]), groups.map(g => ['group:' + g, 'Group: ' + g]), [['pick', 'Cameras I pick']]);
+  const src = [['all', t('display.all_cameras', 'All cameras')]].concat(layouts.map(l => ['layout:' + l.id, t('display.layout_name', 'Layout: {name}', { name: l.name })]), groups.map(g => ['group:' + g, t('display.group_name', 'Group: {name}', { name: g })]), [['pick', t('display.cameras_i_pick', 'Cameras I pick')]]);
   const picked = new Set(S.cams);
-  const awake = wakeSupported() ? (keepAwake() ? 'This browser keeps the screen on while the display shows.' : 'Keep screen awake is off on this device (AmberSight\'s account menu).')
-    : 'Over plain HTTP the browser cannot keep the screen on: set the device\'s screen timeout to Never (or turn on HTTPS in AmberSight).';
-  const acct = who && who.user ? (displaySession ? 'Signed in as <b>' + esc(who.user) + '</b> (a display: it stays signed in while it is used, and signs out after ' + 14 + ' days unused).' : 'Signed in as <b>' + esc(who.user) + '</b>.') : '';
+  const awake = wakeSupported() ? (keepAwake() ? t('display.awake_on', 'This browser keeps the screen on while the display shows.') : t('display.awake_off', 'Keep screen awake is off on this device (AmberSight\'s account menu).'))
+    : t('display.awake_http', 'Over plain HTTP the browser cannot keep the screen on: set the device\'s screen timeout to Never (or turn on HTTPS in AmberSight).');
+  const acct = who && who.user ? (displaySession ? t('display.signed_in_display', 'Signed in as <b>{user}</b> (a display: it stays signed in while it is used, and signs out after {days} days unused).', { user: esc(who.user), days: 14 }) : t('display.signed_in', 'Signed in as <b>{user}</b>.', { user: esc(who.user) })) : '';
   setBox = document.createElement('div');
   setBox.className = 'dsp-set';
-  setBox.setAttribute('role', 'dialog'); setBox.setAttribute('aria-modal', 'true'); setBox.setAttribute('aria-label', 'Display settings');
-  setBox.innerHTML = '<form class="dsp-card" novalidate><div class="dsp-head"><h2>Display settings</h2><button type="button" class="btn icon" data-x aria-label="Close"><svg class="ic"><use href="#i-x"/></svg></button></div>' +
-    '<div class="dsp-sec"><h3>Cameras</h3>' + sel('source', 'Show', src, S.source) +
+  setBox.setAttribute('role', 'dialog'); setBox.setAttribute('aria-modal', 'true'); setBox.setAttribute('aria-label', t('display.settings_title', 'Display settings'));
+  setBox.innerHTML = '<form class="dsp-card" novalidate><div class="dsp-head"><h2>' + t('display.settings_title', 'Display settings') + '</h2><button type="button" class="btn icon" data-x aria-label="' + t('display.close', 'Close') + '"><svg class="ic"><use href="#i-x"/></svg></button></div>' +
+    '<div class="dsp-sec"><h3>' + t('display.cameras', 'Cameras') + '</h3>' + sel('source', t('display.show', 'Show'), src, S.source) +
     '<div class="dsp-pick" data-pick' + (S.source === 'pick' ? '' : ' hidden') + '>' + cams.map(c => chk('cam', esc(c.name), picked.has(c.name)).replace('name="cam"', 'name="cam" value="' + esc(c.name) + '"')).join('') + '</div>' +
-    '<p class="dsp-hint">Up to 16 cameras. Layouts and groups are the ones on Live.</p></div>' +
-    '<div class="dsp-sec"><h3>When something happens</h3>' +
-    sel('trigger', 'Show the camera big on', [['alerts', 'Alerts (AI-confirmed; motion on cameras without AI)'], ['motion', 'Any motion'], ['off', 'Never: grid only']], S.trigger) +
-    '<label class="dsp-f"><span>For (seconds, longer while it goes on)</span><input name="hold" type="number" min="5" max="600" step="5" value="' + S.hold + '"></label>' +
-    sel('multi', 'Two at once', [['two', 'Side by side'], ['newest', 'Newest only']], S.multi) +
-    '<p class="dsp-hint">With Alerts, a camera the AI does not check goes big on any motion. A clip started with Record now (or by an automation through the API) also shows its camera big.</p></div>' +
-    '<div class="dsp-sec"><h3>Picture</h3>' +
-    sel('grid', 'Grid', [['light', 'Light: pictures, lowest load'], ['sub', 'Video: sub streams']], S.grid) +
-    sel('big', 'Big view', [['sub', 'Sub stream (light)'], ['main', 'Main stream (sharper, more load)']], S.big) + '</div>' +
-    '<div class="dsp-sec"><h3>Show</h3>' + chk('clock', 'Clock', S.clock) + chk('armed', 'Armed or disarmed', S.armed) + chk('names', 'Camera names', S.names) +
-    sel('theme', 'Theme', [['auto', 'Auto'], ['dark', 'Dark'], ['light', 'Light']], themeMode()) + '</div>' +
-    '<div class="dsp-sec"><h3>Night</h3>' + chk('dim', 'Dim the screen at night', S.dim) +
-    '<div class="dsp-row"><label class="dsp-f"><span>From</span><input name="dimFrom" type="time" value="' + S.dimFrom + '"></label><label class="dsp-f"><span>To</span><input name="dimTo" type="time" value="' + S.dimTo + '"></label></div>' +
-    '<label class="dsp-f"><span>How dark (%)</span><input name="dimLevel" type="range" min="20" max="95" step="5" value="' + S.dimLevel + '"></label>' +
-    chk('dimWake', 'Brighten while a camera is big', S.dimWake) + '</div>' +
-    '<div class="dsp-sec"><h3>This device</h3>' + chk('nightly', 'Reload the page every night at 3:30', S.nightly) +
+    '<p class="dsp-hint">' + t('display.up_to_16', 'Up to 16 cameras. Layouts and groups are the ones on Live.') + '</p></div>' +
+    '<div class="dsp-sec"><h3>' + t('display.when_happens', 'When something happens') + '</h3>' +
+    sel('trigger', t('display.show_big_on', 'Show the camera big on'), [['alerts', t('display.trig_alerts', 'Alerts (AI-confirmed; motion on cameras without AI)')], ['motion', t('display.trig_motion', 'Any motion')], ['off', t('display.trig_off', 'Never: grid only')]], S.trigger) +
+    '<label class="dsp-f"><span>' + t('display.for_seconds', 'For (seconds, longer while it goes on)') + '</span><input name="hold" type="number" min="5" max="600" step="5" value="' + S.hold + '"></label>' +
+    sel('multi', t('display.two_at_once', 'Two at once'), [['two', t('display.side_by_side', 'Side by side')], ['newest', t('display.newest_only', 'Newest only')]], S.multi) +
+    '<p class="dsp-hint">' + t('display.alerts_hint', 'With Alerts, a camera the AI does not check goes big on any motion. A clip started with Record now (or by an automation through the API) also shows its camera big.') + '</p></div>' +
+    '<div class="dsp-sec"><h3>' + t('display.picture', 'Picture') + '</h3>' +
+    sel('grid', t('display.grid', 'Grid'), [['light', t('display.grid_light', 'Light: pictures, lowest load')], ['sub', t('display.grid_sub', 'Video: sub streams')]], S.grid) +
+    sel('big', t('display.big_view', 'Big view'), [['sub', t('display.big_sub', 'Sub stream (light)')], ['main', t('display.big_main', 'Main stream (sharper, more load)')]], S.big) + '</div>' +
+    '<div class="dsp-sec"><h3>' + t('display.show', 'Show') + '</h3>' + chk('clock', t('display.clock', 'Clock'), S.clock) + chk('armed', t('display.armed_or_disarmed', 'Armed or disarmed'), S.armed) + chk('names', t('display.camera_names', 'Camera names'), S.names) +
+    sel('theme', t('display.theme', 'Theme'), [['auto', t('display.theme_auto', 'Auto')], ['dark', t('display.theme_dark', 'Dark')], ['light', t('display.theme_light', 'Light')]], themeMode()) + '</div>' +
+    '<div class="dsp-sec"><h3>' + t('display.night', 'Night') + '</h3>' + chk('dim', t('display.dim_at_night', 'Dim the screen at night'), S.dim) +
+    '<div class="dsp-row"><label class="dsp-f"><span>' + t('display.from', 'From') + '</span><input name="dimFrom" type="time" value="' + S.dimFrom + '"></label><label class="dsp-f"><span>' + t('display.to', 'To') + '</span><input name="dimTo" type="time" value="' + S.dimTo + '"></label></div>' +
+    '<label class="dsp-f"><span>' + t('display.how_dark', 'How dark (%)') + '</span><input name="dimLevel" type="range" min="20" max="95" step="5" value="' + S.dimLevel + '"></label>' +
+    chk('dimWake', t('display.brighten_while_big', 'Brighten while a camera is big'), S.dimWake) + '</div>' +
+    '<div class="dsp-sec"><h3>' + t('display.this_device', 'This device') + '</h3>' + chk('nightly', t('display.reload_nightly', 'Reload the page every night at 3:30'), S.nightly) +
     '<p class="dsp-hint">' + awake + '</p><p class="dsp-hint">' + acct + '</p></div>' +
-    '<div class="dsp-foot"><button type="submit" class="primary">Save</button><button type="button" class="btn" data-x>Cancel</button><span class="dsp-grow"></span>' +
-    (displaySession ? '<button type="button" class="btn" data-out>Sign out this display</button>' : '<a class="btn" href="/">Exit display mode</a>') + '</div></form>';
+    '<div class="dsp-foot"><button type="submit" class="primary">' + t('display.save', 'Save') + '</button><button type="button" class="btn" data-x>' + t('display.cancel', 'Cancel') + '</button><span class="dsp-grow"></span>' +
+    (displaySession ? '<button type="button" class="btn" data-out>' + t('display.sign_out', 'Sign out this display') + '</button>' : '<a class="btn" href="/">' + t('display.exit', 'Exit display mode') + '</a>') + '</div></form>';
   document.body.appendChild(setBox);
   const f = setBox.querySelector('form');
   f.source.onchange = () => { setBox.querySelector('[data-pick]').hidden = f.source.value !== 'pick'; };
   for (const x of setBox.querySelectorAll('[data-x]')) x.onclick = closeSettings;
   const out = setBox.querySelector('[data-out]');
   if (out) out.onclick = async () => {
-    if (!confirm('Sign this display out? It shows a new display code, which an admin approves again.')) return;
+    if (!confirm(t('display.confirm_sign_out', 'Sign this display out? It shows a new display code, which an admin approves again.'))) return;
     try { await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }); } catch (e) { /* the page shows what is true */ }
     location.reload();
   };

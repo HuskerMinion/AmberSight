@@ -38,6 +38,9 @@ pub struct StreamSource {
     pub group: Option<std::sync::Arc<retina::client::SessionGroup>>,
     /// The camera's `transport` setting: "auto", "tcp" or "udp".
     pub transport: String,
+    /// Read this stream over Baichuan TCP instead of the URL (the camera's
+    /// `connect` setting picked it; see engine/connect_way.rs).
+    pub baichuan: Option<baichuan::wired::Target>,
 }
 
 // ---------------------------------------------------------------------------

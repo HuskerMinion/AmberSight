@@ -1,12 +1,16 @@
 // Tests for static/js/camaddr.js (the camera form's address split/join). Run: node scripts/test-camaddr.mjs
 // (scripts/check-js.sh runs it too.) No framework: a failed check prints and exits 1.
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const src = readFileSync(join(here, '..', 'static', 'js', 'camaddr.js'), 'utf8');
-const A = await import('data:text/javascript;base64,' + Buffer.from(src).toString('base64'));
+// The module imports ./i18n.js (English here): browser stand-ins so it loads under node.
+globalThis.document ??= { documentElement: {} };
+globalThis.localStorage ??= { getItem: () => null, setItem() {}, removeItem() {} };
+if (!globalThis.navigator || !globalThis.navigator.languages) Object.defineProperty(globalThis, 'navigator', { value: { languages: ['en-US'] }, configurable: true });
+globalThis.fetch = async () => ({ ok: false, status: 404 });
+const A = await import(pathToFileURL(join(here, '..', 'static', 'js', 'camaddr.js')).href);
 
 let n = 0, bad = 0;
 const eq = (got, want, what) => {

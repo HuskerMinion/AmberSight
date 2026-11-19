@@ -154,17 +154,24 @@ pub(crate) fn xml_escape(s: &str) -> String {
 }
 
 /// The `<wsse:Security>` header block.
+#[cfg(test)]
 fn security_header(user: &str, password: &str, nonce: &[u8], created: &str) -> String {
+    security_header_parts(user, password, nonce, created).0
+}
+
+/// The header block and the password digest and nonce (base64) in it.
+fn security_header_parts(user: &str, password: &str, nonce: &[u8], created: &str) -> (String, String, String) {
     let digest = password_digest(nonce, created, password);
     let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(nonce);
-    format!(
+    let h = format!(
         "<wsse:Security s:mustUnderstand=\"1\" xmlns:wsse=\"{NS_WSSE}\" xmlns:wsu=\"{NS_WSU}\">\
 <wsse:UsernameToken><wsse:Username>{}</wsse:Username>\
 <wsse:Password Type=\"{PW_DIGEST_TYPE}\">{digest}</wsse:Password>\
 <wsse:Nonce EncodingType=\"{NONCE_ENC}\">{nonce_b64}</wsse:Nonce>\
 <wsu:Created>{created}</wsu:Created></wsse:UsernameToken></wsse:Security>",
         xml_escape(user)
-    )
+    );
+    (h, digest, nonce_b64)
 }
 
 /// A complete SOAP 1.2 envelope. `header` is raw header-block XML (may be empty).
@@ -250,8 +257,9 @@ pub(crate) fn find_text(n: roxmltree::Node, name: &str) -> Option<String> {
         .map(text_of)
 }
 
-/// If the SOAP body is a Fault, describe it.
-fn soap_fault(doc: &roxmltree::Document) -> Option<String> {
+/// If the SOAP body is a Fault, describe it: only its reason and subcode,
+/// each passed through `scrub_device_text` (never the rest of the answer).
+fn soap_fault(doc: &roxmltree::Document, sent: &[&str]) -> Option<String> {
     let f = find_desc(doc, "Fault")?;
     let reason = f
         .descendants()
@@ -264,7 +272,100 @@ fn soap_fault(doc: &roxmltree::Document) -> Option<String> {
         .last()
         .and_then(|s| find_text(s, "Value"))
         .unwrap_or_default();
+    // The values this request signed with go first (before a cut could leave part of
+    // one), and again after the scrubber has unescaped the text.
+    let clean = |t: &str| redact_values(&scrub_device_text(&redact_values(t, sent)), sent);
+    let (reason, sub) = (clean(&reason), clean(&sub));
     Some(format!("SOAP fault: {reason} {sub}").trim().to_string())
+}
+
+/// WS-Security elements (local names, lower case) whose content is a sign-in.
+const SECRET_ELEMENTS: &[&str] = &["security", "usernametoken", "username", "password", "nonce", "created"];
+/// Text that only a WS-Security header carries: what is left of one after the
+/// elements are cut out (a broken or cut-off echo) makes the whole text go.
+const SECRET_MARKERS: &[&str] = &["usernametoken", "passworddigest", "passwordtext", "wssecurity", "wss-", "wsse", "base64binary"];
+/// Longest device text kept in an error or log line.
+const DEVICE_TEXT_MAX: usize = 160;
+
+/// Text an ONVIF device sent (a fault's reason or code, any other answer text)
+/// made safe to put in an error, a log line, the database or an API answer.
+///
+/// Some devices (Reolink among them) echo the request's WS-Security header
+/// (user name, password digest, nonce, created time) in their answers. This
+/// cuts out any such element, written as markup or as escaped markup, drops
+/// every other tag, and gives up on the whole text when anything left still
+/// looks like part of a sign-in. Control characters go, spaces are collapsed
+/// and the result is at most `DEVICE_TEXT_MAX` characters.
+pub(crate) fn scrub_device_text(s: &str) -> String {
+    // Escaped markup is markup here: "&lt;wsse:Password&gt;" is cut out too.
+    let mut t = s.to_string();
+    for _ in 0..3 {
+        let u = t.replace("&lt;", "<").replace("&LT;", "<").replace("&gt;", ">").replace("&GT;", ">").replace("&amp;", "&").replace("&AMP;", "&");
+        if u == t {
+            break;
+        }
+        t = u;
+    }
+    let lower = t.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let mut out = String::with_capacity(t.len().min(1024));
+    let mut i = 0;
+    while i < t.len() {
+        if b[i] != b'<' {
+            let next = lower[i..].find('<').map_or(t.len(), |k| i + k);
+            out.push_str(&t[i..next]);
+            i = next;
+            continue;
+        }
+        // A tag: <name ...>, </name>, <prefix:name/>, <?...?>, <!...>.
+        let Some(end) = lower[i..].find('>').map(|k| i + k) else { break }; // a cut-off tag: drop the rest
+        let tag = &lower[i + 1..end];
+        let closing = tag.starts_with('/');
+        let name = tag.trim_start_matches('/').split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+        let local = name.rsplit(':').next().unwrap_or("");
+        i = end + 1;
+        out.push(' ');
+        if closing || tag.ends_with('/') || !SECRET_ELEMENTS.contains(&local) {
+            continue;
+        }
+        // A secret element: skip to the end of its closing tag, or drop the rest.
+        let mut close = None;
+        let mut from = i;
+        while let Some(k) = lower[from..].find("</") {
+            let at = from + k;
+            let Some(e) = lower[at..].find('>').map(|x| at + x) else { break };
+            let n = lower[at + 2..e].trim();
+            if n.rsplit(':').next() == Some(local) {
+                close = Some(e + 1);
+                break;
+            }
+            from = at + 2;
+        }
+        match close {
+            Some(c) => i = c,
+            None => break,
+        }
+    }
+    let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let fl = flat.to_ascii_lowercase();
+    if SECRET_MARKERS.iter().any(|m| fl.contains(m)) {
+        return "(details removed)".to_string();
+    }
+    let mut r: String = flat.chars().filter(|c| !c.is_control()).take(DEVICE_TEXT_MAX).collect();
+    if flat.chars().count() > DEVICE_TEXT_MAX {
+        r.push_str("...");
+    }
+    r
+}
+
+/// `text` with each of `secrets` (3+ characters) replaced: the values this
+/// server just sent, in case a device repeats one outside any markup.
+pub(crate) fn redact_values(text: &str, secrets: &[&str]) -> String {
+    let mut t = text.to_string();
+    for s in secrets.iter().filter(|s| s.chars().count() >= 3) {
+        t = t.replace(s, "***");
+    }
+    t
 }
 
 /// Device UTC time from a GetSystemDateAndTimeResponse.
@@ -682,14 +783,20 @@ impl<'a> Client<'a> {
             if !action.is_empty() {
                 header.push_str(&addressing_header(action, url_str));
             }
+            // What this request signs with: never to be repeated in an error.
+            let mut sent: Vec<String> = Vec::new();
             if secure {
                 let nonce = random_bytes::<16>();
-                header.push_str(&security_header(
-                    &self.creds.username,
-                    &self.creds.password,
-                    &nonce,
-                    &self.created_now(),
-                ));
+                let created = self.created_now();
+                let (h, digest, nonce_b64) = security_header_parts(&self.creds.username, &self.creds.password, &nonce, &created);
+                header.push_str(&h);
+                sent = vec![digest, nonce_b64, created];
+            }
+            for v in [&self.creds.username, &self.creds.password] {
+                if !v.is_empty() {
+                    sent.push(v.clone());
+                    sent.push(xml_escape(v));
+                }
             }
             let xml = envelope(&header, body);
             let extra = self.http_auth_header(&url);
@@ -711,11 +818,12 @@ impl<'a> Client<'a> {
                 }
             }
             if resp.status == 401 {
-                let soap = roxmltree::Document::parse(&resp.body).is_ok_and(|doc| soap_fault(&doc).is_some());
+                let soap = roxmltree::Document::parse(&resp.body).is_ok_and(|doc| soap_fault(&doc, &[]).is_some());
                 bail!("HTTP 401 unauthorized (check username/password){}", if soap { SOAP_401 } else { "" });
             }
             if let Ok(doc) = roxmltree::Document::parse(&resp.body) {
-                if let Some(f) = soap_fault(&doc) {
+                let sent: Vec<&str> = sent.iter().map(String::as_str).collect();
+                if let Some(f) = soap_fault(&doc, &sent) {
                     bail!("{f} (HTTP {})", resp.status);
                 }
             }
@@ -1043,7 +1151,7 @@ mod tests {
         assert_eq!(parse_system_time(t).unwrap().to_rfc3339(), "2024-05-01T07:05:09+00:00");
         let f = r#"<e:Envelope xmlns:e="x"><e:Body><e:Fault><e:Code><e:Value>e:Sender</e:Value><e:Subcode><e:Value>ter:NotAuthorized</e:Value></e:Subcode></e:Code><e:Reason><e:Text xml:lang="en">Sender not authorized</e:Text></e:Reason></e:Fault></e:Body></e:Envelope>"#;
         let doc = roxmltree::Document::parse(f).unwrap();
-        assert!(soap_fault(&doc).unwrap().contains("Sender not authorized"));
+        assert!(soap_fault(&doc, &[]).unwrap().contains("Sender not authorized"));
     }
 
     #[test]
@@ -1149,5 +1257,217 @@ mod tests {
         let e = c.call(&url, "", "<x/>", true, Duration::from_secs(5)).unwrap_err();
         assert!(format!("{e}").contains("401"), "{e}");
         assert_eq!(seen.load(Ordering::SeqCst), 6, "a refusal after the answer is not repeated");
+    }
+
+    #[test]
+    fn scrubber_cuts_ws_security_in_any_spelling() {
+        let h = security_header("echo-user-q7z", "pw", b"0123456789abcdef", "2024-01-02T03:04:05Z");
+        let (_, digest, nonce) = security_header_parts("echo-user-q7z", "pw", b"0123456789abcdef", "2024-01-02T03:04:05Z");
+        let leaks = |t: &str| ["echo-user-q7z", digest.as_str(), nonce.as_str(), "2024-01-02T03:04:05Z"].iter().any(|v| t.contains(v));
+        for text in [
+            format!("Sender not authorized {h}"),
+            format!("Sender not authorized {}", xml_escape(&h)),
+            format!("Sender not authorized {}", xml_escape(&xml_escape(&h))),
+            format!("Sender not authorized {}", h.to_uppercase()),
+            // Cut off part way: everything after the open tag goes.
+            format!("Sender not authorized {}", &h[..h.len() / 2]),
+            format!("Sender not authorized {}", &h[..20]),
+            // Without the Security wrapper, other prefixes.
+            "x <a:UsernameToken><a:Username>echo-user-q7z</a:Username></a:UsernameToken> y".to_string(),
+            "<Password Type=\"t\">X</Password><Nonce>Y</Nonce> <Created>2024-01-02T03:04:05Z</Created>".to_string(),
+        ] {
+            let s = scrub_device_text(&text);
+            assert!(!leaks(&s), "{s}");
+            assert!(!s.to_ascii_lowercase().contains("wsse"), "{s}");
+            assert!(s.chars().count() <= DEVICE_TEXT_MAX + 3, "{s}");
+        }
+        assert_eq!(scrub_device_text(&format!("Sender not authorized {h}")), "Sender not authorized");
+        // Plain reasons pass, and long ones are cut.
+        assert_eq!(scrub_device_text("  Sender\nnot <b>authorized</b> "), "Sender not authorized");
+        assert_eq!(scrub_device_text("ter:NotAuthorized"), "ter:NotAuthorized");
+        assert!(scrub_device_text(&"a".repeat(5000)).len() <= DEVICE_TEXT_MAX + 3);
+        // Something only a header carries, outside any element: all of it goes.
+        assert_eq!(scrub_device_text("bad token wsse:UsernameToken abc"), "(details removed)");
+        // Values sent by this server are redacted wherever they stand.
+        assert_eq!(redact_values("digest ABCDEF= ok", &["ABCDEF=", "x"]), "digest *** ok");
+    }
+
+    /// A camera that echoes the WS-Security header in its fault: the error (which
+    /// goes to logs, the camera report, caches and API answers) holds none of it,
+    /// and neither does any log line written meanwhile.
+    #[test]
+    fn a_fault_echoing_the_security_header_leaks_nothing() {
+        for status in ["400 Bad Request", "500 Internal Server Error", "401 Unauthorized", "200 OK"] {
+            let (port, sent) = echo_device::start(status);
+            let creds = Credentials { host: "127.0.0.1".into(), port, username: echo_device::USER.into(), password: echo_device::PASS.into() };
+            let stop = AtomicBool::new(false);
+            let (e, logs) = echo_device::capture_logs(|| {
+                let mut c = Client::new(&creds, &stop);
+                c.sync_clock();
+                c.call(&format!("http://127.0.0.1:{port}/onvif/device_service"), ACT_CREATE, "<tds:GetCapabilities/>", true, Duration::from_secs(5)).unwrap_err()
+            });
+            let text = format!("{e:#} / {e:?}");
+            echo_device::assert_clean(&text, &sent);
+            echo_device::assert_clean(&logs, &sent);
+            if status != "401 Unauthorized" {
+                assert!(text.contains("SOAP fault: Sender not Authorized"), "{text}");
+            }
+        }
+    }
+
+    /// The device helper itself does echo: a test against it means something.
+    #[test]
+    fn echo_device_really_echoes() {
+        let req = envelope(&security_header(echo_device::USER, echo_device::PASS, b"0123456789abcdef", "2024-01-02T03:04:05Z"), "<x/>");
+        let v = echo_device::values_in(&req);
+        assert_eq!(v.len(), 4);
+        let reply = echo_device::fault_for(&req, &v);
+        for x in &v {
+            assert!(reply.contains(x.as_str()), "{x}");
+        }
+        let doc = roxmltree::Document::parse(&reply).unwrap();
+        let sent: Vec<&str> = v.iter().map(String::as_str).collect();
+        let f = soap_fault(&doc, &sent).unwrap();
+        assert!(v.iter().all(|x| !f.contains(x.as_str())), "{f}");
+        assert!(f.starts_with("SOAP fault: Sender not Authorized"), "{f}");
+        // The scrubber alone (no values to redact) still cuts every copy in markup:
+        // only the bare repeat at the end is left for the redaction.
+        let unredacted = soap_fault(&doc, &[]).unwrap();
+        let before_bare = unredacted.split(" seen ").next().unwrap();
+        assert!(v.iter().all(|x| !before_bare.contains(x.as_str())), "{unredacted}");
+    }
+}
+
+/// A fake ONVIF device that echoes the request's WS-Security header back, as
+/// some cameras do, for tests that prove none of it reaches an error, a log
+/// line or a report.
+#[cfg(test)]
+pub(crate) mod echo_device {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// Sign-in the tests use (distinctive, so any echo of it is easy to find).
+    pub(crate) const USER: &str = "echo-user-q7z";
+    pub(crate) const PASS: &str = "echo-pass-k3w";
+
+    /// Every Username, Password (digest), Nonce and Created value sent so far.
+    pub(crate) type Sent = Arc<Mutex<Vec<String>>>;
+
+    fn esc(s: &str) -> String {
+        super::xml_escape(s)
+    }
+
+    /// The fault answer for a request: the request's own Security block in the
+    /// Header and in the Detail, escaped (once and twice) in the reason and the
+    /// subcode, and its sign-in values once more as bare text.
+    pub(crate) fn fault_for(request: &str, values: &[String]) -> String {
+        let sec = match (request.find("<wsse:Security"), request.find("</wsse:Security>")) {
+            (Some(a), Some(b)) => request[a..b + "</wsse:Security>".len()].to_string(),
+            _ => String::new(),
+        };
+        let bare = values.join(" ");
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<SOAP-ENV:Envelope xmlns:SOAP-ENV=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsse=\"{}\" xmlns:wsu=\"{}\" xmlns:ter=\"http://www.onvif.org/ver10/error\" xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\">\
+<SOAP-ENV:Header>{sec}</SOAP-ENV:Header><SOAP-ENV:Body><SOAP-ENV:Fault>\
+<SOAP-ENV:Code><SOAP-ENV:Value>SOAP-ENV:Sender</SOAP-ENV:Value><SOAP-ENV:Subcode><SOAP-ENV:Value>ter:NotAuthorized {}</SOAP-ENV:Value></SOAP-ENV:Subcode></SOAP-ENV:Code>\
+<SOAP-ENV:Reason><SOAP-ENV:Text xml:lang=\"en\">Sender not Authorized {} {} seen {}</SOAP-ENV:Text></SOAP-ENV:Reason>\
+<SOAP-ENV:Detail>{sec}</SOAP-ENV:Detail></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>",
+            super::NS_WSSE,
+            super::NS_WSU,
+            esc(&sec),
+            esc(&sec),
+            esc(&esc(&sec)),
+            esc(&bare),
+        )
+    }
+
+    /// The sign-in values in a request's Security header.
+    pub(crate) fn values_in(request: &str) -> Vec<String> {
+        let Some(a) = request.find('<') else { return Vec::new() };
+        let Ok(doc) = roxmltree::Document::parse(&request[a..]) else { return Vec::new() };
+        ["Username", "Password", "Nonce", "Created"]
+            .iter()
+            .filter_map(|n| doc.descendants().find(|x| x.is_element() && x.tag_name().name() == *n).and_then(|x| x.text()).map(str::to_string))
+            .collect()
+    }
+
+    /// Starts the device: every request gets `status` and the echoing fault.
+    pub(crate) fn start(status: &'static str) -> (u16, Sent) {
+        start_with(status, |_, _| None)
+    }
+
+    /// Like `start`, but a request `answer(request, port)` gives a Body for is
+    /// answered 200 with it, the request's Security block echoed in the Header.
+    pub(crate) fn start_with(status: &'static str, answer: impl Fn(&str, u16) -> Option<String> + Send + 'static) -> (u16, Sent) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let sent: Sent = Arc::default();
+        let sent2 = sent.clone();
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut s) = conn else { break };
+                let (_, body) = crate::test_ports::read_http_request(&mut s);
+                let req = String::from_utf8_lossy(&body).into_owned();
+                let values = values_in(&req);
+                sent2.lock().unwrap().extend(values.iter().cloned());
+                let (st, reply) = match answer(&req, port) {
+                    Some(b) => {
+                        let sec = match (req.find("<wsse:Security"), req.find("</wsse:Security>")) {
+                            (Some(a), Some(e)) => &req[a..e + "</wsse:Security>".len()],
+                            _ => "",
+                        };
+                        ("200 OK", format!("<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Header>{sec}</s:Header><s:Body>{b}</s:Body></s:Envelope>"))
+                    }
+                    None => (status, fault_for(&req, &values)),
+                };
+                let _ = write!(s, "HTTP/1.1 {st}\r\nContent-Type: application/soap+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+            }
+        });
+        (port, sent)
+    }
+
+    /// Fails when `text` holds any sign-in value sent to the device, the
+    /// password, or any piece of a WS-Security header.
+    pub(crate) fn assert_clean(text: &str, sent: &Sent) {
+        check(text, sent, true)
+    }
+
+    /// `assert_clean` for text that may name the user (what the admin typed).
+    pub(crate) fn assert_clean_but_user(text: &str, sent: &Sent) {
+        check(text, sent, false)
+    }
+
+    fn check(text: &str, sent: &Sent, user_too: bool) {
+        let sent = sent.lock().unwrap();
+        assert!(sent.iter().any(|v| v == USER), "the device saw no signed request");
+        for v in sent.iter().map(String::as_str).chain([PASS]).filter(|v| user_too || *v != USER) {
+            assert!(!text.contains(v), "{v:?} leaked into: {text}");
+        }
+        let lower = text.to_ascii_lowercase();
+        for m in ["usernametoken", "passworddigest", "wsse", "security>", "nonce>", "created>", "password>"] {
+            assert!(!lower.contains(m), "{m:?} leaked into: {text}");
+        }
+    }
+
+    /// Log lines written (at any level) while `f` runs on this thread.
+    pub(crate) fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone, Default)]
+        struct W(Arc<Mutex<Vec<u8>>>);
+        impl Write for W {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let w = W::default();
+        let w2 = w.clone();
+        let sub = tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).with_ansi(false).with_writer(move || w2.clone()).finish();
+        let r = tracing::subscriber::with_default(sub, f);
+        let text = String::from_utf8_lossy(&w.0.lock().unwrap()).into_owned();
+        (r, text)
     }
 }

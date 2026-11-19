@@ -2,6 +2,7 @@
 // AmberSight has seen, and manage people (rename, no alerts, forget).
 // Also the "Who is this?" dialog used from the event window.
 
+import { t } from './i18n.js';
 import { api, esc, toast, openDlg, state, errText, liveSwitch, swHtml, fld, formBar, confirmDialog, promptDialog, hasUnsaved } from './core.js';
 import { registerAdminPage } from './admin.js';
 import { lead, how, more, notice } from './sp_kit.js';
@@ -13,32 +14,32 @@ const when = (ms) => new Date(ms).toLocaleString(undefined, { month: 'short', da
 export async function nameFaceDialog(face, done) {
   let people = [];
   try { people = (await api('/api/people')).people; } catch (e) { /* new names still work */ }
-  const d = openDlg('Who is this?',
+  const d = openDlg(t('admin_faces.who_is_this','Who is this?'),
     '<div class="fc-who">' + img(face.id, 'fc-big') + '<div>' +
-      '<label class="cs-f"><span>Name</span><input data-n list="fcPeople" value="' + esc(face.person || '') + '" placeholder="e.g. Alex" maxlength="60" autocomplete="off"></label>' +
+      '<label class="cs-f"><span>' + t('admin_faces.name','Name') + '</span><input data-n list="fcPeople" value="' + esc(face.person || '') + '" placeholder="' + t('admin_faces.example_alex','e.g. Alex') + '" maxlength="60" autocomplete="off"></label>' +
       '<datalist id="fcPeople">' + people.map(p => '<option value="' + esc(p.name) + '">').join('') + '</datalist>' +
       (people.length ? '<div class="chips fc-pick">' + people.map(p => '<button class="chip" data-p="' + esc(p.name) + '">' + esc(p.name) + '</button>').join('') + '</div>' : '') +
-      '<label class="asys-chk"><input type="checkbox" data-sim checked> Also name faces that look like this one</label>' +
-      '<div class="hint">Naming a few clear faces of each person (front-on, in daylight and at night) makes recognition much more reliable.' + (face.clear === false ? ' This face is small or blurry: it can be named, but it is not used to recognize anyone.' : '') + '</div>' +
+      '<label class="asys-chk"><input type="checkbox" data-sim checked> ' + t('admin_faces.also_name_similar','Also name faces that look like this one') + '</label>' +
+      '<div class="hint">' + t('admin_faces.naming_hint','Naming a few clear faces of each person (front-on, in daylight and at night) makes recognition much more reliable.') + (face.clear === false ? ' ' + t('admin_faces.small_blurry_hint', 'This face is small or blurry: it can be named, but it is not used to recognize anyone.') : '') + '</div>' +
     '</div></div>' +
-    '<div class="row"><button class="btn primary" data-ok>Save</button>' + (face.person ? '<button class="btn" data-clear>Not ' + esc(face.person) + '</button>' : '') +
-    '<button class="btn danger" data-del title="Not a face, or not worth keeping">Delete</button><button class="btn" data-cancel>Cancel</button></div>', true);
+    '<div class="row"><button class="btn primary" data-ok>' + t('admin_faces.save','Save') + '</button>' + (face.person ? '<button class="btn" data-clear>' + t('admin_faces.not_person', 'Not {name}', { name: esc(face.person) }) + '</button>' : '') +
+    '<button class="btn danger" data-del title="' + t('admin_faces.delete_tip', 'Not a face, or not worth keeping') + '">' + t('admin_faces.delete', 'Delete') + '</button><button class="btn" data-cancel>' + t('admin_faces.cancel', 'Cancel') + '</button></div>', true);
   const q = (s) => d.querySelector(s);
   q('[data-n]').focus();
   d.querySelectorAll('[data-p]').forEach(b => { b.onclick = () => { q('[data-n]').value = b.dataset.p; }; });
   const save = async (name, similar) => {
     try {
       const r = await api('/api/faces/' + face.id + '/name', { json: { name, similar } });
-      toast(name ? 'Named ' + name + (r.named > 1 ? ' (and ' + (r.named - 1) + ' look-alike' + (r.named > 2 ? 's' : '') + ')' : '') : 'No longer named');
+      toast(name ? (r.named > 1 ? t('admin_faces.named_more', 'Named {name} (and {n, plural, one {# look-alike} other {# look-alikes}})', { name, n: r.named - 1 }) : t('admin_faces.named', 'Named {name}', { name })) : t('admin_faces.no_longer_named','No longer named'));
       d.__close();
       if (done) done(name);
     } catch (e) { toast(errText(e)); }
   };
-  q('[data-ok]').onclick = () => { const n = q('[data-n]').value.trim(); if (!n) { toast('Type a name'); return; } save(n, q('[data-sim]').checked); };
+  q('[data-ok]').onclick = () => { const n = q('[data-n]').value.trim(); if (!n) { toast(t('admin_faces.type_name','Type a name')); return; } save(n, q('[data-sim]').checked); };
   q('[data-n]').onkeydown = (e) => { if (e.key === 'Enter') q('[data-ok]').click(); };
   const cl = q('[data-clear]'); if (cl) cl.onclick = () => save(null, false);
   q('[data-del]').onclick = async () => {
-    try { await api('/api/faces/' + face.id, { method: 'DELETE' }); toast('Face deleted'); d.__close(); if (done) done(null); } catch (e) { toast(errText(e)); }
+    try { await api('/api/faces/' + face.id, { method: 'DELETE' }); toast(t('admin_faces.face_deleted','Face deleted')); d.__close(); if (done) done(null); } catch (e) { toast(errText(e)); }
   };
   q('[data-cancel]').onclick = () => d.__close();
 }
@@ -49,8 +50,8 @@ export async function eventFacesHtml(eventId) {
   let faces = [];
   try { faces = (await api('/api/faces?event=' + encodeURIComponent(eventId))).faces; } catch (e) { return ''; }
   if (!faces.length) return '';
-  return '<div class="sec">Faces</div><div class="fc-grid fc-ev">' + faces.map(f =>
-    '<button class="fc-card" data-face="' + f.id + '">' + img(f.id) + '<span>' + (f.person ? esc(f.person) + (f.labeled ? '' : ' ?') : 'Who is this?') + '</span></button>').join('') + '</div>';
+  return '<div class="sec">' + t('admin_faces.faces', 'Faces') + '</div><div class="fc-grid fc-ev">' + faces.map(f =>
+    '<button class="fc-card" data-face="' + f.id + '">' + img(f.id) + '<span>' + (f.person ? esc(f.person) + (f.labeled ? '' : ' ?') : t('admin_faces.who_is_this', 'Who is this?')) + '</span></button>').join('') + '</div>';
 }
 export function wireEventFaces(root, eventId, refresh) {
   root.querySelectorAll('[data-face]').forEach(b => { b.onclick = async () => {
@@ -91,48 +92,48 @@ function facesPage(el) {
   }
   function paint() {
     const s = st.settings;
-    let h = '<div class="ac">' + lead('Optional. Puts names to the people your cameras see, so alerts say who is at the door.', 'Use it on a doorbell or a camera that sees people close and front-on.') +
-      how('When AI sees a person, AmberSight looks for a face in the full-quality recording, compares it with the faces you have named, and labels the event with the name (or &quot;unknown face&quot;). Recognition runs on this server; the face pictures and fingerprints are kept in its database (and so in its backups), and names appear in event labels and alerts. A photo of someone can fool it, so do not rely on &quot;no alerts&quot; for security.');
-    if (st.open) h += notice('warn', 'This server has no sign-in accounts: anyone on your network can see these faces.', '<a class="btn" href="#settings/users/users">Add an account</a>');
+    let h = '<div class="ac">' + lead(t('admin_faces.lead1', 'Optional. Puts names to the people your cameras see, so alerts say who is at the door.'), t('admin_faces.lead2', 'Use it on a doorbell or a camera that sees people close and front-on.')) +
+      how(t('admin_faces.how', 'When AI sees a person, AmberSight looks for a face in the full-quality recording, compares it with the faces you have named, and labels the event with the name (or &quot;unknown face&quot;). Recognition runs on this server; the face pictures and fingerprints are kept in its database (and so in its backups), and names appear in event labels and alerts. A photo of someone can fool it, so do not rely on &quot;no alerts&quot; for security.'));
+    if (st.open) h += notice('warn', t('admin_faces.no_accounts', 'This server has no sign-in accounts: anyone on your network can see these faces.'), '<a class="btn" href="#settings/users/users">' + t('admin_faces.add_account', 'Add an account') + '</a>');
     // Setup card
-    h += '<div class="ac-card" data-setup><div class="ac-card-t">Set up</div>';
-    if (!st.ai) h += notice('info', 'Face recognition needs AI to find people first.', '<a class="btn" href="#settings/detection/objects">Open Objects (AI)</a>');
+    h += '<div class="ac-card" data-setup><div class="ac-card-t">' + t('admin_faces.set_up', 'Set up') + '</div>';
+    if (!st.ai) h += notice('info', t('admin_faces.needs_ai', 'Face recognition needs AI to find people first.'), '<a class="btn" href="#settings/detection/objects">' + t('admin_faces.open_objects', 'Open Objects (AI)') + '</a>');
     if (!st.models) {
       const d = st.download;
-      h += '<p class="hint">Two small models are needed (about 39 MB, from the OpenCV model zoo; free to use).</p>' +
-        (d.running ? '<div class="hint">Downloading... ' + Math.round(100 * d.done / Math.max(1, d.total)) + '%</div>'
-          : d.error ? notice('warn', esc(d.error), '<button class="btn primary" data-dl>Try again</button>') : '<button class="btn primary" data-dl>Download the face models</button>');
+      h += '<p class="hint">' + t('admin_faces.models_needed', 'Two small models are needed (about 39 MB, from the OpenCV model zoo; free to use).') + '</p>' +
+        (d.running ? '<div class="hint">' + t('admin_faces.downloading', 'Downloading... {pct}%', { pct: Math.round(100 * d.done / Math.max(1, d.total)) }) + '</div>'
+          : d.error ? notice('warn', esc(d.error), '<button class="btn primary" data-dl>' + t('admin_faces.try_again', 'Try again') + '</button>') : '<button class="btn primary" data-dl>' + t('admin_faces.download_models', 'Download the face models') + '</button>');
     }
-    h += swHtml('data-en', s.enabled, 'Recognize faces on person events', '', !st.models) +
-      more('More settings', '<div class="ac-grid3">' + fld('Smallest face', 'data-min min="20" max="400" value="' + s.min_face + '"', 'pixels wide') +
-      fld('Match strictness', 'data-match min="0.3" max="0.8" step="0.05" value="' + (+s.match_score).toFixed(2) + '"', '0.30 to 0.80') + '</div>' +
-      '<div class="hint">Smaller faces are skipped: too few pixels to tell people apart. Higher strictness means fewer wrong names but more &quot;unknown&quot;.</div>') +
-      '<div class="sec">Cameras</div>' + swHtml('data-all', !s.cameras.length, 'All cameras with AI') +
+    h += swHtml('data-en', s.enabled, t('admin_faces.recognize', 'Recognize faces on person events'), '', !st.models) +
+      more(t('admin_faces.more_settings', 'More settings'), '<div class="ac-grid3">' + fld(t('admin_faces.smallest_face', 'Smallest face'), 'data-min min="20" max="400" value="' + s.min_face + '"', t('admin_faces.pixels_wide', 'pixels wide')) +
+      fld(t('admin_faces.strictness', 'Match strictness'), 'data-match min="0.3" max="0.8" step="0.05" value="' + (+s.match_score).toFixed(2) + '"', '0.30 to 0.80') + '</div>' +
+      '<div class="hint">' + t('admin_faces.strictness_hint', 'Smaller faces are skipped: too few pixels to tell people apart. Higher strictness means fewer wrong names but more &quot;unknown&quot;.') + '</div>') +
+      '<div class="sec">' + t('admin_faces.cameras', 'Cameras') + '</div>' + swHtml('data-all', !s.cameras.length, t('admin_faces.all_cameras_ai', 'All cameras with AI')) +
       '<div class="cs-copygrid" data-camset' + (!s.cameras.length ? ' hidden' : '') + '>' + state.cams.filter(c => !c.remote).map(c => '<label class="asys-chk"><input type="checkbox" data-c="' + esc(c.name) + '"' + (!s.cameras.length || s.cameras.includes(c.name) ? ' checked' : '') + '> ' + esc(c.name) + '</label>').join('') + '</div>' +
       '</div>';
     if (st.models && s.enabled) {
       // People
-      h += '<div class="ac-card"><div class="ac-card-t">People</div>';
+      h += '<div class="ac-card"><div class="ac-card-t">' + t('admin_faces.people', 'People') + '</div>';
       h += people.length ? '<div class="fc-grid">' + people.map(p => '<button class="fc-card' + (person === p.id ? ' on' : '') + '" data-person="' + p.id + '">' + (p.face ? img(p.face) : '<span class="fc-img"></span>') +
-        '<span><b>' + esc(p.name) + '</b><br><small>' + p.named + ' named · seen ' + p.seen + (p.last_ms ? ' · ' + esc(when(p.last_ms)) : '') + (p.quiet ? ' · no alerts' : '') + '</small></span></button>').join('') + '</div>'
-        : '<p class="hint">Nobody named yet. Name a face below to start, or import faces you named before.</p>';
-      h += '<details class="fc-import"><summary class="hint">Import named faces from a folder on this server</summary>' +
-        '<div class="ac-row"><input data-imp placeholder="e.g. F:\\Faces" spellcheck="false"><button class="btn" data-impgo>Import</button></div>' +
-        '<div class="hint">One folder per person, named after them, holding pictures of their face (for example the named-faces folder of the program you used before). Pictures directly in the folder, not in a person\'s folder, are skipped.</div></details>';
+        '<span><b>' + esc(p.name) + '</b><br><small>' + t('admin_faces.named_seen', '{named} named · seen {seen}', { named: p.named, seen: p.seen }) + (p.last_ms ? ' · ' + esc(when(p.last_ms)) : '') + (p.quiet ? ' · ' + t('admin_faces.no_alerts_short', 'no alerts') : '') + '</small></span></button>').join('') + '</div>'
+        : '<p class="hint">' + t('admin_faces.nobody', 'Nobody named yet. Name a face below to start, or import faces you named before.') + '</p>';
+      h += '<details class="fc-import"><summary class="hint">' + t('admin_faces.import_summary', 'Import named faces from a folder on this server') + '</summary>' +
+        '<div class="ac-row"><input data-imp placeholder="' + t('admin_faces.import_ph', 'e.g. F:\\Faces') + '" spellcheck="false"><button class="btn" data-impgo>' + t('admin_faces.import', 'Import') + '</button></div>' +
+        '<div class="hint">' + t('admin_faces.import_hint', 'One folder per person, named after them, holding pictures of their face (for example the named-faces folder of the program you used before). Pictures directly in the folder, not in a person\'s folder, are skipped.') + '</div></details>';
       const P = people.find(p => p.id === person);
       if (P) {
         h += '<div class="fc-person"><div class="ac-row"><b>' + esc(P.name) + '</b><span class="ac-sp"></span>' +
-          '<span title="When only this person is recognized (and nothing else AI alerts for), the event is kept but sends no alert">' + swHtml('data-quiet', P.quiet, 'No alerts when only they are seen') + '</span>' +
-          '<button class="btn" data-ren>Rename</button><button class="btn danger" data-forget>Forget</button></div>' +
-          '<div class="fc-grid">' + personFaces.map(f => '<button class="fc-card" data-face="' + f.id + '">' + img(f.id) + '<span><small>' + (f.labeled ? (f.clear ? 'named' : '<span class="fc-blur" title="Named, but too small or blurry to recognize others by (used only if this person has no clear face)">named · not clear</span>') : 'matched ' + Math.round((f.sim || 0) * 100) + '%') + ' · ' + esc(when(f.at_ms)) + '</small></span></button>').join('') + '</div>' +
-          '<div class="hint">Only clear faces are used to recognize ' + esc(P.name) + '; blurry or far-away ones can still be named (for the record) without making recognition worse.</div></div>';
+          '<span title="' + t('admin_faces.quiet_tip', 'When only this person is recognized (and nothing else AI alerts for), the event is kept but sends no alert') + '">' + swHtml('data-quiet', P.quiet, t('admin_faces.quiet', 'No alerts when only they are seen')) + '</span>' +
+          '<button class="btn" data-ren>' + t('admin_faces.rename', 'Rename') + '</button><button class="btn danger" data-forget>' + t('admin_faces.forget', 'Forget') + '</button></div>' +
+          '<div class="fc-grid">' + personFaces.map(f => '<button class="fc-card" data-face="' + f.id + '">' + img(f.id) + '<span><small>' + (f.labeled ? (f.clear ? t('admin_faces.named_lc', 'named') : '<span class="fc-blur" title="' + t('admin_faces.blur_tip', 'Named, but too small or blurry to recognize others by (used only if this person has no clear face)') + '">' + t('admin_faces.named_not_clear', 'named · not clear') + '</span>') : t('admin_faces.matched', 'matched {pct}%', { pct: Math.round((f.sim || 0) * 100) })) + ' · ' + esc(when(f.at_ms)) + '</small></span></button>').join('') + '</div>' +
+          '<div class="hint">' + t('admin_faces.clear_only', 'Only clear faces are used to recognize {name}; blurry or far-away ones can still be named (for the record) without making recognition worse.', { name: esc(P.name) }) + '</div></div>';
       }
       h += '</div>';
       // Unnamed
-      h += '<div class="ac-card"><div class="ac-card-t">Faces to name</div>' +
-        (unnamed.length ? '<div class="hint">Click a face to say who it is, or delete it. Faces nobody names are forgotten after 60 days.</div><div class="fc-grid">' +
-          unnamed.map(f => '<button class="fc-card" data-face="' + f.id + '">' + img(f.id) + '<span>' + (f.person ? esc(f.person) + ' ' + Math.round((f.sim || 0) * 100) + '%?' : 'Who is this?') + '<br><small>' + esc(when(f.at_ms)) + '</small></span></button>').join('') + '</div>'
-          : '<p class="hint">None right now. Faces appear here after AI sees a person close enough to recognize.</p>') + '</div>';
+      h += '<div class="ac-card"><div class="ac-card-t">' + t('admin_faces.to_name', 'Faces to name') + '</div>' +
+        (unnamed.length ? '<div class="hint">' + t('admin_faces.click_hint', 'Click a face to say who it is, or delete it. Faces nobody names are forgotten after 60 days.') + '</div><div class="fc-grid">' +
+          unnamed.map(f => '<button class="fc-card" data-face="' + f.id + '">' + img(f.id) + '<span>' + (f.person ? esc(f.person) + ' ' + Math.round((f.sim || 0) * 100) + '%?' : t('admin_faces.who_is_this', 'Who is this?')) + '<br><small>' + esc(when(f.at_ms)) + '</small></span></button>').join('') + '</div>'
+          : '<p class="hint">' + t('admin_faces.none_now', 'None right now. Faces appear here after AI sees a person close enough to recognize.') + '</p>') + '</div>';
     }
     h += '</div>';
     el.innerHTML = h;
@@ -159,31 +160,31 @@ function facesPage(el) {
     }; });
     const ig = q('[data-impgo]');
     if (ig) ig.onclick = async () => {
-      const path = q('[data-imp]').value.trim(); if (!path) { toast('Type the folder'); return; }
-      ig.disabled = true; ig.textContent = 'Importing...';
+      const path = q('[data-imp]').value.trim(); if (!path) { toast(t('admin_faces.type_folder', 'Type the folder')); return; }
+      ig.disabled = true; ig.textContent = t('admin_faces.importing', 'Importing...');
       try {
         const r = await api('/api/faces/import', { json: { path } });
-        toast('Imported ' + r.faces + ' face' + (r.faces === 1 ? '' : 's') + ' of ' + r.people.join(', ') + (r.skipped.length ? '; no clear face in ' + r.skipped.join(', ') : ''));
+        toast(t('admin_faces.imported', 'Imported {faces, plural, one {# face} other {# faces}} of {people}{skipped}', { faces: r.faces, people: r.people.join(', '), skipped: r.skipped.length ? '; ' + t('admin_faces.no_clear_face', 'no clear face in {names}', { names: r.skipped.join(', ') }) : '' }));
         load();
-      } catch (e) { toast(errText(e)); ig.disabled = false; ig.textContent = 'Import'; }
+      } catch (e) { toast(errText(e)); ig.disabled = false; ig.textContent = t('admin_faces.import', 'Import'); }
     };
     const P = people.find(p => p.id === person);
     if (P) {
       liveSwitch(q('[data-quiet]'), async (on) => { await api('/api/people/' + P.id, { method: 'PUT', json: { quiet: on } }); P.quiet = on; });
       q('[data-ren]').onclick = async () => {
-        const n = await promptDialog({ title: 'Rename ' + P.name, label: 'New name', value: P.name, ok: 'Rename' }); if (!n || n.trim() === P.name) return;
+        const n = await promptDialog({ title: t('admin_faces.rename_title', 'Rename {name}', { name: P.name }), label: t('admin_faces.new_name', 'New name'), value: P.name, ok: t('admin_faces.rename_ok', 'Rename') }); if (!n || n.trim() === P.name) return;
         try { await api('/api/people/' + P.id, { method: 'PUT', json: { name: n.trim() } }); load(); } catch (x) { toast(errText(x)); }
       };
       q('[data-forget]').onclick = async () => {
-        if (!(await confirmDialog({ title: 'Forget ' + P.name + '?', body: 'Their name and every picture of their face are deleted. Events already labeled keep the name.', ok: 'Forget ' + P.name, danger: true }))) return;
+        if (!(await confirmDialog({ title: t('admin_faces.forget_title', 'Forget {name}?', { name: P.name }), body: t('admin_faces.forget_body', 'Their name and every picture of their face are deleted. Events already labeled keep the name.'), ok: t('admin_faces.forget_ok', 'Forget {name}', { name: P.name }), danger: true }))) return;
         try { await api('/api/people/' + P.id, { method: 'DELETE' }); person = null; load(); } catch (x) { toast(errText(x)); }
       };
     }
   }
-  el.innerHTML = '<div class="ac"><p class="empty">Loading...</p></div>';
+  el.innerHTML = '<div class="ac"><p class="empty">' + t('admin_faces.loading', 'Loading...') + '</p></div>';
   load();
   return () => clearTimeout(timer);
 }
 
 let stopFaces = null;
-registerAdminPage({ id: 'faces', title: 'Faces', order: 65, render(el) { stopFaces = facesPage(el); }, leave() { if (stopFaces) stopFaces(); } });
+registerAdminPage({ id: 'faces', title: t('admin_faces.title', 'Faces'), order: 65, render(el) { stopFaces = facesPage(el); }, leave() { if (stopFaces) stopFaces(); } });

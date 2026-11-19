@@ -5,6 +5,7 @@
 // crossing alerts), each with a name and options (objects, seconds or direction, alert, record, window).
 // Opened from the camera panel's Motion section and from the Live dock.
 
+import { t } from './i18n.js';
 import { topDlgOpen, state, api, esc, toast, camFromId, refreshCameras, msgDlg, backLayer, overlaysChanged, can } from './core.js';
 
 const MIN = 0.01;
@@ -23,10 +24,10 @@ export function zoneCounts(c) {
 }
 export function zonesSummary(c) {
   const { zn, iz, nz } = zoneCounts(c), parts = [];
-  if (zn || iz) parts.push(zn + ' zone' + (zn === 1 ? '' : 's'));
-  if (iz) parts.push(iz + ' ignore');
-  if (nz) parts.push(nz + ' alert zone' + (nz === 1 ? '' : 's'));
-  return 'Zones: ' + (parts.length ? parts.join(' \u00b7 ') : 'none (the whole picture counts)') + '.';
+  if (zn || iz) parts.push(t('zones.n_zones', '{n, plural, one {# zone} other {# zones}}', { n: zn }));
+  if (iz) parts.push(t('zones.n_ignore', '{n} ignore', { n: iz }));
+  if (nz) parts.push(t('zones.n_alert_zones', '{n, plural, one {# alert zone} other {# alert zones}}', { n: nz }));
+  return t('zones.summary', 'Zones: {list}.', { list: parts.length ? parts.join(' \u00b7 ') : t('zones.none_whole', 'none (the whole picture counts)') });
 }
 
 function ensureCss() {
@@ -43,10 +44,10 @@ const pc = (v) => (Math.round(v * 1000) / 10).toString();
 export async function openZoneEditor(id, opts) {
   opts = opts || {};
   if (open) return;
-  if (!can('camera_detection')) { msgDlg('This account cannot change zones: an admin can allow it'); return; }
+  if (!can('camera_detection')) { msgDlg(t('zones.cannot_change', 'This account cannot change zones: an admin can allow it')); return; }
   let c0 = camFromId(id);
-  if (!c0) { msgDlg('That camera no longer exists'); return; }
-  if (c0.remote) { msgDlg('Zones of a camera on another server are edited on that server'); return; }
+  if (!c0) { msgDlg(t('zones.camera_missing', 'That camera no longer exists')); return; }
+  if (c0.remote) { msgDlg(t('zones.remote_edit', 'Zones of a camera on another server are edited on that server')); return; }
   open = true;
   ensureCss();
   try { await refreshCameras(); } catch (e) { /* use what we have */ }
@@ -77,30 +78,29 @@ export async function openZoneEditor(id, opts) {
   const root = document.createElement('div');
   root.className = 'ze';
   root.innerHTML =
-    '<div class="ze-win" role="dialog" aria-modal="true" aria-label="' + (Q ? 'Edit areas that do not notify' : 'Edit motion zones') + '" tabindex="-1">' +
+    '<div class="ze-win" role="dialog" aria-modal="true" aria-label="' + esc(Q ? t('zones.edit_areas_label', 'Edit areas that do not notify') : t('zones.edit_zones_label', 'Edit motion zones')) + '" tabindex="-1">' +
       '<div class="ze-head">' +
-        '<h2 class="ze-title">' + (Q ? 'Areas that don\'t notify' : 'Zones') + ' <span class="muted">' + esc(c0.name) + '</span></h2>' +
-        '<span class="ze-lamp" data-lamp>Quiet</span>' +
-        '<div class="ze-seg" role="group" aria-label="New zone type"' + (Q ? ' hidden' : '') + '>' +
-          '<button type="button" data-type="detect" aria-pressed="true" title="Motion counts only inside detect zones (if there are any)">Detect zone</button>' +
-          '<button type="button" data-type="ignore" aria-pressed="false" title="Motion inside an ignore zone never counts">Ignore zone</button>' +
-          '<button type="button" data-type="area" aria-pressed="false" title="A named area: alerts when someone stays inside too long (loitering). Needs AI.">Alert area</button>' +
-          '<button type="button" data-type="line" aria-pressed="false" title="A named line with a direction arrow: alerts when someone crosses it. Needs AI.">Alert line</button></div>' +
-        '<div class="ze-seg" role="group" aria-label="Shape tool">' +
-          '<button type="button" data-tool="rect" aria-pressed="true" title="Drag to draw a rectangle">Rectangle</button>' +
-          '<button type="button" data-tool="poly" aria-pressed="false" title="Click to add points; double-click, Enter or the first point closes the shape">Polygon</button></div>' +
-        '<div class="ze-hist"><button type="button" class="btn" data-undo title="Undo (Ctrl+Z)">Undo</button><button type="button" class="btn" data-redo title="Redo (Ctrl+Shift+Z)">Redo</button></div>' +
+        '<h2 class="ze-title">' + (Q ? t('zones.areas_no_notify', 'Areas that don\'t notify') : t('zones.zones_title', 'Zones')) + ' <span class="muted">' + esc(c0.name) + '</span></h2>' +
+        '<span class="ze-lamp" data-lamp>' + t('zones.lamp_quiet', 'Quiet') + '</span>' +
+        '<div class="ze-seg" role="group" aria-label="' + esc(t('zones.new_type_label', 'New zone type')) + '"' + (Q ? ' hidden' : '') + '>' +
+          '<button type="button" data-type="detect" aria-pressed="true" title="' + esc(t('zones.detect_title', 'Motion counts only inside detect zones (if there are any)')) + '">' + t('zones.detect_zone', 'Detect zone') + '</button>' +
+          '<button type="button" data-type="ignore" aria-pressed="false" title="' + esc(t('zones.ignore_title', 'Motion inside an ignore zone never counts')) + '">' + t('zones.ignore_zone', 'Ignore zone') + '</button>' +
+          '<button type="button" data-type="area" aria-pressed="false" title="' + esc(t('zones.area_title', 'A named area: alerts when someone stays inside too long (loitering). Needs AI.')) + '">' + t('zones.alert_area', 'Alert area') + '</button>' +
+          '<button type="button" data-type="line" aria-pressed="false" title="' + esc(t('zones.line_title', 'A named line with a direction arrow: alerts when someone crosses it. Needs AI.')) + '">' + t('zones.alert_line', 'Alert line') + '</button></div>' +
+        '<div class="ze-seg" role="group" aria-label="' + esc(t('zones.shape_tool', 'Shape tool')) + '">' +
+          '<button type="button" data-tool="rect" aria-pressed="true" title="' + esc(t('zones.rect_tool', 'Drag to draw a rectangle')) + '">' + t('zones.rectangle', 'Rectangle') + '</button>' +
+          '<button type="button" data-tool="poly" aria-pressed="false" title="' + esc(t('zones.poly_tool', 'Click to add points; double-click, Enter or the first point closes the shape')) + '">' + t('zones.polygon', 'Polygon') + '</button></div>' +
+        '<div class="ze-hist"><button type="button" class="btn" data-undo title="' + esc(t('zones.undo_title', 'Undo (Ctrl+Z)')) + '">' + t('zones.undo', 'Undo') + '</button><button type="button" class="btn" data-redo title="' + esc(t('zones.redo_title', 'Redo (Ctrl+Shift+Z)')) + '">' + t('zones.redo', 'Redo') + '</button></div>' +
         '<span class="ze-sp"></span>' +
-        '<span class="ze-acts"><button type="button" class="btn" data-zcancel>Cancel</button>' +
-        '<button type="button" class="primary" data-zsave>' + (Q ? 'Save areas' : 'Save zones') + '</button></span>' +
+        '<span class="ze-acts"><button type="button" class="btn" data-zcancel>' + t('zones.cancel', 'Cancel') + '</button>' +
+        '<button type="button" class="primary" data-zsave>' + (Q ? t('zones.save_areas', 'Save areas') : t('zones.save_zones', 'Save zones')) + '</button></span>' +
       '</div>' +
-      '<div class="ze-confirm" data-confirm hidden><span>Discard your changes to the zones?</span><button type="button" class="btn" data-keep>Keep editing</button><button type="button" class="btn danger" data-discard>Discard</button></div>' +
+      '<div class="ze-confirm" data-confirm hidden><span>' + t('zones.discard_q', 'Discard your changes to the zones?') + '</span><button type="button" class="btn" data-keep>' + t('zones.keep_editing', 'Keep editing') + '</button><button type="button" class="btn danger" data-discard>' + t('zones.discard', 'Discard') + '</button></div>' +
       '<div class="ze-err" data-err hidden></div>' +
-      (Q ? '' : '<div class="ze-note">AmberSight no longer makes privacy masks: use the camera\'s own (Reolink, Dahua/Amcrest and Hikvision cameras have one). An ignore zone keeps motion there from counting.</div>') +
       '<div class="ze-main">' +
-        '<div class="ze-stage" data-stage><canvas data-cv aria-label="Camera picture: drag to draw a zone; click a zone to select it"></canvas><div class="ze-nopic" data-nopic hidden>No picture right now. You can still draw zones.</div>' +
-          '<div class="ze-polybar" data-polybar hidden><span data-pcount></span><button type="button" class="btn" data-pclose>Close</button><button type="button" class="btn" data-pback>Undo point</button><button type="button" class="btn" data-pcancel>Cancel</button></div></div>' +
-        '<aside class="ze-side"><div class="ze-hint"><span data-hintdraw></span> Click a shape to select it; drag to move, handles to resize or reshape. Delete removes it. Arrow keys nudge (Shift: more). Polygons: drag a point, click a dot on an edge to add a point, Alt-click a point (or its x) to remove it.</div>' +
+        '<div class="ze-stage" data-stage><canvas data-cv aria-label="' + esc(t('zones.canvas_aria', 'Camera picture: drag to draw a zone; click a zone to select it')) + '"></canvas><div class="ze-nopic" data-nopic hidden>' + t('zones.no_picture', 'No picture right now. You can still draw zones.') + '</div>' +
+          '<div class="ze-polybar" data-polybar hidden><span data-pcount></span><button type="button" class="btn" data-pclose>' + t('zones.close', 'Close') + '</button><button type="button" class="btn" data-pback>' + t('zones.undo_point', 'Undo point') + '</button><button type="button" class="btn" data-pcancel>' + t('zones.cancel', 'Cancel') + '</button></div></div>' +
+        '<aside class="ze-side"><div class="ze-hint"><span data-hintdraw></span> ' + t('zones.edit_help', 'Click a shape to select it; drag to move, handles to resize or reshape. Delete removes it. Arrow keys nudge (Shift: more). Polygons: drag a point, click a dot on an edge to add a point, Alt-click a point (or its x) to remove it.') + '</div>' +
           '<ul class="ze-list" data-list></ul><div class="ze-opts" data-opts hidden></div></aside>' +
       '</div>' +
     '</div>';
@@ -149,7 +149,7 @@ export async function openZoneEditor(id, opts) {
     saveBtn.disabled = !dirty() || saving;
     undoBtn.disabled = hi <= 0; redoBtn.disabled = hi >= hist.length - 1;
   }
-  const TNAME = { detect: 'Detect', ignore: Q ? 'No notification' : 'Ignore', area: 'Area', line: 'Line' };
+  const TNAME = { detect: t('zones.detect', 'Detect'), ignore: Q ? t('zones.no_notification', 'No notification') : t('zones.ignore', 'Ignore'), area: t('zones.area', 'Area'), line: t('zones.line', 'Line') };
   const isNamed = (z) => z.t === 'area' || z.t === 'line';
   const isPts = (z) => z.k === 'p' || z.k === 'l';          // corner / vertex list (polygon or line)
   const minPts = (z) => (z.k === 'l' ? 2 : 3);
@@ -159,7 +159,7 @@ export async function openZoneEditor(id, opts) {
     for (let j = 0; j <= i; j++) if (zones[j].t === z.t) n++;
     return TNAME[z.t] + ' ' + n;
   };
-  const rowName = (z) => (isNamed(z) ? (z.name || '(unnamed)') : TNAME[z.t] + (z.k === 'p' ? ' polygon (' + z.pts.length + ' points)' : ''));
+  const rowName = (z) => (isNamed(z) ? (z.name || t('zones.unnamed', '(unnamed)')) : z.k === 'p' ? t('zones.polygon_row', '{type} polygon ({n} points)', { type: TNAME[z.t], n: z.pts.length }) : TNAME[z.t]);
   const effTool = () => tool;
   // A fresh name: "Area 1", "Line 2" ... the first free number.
   const freeName = (t) => { const w = TNAME[t]; for (let n = 1; ; n++) if (!zones.some(z => isNamed(z) && (z.name || '').toLowerCase() === (w + ' ' + n).toLowerCase())) return w + ' ' + n; };
@@ -168,20 +168,20 @@ export async function openZoneEditor(id, opts) {
     root.querySelectorAll('[data-type]').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.type === type)));
     root.querySelectorAll('[data-tool]').forEach(x => {
       x.setAttribute('aria-pressed', String(x.dataset.tool === effTool()));
-      x.textContent = type === 'line' ? (x.dataset.tool === 'rect' ? 'Straight' : 'Bent') : (x.dataset.tool === 'rect' ? 'Rectangle' : 'Polygon');
+      x.textContent = type === 'line' ? (x.dataset.tool === 'rect' ? t('zones.straight', 'Straight') : t('zones.bent', 'Bent')) : (x.dataset.tool === 'rect' ? t('zones.rectangle', 'Rectangle') : t('zones.polygon', 'Polygon'));
     });
-    const what = type === 'area' ? 'alert area' : type === 'line' ? 'alert line' : type + ' zone';
+    const what = type === 'area' ? t('zones.what_alert_area', 'alert area') : type === 'line' ? t('zones.what_alert_line', 'alert line') : type === 'ignore' ? t('zones.what_ignore_zone', 'ignore zone') : t('zones.what_detect_zone', 'detect zone');
     $q('[data-hintdraw]').textContent = type === 'line'
-      ? (effTool() === 'poly' ? 'Click to add the points of a line; double-click or Enter finishes it. Esc cancels.' : 'Drag on the picture to draw a line. The arrow shows which way counts as in.')
+      ? (effTool() === 'poly' ? t('zones.click_add_line', 'Click to add the points of a line; double-click or Enter finishes it. Esc cancels.') : t('zones.drag_draw_line', 'Drag on the picture to draw a line. The arrow shows which way counts as in.'))
       : effTool() === 'poly'
-        ? 'Click on the picture to add points of a ' + what + ' polygon; double-click, Enter or the first point closes it. Esc cancels, Backspace removes the last point.'
-        : 'Drag on the picture to draw a ' + what + '.';
-    if (Q) $q('[data-hintdraw]').textContent = (effTool() === 'poly' ? 'Click on the picture to add the corners of an area; double-click, Enter or the first point closes it.' : 'Drag on the picture to draw an area.') + ' Things here are still detected, recorded and searchable. They just don\'t send a notification.';
+        ? t('zones.click_add_points', 'Click on the picture to add points of a {what} polygon; double-click, Enter or the first point closes it. Esc cancels, Backspace removes the last point.', { what })
+        : t('zones.drag_draw', 'Drag on the picture to draw a {what}.', { what });
+    if (Q) $q('[data-hintdraw]').textContent = (effTool() === 'poly' ? t('zones.click_add_corners', 'Click on the picture to add the corners of an area; double-click, Enter or the first point closes it.') : t('zones.drag_draw_area', 'Drag on the picture to draw an area.')) + t('zones.things_note', " Things here are still detected, recorded and searchable. They just don't send a notification.");
     polybar.hidden = !poly;
     if (poly) {
       const min = poly.t === 'line' ? 2 : 3;
-      $q('[data-pcount]').textContent = poly.pts.length + ' point' + (poly.pts.length === 1 ? '' : 's');
-      $q('[data-pclose]').disabled = poly.pts.length < min; $q('[data-pclose]').textContent = poly.t === 'line' ? 'Finish' : 'Close';
+      $q('[data-pcount]').textContent = t('zones.pcount', '{n, plural, one {# point} other {# points}}', { n: poly.pts.length });
+      $q('[data-pclose]').disabled = poly.pts.length < min; $q('[data-pclose]').textContent = poly.t === 'line' ? t('zones.finish', 'Finish') : t('zones.close', 'Close');
     }
   }
   function setSel(i) { sel = i; selV = -1; renderList(); renderOpts(false); draw(); }
@@ -302,7 +302,7 @@ export async function openZoneEditor(id, opts) {
         ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.stroke();
         ctx.lineWidth = 2; ctx.strokeStyle = occ ? colors.motion : col; ctx.stroke(); ctx.setLineDash([]);
         const top = z.pts.reduce((m, q) => (q[1] < m[1] ? q : m), z.pts[0]);
-        tagLabel((z.name || 'Area') + ' \u00b7 ' + (+z.seconds || 30) + ' s', top[0] * cw, top[1] * ch, col);
+        tagLabel(t('zones.area_label', '{name} \u00b7 {seconds} s', { name: z.name || t('zones.area', 'Area'), seconds: +z.seconds || 30 }), top[0] * cw, top[1] * ch, col);
         if (i === sel) { ctx.lineWidth = 1; ctx.strokeStyle = colors.accent; ctx.strokeRect(x - 3.5, y - 3.5, w + 7, h + 7); }
         return;
       }
@@ -432,23 +432,23 @@ export async function openZoneEditor(id, opts) {
       ctx.beginPath(); ctx.arc(q[0] * cw, q[1] * ch, 8, 0, 7); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#0b0e12'; ctx.stroke();
       ctx.font = '700 10px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center'; ctx.fillStyle = '#10141a'; ctx.fillText(t, q[0] * cw, q[1] * ch + 0.5); ctx.textAlign = 'start';
     });
-    tagLabel(z.name || 'Line', mx, my - 6 - (z.direction === 'ba' ? 0 : 0), col);
+    tagLabel(z.name || t('zones.line', 'Line'), mx, my - 6 - (z.direction === 'ba' ? 0 : 0), col);
     if (selected) { /* handles are drawn with the others */ }
   }
 
   function renderList() {
     if (!zones.length) {
-      list.innerHTML = '<li class="ze-empty">' + (Q ? 'No areas yet: every detected object can notify. Draw on the picture to add one.' : 'No zones: the whole picture counts. Draw on the picture to add one.') + '</li>';
+      list.innerHTML = '<li class="ze-empty">' + (Q ? t('zones.no_areas_yet', 'No areas yet: every detected object can notify. Draw on the picture to add one.') : t('zones.no_zones', 'No zones: the whole picture counts. Draw on the picture to add one.')) + '</li>';
       return;
     }
     const row = (z, i) =>
       '<li class="ze-row' + (i === sel ? ' on' : '') + (isNamed(z) && !z.enabled ? ' off' : '') + '" data-i="' + i + '"><button type="button" class="ze-pick" data-pick="' + i + '" aria-pressed="' + (i === sel) + '">' +
         '<span class="ze-sw ' + (z.t === 'ignore' ? 'ig' : z.t === 'area' ? 'ar' : z.t === 'line' ? 'ln' : 'de') + '"></span><span class="ze-nm">' + esc(rowName(z)) + '</span>' +
-        (isNamed(z) ? '<span class="ze-sz">' + (z.t === 'line' ? 'line' : (+z.seconds || 30) + ' s') + '</span>' : isPts(z) ? '' : '<span class="ze-sz">' + pc(z.w) + ' x ' + pc(z.h) + '%</span>') + '</button>' +
-        '<button type="button" class="ze-del" data-del="' + i + '" aria-label="Delete ' + esc(nameOf(i)) + '" title="Delete">&times;</button></li>';
+        (isNamed(z) ? '<span class="ze-sz">' + (z.t === 'line' ? t('zones.line_lc', 'line') : t('zones.secs', '{n} s', { n: +z.seconds || 30 })) + '</span>' : isPts(z) ? '' : '<span class="ze-sz">' + pc(z.w) + ' x ' + pc(z.h) + '%</span>') + '</button>' +
+        '<button type="button" class="ze-del" data-del="' + i + '" aria-label="' + esc(t('zones.delete_named', 'Delete {name}', { name: nameOf(i) })) + '" title="' + esc(t('zones.delete', 'Delete')) + '">&times;</button></li>';
     const zs = [], ns = [];
     zones.forEach((z, i) => (isNamed(z) ? ns : zs).push(row(z, i)));
-    list.innerHTML = zs.join('') + (ns.length ? '<li class="ze-sub">Alert zones</li>' + ns.join('') : '');
+    list.innerHTML = zs.join('') + (ns.length ? '<li class="ze-sub">' + t('zones.alert_zones', 'Alert zones') + '</li>' + ns.join('') : '');
   }
 
   // ---------- options of the selected alert zone ----------
@@ -462,15 +462,15 @@ export async function openZoneEditor(id, opts) {
     const objs = OBJECTS.concat(z.labels.filter(l => !OBJECTS.includes(l)));
     const sw = (k, label, hint) => '<label class="sw"><input type="checkbox" role="switch" data-o="' + k + '"' + (z[k] ? ' checked' : '') + '><span class="sw-track" aria-hidden="true"></span><span class="sw-text"><b>' + label + '</b>' + (hint ? '<small>' + hint + '</small>' : '') + '</span></label>';
     box.innerHTML =
-      '<label class="ze-f">Name<input type="text" data-o="name" maxlength="40" value="' + esc(z.name) + '" autocomplete="off"></label>' +
-      '<div class="ze-f">Counts<div class="ze-chips" data-chips>' + objs.map(l => '<button type="button" data-lab="' + esc(l) + '" aria-pressed="' + z.labels.includes(l) + '">' + esc(l) + '</button>').join('') + '</div></div>' +
+      '<label class="ze-f">' + t('zones.name', 'Name') + '<input type="text" data-o="name" maxlength="40" value="' + esc(z.name) + '" autocomplete="off"></label>' +
+      '<div class="ze-f">' + t('zones.counts', 'Counts') + '<div class="ze-chips" data-chips>' + objs.map(l => '<button type="button" data-lab="' + esc(l) + '" aria-pressed="' + z.labels.includes(l) + '">' + esc(l) + '</button>').join('') + '</div></div>' +
       (z.t === 'area'
-        ? '<label class="ze-f">Loitering after<span class="ze-num"><input type="number" data-o="seconds" min="1" max="3600" step="1" value="' + (+z.seconds || 30) + '" inputmode="numeric"> seconds inside</span></label>'
-        : '<div class="ze-f">Alert when crossing<div class="ze-seg ze-dir" role="group" data-dir>' +
-            [['ab', 'In (arrow)'], ['ba', 'Out'], ['both', 'Both']].map(([v, t]) => '<button type="button" data-d="' + v + '" aria-pressed="' + (z.direction === v) + '">' + t + '</button>').join('') + '</div></div>') +
-      sw('enabled', 'Watching') + sw('alert', 'Send alerts', 'Push, ntfy, email, MQTT and the rest') + sw('ignore_parked', 'Ignore parked vehicles', 'A car that has sat in one place for minutes does not count') + sw('record', 'Save events', 'With a clip, searchable as "' + (z.t === 'area' ? 'loitering' : 'crossed') + ': ' + esc(z.name) + '"') +
-      '<label class="ze-f">Only between <input type="text" data-o="schedule" placeholder="any time, or like 22:00-06:00" maxlength="11" value="' + esc(z.schedule || '') + '" autocomplete="off"></label>' +
-      '<div class="ze-foot">Needs AI object checks to be on. ' + (z.t === 'line' ? 'Counts when the feet (bottom center of the object) cross.' : 'Counts when the feet are inside the area.') + '</div>';
+        ? '<label class="ze-f">' + t('zones.loitering_after', 'Loitering after') + '<span class="ze-num"><input type="number" data-o="seconds" min="1" max="3600" step="1" value="' + (+z.seconds || 30) + '" inputmode="numeric"> ' + t('zones.seconds_inside', 'seconds inside') + '</span></label>'
+        : '<div class="ze-f">' + t('zones.alert_when_crossing', 'Alert when crossing') + '<div class="ze-seg ze-dir" role="group" data-dir>' +
+            [['ab', t('zones.in_arrow', 'In (arrow)')], ['ba', t('zones.out', 'Out')], ['both', t('zones.both', 'Both')]].map(([v, lbl]) => '<button type="button" data-d="' + v + '" aria-pressed="' + (z.direction === v) + '">' + lbl + '</button>').join('') + '</div></div>') +
+      sw('enabled', t('zones.watching', 'Watching')) + sw('alert', t('zones.send_alerts', 'Send alerts'), t('zones.send_alerts_hint', 'Push, ntfy, email, MQTT and the rest')) + sw('ignore_parked', t('zones.ignore_parked', 'Ignore parked vehicles'), t('zones.ignore_parked_hint', 'A car that has sat in one place for minutes does not count')) + sw('record', t('zones.save_events', 'Save events'), t('zones.save_events_hint', 'With a clip, searchable as "{kind}: {name}"', { kind: z.t === 'area' ? 'loitering' : 'crossed', name: esc(z.name) })) +
+      '<label class="ze-f">' + t('zones.only_between', 'Only between') + ' <input type="text" data-o="schedule" placeholder="' + esc(t('zones.schedule_placeholder', 'any time, or like 22:00-06:00')) + '" maxlength="11" value="' + esc(z.schedule || '') + '" autocomplete="off"></label>' +
+      '<div class="ze-foot">' + t('zones.needs_ai', 'Needs AI object checks to be on.') + ' ' + (z.t === 'line' ? t('zones.counts_cross', 'Counts when the feet (bottom center of the object) cross.') : t('zones.counts_inside', 'Counts when the feet are inside the area.')) + '</div>';
   }
   $q('[data-opts]').addEventListener('input', (ev) => {
     const z = zones[sel], k = ev.target.dataset && ev.target.dataset.o;
@@ -507,11 +507,11 @@ export async function openZoneEditor(id, opts) {
     if (!poly || poly.pts.length < (poly.t === 'line' ? 2 : 3)) return false;
     const pts = poly.pts.map(q => [r4(q[0]), r4(q[1])]);
     if (poly.t === 'line') {
-      if (lineLen(pts) < 0.03) { showErr('That line is too short.'); return false; }
+      if (lineLen(pts) < 0.03) { showErr(t('zones.line_too_short', 'That line is too short.')); return false; }
       showErr('');
       zones.push(newNamed('line', 'l', pts));
     } else {
-      if (area(pts) <= MIN_AREA) { showErr('That polygon is too small or flat. Add points that enclose some area.'); return false; }
+      if (area(pts) <= MIN_AREA) { showErr(t('zones.polygon_too_small', 'That polygon is too small or flat. Add points that enclose some area.')); return false; }
       showErr('');
       zones.push(poly.t === 'area' ? newNamed('area', 'p', pts) : { k: 'p', t: poly.t, pts });
     }
@@ -539,7 +539,7 @@ export async function openZoneEditor(id, opts) {
         if (h && h.kind === 'x') { z.pts.splice(selV, 1); selV = -1; record(); return; }
         if (h && h.kind === 'v') {
           if (ev.altKey) {
-            if (z.pts.length > minPts(z)) { z.pts.splice(h.i, 1); record(); } else showErr(z.k === 'l' ? 'A line needs at least 2 points.' : 'A polygon needs at least 3 points.');
+            if (z.pts.length > minPts(z)) { z.pts.splice(h.i, 1); record(); } else showErr(z.k === 'l' ? t('zones.line_min_points', 'A line needs at least 2 points.') : t('zones.polygon_min_points', 'A polygon needs at least 3 points.'));
             return;
           }
           selV = h.i; draw();
@@ -654,23 +654,23 @@ export async function openZoneEditor(id, opts) {
     for (const z of zones) {
       if (isNamed(z)) {
         const n = (z.name || '').trim();
-        if (!n) return 'Give every alert zone a name.';
-        if (n.length > 40) return 'Zone names can be up to 40 characters.';
+        if (!n) return t('zones.give_name', 'Give every alert zone a name.');
+        if (n.length > 40) return t('zones.name_length', 'Zone names can be up to 40 characters.');
         const k = n.toLowerCase().replace(/[^a-z0-9]/g, '_');
-        if (seen.includes(k)) return 'Two alert zones are named "' + n + '". Names must differ.';
+        if (seen.includes(k)) return t('zones.two_named', 'Two alert zones are named "{n}". Names must differ.', { n });
         seen.push(k);
-        if (!z.labels.length) return '"' + n + '": pick at least one object that counts.';
-        if (z.t === 'area' && !(+z.seconds >= 1 && +z.seconds <= 3600)) return '"' + n + '": loitering time must be 1 to 3600 seconds.';
-        if (z.schedule && !/^\s*([01]?\d|2[0-3]):[0-5]\d\s*-\s*([01]?\d|2[0-3]):[0-5]\d\s*$/.test(z.schedule)) return '"' + n + '": write the time window like 22:00-06:00.';
+        if (!z.labels.length) return t('zones.pick_object', '"{n}": pick at least one object that counts.', { n });
+        if (z.t === 'area' && !(+z.seconds >= 1 && +z.seconds <= 3600)) return t('zones.loiter_time', '"{n}": loitering time must be 1 to 3600 seconds.', { n });
+        if (z.schedule && !/^\s*([01]?\d|2[0-3]):[0-5]\d\s*-\s*([01]?\d|2[0-3]):[0-5]\d\s*$/.test(z.schedule)) return t('zones.time_window', '"{n}": write the time window like 22:00-06:00.', { n });
       }
       if (isPts(z)) {
-        if (z.pts.length < minPts(z)) return z.k === 'l' ? 'A line needs at least 2 points.' : 'A polygon needs at least 3 points.';
-        if (z.pts.some(q => q[0] < -1e-9 || q[0] > 1 + 1e-9 || q[1] < -1e-9 || q[1] > 1 + 1e-9)) return 'A zone reaches outside the picture.';
-        if (z.k === 'l' ? lineLen(z.pts) < 0.02 : !(area(z.pts) > MIN_AREA)) return z.k === 'l' ? 'A line is too short. Move its points apart or delete it.' : 'A polygon is too small or flat. Move its points apart or delete it.';
+        if (z.pts.length < minPts(z)) return z.k === 'l' ? t('zones.line_min_pts', 'A line needs at least 2 points.') : t('zones.polygon_min_pts', 'A polygon needs at least 3 points.');
+        if (z.pts.some(q => q[0] < -1e-9 || q[0] > 1 + 1e-9 || q[1] < -1e-9 || q[1] > 1 + 1e-9)) return t('zones.zone_outside', 'A zone reaches outside the picture.');
+        if (z.k === 'l' ? lineLen(z.pts) < 0.02 : !(area(z.pts) > MIN_AREA)) return z.k === 'l' ? t('zones.line_short_fix', 'A line is too short. Move its points apart or delete it.') : t('zones.polygon_small_fix', 'A polygon is too small or flat. Move its points apart or delete it.');
         continue;
       }
-      if (!(z.w >= MIN - 1e-9 && z.h >= MIN - 1e-9)) return 'Every zone must be at least 1% wide and 1% high.';
-      if (z.x < -1e-9 || z.y < -1e-9 || z.x + z.w > 1 + 1e-9 || z.y + z.h > 1 + 1e-9) return 'A zone reaches outside the picture.';
+      if (!(z.w >= MIN - 1e-9 && z.h >= MIN - 1e-9)) return t('zones.zone_min_size', 'Every zone must be at least 1% wide and 1% high.');
+      if (z.x < -1e-9 || z.y < -1e-9 || z.x + z.w > 1 + 1e-9 || z.y + z.h > 1 + 1e-9) return t('zones.zone_outside', 'A zone reaches outside the picture.');
     }
     return '';
   }
@@ -692,11 +692,11 @@ export async function openZoneEditor(id, opts) {
     // (A rectangle drawn for a quiet area is saved as a four-corner polygon.)
     const quiet = () => polys('ignore').concat(rects('ignore').map(r => ({ points: [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]].map(q => [r4(q[0]), r4(q[1])]) })));
     const body = Q ? { alert_ignore_polys: quiet() } : { zones: rects('detect'), ignore_zones: rects('ignore'), zone_polys: polys('detect'), ignore_polys: polys('ignore'), named_zones: named };
-    saving = true; saveBtn.textContent = 'Saving...'; status();
+    saving = true; saveBtn.textContent = t('zones.saving', 'Saving...'); status();
     try {
       await api('/api/cameras/' + id, { method: 'PUT', json: body });
     } catch (e) {
-      saving = false; saveBtn.textContent = Q ? 'Save areas' : 'Save zones'; status();
+      saving = false; saveBtn.textContent = Q ? t('zones.save_areas', 'Save areas') : t('zones.save_zones', 'Save zones'); status();
       let m = e.body || e.message; try { const j = JSON.parse(m); if (j && j.error) m = j.error; } catch (x) { /* plain */ }
       showErr(m); return;
     }
@@ -704,7 +704,7 @@ export async function openZoneEditor(id, opts) {
     try { await refreshCameras(); } catch (e) { /* next poll */ }
     const cam = camFromId(id) || Object.assign({}, c0, body);
     saved = key();
-    toast((Q ? 'Saved areas that don\'t notify for ' : 'Saved zones for ') + (cam.name || c0.name), { kind: 'ok' });
+    toast(Q ? t('zones.toast_saved_areas_no_notify', 'Saved areas that don\'\'t notify for {name}', { name: cam.name || c0.name }) : t('zones.toast_saved_zones', 'Saved zones for {name}', { name: cam.name || c0.name }), { kind: 'ok' });
     if (opts.onSaved) { try { opts.onSaved(cam); } catch (e) { /* the opener went away */ } }
     close();
   }
@@ -782,7 +782,7 @@ export async function openZoneEditor(id, opts) {
   function tick() {
     if (gone) return;
     const c = camFromId(id), lamp = $q('[data-lamp]'), mo = !!(c && c.motion);
-    lamp.textContent = mo ? 'Motion now' : 'Quiet'; lamp.classList.toggle('now', mo);
+    lamp.textContent = mo ? t('zones.lamp_motion_now','Motion now') : t('zones.lamp_quiet','Quiet'); lamp.classList.toggle('now', mo);
     if (mo && c.blobs) {
       const now = Date.now();
       for (const z of zones) {

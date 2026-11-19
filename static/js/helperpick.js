@@ -2,6 +2,7 @@
 // then one of its screens, windows or a region (with live thumbnails), and pair new
 // computers. See docs/helper-protocol.md.
 
+import { t } from './i18n.js';
 import { api, esc, openDlg, toast } from './core.js';
 
 const field = (label, input, hint) => '<label class="cs-f"><span>' + label + '</span>' + input + '</label>' + (hint ? '<div class="hint">' + hint + '</div>' : '');
@@ -10,19 +11,19 @@ const sameSource = (a, b) => !!a && !!b && JSON.stringify(a) === JSON.stringify(
 export function helperHtml(c) {
   const cap = c.capture || {};
   return '<div data-src="helper"' + (c.capture ? '' : ' hidden') + '>' +
-    field('Computer', '<span class="cs-ovin"><select data-k="hlp"><option value="">loading...</option></select>' +
-      '<button type="button" class="cs-reset" data-pairnew>Add a computer...</button></span>',
-      'A computer running AmberSight Capture sends what is on its screen. It connects to this server, so nothing has to be opened on its side.') +
-    '<div class="sec">What to capture</div><div class="hp-grid" data-hlpsrc><p class="hint">Pick a computer first.</p></div>' +
+    field(t('helperpick.computer','Computer'), '<span class="cs-ovin"><select data-k="hlp"><option value="">' + t('helperpick.loading', 'loading...') + '</option></select>' +
+      '<button type="button" class="cs-reset" data-pairnew>' + t('helperpick.add_computer', 'Add a computer...') + '</button></span>',
+      t('helperpick.computer_hint','A computer running AmberSight Capture sends what is on its screen. It connects to this server, so nothing has to be opened on its side.')) +
+    '<div class="sec">' + t('helperpick.what_to_capture', 'What to capture') + '</div><div class="hp-grid" data-hlpsrc><p class="hint">' + t('helperpick.pick_first', 'Pick a computer first.') + '</p></div>' +
     '<input type="hidden" data-k="hlp_source" value="' + esc(cap.source ? JSON.stringify(cap.source) : '') + '">' +
-    '<details class="hp-region"><summary>Part of the screen instead</summary>' +
-      '<div class="hint">x, y, width, height in screen pixels (for example 0,0,1280,720).</div>' +
-      field('Region', '<input data-k="hlp_region" placeholder="x,y,width,height" spellcheck="false" value="' + esc(cap.source && cap.source.kind === 'region' ? [cap.source.x, cap.source.y, cap.source.w, cap.source.h].join(',') : '') + '">') +
+    '<details class="hp-region"><summary>' + t('helperpick.part_of_screen', 'Part of the screen instead') + '</summary>' +
+      '<div class="hint">' + t('helperpick.region_hint', 'x, y, width, height in screen pixels (for example 0,0,1280,720).') + '</div>' +
+      field(t('helperpick.region','Region'), '<input data-k="hlp_region" placeholder="x,y,width,height" spellcheck="false" value="' + esc(cap.source && cap.source.kind === 'region' ? [cap.source.x, cap.source.y, cap.source.w, cap.source.h].join(',') : '') + '">') +
     '</details>' +
-    field('Frame rate', '<input data-k="hlp_fps" type="number" min="1" max="30" value="' + (cap.fps || 10) + '">') +
-    field('Max bitrate (kbit/s)', '<input data-k="hlp_kbps" type="number" min="200" max="20000" step="100" value="' + (cap.max_kbps || 2500) + '">', 'Lower for computers on a slow link (Tailscale from another site).') +
-    field('Max width (px)', '<input data-k="hlp_width" type="number" min="320" max="3840" step="16" value="' + (cap.max_width || 1920) + '">') +
-    (c.capture_status ? '<div class="hint">Right now: ' + esc(c.capture_status.state || '') + (c.capture_status.error ? ' (' + esc(c.capture_status.error) + ')' : '') + '</div>' : '') +
+    field(t('helperpick.frame_rate','Frame rate'), '<input data-k="hlp_fps" type="number" min="1" max="30" value="' + (cap.fps || 10) + '">') +
+    field(t('helperpick.max_bitrate','Max bitrate (kbit/s)'), '<input data-k="hlp_kbps" type="number" min="200" max="20000" step="100" value="' + (cap.max_kbps || 2500) + '">', t('helperpick.low_link_hint','Lower for computers on a slow link (Tailscale from another site).')) +
+    field(t('helperpick.max_width','Max width (px)'), '<input data-k="hlp_width" type="number" min="320" max="3840" step="16" value="' + (cap.max_width || 1920) + '">') +
+    (c.capture_status ? '<div class="hint">' + t('helperpick.right_now', 'Right now: {state}{error}', { state: esc(c.capture_status.state || ''), error: c.capture_status.error ? ' (' + esc(c.capture_status.error) + ')' : '' }) + '</div>' : '') +
     '</div>';
 }
 
@@ -37,8 +38,8 @@ export function wireHelper(d, c) {
 
   async function loadHelpers(select) {
     try { helpers = (await api('/api/helpers')).helpers || []; } catch (e) { helpers = []; }
-    sel.innerHTML = (helpers.length ? '' : '<option value="">no computers yet: add one</option>') +
-      helpers.map(h => '<option value="' + esc(h.id) + '">' + esc(h.name) + (h.online ? '' : ' (offline)') + '</option>').join('');
+    sel.innerHTML = (helpers.length ? '' : '<option value="">' + t('helperpick.no_computers', 'no computers yet: add one') + '</option>') +
+      helpers.map(h => '<option value="' + esc(h.id) + '">' + esc(h.name) + (h.online ? '' : ' ' + t('helperpick.offline', '(offline)')) + '</option>').join('');
     const pick = select || want || (helpers[0] && helpers[0].id) || '';
     if (pick) sel.value = pick;
     loadSources();
@@ -46,22 +47,22 @@ export function wireHelper(d, c) {
 
   async function loadSources() {
     const id = sel.value;
-    if (!id) { grid.innerHTML = '<p class="hint">Add a computer to choose what to capture.</p>'; return; }
+    if (!id) { grid.innerHTML = '<p class="hint">' + t('helperpick.add_computer_hint', 'Add a computer to choose what to capture.') + '</p>'; return; }
     if (loadedFor === id) return;
     loadedFor = id;
     const h = helpers.find(x => x.id === id);
-    if (h && !h.online) { grid.innerHTML = '<p class="hint">' + esc(h.name) + ' is not connected right now. Its saved choice is kept.</p>'; loadedFor = null; return; }
-    grid.innerHTML = '<p class="hint">Asking ' + esc(h ? h.name : 'the computer') + ' what it can show...</p>';
+    if (h && !h.online) { grid.innerHTML = '<p class="hint">' + t('helperpick.not_connected_now', '{name} is not connected right now. Its saved choice is kept.', { name: esc(h.name) }) + '</p>'; loadedFor = null; return; }
+    grid.innerHTML = '<p class="hint">' + t('helperpick.asking', 'Asking {name} what it can show...', { name: esc(h ? h.name : t('helperpick.the_computer', 'the computer')) }) + '</p>';
     let r;
     try { r = await api('/api/helpers/' + encodeURIComponent(id) + '/sources', { method: 'POST' }); }
-    catch (e) { grid.innerHTML = '<p class="hint">Could not ask it: ' + esc(e.body || e.message) + '</p>'; loadedFor = null; return; }
-    const items = [{ label: 'Whole desktop', source: { kind: 'desktop' } }]
-      .concat((r.monitors || []).map(m => ({ label: (m.name || 'Monitor ' + (m.index + 1)) + (m.primary ? ' (main)' : '') + (m.w && m.h ? ' ' + m.w + 'x' + m.h : ''), source: { kind: 'monitor', index: m.index } })))
+    catch (e) { grid.innerHTML = '<p class="hint">' + t('helperpick.could_not_ask', 'Could not ask it: {error}', { error: esc(e.body || e.message) }) + '</p>'; loadedFor = null; return; }
+    const items = [{ label: t('helperpick.whole_desktop','Whole desktop'), source: { kind: 'desktop' } }]
+      .concat((r.monitors || []).map(m => ({ label: (m.name || t('helperpick.monitor_n', 'Monitor {n}', { n: m.index + 1 })) + (m.primary ? ' ' + t('helperpick.main', '(main)') : '') + (m.w && m.h ? ' ' + m.w + 'x' + m.h : ''), source: { kind: 'monitor', index: m.index } })))
       .concat((r.windows || []).map(w => ({ label: w.title + (w.exe ? ' - ' + w.exe : ''), source: { kind: 'window', title: w.title, exe: w.exe || undefined } })));
     let cur = null;
     try { cur = hidden.value ? JSON.parse(hidden.value) : null; } catch (e) { cur = null; }
     grid.innerHTML = items.map((it, i) => '<button type="button" class="hp-item' + (sameSource(it.source, cur) ? ' on' : '') + '" data-i="' + i + '" title="' + esc(it.label) + '">' +
-      '<span class="hp-thumb"><img alt="" loading="lazy"></span><span class="hp-label">' + esc(it.label) + '</span></button>').join('');
+      '<span class="hp-thumb" data-label="' + esc(t('helperpick.no_preview', 'no preview')) + '"><img alt="" loading="lazy"></span><span class="hp-label">' + esc(it.label) + '</span></button>').join('');
     grid.querySelectorAll('.hp-item').forEach(b => {
       b.onclick = () => {
         grid.querySelectorAll('.hp-item').forEach(x => x.classList.toggle('on', x === b));
@@ -109,41 +110,41 @@ export function readHelper(d) {
 // certificate fingerprint to compare. Calls done(id) once it connects.
 export async function pairDialog(done) {
   let r, tls = {}, before = [];
-  try { r = await api('/api/helpers/pair', { method: 'POST' }); } catch (e) { toast('Could not make a code: ' + (e.body || e.message)); return; }
+  try { r = await api('/api/helpers/pair', { method: 'POST' }); } catch (e) { toast(t('helperpick.could_not_make_code', 'Could not make a code: {error}', { error: e.body || e.message })); return; }
   try { tls = await api('/api/tls'); } catch (e) { /* fingerprint shown when known */ }
   try { before = ((await api('/api/helpers')).helpers || []).map(h => h.id); } catch (e) { /* none */ }
   const origin = location.origin;
   const dl = (f) => origin + '/helper/download/' + f + '?code=' + encodeURIComponent(r.code);
   const cmd = 'ambersight.exe capture --pair ' + origin + ' ' + r.code;
   const row = (label, val, link) => '<div class="cs-pushrow"><span>' + label + '</span><code>' + esc(val) + '</code>' +
-    (link ? '<a class="cs-reset" href="' + esc(val) + '" download>Get</a>' : '<button type="button" class="cs-reset" data-copytext="' + esc(val) + '">Copy</button>') + '</div>';
-  const d = openDlg('Add a computer',
-    '<div class="hint">Do this on the computer whose screen you want to record. The code works for 15 minutes.</div>' +
-    '<div class="sec">1. Download (on that computer)</div><div class="cs-push">' +
-      row('Helper', dl('ambersight.exe'), true) + row('ffmpeg', dl('ffmpeg.exe'), true) + '</div>' +
-    '<div class="hint">Put both in one folder, e.g. C:\\AmberSight Capture. Windows may warn that the program is not recognized: choose More info, then Run anyway. Skip ffmpeg if that computer already has it.</div>' +
-    '<div class="sec">2. Run this in that folder (Command Prompt)</div><div class="cs-push">' + row('Command', cmd) + '</div>' +
-    '<div class="hint">It shows a certificate fingerprint: it must match this one.</div>' +
-    '<code class="tlsfp">' + esc(tls.ca_fingerprint_sha256 || '(this server has no certificate yet)') + '</code>' +
-    '<div class="sec">3. Wait here</div><div class="hp-wait" data-wait>Waiting for the computer to connect...</div>' +
-    '<div class="row"><button class="btn" data-close>Close</button></div>', true);
+    (link ? '<a class="cs-reset" href="' + esc(val) + '" download>' + t('helperpick.get', 'Get') + '</a>' : '<button type="button" class="cs-reset" data-copytext="' + esc(val) + '">' + t('helperpick.copy', 'Copy') + '</button>') + '</div>';
+  const d = openDlg(t('helperpick.add_computer_title', 'Add a computer'),
+    '<div class="hint">' + t('helperpick.do_this_hint', 'Do this on the computer whose screen you want to record. The code works for 15 minutes.') + '</div>' +
+    '<div class="sec">' + t('helperpick.download_sec', '1. Download (on that computer)') + '</div><div class="cs-push">' +
+      row(t('helperpick.helper','Helper'), dl('ambersight.exe'), true) + row('ffmpeg', dl('ffmpeg.exe'), true) + '</div>' +
+    '<div class="hint">' + t('helperpick.put_both_hint', 'Put both in one folder, e.g. C:\\AmberSight Capture. Windows may warn that the program is not recognized: choose More info, then Run anyway. Skip ffmpeg if that computer already has it.') + '</div>' +
+    '<div class="sec">' + t('helperpick.run_sec', '2. Run this in that folder (Command Prompt)') + '</div><div class="cs-push">' + row(t('helperpick.command','Command'), cmd) + '</div>' +
+    '<div class="hint">' + t('helperpick.fingerprint_hint', 'It shows a certificate fingerprint: it must match this one.') + '</div>' +
+    '<code class="tlsfp">' + esc(tls.ca_fingerprint_sha256 || t('helperpick.no_certificate','(this server has no certificate yet)')) + '</code>' +
+    '<div class="sec">' + t('helperpick.wait_sec', '3. Wait here') + '</div><div class="hp-wait" data-wait>' + t('helperpick.waiting', 'Waiting for the computer to connect...') + '</div>' +
+    '<div class="row"><button class="btn" data-close>' + t('helperpick.close','Close') + '</button></div>', true);
   d.classList.add('wide');
   d.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-copytext]'); if (!b) return;
-    try { await navigator.clipboard.writeText(b.dataset.copytext); b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy'; }, 1200); }
-    catch (err) { toast('Copy did not work here: select the text instead'); }
+    try { await navigator.clipboard.writeText(b.dataset.copytext); b.textContent = t('helperpick.copied','Copied'); setTimeout(() => { b.textContent = t('helperpick.copy','Copy'); }, 1200); }
+    catch (err) { toast(t('helperpick.copy_failed','Copy did not work here: select the text instead')); }
   });
   d.querySelector('[data-close]').onclick = () => d.__close();
   const until = Date.now() + r.expires_in * 1000;
   const poll = async () => {
     if (!d.isConnected) return;
-    if (Date.now() > until) { d.querySelector('[data-wait]').textContent = 'The code has expired. Close this and add the computer again.'; return; }
+    if (Date.now() > until) { d.querySelector('[data-wait]').textContent = t('helperpick.code_expired','The code has expired. Close this and add the computer again.'); return; }
     try {
       const hs = (await api('/api/helpers')).helpers || [];
       const n = hs.find(h => !before.includes(h.id));
       if (n) {
-        d.querySelector('[data-wait]').innerHTML = '<b>Connected: ' + esc(n.name) + '</b>. It will start with that computer from now on.';
-        toast(n.name + ' added');
+        d.querySelector('[data-wait]').innerHTML = t('helperpick.connected_msg', '<b>Connected: {name}</b>. It will start with that computer from now on.', { name: esc(n.name) });
+        toast(t('helperpick.helper_added','{name} added', { name: n.name }));
         if (done) done(n.id);
         return;
       }
@@ -156,8 +157,8 @@ export async function pairDialog(done) {
 // Settings > Cameras: the paired computers, with rename and remove.
 export function helpersListHtml(list) {
   if (!list.length) return '';
-  return '<div class="sec">Computers sending their screen</div><div class="cs-list">' + list.map(h =>
-    '<div class="cs-item"><div class="cs-name"><b>' + esc(h.name) + '</b><div class="cs-url">' + (h.online ? 'connected' : 'not connected') + (h.version ? ' - version ' + esc(h.version) : '') + '</div></div>' +
-    '<span class="badge dot ' + (h.online ? 'on' : 'off') + '">' + (h.online ? 'online' : 'offline') + '</span>' +
-    '<button class="btn" data-hren="' + esc(h.id) + '">Rename</button><button class="btn danger" data-hdel="' + esc(h.id) + '">Remove</button></div>').join('') + '</div>';
+  return '<div class="sec">' + t('helperpick.computers_sending', 'Computers sending their screen') + '</div><div class="cs-list">' + list.map(h =>
+    '<div class="cs-item"><div class="cs-name"><b>' + esc(h.name) + '</b><div class="cs-url">' + (h.online ? t('helperpick.connected','connected') : t('helperpick.not_connected','not connected')) + (h.version ? t('helperpick.version_suffix', ' - version {v}', { v: esc(h.version) }) : '') + '</div></div>' +
+    '<span class="badge dot ' + (h.online ? 'on' : 'off') + '">' + (h.online ? t('helperpick.online','online') : t('helperpick.offline_badge', 'offline')) + '</span>' +
+    '<button class="btn" data-hren="' + esc(h.id) + '">' + t('helperpick.rename', 'Rename') + '</button><button class="btn danger" data-hdel="' + esc(h.id) + '">' + t('helperpick.remove', 'Remove') + '</button></div>').join('') + '</div>';
 }

@@ -10,6 +10,7 @@
 // Settings (direction, divider position, each pane's server) are kept in this
 // browser: localStorage "ambs.split".
 
+import { t } from './i18n.js';
 const KEY = 'ambs.split';
 const qp = new URLSearchParams(location.search);
 
@@ -47,10 +48,10 @@ export function startSplitPage() {
   const s = loadSplit();
   document.body.classList.add('splitpage');
   document.body.innerHTML =
-    '<div class="sp-bar"><span class="sp-title"><b>Amber</b>Sight split view</span><span class="sp-sp"></span>' +
-      '<button class="btn" id="spFlip" title="Side by side, or one above the other"></button>' +
-      '<button class="btn" id="spClose">Close split view</button></div>' +
-    '<div class="sp-wrap" id="spWrap"><iframe id="spA" title="Pane 1"></iframe><div class="sp-div" id="spDiv" role="separator" tabindex="0" aria-label="Drag to resize the panes"></div><iframe id="spB" title="Pane 2"></iframe></div>';
+    '<div class="sp-bar"><span class="sp-title">' + t('split.title', '<b>Amber</b>Sight split view') + '</span><span class="sp-sp"></span>' +
+      '<button class="btn" id="spFlip" title="' + t('split.side_by_or_one_above','Side by side, or one above the other') + '"></button>' +
+      '<button class="btn" id="spClose">' + t('split.close_split_view','Close split view') + '</button></div>' +
+    '<div class="sp-wrap" id="spWrap"><iframe id="spA" title="' + t('split.pane_1', 'Pane 1') + '"></iframe><div class="sp-div" id="spDiv" role="separator" tabindex="0" aria-label="' + t('split.drag_resize', 'Drag to resize the panes') + '"></div><iframe id="spB" title="' + t('split.pane_2', 'Pane 2') + '"></iframe></div>';
   const wrap = document.getElementById('spWrap');
   const a = document.getElementById('spA'), b = document.getElementById('spB');
   const src = (p) => '/?pane=' + p + '&site=' + encodeURIComponent(s.sites[p] || 'here') + '#live';
@@ -61,7 +62,7 @@ export function startSplitPage() {
     const pct = (s.ratio * 100).toFixed(2);
     a.style.flex = '0 0 calc(' + pct + '% - 3px)';
     b.style.flex = '1 1 0';
-    document.getElementById('spFlip').textContent = s.dir === 'col' ? 'Side by side' : 'One above the other';
+    document.getElementById('spFlip').textContent = s.dir === 'col' ? t('split.side_by_side','Side by side') : t('split.one_above_other','One above the other');
   };
   layout();
   document.getElementById('spFlip').onclick = () => { s.dir = s.dir === 'col' ? 'row' : 'col'; saveSplit(s); layout(); };
@@ -107,10 +108,10 @@ export function mountPaneBar(cams, links) {
     bar.className = 'pane-bar';
     document.body.prepend(bar);
   }
-  const sites = [{ id: 'here', name: links.name || 'This server' }].concat((links.links || []).filter(l => l.id === paneSite || cams.some(c => c.remote && c.remote.link === l.id)).map(l => ({ id: l.id, name: l.name })));
+  const sites = [{ id: 'here', name: links.name || t('split.this_server','This server') }].concat((links.links || []).filter(l => l.id === paneSite || cams.some(c => c.remote && c.remote.link === l.id)).map(l => ({ id: l.id, name: l.name })));
   // The pane's server is always listed, even while it has no cameras here.
-  if (!sites.some(x => x.id === paneSite)) sites.push({ id: paneSite, name: 'unavailable server' });
-  bar.innerHTML = '<select aria-label="Server shown in this pane">' + sites.map(x => '<option value="' + x.id + '"' + (x.id === paneSite ? ' selected' : '') + '>' + x.name.replace(/[<>&"]/g, '') + '</option>').join('') + '</select>';
+  if (!sites.some(x => x.id === paneSite)) sites.push({ id: paneSite, name: t('split.unavailable_server','unavailable server') });
+  bar.innerHTML = '<select aria-label="' + t('split.server_in_pane', 'Server shown in this pane') + '">' + sites.map(x => '<option value="' + x.id + '"' + (x.id === paneSite ? ' selected' : '') + '>' + x.name.replace(/[<>&"]/g, '') + '</option>').join('') + '</select>';
   bar.querySelector('select').onchange = (e) => {
     const site = e.target.value;
     try { window.parent.postMessage({ type: 'ambs-pane-site', pane: paneId, site }, location.origin); } catch (err) { /* not in the split page */ }

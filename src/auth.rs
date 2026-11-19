@@ -214,6 +214,9 @@ impl Role {
                 Perm::Arm => p.arm,
                 Perm::Events => p.events,
                 Perm::CameraDetection => p.camera_detection,
+                Perm::Lights => p.lights,
+                Perm::Siren => p.siren,
+                Perm::Controls => p.lights || p.siren,
             },
         }
     }
@@ -231,6 +234,9 @@ impl Role {
             "pause": m(Perm::Arm),
             "events": m(Perm::Events),
             "camera_detection": m(Perm::CameraDetection) && !by_token,
+            "lights": m(Perm::Lights),
+            // A physical alarm: never from a device token.
+            "siren": m(Perm::Siren) && !by_token,
         })
     }
 }
@@ -243,6 +249,12 @@ pub enum Perm {
     Arm,
     Events,
     CameraDetection,
+    /// A camera's spotlight.
+    Lights,
+    /// A camera's siren.
+    Siren,
+    /// Either of the two (who may reach the controls at all).
+    Controls,
 }
 
 /// The role of `user`, signed in with these rights: `admin` is the

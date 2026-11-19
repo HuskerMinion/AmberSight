@@ -4,7 +4,8 @@
 // debounced, one at a time, and rounded to the second so the browser's cache
 // answers repeats.
 
-import { enc, fmtWall, state } from './core.js';
+import { t } from './i18n.js';
+import { enc, fmtWhen, state } from './core.js';
 
 const WIDTH = 240;
 const DEBOUNCE_MS = 90;
@@ -74,7 +75,7 @@ export function showPreviewFrame(cam, ms, x, y, f) {
   cv.hidden = false;
   img.hidden = true;
   shownKey = '';
-  label.textContent = cam + ' · ' + fmtWall(ms);
+  label.textContent = cam + t('preview.separator_dot', ' · ') + fmtWhen(ms);
   el.hidden = false;
   place(x, y);
 }
@@ -85,7 +86,7 @@ export function showPreview(cam, ms, x, y) {
   ensure();
   cv.hidden = true;
   want = { cam, ms, x, y };
-  label.textContent = cam + ' · ' + fmtWall(ms);
+  label.textContent = cam + t('preview.separator_dot', ' · ') + fmtWhen(ms);
   if (el.hidden) { el.hidden = false; img.hidden = true; shownKey = ''; }
   place(x, y);
   clearTimeout(timer);

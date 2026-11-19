@@ -1,5 +1,6 @@
 // status.js - header status text, lamp, clock and the Armed / Disarmed button.
 
+import { t } from './i18n.js';
 import { $, state, api, fmtSize, msgDlg, toast, viewOnlyNote, confirmDialog, can } from './core.js';
 
 let armedCache;
@@ -16,9 +17,8 @@ export async function refreshStatus() {
     // Recordings: what the index holds in every folder (storage.bytes is the
     // data folder only: event clips, the database and what is recorded there).
     const st = s.storage || {};
-    const rec = typeof st.indexed_bytes === 'number' ? fmtSize(st.indexed_bytes) + ' of recordings' : fmtSize(st.bytes || 0) + ' in the data folder';
-    const text = s.online + '/' + s.cameras + ' online · ' + s.events + ' events · ' +
-      rec + ' · ' + (st.clips || 0) + ' event clips · up ' + Math.floor(s.uptime_seconds / 60) + ' min';
+    const rec = typeof st.indexed_bytes === 'number' ? t('status.of_recordings', '{size} of recordings', { size: fmtSize(st.indexed_bytes) }) : t('status.in_data_folder', '{size} in the data folder', { size: fmtSize(st.bytes || 0) });
+    const text = t('status.line', '{online}/{cams} online · {events} events · {rec} · {clips} event clips · up {min} min', { online: s.online, cams: s.cameras, events: s.events, rec, clips: st.clips || 0, min: Math.floor(s.uptime_seconds / 60) });
     $('statusText').textContent = text;
     armingUntil = !s.armed && s.arming_until ? s.arming_until * 1000 : 0;
     armDelay = s.arm_delay || 0;
@@ -36,7 +36,7 @@ export async function refreshStatus() {
     syncHealth(s);
   } catch (e) {
     if (e.status === 401) return;
-    $('statusText').textContent = 'server unreachable';
+    $('statusText').textContent = t('status.server_unreachable', 'server unreachable');
     $('lamp').className = 'lamp';
     unreachable = true;
     syncHealth();
@@ -56,8 +56,8 @@ function syncStartBanner(s) {
     document.body.appendChild(el);
   }
   const m = Math.floor((s.uptime_seconds || 0) / 60);
-  const ago = m < 1 ? 'just now' : m < 120 ? m + ' min ago' : Math.floor(m / 60) + ' h ago';
-  el.textContent = 'AmberSight started ' + ago + ' and is still checking its recordings. Playback may be slow until it finishes.';
+  const ago = m < 1 ? t('status.just_now', 'just now') : m < 120 ? t('status.min_ago', '{n} min ago', { n: m }) : t('status.h_ago', '{n} h ago', { n: Math.floor(m / 60) });
+  el.textContent = t('status.start_banner', 'AmberSight started {ago} and is still checking its recordings. Playback may be slow until it finishes.', { ago });
   el.hidden = false;
 }
 
@@ -86,8 +86,8 @@ function namedCam(w, cams) {
 function syncHealth(s) {
   const b = $('healthChip');
   if (!b) return;
-  let lvl = '', txt = '', tip = '', compact = '';
-  if (unreachable) { lvl = 'fault'; txt = 'Server offline'; tip = 'The server is not answering. Click to open Status.'; }
+  let lvl = '', txt = '', tip = '', tipAct = '', tipSep = '\n', compact = '';
+  if (unreachable) { lvl = 'fault'; txt = t('status.server_offline', 'Server offline'); tip = t('status.server_tip', 'The server is not answering.'); tipAct = t('status.server_tip_act', 'Click to open Status.'); tipSep = ' '; }
   else {
     const cams = (health && health.cameras) || [];
     const off = cams.filter(c => c.enabled && !c.online && !c.sleeping);
@@ -98,19 +98,19 @@ function syncHealth(s) {
     if (n) {
       lvl = off.length ? 'fault' : 'warn';
       // The first problem in words, "+N more" after it; the tooltip lists them all.
-      const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
-      const first = offOnly.length ? offOnly[0].name + ' is offline' : warns.length ? (((health && health.short) || [])[0] || cap(warns[0])) : off[0].name + ' is offline';
-      txt = first + (n > 1 ? ' +' + (n - 1) + ' more' : '');
+      const cap = (w) => w.charAt(0).toUpperCase() + w.slice(1);
+      const first = offOnly.length ? t('status.cam_offline', '{name} is offline', { name: offOnly[0].name }) : warns.length ? (((health && health.short) || [])[0] || cap(warns[0])) : t('status.cam_offline', '{name} is offline', { name: off[0].name });
+      txt = first + (n > 1 ? t('status.plus_more', ' +{n} more', { n: n - 1 }) : '');
       // (When the chip is too narrow for the words: the count alone, never a cut-off name.)
-      compact = !warns.length ? offOnly.length + ' offline' : n === 1 ? '1 problem' : n + ' problems';
-      tip = [].concat(offOnly.map(c => c.name + ' is offline'), warns.map(cap)).join('\n') + '\nClick to see what to do.';
+      compact = !warns.length ? t('status.n_offline', '{n} offline', { n: offOnly.length }) : t('status.n_problems', '{n, plural, one {# problem} other {# problems}}', { n });
+      tip = [].concat(offOnly.map(c => t('status.cam_offline', '{name} is offline', { name: c.name })), warns.map(cap)).join('\n'); tipAct = t('status.click_see_todo', 'Click to see what to do.');
     }
   }
   // Nothing wrong: a camera the hourly check found that is not added yet.
   const fresh = (!lvl && health && health.new_cameras) || [];
   if (fresh.length) {
-    lvl = 'info'; txt = fresh.length === 1 ? 'New camera' : fresh.length + ' new cameras';
-    tip = 'Found on the network, not added yet: ' + fresh.map(f => f.ip + (f.name ? ' (' + f.name + ')' : '')).join(', ') + '\nClick to add or ignore.';
+    lvl = 'info'; txt = t('status.new_cameras', '{n, plural, one {New camera} other {# new cameras}}', { n: fresh.length });
+    tip = t('status.found_tip', 'Found on the network, not added yet: {list}', { list: fresh.map(f => f.ip + (f.name ? ' (' + f.name + ')' : '')).join(', ') }); tipAct = t('status.click_add_ignore', 'Click to add or ignore.');
   }
   b.dataset.go = lvl === 'info' ? 'find' : '';
   b.hidden = !lvl;
@@ -119,8 +119,8 @@ function syncHealth(s) {
   b._full = txt; b._compact = compact;
   fitHealth();
   // The full words are always in the tooltip (the first problem on top when the chip shows a count).
-  const t = (compact ? txt + '\n' : '') + tip;
-  b.title = state.isAdmin ? t : t.replace(/\n?Click to [^\n]*$/, '');
+  const text = (compact ? txt + '\n' : '') + tip;
+  b.title = state.isAdmin && tipAct ? text + tipSep + tipAct : text;
   b.classList.toggle('noclick', !state.isAdmin);
   b.setAttribute('aria-label', txt);
 }
@@ -156,11 +156,11 @@ function syncShieldBtn() {
   if (armedCache === undefined) { l.textContent = '\u2026'; return; }
   const left = armingUntil ? Math.max(0, Math.ceil((armingUntil - Date.now()) / 1000)) : 0;
   if (armingUntil && !left) { armingUntil = 0; refreshStatus(); }
-  l.textContent = armedCache ? 'Armed' : left ? 'Arming in ' + (left < 100 ? left + ' s' : Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0')) : 'Disarmed';
+  l.textContent = armedCache ? t('status.armed', 'Armed') : left ? t('status.arming_in', 'Arming in {t}', { t: left < 100 ? t('status.secs', '{n} s', { n: left }) : Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') }) : t('status.disarmed', 'Disarmed');
   b.className = 'btn shieldbtn ' + (armedCache ? 'armedbtn' : left ? 'armingbtn' : 'shieldedbtn');
-  b.title = !can('arm') ? (armedCache ? 'Armed' : left ? 'Arming soon' : 'Disarmed') + ' (an admin or operator can change this)' :
-    armedCache ? 'Armed: click to disarm (no motion, no new events)' : left ? 'Arming soon: click to cancel' :
-    'Disarmed: click to arm' + (armDelay ? ' (after ' + armDelay + ' s, so you can leave)' : '');
+  b.title = !can('arm') ? t('status.shield_view_only', '{state} (an admin or operator can change this)', { state: armedCache ? t('status.armed', 'Armed') : left ? t('status.arming_soon', 'Arming soon') : t('status.disarmed', 'Disarmed') }) :
+    armedCache ? t('status.armed_click_disarm', 'Armed: click to disarm (no motion, no new events)') : left ? t('status.arming_soon_cancel', 'Arming soon: click to cancel') :
+    t('status.disarmed_click_arm', 'Disarmed: click to arm') + (armDelay ? t('status.after_delay', ' (after {n} s, so you can leave)', { n: armDelay }) : '');
 }
 
 // Arm or disarm from anywhere. Disarming never happens silently: a toast offers Undo for 6 s,
@@ -172,14 +172,14 @@ export async function toggleShield(quiet) {
     // Armed or arming: disarm (cancels the arm delay). Disarmed: arm, after the delay.
     const arm = !s.armed && !s.arming_until;
     const r = await api('/api/shield', { json: { armed: arm, delay: arm } });
-    if (r.arming_until) toast('Arming in ' + Math.round(r.arming_until - Date.now() / 1000) + ' s. Tap the button again to cancel.');
+    if (r.arming_until) toast(t('status.arming_toast', 'Arming in {n} s. Tap the button again to cancel.', { n: Math.round(r.arming_until - Date.now() / 1000) }));
     else if (!r.armed && s.armed) {
-      toast('Disarmed', { ms: 6000, action: { label: 'Undo', run: async () => {
+      toast(t('status.disarmed', 'Disarmed'), { ms: 6000, action: { label: t('status.undo', 'Undo'), run: async () => {
         try { await api('/api/shield', { json: { armed: true, delay: false } }); } catch (e) { msgDlg(e.message); }
         refreshStatus();
       } } });
     }
-    else if (!quiet) toast(r.armed ? 'Armed: motion detection on' : 'Disarmed: no motion, no new events');
+    else if (!quiet) toast(r.armed ? t('status.armed_on', 'Armed: motion detection on') : t('status.disarmed_off', 'Disarmed: no motion, no new events'));
     refreshStatus();
   } catch (e) { msgDlg(e.message); }
 }
@@ -191,7 +191,7 @@ export async function shieldKey() {
   try {
     const s = await api('/api/status');
     if (s.armed || s.arming_until) {
-      const yes = await confirmDialog({ title: 'Disarm all cameras?', body: 'Motion detection, new events and motion alerts stop on every camera until you arm again.', ok: 'Disarm', danger: true });
+      const yes = await confirmDialog({ title: t('status.disarm_all', 'Disarm all cameras?'), body: t('status.disarm_body', 'Motion detection, new events and motion alerts stop on every camera until you arm again.'), ok: t('status.disarm_ok', 'Disarm'), danger: true });
       if (!yes) return;
     }
     await toggleShield(true);
@@ -216,7 +216,7 @@ export function initStatus() {
     if ($('healthChip').dataset.go === 'find') location.hash = '#settings/cameras/find';
     else openStatus();
   };
-  $('statusText').title = 'Open system status';
+  $('statusText').title = t('status.open_status', 'Open system status');
   setInterval(() => {
     const clock = $('clock');
     clock.textContent = new Date().toLocaleTimeString();

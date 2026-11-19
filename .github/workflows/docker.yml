@@ -7,6 +7,7 @@ name: docker
 #
 #   ghcr.io/huskerminion/ambersight:<version> and :latest   amd64 + arm64 (Dockerfile)
 #   ghcr.io/huskerminion/ambersight:<version>-cuda and :cuda   amd64 (Dockerfile.cuda)
+#   ghcr.io/huskerminion/ambersight:<version>-openvino and :openvino   amd64 (Dockerfile.openvino)
 #
 # Each architecture builds on its own runner (arm64 on GitHub's ARM runner, no
 # emulation) and is pushed by digest; the merge job then makes the
@@ -19,7 +20,7 @@ on:
         required: true
         type: string
       latest:
-        description: Also move :latest and :cuda to this release
+        description: Also move :latest, :cuda and :openvino to this release
         required: false
         type: boolean
         default: true
@@ -214,6 +215,52 @@ jobs:
           push: true
           cache-from: type=gha,scope=cuda
           cache-to: type=gha,mode=max,scope=cuda
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            REVISION=${{ needs.prepare.outputs.revision }}
+            CREATED=${{ needs.prepare.outputs.created }}
+
+  # Intel graphics (OpenVINO): its own tags only, never :latest (that image
+  # stays small and Debian-based).
+  openvino:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - name: Tags
+        id: tags
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          LATEST: ${{ inputs.latest }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE:$VERSION-openvino"
+            if [ "$LATEST" = true ]; then echo "$IMAGE:openvino"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.openvino
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          cache-from: type=gha,scope=openvino
+          cache-to: type=gha,mode=max,scope=openvino
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}

@@ -1,6 +1,7 @@
 //! Graphics cards the built-in AI can run on: Windows (DirectML, which
 //! numbers them the way DXGI lists them), 64-bit Linux PCs (NVIDIA cards
-//! with CUDA, as nvidia-smi lists them) and Apple silicon Macs (Core ML: one
+//! with CUDA, as nvidia-smi lists them, and Intel graphics with OpenVINO,
+//! from the kernel's list of cards) and Apple silicon Macs (Core ML: one
 //! entry for the chip). Elsewhere the list is empty and the AI runs on the
 //! CPU.
 
@@ -13,11 +14,18 @@ pub struct Gpu {
     pub name: String,
     /// Its own video memory, MB (0 for most integrated graphics).
     pub memory_mb: u64,
-    /// Linux: its PCI address ("00000000:01:00.0"), by which CUDA is asked
-    /// for its own number for the card; empty elsewhere.
+    /// Linux: its PCI address ("00000000:01:00.0" from nvidia-smi,
+    /// "0000:03:00.0" for Intel), by which CUDA or OpenVINO is asked for its
+    /// own number for the card; empty elsewhere.
     #[serde(skip)]
     #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
     pub bus: String,
+    /// What the AI runs it with: "CUDA", "OpenVINO", "DirectML" or "Core ML".
+    pub api: &'static str,
+    /// Linux, Intel: its render node ("/dev/dri/renderD128").
+    #[serde(skip)]
+    #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
+    pub render: String,
 }
 
 /// The graphics cards in this computer (not Windows' software renderer).
@@ -38,15 +46,17 @@ pub fn list() -> Vec<Gpu> {
             name: String::from_utf16_lossy(&d.Description[..len]).trim().to_string(),
             memory_mb: d.DedicatedVideoMemory as u64 / (1024 * 1024),
             bus: String::new(),
+            api: "DirectML",
+            render: String::new(),
         });
     }
     out
 }
 
-/// The NVIDIA cards (none without NVIDIA's driver). nvidia-smi also gives
-/// their memory; without it, the driver's own list gives the names. Asked
-/// at most once a minute (Settings asks on each visit); the cache is not
-/// held while nvidia-smi runs.
+/// The NVIDIA cards (none without NVIDIA's driver), then the Intel ones.
+/// nvidia-smi also gives the NVIDIA cards' memory; without it, the driver's
+/// own list gives the names. Asked at most once a minute (Settings asks on
+/// each visit); the cache is not held while nvidia-smi runs.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub fn list() -> Vec<Gpu> {
     use std::sync::Mutex;
@@ -59,6 +69,9 @@ pub fn list() -> Vec<Gpu> {
     }
     let mut v = nvidia_smi().map(|t| parse_nvidia_smi(&t)).filter(|v| !v.is_empty()).unwrap_or_else(nvidia_proc);
     number_same_names(&mut v);
+    let mut intel = intel_cards(std::path::Path::new("/sys/class/drm"), &crate::openvino::known_cards());
+    number_same_names(&mut intel);
+    v.extend(intel);
     *CACHE.lock().unwrap() = Some((Instant::now(), v.clone()));
     v
 }
@@ -104,7 +117,7 @@ fn parse_nvidia_smi(text: &str) -> Vec<Gpu> {
             let name = p.next().filter(|n| !n.is_empty())?.to_string();
             let memory_mb = p.next().and_then(|m| m.parse().ok()).unwrap_or(0);
             let bus = p.next().filter(|b| b.contains(':')).unwrap_or("").to_string();
-            Some(Gpu { index, name, memory_mb, bus })
+            Some(Gpu { index, name, memory_mb, bus, api: "CUDA", render: String::new() })
         })
         .collect()
 }
@@ -122,7 +135,51 @@ fn nvidia_proc() -> Vec<Gpu> {
         })
         .collect();
     cards.sort();
-    cards.into_iter().enumerate().map(|(i, (bus, name))| Gpu { index: i as u32, name, memory_mb: 0, bus }).collect()
+    cards.into_iter().enumerate().map(|(i, (bus, name))| Gpu { index: i as u32, name, memory_mb: 0, bus, api: "CUDA", render: String::new() }).collect()
+}
+
+/// The Intel graphics the kernel runs (i915 or xe driver) with a render
+/// node, in PCI order, named as OpenVINO last named them (`known`, matched
+/// by PCI address) or plainly until it has.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn intel_cards(drm: &std::path::Path, known: &[crate::openvino::Card]) -> Vec<Gpu> {
+    let Ok(rd) = std::fs::read_dir(drm) else { return Vec::new() };
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).map(|t| t.trim().to_string()).unwrap_or_default();
+    let mut found: Vec<(String, String)> = rd
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        .filter_map(|e| {
+            let dev = e.path().join("device");
+            if read(dev.join("vendor")) != "0x8086" || !read(dev.join("class")).starts_with("0x03") {
+                return None;
+            }
+            let driver = std::fs::read_link(dev.join("driver")).ok()?.file_name()?.to_string_lossy().into_owned();
+            if driver != "i915" && driver != "xe" {
+                return None;
+            }
+            let bus = std::fs::canonicalize(&dev).ok()?.file_name()?.to_string_lossy().into_owned();
+            Some((bus, format!("/dev/dri/{}", e.file_name().to_string_lossy())))
+        })
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(i, (bus, render))| {
+            let k = known.iter().find(|k| k.bus.eq_ignore_ascii_case(&bus));
+            let name = match k {
+                Some(k) => k.name.clone(),
+                None if built_in(&bus) => "Intel built-in graphics".to_string(),
+                None => "Intel graphics card".to_string(),
+            };
+            Gpu { index: i as u32, name, memory_mb: k.map_or(0, |k| k.memory_mb), bus, api: "OpenVINO", render }
+        })
+        .collect()
+}
+
+/// Intel graphics built into the processor (always at PCI 00:02.0).
+pub(crate) fn built_in(bus: &str) -> bool {
+    bus.ends_with(":00:02.0")
 }
 
 /// The "Model:" line of /proc/driver/nvidia/gpus/<bus>/information.
@@ -134,7 +191,7 @@ fn proc_model(text: &str) -> Option<String> {
 /// Cards of the same model get their number after the name, so each can be
 /// chosen ("NVIDIA GeForce RTX 3060 #1").
 #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
-fn number_same_names(v: &mut [Gpu]) {
+pub(crate) fn number_same_names(v: &mut [Gpu]) {
     let names: Vec<String> = v.iter().map(|g| g.name.clone()).collect();
     for g in v.iter_mut() {
         if names.iter().filter(|n| **n == g.name).count() > 1 {
@@ -155,7 +212,7 @@ pub fn list() -> Vec<Gpu> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "Apple silicon".to_string());
-    vec![Gpu { index: 0, name, memory_mb: 0, bus: String::new() }]
+    vec![Gpu { index: 0, name, memory_mb: 0, bus: String::new(), api: "Core ML", render: String::new() }]
 }
 
 #[cfg(not(any(windows, all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -163,8 +220,11 @@ pub fn list() -> Vec<Gpu> {
     Vec::new()
 }
 
-/// The card to use: the one named `want` when it is there, else the one with
-/// the most video memory (a separate graphics card over built-in graphics).
+/// The card to use: the one named `want` when it is there, else an NVIDIA
+/// card over an Intel one (Linux), and then the one with the most video
+/// memory (a separate graphics card over built-in graphics; Intel cards
+/// have no size until OpenVINO has looked at them, so a card not built
+/// into the processor comes first there).
 #[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
 pub fn pick(gpus: &[Gpu], want: Option<&str>) -> Option<Gpu> {
     if let Some(w) = want.filter(|w| !w.is_empty()) {
@@ -172,7 +232,7 @@ pub fn pick(gpus: &[Gpu], want: Option<&str>) -> Option<Gpu> {
             return Some(g.clone());
         }
     }
-    gpus.iter().max_by_key(|g| (g.memory_mb, std::cmp::Reverse(g.index))).cloned()
+    gpus.iter().max_by_key(|g| (g.api == "CUDA", g.memory_mb, !built_in(&g.bus), std::cmp::Reverse(g.index))).cloned()
 }
 
 #[cfg(test)]
@@ -181,7 +241,7 @@ mod tests {
 
     #[test]
     fn named_card_else_the_biggest() {
-        let g = |index, name: &str, memory_mb| Gpu { index, name: name.into(), memory_mb, bus: String::new() };
+        let g = |index, name: &str, memory_mb| Gpu { index, name: name.into(), memory_mb, bus: String::new(), api: "DirectML", render: String::new() };
         let gpus = vec![g(0, "Intel(R) UHD Graphics", 0), g(1, "Intel(R) Arc(TM) B580", 12000), g(2, "AMD Radeon", 8000)];
         assert_eq!(pick(&gpus, None).unwrap().index, 1);
         assert_eq!(pick(&gpus, Some("AMD Radeon")).unwrap().index, 2);
@@ -211,6 +271,47 @@ mod tests {
         let names: Vec<&str> = g.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, ["NVIDIA GeForce RTX 5060 Ti #0", "NVIDIA GeForce RTX 5060 Ti #1", "NVIDIA T400"]);
         assert_eq!(pick(&g, Some("NVIDIA GeForce RTX 5060 Ti #1")).unwrap().index, 1);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn nvidia_before_intel_and_intel_cards_from_the_kernel() {
+        let mut v = parse_nvidia_smi("0, NVIDIA T400, 2048, 00000000:01:00.0\n");
+        // A fake /sys/class/drm: an Intel card (xe), the processor's Intel
+        // graphics (i915), an AMD card and an Intel card on another driver.
+        let d = std::env::temp_dir().join(format!("ambersight-drm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let card = |node: &str, bus: &str, vendor: &str, driver: &str| {
+            let dev = d.join("devices").join(bus);
+            std::fs::create_dir_all(&dev).unwrap();
+            std::fs::create_dir_all(d.join("drivers").join(driver)).unwrap();
+            std::fs::write(dev.join("vendor"), format!("{vendor}\n")).unwrap();
+            std::fs::write(dev.join("class"), "0x030000\n").unwrap();
+            std::os::unix::fs::symlink(d.join("drivers").join(driver), dev.join("driver")).unwrap();
+            std::fs::create_dir_all(d.join("drm").join(node)).unwrap();
+            std::os::unix::fs::symlink(&dev, d.join("drm").join(node).join("device")).unwrap();
+        };
+        card("renderD128", "0000:03:00.0", "0x8086", "xe");
+        card("renderD129", "0000:00:02.0", "0x8086", "i915");
+        card("renderD130", "0000:13:00.0", "0x1002", "amdgpu");
+        card("renderD131", "0000:05:00.0", "0x8086", "vfio-pci");
+        let intel = intel_cards(&d.join("drm"), &[]);
+        assert_eq!(intel.iter().map(|g| (g.name.as_str(), g.bus.as_str(), g.render.as_str())).collect::<Vec<_>>(), [
+            ("Intel built-in graphics", "0000:00:02.0", "/dev/dri/renderD129"),
+            ("Intel graphics card", "0000:03:00.0", "/dev/dri/renderD128"),
+        ]);
+        assert!(intel.iter().all(|g| g.api == "OpenVINO"));
+        // Not sized yet: the separate card over the built-in graphics.
+        assert_eq!(pick(&intel, None).unwrap().bus, "0000:03:00.0");
+        // Named as OpenVINO found them.
+        let known = [crate::openvino::Card { id: "GPU.1".into(), name: "Intel(R) Arc(TM) B580 Graphics".into(), bus: "0000:03:00.0".into(), memory_mb: 12000, integrated: false }];
+        let named = intel_cards(&d.join("drm"), &known);
+        assert_eq!((named[1].name.as_str(), named[1].memory_mb), ("Intel(R) Arc(TM) B580 Graphics", 12000));
+        // An NVIDIA card goes first, even with less memory; a named card wins.
+        v.extend(named);
+        assert_eq!(pick(&v, None).unwrap().api, "CUDA");
+        assert_eq!(pick(&v, Some("Intel(R) Arc(TM) B580 Graphics")).unwrap().api, "OpenVINO");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

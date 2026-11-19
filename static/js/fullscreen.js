@@ -7,6 +7,7 @@
 // Esc: whatever is open on top first (dialog, menu), then one camera -> back to the grid -> leave; on the
 // timeline it leaves full screen and stays on the timeline. A small exit button shows on pointer movement
 // or a tap and fades after 3 s.
+import { t } from './i18n.js';
 import { bus, overlayOpen } from './core.js';
 import { isActive } from './nav.js';
 
@@ -37,8 +38,8 @@ function showBar() {
 function buildBar(h) {
   bar = document.createElement('div');
   bar.className = 'tvbar';
-  bar.innerHTML = '<button type="button" class="btn glass tvback" hidden>Back to all cameras</button>' +
-    '<button type="button" class="btn glass tvexit" title="Leave full screen (Esc)" aria-label="Leave full screen">Exit full screen</button>';
+  bar.innerHTML = '<button type="button" class="btn glass tvback" hidden>' + t('fullscreen.back_all', 'Back to all cameras') + '</button>' +
+    '<button type="button" class="btn glass tvexit" title="' + t('fullscreen.leave_title', 'Leave full screen (Esc)') + '" aria-label="' + t('fullscreen.leave_label', 'Leave full screen') + '">' + t('fullscreen.exit', 'Exit full screen') + '</button>';
   bar.querySelector('.tvback').onclick = (ev) => { ev.stopPropagation(); setOne(null); };
   bar.querySelector('.tvexit').onclick = (ev) => { ev.stopPropagation(); exitTv(); };
   h.appendChild(bar);

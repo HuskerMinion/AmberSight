@@ -4,7 +4,7 @@
 //
 //   import { registerAdminPage } from './admin.js';
 //   registerAdminPage({
-//     id: 'health', title: 'Health', order: 20,
+//     id: 'health', title: t('admin.health_title','Health'), order: 20,
 //     render(el) { el.innerHTML = '...'; },   // called each time the page is opened
 //     leave() {},                             // optional: stop timers when switching away
 //   });
@@ -14,6 +14,7 @@
 // core.js); text / number / select fields use the one sticky bar (formBar or pageBar+wireBar).
 // "Admin" is no longer a page of its own: #admin and openAdminPage() go to Settings.
 
+import { t } from './i18n.js';
 const pages = [];
 
 export function registerAdminPage(p) {
@@ -40,7 +41,7 @@ export async function openAdminPage(id) {
 
 // "Admin" stays as an alias of Settings > System so old links, bookmarks and G A keep working.
 export const adminTab = {
-  id: 'admin', label: 'Admin', order: 70, admin: true, noNav: true,
+  id: 'admin', label: t('admin.admin_label','Admin'), order: 70, admin: true, noNav: true,
   // #admin/<old page id> bookmarks go to that page's place in Settings.
   redirect: () => {
     const m = /^#admin\/([a-z]+)/.exec(location.hash);

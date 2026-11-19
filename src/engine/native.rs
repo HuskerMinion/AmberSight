@@ -30,6 +30,10 @@ pub(super) fn wants_native(cfg: &CameraConfig) -> bool {
     if crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
         return true;
     }
+    // Baichuan TCP (or Auto) is the built-in reader's alone.
+    if super::connect_way::mode_of(cfg) != super::connect_way::Mode::Rtsp && !cfg.overlay {
+        return true;
+    }
     // Burned-in text changes the picture: that needs re-encoding, which the
     // ffmpeg pipeline does.
     if cfg.overlay {
@@ -127,7 +131,18 @@ const AUTH_RETRY_MAX: Duration = Duration::from_secs(600);
 /// Whether a connection error means the camera refused the sign-in.
 pub fn is_auth_error(e: &str) -> bool {
     let l = e.to_ascii_lowercase();
-    l.contains("401 response") || l.contains("401 unauthorized") || l.contains("unauthorized") || l.contains("authentication failed") || l.contains("auth failed")
+    l.contains("401 response") || l.contains("401 unauthorized") || l.contains("unauthorized") || l.contains("authentication failed") || l.contains("auth failed") || l.contains("sign-in refused")
+        || l.contains("403 response") || l.contains("403 forbidden")
+}
+
+/// A clear refusal of the user name or password, after the sign-in was
+/// really tried: RTSP 401 after the digest/basic answer was sent, RTSP 403,
+/// or a refused Baichuan sign-in. Never a timeout, a refused connection or a
+/// 5xx. Such a refusal is not asked again until the settings are saved
+/// (cameras lock an account out after a few).
+pub fn is_refused_password(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    l.contains("received unauthorized after trying digest auth") || l.contains("403 response to") || l.contains("sign-in refused")
 }
 
 /// Whether a connection error means the camera did not answer at all (off,
@@ -306,6 +321,30 @@ struct SessionPlan {
     sub_note: Option<String>,
     /// The camera's place on the NVIDIA card (see `NvdecSlot`).
     nvdec: NvdecSlot,
+    /// End the session at the next clean point (a recording segment
+    /// boundary, or a keyframe when nothing is being recorded): Auto is
+    /// moving back to its primary way.
+    clean_stop: Arc<AtomicBool>,
+}
+
+/// The Baichuan target for one of the camera's stream addresses (main for
+/// `url`, sub for `sub_url`).
+fn bc_target(cfg: &CameraConfig, url: &str) -> Option<crate::ingest::baichuan::wired::Target> {
+    use crate::ingest::baichuan::wired::{target_for, StreamKind};
+    let default = if url == cfg.url { StreamKind::Main } else { StreamKind::Sub };
+    let port = cfg.baichuan_port.unwrap_or(crate::ingest::baichuan::transport::TCP_PORT);
+    let channel = cfg.baichuan_channel.or(cfg.reolink_channel.and_then(|c| u8::try_from(c).ok()));
+    target_for(url, port, channel, default).map(|t| crate::ingest::baichuan::wired::Target { owner: cfg.name.clone(), ..t })
+}
+
+/// A note for the way in use: a Baichuan session that is not AES-encrypted.
+fn bc_note(cfg: &CameraConfig, use_bc: bool) -> Option<String> {
+    if !use_bc {
+        return None;
+    }
+    let t = bc_target(cfg, &cfg.url)?;
+    let st = crate::ingest::baichuan::wired::status(&t.host, t.port)?;
+    (st.aes == Some(false)).then(|| "the camera chose a Baichuan session that is not AES-encrypted (BC/XOR): trusted network only".to_string())
 }
 
 /// The camera's place on the NVIDIA card while its motion decoder runs
@@ -378,6 +417,19 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
     // change).
     let mut ever_played = played_recently(&engine, &slug_name, &cfg.url, chrono::Utc::now().timestamp());
     let mut busy_before_play: u32 = 0;
+    // RTSP or Baichuan (the `connect` setting), and when Auto moves.
+    let mode = super::connect_way::mode_of(&cfg);
+    let mut picker = super::connect_way::WayPicker::new(mode, std::time::Instant::now());
+    // Auto switches since video last came (both ways down: waits grow).
+    let mut switches_without_video: u32 = 0;
+    if mode != super::connect_way::Mode::Rtsp {
+        info!("camera '{}': connect with {:?} ({} first)", cfg.name, mode, picker.current.label());
+        // A new worker (its settings were saved, or a start): a refused
+        // sign-in may be tried once more. Never retried on its own.
+        if let Some(t) = bc_target(&cfg, &cfg.url) {
+            crate::ingest::baichuan::wired::forget_refusal(&t.host, t.port);
+        }
+    }
     let mut failing_since: Option<std::time::Instant> = None;
     let mut backoff = Duration::from_secs(2);
     let mut port_watch = PortWatch::default();
@@ -464,7 +516,9 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // One teardown group per session: awaited inside the session's own
         // runtime so TEARDOWN reaches the camera before the runtime ends.
         let group = Arc::new(retina::client::SessionGroup::default());
+        let use_bc = picker.current == super::connect_way::Way::Baichuan;
         let creds = |url: &str| {
+            let baichuan = if use_bc { bc_target(&cfg, url) } else { None };
             // A battery Argus carries its UID in the URL so open_stream can find
             // the persistent session the event poller started.
             let url = match cfg.battery_uid() {
@@ -477,7 +531,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             // normalize_creds); the reader takes it apart from the address.
             let (url, own) = super::creds::split_login(&url);
             let (username, password) = own.unwrap_or_else(|| (cfg.username.clone(), cfg.password.clone()));
-            StreamSource { url, username, password, group: Some(group.clone()), transport: cfg.transport.clone() }
+            StreamSource { url, username, password, group: Some(group.clone()), transport: cfg.transport.clone(), baichuan }
         };
         // A sub stream address that cannot be opened ("stream2" without
         // rtsp://): motion uses the main stream, and the camera stays on
@@ -511,7 +565,46 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             sub_copy: storage.sub_copy,
             sub_note: if sub_watch.trying() { Some("trying the sub stream again".into()) } else { sub_watch.off.clone() },
             nvdec: nvdec.clone(),
+            clean_stop: Arc::new(AtomicBool::new(false)),
         };
+        let clean_stop = plan.clean_stop.clone();
+        if mode != super::connect_way::Mode::Rtsp {
+            if !use_bc {
+                // One way at a time: no Baichuan session to this camera may
+                // still be signed in while RTSP is asked.
+                if let Some(t) = bc_target(&cfg, &cfg.url) {
+                    use crate::ingest::baichuan::wired::{release, Released};
+                    let mut r = release(&t.host, t.port, &cfg.name, Duration::from_secs(8));
+                    let until = std::time::Instant::now() + Duration::from_secs(30);
+                    while r == Released::Busy && handle.active.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+                        thread::sleep(Duration::from_secs(1));
+                        r = release(&t.host, t.port, &cfg.name, Duration::from_secs(8));
+                    }
+                    match r {
+                        Released::Free => {}
+                        Released::OthersOnly => tracing::debug!("camera '{}': the Baichuan session to {} stays for other cameras of that device", cfg.name, t.key()),
+                        Released::Busy => {
+                            // Not both ways at once: no RTSP while it is signed in.
+                            let why = format!("the Baichuan session to {} did not sign out; RTSP waits", t.key());
+                            warn!("camera '{}': {why}", cfg.name);
+                            {
+                                let mut st = handle.state.write().unwrap();
+                                st.last_error = Some(why);
+                                st.last_error_at = Some(Utc::now().timestamp());
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            let mut st = handle.state.write().unwrap();
+            st.via = Some(picker.current.label());
+            st.via_note = picker.note.clone().or_else(|| bc_note(&cfg, use_bc));
+        } else {
+            let mut st = handle.state.write().unwrap();
+            st.via = None;
+            st.via_note = None;
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         let (jpeg_tx, jpeg_rx) = mpsc::sync_channel::<Vec<u8>>(4);
@@ -543,7 +636,9 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         let mut probe: Option<mpsc::Receiver<Result<(), String>>> = None;
         let mut back_to_sub = false;
         loop {
-            if probe.is_none() && !back_to_sub && sub_watch.probe_due(std::time::Instant::now()) {
+            // (Not while on Baichuan: the probe would open the sub stream over
+            // RTSP, both ways to the camera at once.)
+            if probe.is_none() && !back_to_sub && !use_bc && sub_watch.probe_due(std::time::Instant::now()) {
                 if let Some(u) = super::usable_sub_url(&cfg) {
                     let (tx, rx) = mpsc::channel();
                     let c = cfg.clone();
@@ -599,9 +694,22 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                     stop.store(true, Ordering::Relaxed);
                 }
             }
+            if picker.primary_due(std::time::Instant::now()) && !clean_stop.load(Ordering::Relaxed) {
+                info!(
+                    "camera '{}': on {} for {} min; trying {} again at the next recording boundary",
+                    cfg.name,
+                    picker.current.label(),
+                    super::connect_way::primary_retry().as_secs() / 60,
+                    picker.primary.label()
+                );
+                clean_stop.store(true, Ordering::Relaxed);
+            }
             match jpeg_rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(jpeg) => {
                     got_video = true;
+                    if picker.video(std::time::Instant::now()) {
+                        handle.state.write().unwrap().via_note = picker.note.clone();
+                    }
                     process_frame(
                         &handle, &engine, &cfg, &mut detector, jpeg, segment_seconds,
                         &mut frames_over, &mut event_start, &mut event_score,
@@ -666,6 +774,81 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         }
         if !handle.active.load(Ordering::Relaxed) || idle_stop {
             continue; // disabled, replaced, or gone back to sleep
+        }
+        {
+            use super::connect_way::{Ended, Next};
+            let now = std::time::Instant::now();
+            if clean_stop.load(Ordering::Relaxed) && picker.primary_due(now) {
+                // Ended on purpose at a recording boundary: try the primary.
+                picker.session_ended(&Ended { got_video, error: None, ..Default::default() }, now);
+                picker.try_primary(now);
+                info!("camera '{}': trying {} again", cfg.name, picker.current.label());
+                failures_before_play = 0;
+                backoff = Duration::from_secs(2);
+                continue;
+            }
+            let err = end.error.clone().unwrap_or_else(|| "stream ended".into());
+            // RTSP alone stops only on a clear refusal (anything looser keeps
+            // the long waits below); Baichuan and Auto stop on any refusal, so
+            // the same credentials are never tried the other way.
+            let refused = if mode == super::connect_way::Mode::Rtsp { is_refused_password(&err) } else { is_auth_error(&err) };
+            let ended = Ended {
+                got_video,
+                auth: !got_video && refused,
+                battery: crate::ingest::baichuan::wired::is_battery_refusal(&err),
+                error: Some(err),
+            };
+            if got_video {
+                switches_without_video = 0;
+            }
+            match picker.session_ended(&ended, now) {
+                Next::Same => {}
+                Next::Switch { to, why } => {
+                    warn!("camera '{}': {why}", cfg.name);
+                    crate::camreport::note_end(&cfg.name, &why, false);
+                    {
+                        let mut st = handle.state.write().unwrap();
+                        st.via = Some(to.label());
+                        st.via_note = Some(why);
+                    }
+                    failures_before_play = 0;
+                    busy_before_play = 0;
+                    failing_since = None;
+                    if switches_without_video == 0 {
+                        // The other way gets a quick first try.
+                        backoff = Duration::from_secs(2);
+                        thread::sleep(Duration::from_millis(500));
+                    } else {
+                        // Both ways down: the waits keep growing (to a minute).
+                        let until = std::time::Instant::now() + backoff;
+                        while std::time::Instant::now() < until && handle.active.load(Ordering::Relaxed) {
+                            thread::sleep(Duration::from_millis(250));
+                        }
+                        backoff = (backoff * 2).min(RETRY_MAX);
+                    }
+                    switches_without_video += 1;
+                    continue;
+                }
+                Next::Stop { why } => {
+                    // A refused password (or a channel that may be a battery
+                    // camera): stop both ways until the settings change (a
+                    // change replaces this worker).
+                    warn!("camera '{}': {why}", cfg.name);
+                    {
+                        let mut st = handle.state.write().unwrap();
+                        st.last_error = Some(why.clone());
+                        st.last_error_at = Some(Utc::now().timestamp());
+                        st.via_note = Some(why);
+                    }
+                    while handle.active.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(500));
+                        if outage.lapsed(std::time::Instant::now()) {
+                            nvdec.lock().unwrap().take();
+                        }
+                    }
+                    continue;
+                }
+            }
         }
         if end.transient && end.reached_play {
             // Damaged packet: reconnect at once; log at most once a minute.
@@ -779,7 +962,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // (baichuan://) has no ffmpeg fallback either: ffmpeg cannot open it,
         // and a camera that will not preview — e.g. older firmware — must keep
         // retrying the native client, not spin on ffmpeg.)
-        if !end.reached_play && gave_up && cfg.ingest != "native" && !crate::ingest::flv::is_flv_url(&cfg.url) && !crate::ingest::push::is_push_url(&cfg.url) && !crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
+        if !end.reached_play && gave_up && mode == super::connect_way::Mode::Rtsp && cfg.ingest != "native" && !crate::ingest::flv::is_flv_url(&cfg.url) && !crate::ingest::push::is_push_url(&cfg.url) && !crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
             warn!(
                 "camera '{}': built-in RTSP reader could not play this camera ({why}); switching to ffmpeg ingest",
                 cfg.name
@@ -884,6 +1067,18 @@ async fn run_session(
 enum Sink {
     Continuous(SegmentWriter),
     MotionOnly(TriggeredRecorder),
+}
+
+/// Whether a keyframe at `ticks` is a clean point to end the session at
+/// (moving back to the primary way): a continuous recording where its
+/// segment is full, a motion-only one when no clip is being written (never
+/// in the middle of an event), and at once with nothing recorded.
+fn at_clean_point(sink: Option<&Sink>, ticks: i64) -> bool {
+    match sink {
+        Some(Sink::Continuous(w)) => w.would_rotate(ticks),
+        Some(Sink::MotionOnly(r)) => r.idle_at(ticks),
+        None => true,
+    }
 }
 
 /// The open recording of one stream task. However the task ends (its
@@ -991,7 +1186,10 @@ async fn main_task(
     }
     reached_play.store(true, Ordering::Relaxed);
     main_played.store(true, Ordering::Relaxed);
-    info!("camera '{}': native stream playing ({})", handle.state.read().unwrap().name, redact_url(plan.main.url.clone()));
+    match &plan.main.baichuan {
+        Some(t) => info!("camera '{}': native stream playing ({})", handle.state.read().unwrap().name, t.describe()),
+        None => info!("camera '{}': native stream playing ({})", handle.state.read().unwrap().name, redact_url(plan.main.url.clone())),
+    }
     let mut sink = OpenSink::new(engine, &plan.slug);
     let mut motion = MotionDec::new("main", plan.nvdec.clone());
     let mut main_noted = false;
@@ -1017,6 +1215,11 @@ async fn main_task(
                 }
             }
             MediaItem::Video { ticks, cts, data, key, new_params } => {
+                // Moving back to the primary way: at a keyframe when there is
+                // no continuous recording to end at a segment boundary.
+                if key && plan.clean_stop.load(Ordering::Relaxed) && at_clean_point(sink.as_ref(), ticks) {
+                    break;
+                }
                 handle.rx_frames.fetch_add(1, Ordering::Relaxed);
                 handle.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
                 if new_params {
@@ -1195,6 +1398,11 @@ async fn decode_only_task(
             continue;
         }
         if let MediaItem::Video { ticks, cts, data, key, new_params } = item {
+            // Moving back to the primary way with no main stream session to
+            // end it: stop at a keyframe.
+            if key && plan.clean_stop.load(Ordering::Relaxed) && plan.record.is_none() && !handle.restream_main.wanted() {
+                break;
+            }
             if new_params {
                 motion.reset();
                 live = None;
@@ -1688,6 +1896,38 @@ mod tests {
     }
 
     #[test]
+    fn moving_back_never_cuts_a_motion_only_clip_short() {
+        use crate::ingest::fmp4::{TrackInfo, TrackKind};
+        let dir = std::env::temp_dir().join(format!("amber-cleanpoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut entry = vec![0, 0, 0, 16];
+        entry.extend_from_slice(b"avc1");
+        entry.extend_from_slice(&[0; 8]);
+        let track = TrackInfo { kind: TrackKind::Video, timescale: 90000, sample_entry: entry, width: 640, height: 480 };
+        // 10 fps, a keyframe each second; pre-roll 1 s, post-roll 2 s.
+        let mut r = TriggeredRecorder::new(dir.clone(), "cam", vec![track], 60, 1, 2, 90000);
+        let frame = |i: i64| crate::ingest::preroll::Frame::Video { ticks: i * 9000, cts: 0, data: vec![0, 0, 0, 1, 0x65], is_key: i % 10 == 0 };
+        for i in 0..20 {
+            r.push(frame(i)).unwrap();
+        }
+        let mut sink = Some(Sink::MotionOnly(r));
+        assert!(at_clean_point(sink.as_ref(), 20 * 9000), "idle: end at this keyframe");
+        if let Some(Sink::MotionOnly(r)) = sink.as_mut() {
+            r.trigger().unwrap();
+            for i in 20..30 {
+                r.push(frame(i)).unwrap();
+            }
+        }
+        assert!(!at_clean_point(sink.as_ref(), 30 * 9000), "an event clip is being written");
+        assert!(at_clean_point(sink.as_ref(), 40 * 9000), "its post-roll is over");
+        assert!(at_clean_point(None, 0), "nothing recorded: the next keyframe");
+        if let Some(Sink::MotionOnly(r)) = sink.as_mut() {
+            r.stop().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_place_on_the_card_outlives_a_new_stream_and_a_reconnect() {
         let slot: NvdecSlot = Arc::default();
         *slot.lock().unwrap() = Some(crate::hwdecode::hold_for_test("NativeKeep"));
@@ -1899,6 +2139,26 @@ mod tests {
         assert!(!is_auth_error("camera did not answer within 15 s"));
         assert!(!is_auth_error("stream ended"));
         assert!(!is_auth_error("cannot reach 192.168.1.40:1401"));
+        assert!(is_auth_error("DESCRIBE failed: 403 response to DESCRIBE CSeq=2: Forbidden"), "403 is a refusal too");
+    }
+
+    #[test]
+    fn only_a_clear_refusal_stops_an_rtsp_camera() {
+        assert!(is_refused_password("DESCRIBE failed: 401 response to DESCRIBE CSeq=3: Received Unauthorized after trying digest auth"));
+        assert!(is_refused_password("DESCRIBE failed: 403 response to DESCRIBE CSeq=2: Forbidden"));
+        assert!(is_refused_password("sign-in refused: the camera did not accept the user name or password (Baichuan status 400)"));
+        // Not a password verdict: a 401 with no sign-in tried (none set, or
+        // no challenge), a timeout, a refused connection, a 5xx.
+        for e in [
+            "DESCRIBE failed: 401 response to DESCRIBE CSeq=2: Unauthorized without WWW-Authenticate header",
+            "camera did not answer within 15 s (rtsp://192.0.2.5/x)",
+            "DESCRIBE failed: Unable to connect to RTSP server: Connection refused (os error 111)",
+            "DESCRIBE failed: 500 response to DESCRIBE CSeq=2: Internal Server Error",
+            "DESCRIBE failed: 503 response to DESCRIBE CSeq=2: Service Unavailable",
+            "cannot reach 192.168.1.40:1401",
+        ] {
+            assert!(!is_refused_password(e), "{e}");
+        }
     }
 
     #[test]

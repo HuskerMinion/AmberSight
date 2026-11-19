@@ -15,8 +15,13 @@
 #   ambersight-<v>-1.x86_64.rpm               ambersight-<v>-1.aarch64.rpm
 #   ambersight-cuda-<v>-linux-x86_64.tar.gz   (the NVIDIA add-on, made by
 #                                              scripts/package.sh on Linux x86_64)
-# Any 64-bit Intel/AMD Linux package needs the NVIDIA add-on beside it:
-# AmberSight downloads it from the same release when it finds an NVIDIA card.
+#   ambersight-openvino-<v>-linux-x86_64.tar.gz (the Intel graphics add-on, made
+#                                              by scripts/package-openvino-addon.sh)
+#   ambersight-lang-<code>-<v>.json          (one per language pack, made by
+#                                              scripts/package-lang.sh; required)
+# Any 64-bit Intel/AMD Linux package needs both add-ons beside it: AmberSight
+# downloads them from the same release when it finds an NVIDIA card, or Intel
+# graphics with Intel's compute driver.
 #
 # It writes dist/release-<v>/SHA256SUMS over them and signs it with the
 # offline release key (dist/release-<v>/SHA256SUMS.sig), using this
@@ -72,19 +77,54 @@ for f in \
   "ambersight-$v-darwin-arm64.tar.gz" "ambersight-$v-darwin-x86_64.tar.gz" \
   "ambersight_${v}_amd64.deb" "ambersight_${v}_arm64.deb" \
   "ambersight-$v-1.x86_64.rpm" "ambersight-$v-1.aarch64.rpm" \
-  "ambersight-cuda-$v-linux-x86_64.tar.gz"; do
+  "ambersight-cuda-$v-linux-x86_64.tar.gz" "ambersight-openvino-$v-linux-x86_64.tar.gz"; do
   if [ -f "dist/$f" ]; then
     files="$files $f"
   fi
 done
 [ -n "$files" ] || { echo "no packages for $v in dist/" >&2; exit 1; }
+
+# Language packs (scripts/package-lang.sh): every pack this version pins must be in the release,
+# byte for byte, or the installed program refuses to download that language.
+for l in lang/*.json; do
+  code=$(basename "$l" .json)
+  case "$code" in en|en-XA) continue ;; esac
+  f="ambersight-lang-$code-$v.json"
+  [ -f "dist/$f" ] || { echo "dist/$f is missing: run scripts/package-lang.sh" >&2; exit 1; }
+  cmp -s "$l" "dist/$f" || { echo "dist/$f differs from $l (the pinned pack): run scripts/package-lang.sh again from the release tree" >&2; exit 1; }
+  files="$files $f"
+done
 case "$files" in
   *"linux-x86_64.tar.gz"* | *"_amd64.deb"* | *".x86_64.rpm"*)
     case "$files" in
       *"ambersight-cuda-$v-linux-x86_64.tar.gz"*) ;;
       *) echo "dist/ambersight-cuda-$v-linux-x86_64.tar.gz is missing (the NVIDIA add-on the Linux x86_64 packages download): run scripts/package-cuda-addon.sh" >&2; exit 1 ;;
+    esac
+    case "$files" in
+      *"ambersight-openvino-$v-linux-x86_64.tar.gz"*) ;;
+      *) echo "dist/ambersight-openvino-$v-linux-x86_64.tar.gz is missing (the Intel graphics add-on the Linux x86_64 packages download): run scripts/package-openvino-addon.sh" >&2; exit 1 ;;
     esac ;;
 esac
+
+# Both add-ons carry ONNX Runtime's bridge library, and one process may load
+# either first (a computer with both cards): they must be the same file.
+cuda="dist/ambersight-cuda-$v-linux-x86_64.tar.gz"
+ov="dist/ambersight-openvino-$v-linux-x86_64.tar.gz"
+if [ -f "$cuda" ] && [ -f "$ov" ]; then
+  shared_sum() {
+    t=$(mktemp -d)
+    if tar -xzf "$1" -C "$t" --wildcards '*/libonnxruntime_providers_shared.so' 2>/dev/null; then
+      f=$(find "$t" -name libonnxruntime_providers_shared.so | head -1)
+      [ -n "$f" ] && { sha256sum "$f" 2>/dev/null || shasum -a 256 "$f"; } | cut -d' ' -f1
+    fi
+    rm -rf "$t"
+  }
+  a=$(shared_sum "$cuda"); b=$(shared_sum "$ov")
+  if [ -z "$a" ] || [ "$a" != "$b" ]; then
+    echo "libonnxruntime_providers_shared.so differs between the NVIDIA ($a) and Intel ($b) add-ons: both must come from the same ONNX Runtime" >&2
+    exit 1
+  fi
+fi
 
 out="dist/release-$v"
 mkdir -p "$out"

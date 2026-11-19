@@ -8,6 +8,7 @@
 // A tile showing JPEG frames has no audio of its own: unmuting it starts a hidden
 // <video> playing the camera's sub stream, stopped again when muted.
 
+import { t } from './i18n.js';
 import { api, ic, camFromId, toast } from './core.js';
 import * as Prefs from './prefs.js';
 import { startLive, noSound, liveStream, playableStream } from './live.js';
@@ -72,7 +73,7 @@ export function attach(host, opts) {
   const slider = document.createElement('input');
   slider.type = 'range'; slider.className = 'spkvol';
   slider.min = '0'; slider.max = '1'; slider.step = '0.01';
-  slider.setAttribute('aria-label', 'Volume');
+  slider.setAttribute('aria-label', t('speaker.volume', 'Volume'));
   root.append(btn, slider);
   host.appendChild(root);
 
@@ -80,11 +81,11 @@ export function attach(host, opts) {
   const draw = () => {
     const low = muted || vol === 0;
     btn.innerHTML = ic(low ? 'mute' : vol < 0.5 ? 'vol-low' : 'vol');
-    const label = (muted ? 'Unmute ' : 'Mute ') + name();
+    const label = (muted ? t('speaker.unmute_label', 'Unmute ') : t('speaker.mute_label', 'Mute ')) + name();
     btn.setAttribute('aria-label', label);
     btn.title = label;
     slider.value = String(vol);
-    slider.title = 'Volume ' + Math.round(vol * 100) + '%';
+    slider.title = t('speaker.volume_pct', 'Volume {pct}%', { pct: Math.round(vol * 100) });
     root.classList.toggle('unmuted', !muted);
   };
   const applyVol = () => {
@@ -107,7 +108,7 @@ export function attach(host, opts) {
     if (active === self) active = null;
     draw();
   };
-  const say = () => toast((name() || 'This camera') + ': its sound can\'t be played in this browser. You get the picture only. Reloading the page tries again.');
+  const say = () => toast(t('speaker.sound_unplayable', '{name}: its sound can\'t be played in this browser. You get the picture only. Reloading the page tries again.', { name: (name() || 'This camera') }));
   // The browser gave up on this camera's sound while it was playing.
   const onNoSound = (e) => { if (e.detail && e.detail.cam === id && !muted) { mute(); say(); } };
   window.addEventListener('ambersight:nosound', onNoSound);

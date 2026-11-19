@@ -7,6 +7,7 @@
 
 // The protocols the split form offers. Anything else (rtmp://, lavfi://...) is
 // edited as a full address (baichuan:// has its own form: a battery camera, see fieldsFromUrls).
+import { t } from './i18n.js';
 export const PROTOCOLS = [['rtsp', 'RTSP'], ['rtsps', 'RTSPS'], ['http', 'HTTP'], ['https', 'HTTPS']];
 export const DEFAULT_PORT = { rtsp: 554, rtsps: 322, http: 80, https: 443 };
 
@@ -160,8 +161,8 @@ const UID_RE = /^[A-Za-z0-9]{6,40}$/;
 export const normUid = (s) => String(s == null ? '' : s).trim().toUpperCase();
 export const uidProblem = (s) => {
   const u = normUid(s);
-  if (!u) return 'Enter the camera\'s UID (Reolink app > Device info). It is 16 letters and digits.';
-  return UID_RE.test(u) ? '' : 'A UID is letters and digits only, like 95270000ABCDEFGH (Reolink app > Device info).';
+  if (!u) return t('camaddr.uid_enter', 'Enter the camera\'s UID (Reolink app > Device info). It is 16 letters and digits.');
+  return UID_RE.test(u) ? '' : t('camaddr.uid_invalid', 'A UID is letters and digits only, like 95270000ABCDEFGH (Reolink app > Device info).');
 };
 // The uid= in an address's query ('' when none).
 export function addrUid(pathOrUrl) {
@@ -198,28 +199,28 @@ export function addrProblems(f, mode) {
   const out = [];
   if (mode === 'battery') {
     const h = String(f.host || '').trim();
-    if (!h) out.push(['host', 'Enter the camera\'s address, like 192.168.1.50 or camera.local.']);
-    else if (/[\s/?#@]/.test(h)) out.push(['host', 'Only the camera\'s address goes here, like 192.168.1.50.']);
+    if (!h) out.push(['host', t('camaddr.host_enter', 'Enter the camera\'s address, like 192.168.1.50 or camera.local.')]);
+    else if (/[\s/?#@]/.test(h)) out.push(['host', t('camaddr.host_only', 'Only the camera\'s address goes here, like 192.168.1.50.')]);
     const p = String(f.port == null ? '' : f.port).trim();
-    if (p && !(/^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 65535)) out.push(['port', 'The port is a number from 1 to 65535.']);
+    if (p && !(/^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 65535)) out.push(['port', t('camaddr.port_range', 'The port is a number from 1 to 65535.')]);
     const w = uidProblem(f.uid);
     if (w) out.push(['uid', w]);
     return out;
   }
   if (mode === 'full') {
     const u = String(f.url || '').trim(), s = String(f.sub_url || '').trim();
-    if (!u) out.push(['url', 'Enter the camera\'s stream address, like rtsp://192.168.1.50:554/stream1.']);
-    else if (!hasScheme(u)) out.push(['url', 'Start the address with its protocol, like rtsp:// or http://.']);
-    if (s && !hasScheme(s)) out.push(['sub_url', 'Start the address with its protocol, like rtsp:// or http://.']);
+    if (!u) out.push(['url', t('camaddr.url_enter', 'Enter the camera\'s stream address, like rtsp://192.168.1.50:554/stream1.')]);
+    else if (!hasScheme(u)) out.push(['url', t('camaddr.url_start_proto', 'Start the address with its protocol, like rtsp:// or http://.')]);
+    if (s && !hasScheme(s)) out.push(['sub_url', t('camaddr.sub_url_start_proto', 'Start the address with its protocol, like rtsp:// or http://.')]);
     return out;
   }
   const h = String(f.host || '').trim();
-  if (!h) out.push(['host', 'Enter the camera\'s address, like 192.168.1.50 or camera.local.']);
-  else if (/[\s/?#@]/.test(h)) out.push(['host', 'Only the camera\'s address goes here, like 192.168.1.50. The rest goes in Main stream.']);
+  if (!h) out.push(['host', t('camaddr.host_enter', 'Enter the camera\'s address, like 192.168.1.50 or camera.local.')]);
+  else if (/[\s/?#@]/.test(h)) out.push(['host', t('camaddr.host_only_main', 'Only the camera\'s address goes here, like 192.168.1.50. The rest goes in Main stream.')]);
   const p = String(f.port == null ? '' : f.port).trim();
-  if (p && !(/^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 65535)) out.push(['port', 'The port is a number from 1 to 65535.']);
-  if (/\s/.test(String(f.main || '').trim())) out.push(['main', 'A stream path has no spaces. Write a space as %20.']);
-  if (/\s/.test(String(f.sub || '').trim())) out.push(['sub', 'A stream path has no spaces. Write a space as %20.']);
+  if (p && !(/^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 65535)) out.push(['port', t('camaddr.port_range', 'The port is a number from 1 to 65535.')]);
+  if (/\s/.test(String(f.main || '').trim())) out.push(['main', t('camaddr.path_no_spaces', 'A stream path has no spaces. Write a space as %20.')]);
+  if (/\s/.test(String(f.sub || '').trim())) out.push(['sub', t('camaddr.path_no_spaces', 'A stream path has no spaces. Write a space as %20.')]);
   return out;
 }
 
@@ -228,17 +229,17 @@ export function addrProblems(f, mode) {
 export const BRANDS = [
   { id: 'reolink', name: 'Reolink', tested: true, main: '/Preview_01_main', sub: '/Preview_01_sub', port: 554 },
   { id: 'reolink-h264', name: 'Reolink (h264Preview)', tested: true, main: '/h264Preview_01_main', sub: '/h264Preview_01_sub', port: 554 },
-  { id: 'wyze', name: 'Wyze (RTSP firmware)', tested: true, main: '/live', sub: '', port: 554 },
+  { id: 'wyze', name: t('camaddr.brand_wyze', 'Wyze (RTSP firmware)'), tested: true, main: '/live', sub: '', port: 554 },
   { id: 'amcrest', name: 'Amcrest', tested: true, main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1', port: 554 },
-  { id: 'dahua', name: 'Dahua (also Lorex, Empiretech and other rebrands)', tested: false, main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1', port: 554 },
+  { id: 'dahua', name: t('camaddr.brand_dahua', 'Dahua (also Lorex, Empiretech and other rebrands)'), tested: false, main: '/cam/realmonitor?channel=1&subtype=0', sub: '/cam/realmonitor?channel=1&subtype=1', port: 554 },
   { id: 'hikvision', name: 'Hikvision', tested: false, main: '/Streaming/Channels/101', sub: '/Streaming/Channels/102', port: 554 },
   { id: 'uniview', name: 'Uniview', tested: false, main: '/media/video1', sub: '/media/video2', port: 554 },
   { id: 'tapo', name: 'Tapo / TP-Link', tested: false, main: '/stream1', sub: '/stream2', port: 554 },
   { id: 'axis', name: 'Axis', tested: false, main: '/axis-media/media.amp', sub: '/axis-media/media.amp?resolution=640x360', port: 554 },
-  { id: 'annke', name: 'Annke (main only)', tested: false, main: '/H264/ch1/main/av_stream', sub: '', port: 554 },
+  { id: 'annke', name: t('camaddr.brand_annke', 'Annke (main only)'), tested: false, main: '/H264/ch1/main/av_stream', sub: '', port: 554 },
   { id: 'foscam', name: 'Foscam', tested: false, main: '/videoMain', sub: '/videoSub', port: 88 },
   // Not a stream path: a battery camera talks Reolink's own protocol (baichuan://) and needs its UID.
-  { id: 'reolink-battery', name: 'Reolink battery (Argus, no hub)', tested: true, battery: true, main: '', sub: '', port: 0 },
+  { id: 'reolink-battery', name: t('camaddr.brand_reolink_battery', 'Reolink battery (Argus, no hub)'), tested: true, battery: true, main: '', sub: '', port: 0 },
 ];
 // The brand whose paths these are ('' when none, or when several brands share them, as
 // Amcrest and Dahua do).
@@ -257,10 +258,10 @@ export function brandPort(cur, brand, scheme) {
 // string): a period set in the config file (60 to 1440) is offered as it is, so the form
 // shows it and saving keeps it.
 export function catchUpOptions(every) {
-  const opts = [['60', 'about hourly, while the camera is awake'], ['180', 'every 3 hours, while awake'], ['360', 'every 6 hours, while awake'], ['0', 'only after a restart, a reconnect or a missed push']];
+  const opts = [['60', t('camaddr.catchup_60', 'about hourly, while the camera is awake')], ['180', t('camaddr.catchup_180', 'every 3 hours, while awake')], ['360', t('camaddr.catchup_360', 'every 6 hours, while awake')], ['0', t('camaddr.catchup_0', 'only after a restart, a reconnect or a missed push')]];
   const m = Number(every);
   if (!opts.some(o => o[0] === every) && m > 0) {
-    opts.splice(opts.length - 1, 0, [every, (m % 60 ? 'every ' + m + ' minutes' : 'every ' + (m / 60) + ' hours') + ', while awake']);
+    opts.splice(opts.length - 1, 0, [every, m % 60 ? t('camaddr.catchup_min', 'every {n} minutes, while awake', { n: m }) : t('camaddr.catchup_h', 'every {n} hours, while awake', { n: m / 60 })]);
   }
   return opts;
 }

@@ -3,6 +3,7 @@
 //   GET /api/restream   {enabled, port, listening, error, auth, cameras: [{id, name, slug, share, has_sub, blocked, main, sub}]}
 //   PUT /api/restream   {enabled?, port?, cameras?: {name: bool}}   (admin)
 
+import { t } from './i18n.js';
 import { api, esc, toast, errText, liveSwitch, swHtml, fld, formBar, hasUnsaved, ic } from './core.js';
 import { lead, how, more, notice } from './sp_kit.js';
 
@@ -10,11 +11,11 @@ export function mountShare(el) {
   let st = null, timer = 0, busy = false, gone = false;
   const host = location.hostname.includes(':') ? '[' + location.hostname + ']' : location.hostname;
 
-  el.innerHTML = '<p class="empty">Loading...</p>';
+  el.innerHTML = '<p class="empty">' + t('share_settings.loading', 'Loading...') + '</p>';
   load();
 
   async function load() {
-    try { st = await api('/api/restream'); } catch (e) { if (!gone) el.innerHTML = '<p class="empty">Could not load: ' + esc(errText(e)) + '</p>'; return; }
+    try { st = await api('/api/restream'); } catch (e) { if (!gone) el.innerHTML = '<p class="empty">' + t('share_settings.could_not_load', 'Could not load: ') + esc(errText(e)) + '</p>'; return; }
     if (gone) return;
     paint();
     clearTimeout(timer);
@@ -33,16 +34,17 @@ export function mountShare(el) {
 
   function urlRow(label, url) {
     return '<div class="cs-pushrow"><span>' + label + '</span><code>' + esc(url) + '</code>' +
-      '<button type="button" class="cs-reset" data-copytext="' + esc(url) + '">Copy</button></div>';
+      '<button type="button" class="cs-reset" data-copytext="' + esc(url) + '">' + t('share_settings.copy', 'Copy') + '</button></div>';
   }
 
   function streamInfo(s) {
     if (!s) return '';
     const bits = [];
     if (s.live) {
-      bits.push(s.codec + (s.width ? ' ' + s.width + 'x' + s.height : '') + (s.audio ? ' + audio' : ', video only'));
-      bits.push(s.clients ? s.clients + (s.clients === 1 ? ' viewer' : ' viewers') : 'no viewers');
-    } else bits.push('not streaming');
+      const video = s.codec + (s.width ? ' ' + s.width + 'x' + s.height : '');
+      bits.push(s.audio ? t('share_settings.video_audio', '{video} + audio', { video }) : t('share_settings.video_only', '{video}, video only', { video }));
+      bits.push(t('share_settings.clients', '{n, plural, =0 {no viewers} one {# viewer} other {# viewers}}', { n: s.clients }));
+    } else bits.push(t('share_settings.not_streaming', 'not streaming'));
     return bits.join(', ');
   }
 
@@ -51,12 +53,12 @@ export function mountShare(el) {
     const creds = st.auth ? 'USER:PASSWORD@' : '';
     const base = 'rtsp://' + creds + host + ':' + st.port + '/' + c.slug;
     const live = c.share && !c.blocked;
-    const sub = c.blocked ? esc(c.blocked) : c.share ? (st.enabled ? 'Shared. ' : 'Marked to share; sharing is off. ') + esc(streamInfo(c.main)) : '';
+    const sub = c.blocked ? esc(c.blocked) : c.share ? (st.enabled ? t('share_settings.shared_info', 'Shared. {info}', { info: esc(streamInfo(c.main)) }) : t('share_settings.marked_info', 'Marked to share; sharing is off. {info}', { info: esc(streamInfo(c.main)) })) : '';
     let h = '<div class="sh-row" data-cam="' + esc(c.name) + '"><div class="sh-main">' + swHtml('data-share', c.share, esc(c.name), sub, !!c.blocked) +
-      (live ? '<button type="button" class="btn sh-copy" data-copytext="' + esc(base) + '" title="Copy this camera\'s stream address">' + ic('share') + ' Copy address</button>' : '') + '</div>';
+      (live ? '<button type="button" class="btn sh-copy" data-copytext="' + esc(base) + '" title="' + t('share_settings.copy_address_title', "Copy this camera's stream address") + '">' + ic('share') + ' ' + t('share_settings.copy_address', 'Copy address') + '</button>' : '') + '</div>';
     if (live) {
-      h += '<details class="sh-more"><summary>Other addresses</summary><div class="cs-push">' + (c.has_sub ? urlRow('Sub stream', base + '/sub') + '<div class="hint">Sub stream: ' + esc(streamInfo(c.sub)) + '</div>' : '') +
-        urlRow('Snapshot', location.origin + '/api/snapshot/' + c.id) + urlRow('MJPEG', location.origin + '/api/live/' + c.id) + '</div></details>';
+      h += '<details class="sh-more"><summary>' + t('share_settings.other_addresses', 'Other addresses') + '</summary><div class="cs-push">' + (c.has_sub ? urlRow(t('share_settings.sub_stream', 'Sub stream'), base + '/sub') + '<div class="hint">' + t('share_settings.sub_stream_info', 'Sub stream: {info}', { info: esc(streamInfo(c.sub)) }) + '</div>' : '') +
+        urlRow(t('share_settings.snapshot', 'Snapshot'), location.origin + '/api/snapshot/' + c.id) + urlRow(t('share_settings.mjpeg', 'MJPEG'), location.origin + '/api/live/' + c.id) + '</div></details>';
     }
     return h + '</div>';
   }
@@ -66,30 +68,30 @@ export function mountShare(el) {
     const shareable = st.cameras.filter(c => !c.blocked);
     const anyShared = st.cameras.some(c => c.share && !c.blocked);
     const allShared = shareable.length > 0 && shareable.every(c => c.share);
-    if (st.error) warn.push(notice('bad', '<b>' + esc(st.error) + '</b> Choose another port under More settings.'));
-    else if (st.enabled && !st.listening) warn.push('<div class="hint">Opening the port...</div>');
-    if (st.enabled && !st.auth) warn.push(notice('warn', 'No accounts are set up, so anyone who can reach this server can watch the shared streams.', '<a class="btn" href="#settings/users/users">Add an account</a>'));
-    if (anyShared) warn.push(notice('warn', 'Shared streams are not encrypted: use them on your own network or over a private link such as Tailscale.'));
-    const cams = st.cameras.length ? st.cameras.map(camHtml).join('') : '<p class="empty">No cameras yet.</p>';
-    el.innerHTML = '<div class="ac">' + lead('Lets other apps, like Home Assistant or VLC, watch your cameras through AmberSight.', 'Leave it off unless you use another app that needs the video.') +
-      how('Other apps connect here instead of to each camera, so the cameras only ever serve AmberSight. The video is passed on as it arrives (no re-encoding, almost no extra load), with sound when the camera has AAC audio. Off until you turn it on, and only for the cameras you switch on below. Apps sign in with an AmberSight account (user name and password, sent as HTTP Basic); accounts limited to some cameras only see those.') +
+    if (st.error) warn.push(notice('bad', '<b>' + esc(st.error) + '</b> ' + t('share_settings.choose_port', 'Choose another port under More settings.')));
+    else if (st.enabled && !st.listening) warn.push('<div class="hint">' + t('share_settings.opening_port', 'Opening the port...') + '</div>');
+    if (st.enabled && !st.auth) warn.push(notice('warn', t('share_settings.no_accounts', 'No accounts are set up, so anyone who can reach this server can watch the shared streams.'), '<a class="btn" href="#settings/users/users">' + t('share_settings.add_account', 'Add an account') + '</a>'));
+    if (anyShared) warn.push(notice('warn', t('share_settings.shared_not_encrypted', 'Shared streams are not encrypted: use them on your own network or over a private link such as Tailscale.')));
+    const cams = st.cameras.length ? st.cameras.map(camHtml).join('') : '<p class="empty">' + t('share_settings.no_cameras_yet', 'No cameras yet.') + '</p>';
+    el.innerHTML = '<div class="ac">' + lead(t('share_settings.lead_main', 'Lets other apps, like Home Assistant or VLC, watch your cameras through AmberSight.'), t('share_settings.lead_sub', 'Leave it off unless you use another app that needs the video.')) +
+      how(t('share_settings.how', 'Other apps connect here instead of to each camera, so the cameras only ever serve AmberSight. The video is passed on as it arrives (no re-encoding, almost no extra load), with sound when the camera has AAC audio. Off until you turn it on, and only for the cameras you switch on below. Apps sign in with an AmberSight account (user name and password, sent as HTTP Basic); accounts limited to some cameras only see those.')) +
       warn.join('') +
-      '<div class="ac-card" data-sharecard>' + swHtml('data-en', st.enabled, 'Share camera streams', st.enabled ? (st.listening ? 'On. Listening on port ' + st.port + '.' : 'On. Not listening yet.') : 'Off') +
-      more('More settings', fld('Port', 'min="1" max="65535" data-port value="' + st.port + '"', '', 'Default 8554.')) + '</div>' +
-      '<div class="sp-grp"><b>Cameras</b></div>' +
-      (shareable.length > 1 ? swHtml('data-shareall', allShared, 'Share all cameras', allShared ? 'Every camera is shared.' : '') : '') +
+      '<div class="ac-card" data-sharecard>' + swHtml('data-en', st.enabled, t('share_settings.share_camera_streams', 'Share camera streams'), st.enabled ? (st.listening ? t('share_settings.on_listening', 'On. Listening on port {port}.', { port: st.port }) : t('share_settings.on_not_listening', 'On. Not listening yet.')) : t('share_settings.off', 'Off')) +
+      more(t('share_settings.more_settings', 'More settings'), fld(t('share_settings.port_label', 'Port'), 'min="1" max="65535" data-port value="' + st.port + '"', '', t('share_settings.port_default', 'Default 8554.'))) + '</div>' +
+      '<div class="sp-grp"><b>' + t('share_settings.cameras', 'Cameras') + '</b></div>' +
+      (shareable.length > 1 ? swHtml('data-shareall', allShared, t('share_settings.share_all_cameras', 'Share all cameras'), allShared ? t('share_settings.every_camera_shared', 'Every camera is shared.') : '') : '') +
       '<div class="sh-list">' + cams + '</div>' +
-      more('How to use these addresses',
-      '<p class="hint"><b>Home Assistant</b>: Settings, Devices &amp; services, Add integration, <b>Generic Camera</b>. Stream source: the main or sub stream address, with <b>USER</b> and <b>PASSWORD</b> filled in (a password with special characters must be percent-encoded, @ is %40). RTSP transport protocol: TCP. Still image URL: the Snapshot address, with the same user name and password in the authentication fields (basic); the MJPEG address works as a stream source too. If this server uses HTTPS with its own certificate, turn off certificate verification there.</p>' +
-      '<p class="hint"><b>Scrypted</b>: add an <b>RTSP Camera</b> (or ONVIF-less generic) and paste the stream address; use the sub stream for low-resolution uses such as detection.</p>' +
-      '<p class="hint"><b>VLC</b>: Media, Open Network Stream, paste the address (it asks for the user name and password if they are not in it). <b>Another NVR</b>: add a generic RTSP camera with the address; choose TCP.</p>' +
-      '<p class="hint">Only TCP is offered (UDP is not). Shared video is the camera\'s own picture, without AmberSight\'s drawn text. The camera sound is shared when it is AAC; G.711 sound is not (video only).</p>') + '</div>';
+      more(t('share_settings.how_use_addresses', 'How to use these addresses'),
+      '<p class="hint">' + t('share_settings.how_use_addresses_body', '<b>Home Assistant</b>: Settings, Devices &amp; services, Add integration, <b>Generic Camera</b>. Stream source: the main or sub stream address, with <b>USER</b> and <b>PASSWORD</b> filled in (a password with special characters must be percent-encoded, @ is %40). RTSP transport protocol: TCP. Still image URL: the Snapshot address, with the same user name and password in the authentication fields (basic); the MJPEG address works as a stream source too. If this server uses HTTPS with its own certificate, turn off certificate verification there.') + '</p>' +
+      '<p class="hint">' + t('share_settings.scrypted_hint', '<b>Scrypted</b>: add an <b>RTSP Camera</b> (or ONVIF-less generic) and paste the stream address; use the sub stream for low-resolution uses such as detection.') + '</p>' +
+      '<p class="hint">' + t('share_settings.vlc_hint', '<b>VLC</b>: Media, Open Network Stream, paste the address (it asks for the user name and password if they are not in it). <b>Another NVR</b>: add a generic RTSP camera with the address; choose TCP.') + '</p>' +
+      '<p class="hint">' + t('share_settings.tcp_hint', 'Only TCP is offered (UDP is not). Shared video is the camera\'s own picture, without AmberSight\'s drawn text. The camera sound is shared when it is AAC; G.711 sound is not (video only).') + '</p>') + '</div>';
     // Switches save when flipped; the port goes through the bar.
     liveSwitch(el.querySelector('[data-en]'), (on) => save({ enabled: on }));
     formBar(el.querySelector('[data-sharecard]'), { save: async () => {
       const port = el.querySelector('[data-port]');
       const v = parseInt(port.value, 10);
-      if (!(v >= 1 && v <= 65535)) throw new Error('Enter a port between 1 and 65535.');
+      if (!(v >= 1 && v <= 65535)) throw new Error(t('share_settings.enter_port', 'Enter a port between 1 and 65535.'));
       await save({ port: v });
       paint(); load();
     } });
@@ -102,8 +104,8 @@ export function mountShare(el) {
 
   el.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-copytext]'); if (!b) return;
-    try { await navigator.clipboard.writeText(b.dataset.copytext); const old = b.innerHTML; b.textContent = 'Copied'; setTimeout(() => { b.innerHTML = old; }, 1200); }
-    catch (err) { toast('Copy did not work here: select the text instead'); }
+    try { await navigator.clipboard.writeText(b.dataset.copytext); const old = b.innerHTML; b.textContent = t('share_settings.copied', 'Copied'); setTimeout(() => { b.innerHTML = old; }, 1200); }
+    catch (err) { toast(t('share_settings.copy_failed', 'Copy did not work here: select the text instead')); }
   });
   return () => { gone = true; clearTimeout(timer); };
 }

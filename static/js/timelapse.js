@@ -2,6 +2,7 @@
 // each night for yesterday (when turned on), or now by an admin. Admins also
 // get the settings here.
 
+import { t } from './i18n.js';
 import { state, api, esc, enc, fmtSize, toast, swHtml, fld, liveSwitch, formBar } from './core.js';
 
 let el = null, data = null, cam = '', day = '', timer = 0;
@@ -16,7 +17,7 @@ async function load() {
   if (!cam || !(cams.includes(cam) || own.includes(cam))) cam = cams[0] || own[0] || '';
   paintList();
   clearTimeout(timer);
-  if (data.timelapses.some(t => t.making)) timer = setTimeout(() => { if (el && el.isConnected && !el.closest('[hidden]')) load(); }, 5000);
+  if (data.timelapses.some(x => x.making)) timer = setTimeout(() => { if (el && el.isConnected && !el.closest('[hidden]')) load(); }, 5000);
 }
 
 // Only the list part is redrawn (on the 5 s refresh too), so edits in the settings card survive.
@@ -24,26 +25,26 @@ function paintList() {
   const host = el.querySelector('[data-tllist]');
   if (!host) return;
   const all = data.timelapses;
-  const camNames = [...new Set(all.map(t => t.camera).concat(state.cams.filter(c => !c.remote).map(c => c.name)))];
-  const mine = all.filter(t => t.camera === cam);
-  const ready = mine.filter(t => !t.making);
-  if (!ready.some(t => t.date === day)) day = ready.length ? ready[0].date : '';
-  const cur = ready.find(t => t.date === day);
+  const camNames = [...new Set(all.map(x => x.camera).concat(state.cams.filter(c => !c.remote).map(c => c.name)))];
+  const mine = all.filter(x => x.camera === cam);
+  const ready = mine.filter(x => !x.making);
+  if (!ready.some(x => x.date === day)) day = ready.length ? ready[0].date : '';
+  const cur = ready.find(x => x.date === day);
   let h = '<div class="tl-lapse">';
-  if (camNames.length) h += '<div class="searchbar"><label>Camera <select data-cam>' + camNames.map(n => '<option' + (n === cam ? ' selected' : '') + '>' + esc(n) + '</option>').join('') + '</select></label>' +
-    (state.isAdmin ? '<label>Day <input type="date" data-day value="' + today() + '" max="' + today() + '"></label><button class="btn" data-make>Make now</button>' : '') + '</div>';
+  if (camNames.length) h += '<div class="searchbar"><label>' + t('timelapse.camera', 'Camera') + ' <select data-cam>' + camNames.map(n => '<option' + (n === cam ? ' selected' : '') + '>' + esc(n) + '</option>').join('') + '</select></label>' +
+    (state.isAdmin ? '<label>' + t('timelapse.day', 'Day') + ' <input type="date" data-day value="' + today() + '" max="' + today() + '"></label><button class="btn" data-make>' + t('timelapse.make_now', 'Make now') + '</button>' : '') + '</div>';
   if (!all.length && !data.enabled) {
-    h += '<p class="empty">No time-lapses yet.' + (state.isAdmin ? ' Turn them on below, or make one now.' : ' An admin can turn them on.') + '</p>';
+    h += '<p class="empty">' + (state.isAdmin ? t('timelapse.none_admin', 'No time-lapses yet. Turn them on below, or make one now.') : t('timelapse.none_user', 'No time-lapses yet. An admin can turn them on.')) + '</p>';
   }
   if (mine.length) {
-    h += '<div class="chips tl-days">' + mine.map(t => '<button class="chip' + (t.date === day ? ' on' : '') + '" data-d="' + t.date + '"' + (t.making ? ' disabled' : '') + '>' + esc(prettyDay(t.date)) + (t.making ? ' (making…)' : '') + '</button>').join('') + '</div>';
+    h += '<div class="chips tl-days">' + mine.map(x => '<button class="chip' + (x.date === day ? ' on' : '') + '" data-d="' + x.date + '"' + (x.making ? ' disabled' : '') + '>' + esc(prettyDay(x.date)) + (x.making ? ' ' + t('timelapse.making_dots', '(making…)') : '') + '</button>').join('') + '</div>';
   } else if (cam && (all.length || data.enabled)) {
-    h += '<p class="hint">No time-lapse of ' + esc(cam) + ' yet.</p>';
+    h += '<p class="hint">' + t('timelapse.no_timelapse_of', 'No time-lapse of {cam} yet.', { cam: esc(cam) }) + '</p>';
   }
   if (cur) {
     const url = '/api/timelapse/' + enc(cur.slug) + '/' + cur.date;
     h += '<div class="tl-player"><video controls playsinline preload="metadata" src="' + url + '"></video>' +
-      '<div class="row"><span class="hint">' + esc(cam) + ' · ' + esc(prettyDay(cur.date)) + ' · ' + fmtSize(cur.bytes) + '</span><a class="btn" href="' + url + '?download=1" download>Download</a></div></div>';
+      '<div class="row"><span class="hint">' + esc(cam) + ' · ' + esc(prettyDay(cur.date)) + ' · ' + fmtSize(cur.bytes) + '</span><a class="btn" href="' + url + '?download=1" download>' + t('timelapse.download', 'Download') + '</a></div></div>';
   }
   h += '</div>';
   host.innerHTML = h;
@@ -56,7 +57,7 @@ function paintList() {
     mk.disabled = true;
     try {
       const r = await api('/api/timelapse', { json: { camera: cam, date: q('[data-day]').value || today() } });
-      toast(r.started ? 'Making the time-lapse; it takes a minute or two' : 'Already being made');
+      toast(r.started ? t('timelapse.making', 'Making the time-lapse; it takes a minute or two') : t('timelapse.already_being_made', 'Already being made'));
       load();
     } catch (e) { toast(e.message); mk.disabled = false; }
   };
@@ -74,13 +75,13 @@ async function settingsCard(host) {
   try { s = (await api('/api/settings')).timelapse; } catch (e) { return; }
   const cams = state.cams.filter(c => !c.remote && c.record !== false).map(c => c.name);
   const all = !s.cameras || !s.cameras.length;
-  host.innerHTML = '<div class="ac-card tl-set"><div class="ac-card-t">Time-lapse settings</div>' +
-    swHtml('data-en', s.enabled, 'Make one each night for yesterday') +
-    '<div class="ac-grid3">' + fld('Length', 'data-sec min="10" max="600" value="' + s.seconds + '"', 's') +
-    fld('Made at', 'data-hour min="0" max="23" value="' + s.hour + '"', 'o\'clock (0-23)') +
-    fld('Keep for', 'data-keep min="0" max="3650" value="' + s.keep_days + '"', 'days', '0 keeps them always') + '</div>' +
-    '<div class="hint">A day becomes one picture every ' + Math.round(86400 / (s.seconds * 30)) + ' s, played at 30 per second. It is made from keyframes, so it takes a minute or two per camera at night.</div>' +
-    '<div class="sec">Cameras</div>' + swHtml('data-all', all, 'All cameras that record') +
+  host.innerHTML = '<div class="ac-card tl-set"><div class="ac-card-t">' + t('timelapse.settings', 'Time-lapse settings') + '</div>' +
+    swHtml('data-en', s.enabled, t('timelapse.make_one_each_night', 'Make one each night for yesterday')) +
+    '<div class="ac-grid3">' + fld(t('timelapse.length_label', 'Length'), 'data-sec min="10" max="600" value="' + s.seconds + '"', t('timelapse.unit_s', 's')) +
+    fld(t('timelapse.made_at_label', 'Made at'), 'data-hour min="0" max="23" value="' + s.hour + '"', t('timelapse.made_at_placeholder', "o'clock (0-23)")) +
+    fld(t('timelapse.keep_for_label', 'Keep for'), 'data-keep min="0" max="3650" value="' + s.keep_days + '"', t('timelapse.days_placeholder', 'days'), t('timelapse.keep_hint', '0 keeps them always')) + '</div>' +
+    '<div class="hint">' + t('timelapse.hint_day', 'A day becomes one picture every {n} s, played at 30 per second. It is made from keyframes, so it takes a minute or two per camera at night.', { n: Math.round(86400 / (s.seconds * 30)) }) + '</div>' +
+    '<div class="sec">' + t('timelapse.cameras', 'Cameras') + '</div>' + swHtml('data-all', all, t('timelapse.all_that_record', 'All cameras that record')) +
     '<div class="cs-copygrid" data-camset' + (all ? ' hidden' : '') + '>' + cams.map(n => '<label class="asys-chk"><input type="checkbox" data-c="' + esc(n) + '"' + (all || s.cameras.includes(n) ? ' checked' : '') + '> ' + esc(n) + '</label>').join('') + '</div></div>';
   const q = (x) => host.querySelector(x);
   const body = () => ({
@@ -105,7 +106,7 @@ async function settingsCard(host) {
 }
 
 export const timelapseTab = {
-  id: 'timelapse', label: 'Time-lapse', order: 65,
+  id: 'timelapse', label: t('timelapse.tab', 'Time-lapse'), order: 65,
   init(e) { el = e; },
   show() { start(); },
   leaveHash: () => '#timelapse',

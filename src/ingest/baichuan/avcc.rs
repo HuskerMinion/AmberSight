@@ -12,10 +12,10 @@
 //! `super::super::sps` does not expose picture size), so the caller supplies
 //! them via [`AvccBridge::set_dimensions`].
 //!
-//! H.265 is not implemented here yet: every battery Argus we have seen streams
-//! H.264. [`AvccBridge::push_frame`] returns `None` for an H.265 bridge until
-//! the HEVCDecoderConfigurationRecord builder is written (tracked for the
-//! reader phase).
+//! H.265 (wired cameras' main streams, e.g. a Duo Floodlight's 4608x1728)
+//! works the same way: VPS/SPS/PPS go into an HEVCDecoderConfigurationRecord
+//! (`build_hevc_config`, written from ISO/IEC 14496-15 and the H.265 SPS
+//! syntax) and IRAP pictures are keyframes.
 
 use crate::ingest::flv::{codec_string, video_sample_entry};
 use crate::ingest::recorder::VideoParams;
@@ -116,12 +116,166 @@ pub fn build_avc_config(sps: &[u8], pps: &[u8]) -> Option<Vec<u8>> {
     Some(a)
 }
 
+/// H.265 NAL unit types we care about.
+const HEVC_VPS: u8 = 32;
+const HEVC_SPS: u8 = 33;
+const HEVC_PPS: u8 = 34;
+const HEVC_AUD: u8 = 35;
+
+fn h265_type(nal: &[u8]) -> Option<u8> {
+    (nal.len() >= 2).then(|| (nal[0] >> 1) & 0x3f)
+}
+
+/// A NAL unit's payload without its emulation-prevention bytes
+/// (`00 00 03` -> `00 00`).
+fn rbsp(nal: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nal.len());
+    let mut zeros = 0;
+    for &b in nal {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+    out
+}
+
+/// A big-endian bit reader with Exp-Golomb codes.
+struct Bits<'a> {
+    b: &'a [u8],
+    pos: usize,
+}
+
+impl Bits<'_> {
+    fn bit(&mut self) -> Option<u32> {
+        let v = (self.b.get(self.pos / 8)? >> (7 - self.pos % 8)) & 1;
+        self.pos += 1;
+        Some(v as u32)
+    }
+    fn bits(&mut self, n: u32) -> Option<u32> {
+        let mut v = 0;
+        for _ in 0..n {
+            v = (v << 1) | self.bit()?;
+        }
+        Some(v)
+    }
+    fn skip(&mut self, n: usize) -> Option<()> {
+        self.pos += n;
+        (self.pos <= self.b.len() * 8).then_some(())
+    }
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.bit()? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        Some((1u32 << zeros) - 1 + self.bits(zeros)?)
+    }
+}
+
+/// What the HEVC configuration record copies from the SPS: the 12 bytes
+/// of general profile/tier/level, the sub-layer count, the nesting flag,
+/// the chroma format and the bit depths.
+struct HevcSpsInfo {
+    ptl: [u8; 12],
+    max_sub_layers: u8,
+    temporal_id_nesting: bool,
+    chroma_format_idc: u8,
+    bit_depth_luma_minus8: u8,
+    bit_depth_chroma_minus8: u8,
+}
+
+fn parse_hevc_sps(nal: &[u8]) -> Option<HevcSpsInfo> {
+    let r = rbsp(nal.get(2..)?); // after the 2-byte NAL header
+    let mut b = Bits { b: &r, pos: 0 };
+    b.bits(4)?; // sps_video_parameter_set_id
+    let max_sub_layers_minus1 = b.bits(3)? as usize;
+    let temporal_id_nesting = b.bit()? == 1;
+    // profile_tier_level: 96 bits of general profile, tier and level.
+    let mut ptl = [0u8; 12];
+    ptl.copy_from_slice(r.get(1..13)?);
+    b.skip(96)?;
+    let mut present = Vec::with_capacity(max_sub_layers_minus1);
+    for _ in 0..max_sub_layers_minus1 {
+        present.push((b.bit()?, b.bit()?));
+    }
+    if max_sub_layers_minus1 > 0 {
+        b.skip(2 * (8 - max_sub_layers_minus1))?;
+    }
+    for (profile, level) in present {
+        if profile == 1 {
+            b.skip(88)?;
+        }
+        if level == 1 {
+            b.skip(8)?;
+        }
+    }
+    b.ue()?; // sps_seq_parameter_set_id
+    let chroma_format_idc = b.ue()?;
+    if chroma_format_idc == 3 {
+        b.bit()?; // separate_colour_plane_flag
+    }
+    b.ue()?; // pic_width_in_luma_samples
+    b.ue()?; // pic_height_in_luma_samples
+    if b.bit()? == 1 {
+        for _ in 0..4 {
+            b.ue()?; // conformance window offsets
+        }
+    }
+    let luma = b.ue()?;
+    let chroma = b.ue()?;
+    if chroma_format_idc > 3 || luma > 8 || chroma > 8 {
+        return None;
+    }
+    Some(HevcSpsInfo {
+        ptl,
+        max_sub_layers: max_sub_layers_minus1 as u8 + 1,
+        temporal_id_nesting,
+        chroma_format_idc: chroma_format_idc as u8,
+        bit_depth_luma_minus8: luma as u8,
+        bit_depth_chroma_minus8: chroma as u8,
+    })
+}
+
+/// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15) from one VPS,
+/// SPS and PPS (each with its 2-byte NAL header), 4-byte NAL lengths.
+/// `None` when the SPS cannot be read or a set is too long to record.
+pub fn build_hevc_config(vps: &[u8], sps: &[u8], pps: &[u8]) -> Option<Vec<u8>> {
+    if [vps, sps, pps].iter().any(|n| n.len() < 3 || n.len() > u16::MAX as usize) {
+        return None;
+    }
+    let info = parse_hevc_sps(sps)?;
+    let mut a = vec![1u8]; // configurationVersion
+    a.extend_from_slice(&info.ptl); // profile space/tier/idc, compat flags, constraint flags, level
+    a.extend_from_slice(&[0xf0, 0x00]); // reserved + min_spatial_segmentation_idc 0
+    a.push(0xfc); // reserved + parallelismType 0 (unknown)
+    a.push(0xfc | info.chroma_format_idc);
+    a.push(0xf8 | info.bit_depth_luma_minus8);
+    a.push(0xf8 | info.bit_depth_chroma_minus8);
+    a.extend_from_slice(&[0, 0]); // avgFrameRate unknown
+    // constantFrameRate 0, numTemporalLayers, temporalIdNested, lengthSizeMinusOne 3.
+    a.push(((info.max_sub_layers & 7) << 3) | (u8::from(info.temporal_id_nesting) << 2) | 3);
+    a.push(3); // numOfArrays
+    for (t, nal) in [(HEVC_VPS, vps), (HEVC_SPS, sps), (HEVC_PPS, pps)] {
+        a.push(0x80 | t); // array_completeness 1, NAL type
+        a.extend_from_slice(&1u16.to_be_bytes());
+        a.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+        a.extend_from_slice(nal);
+    }
+    Some(a)
+}
+
 /// Converts the camera's Annex-B access units into AVCC frames and tracks the
 /// current parameter sets to produce a `VideoParams`. One per stream.
 pub struct AvccBridge {
     h265: bool,
     width: u16,
     height: u16,
+    vps: Option<Vec<u8>>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
     config: Option<Vec<u8>>,
@@ -131,7 +285,7 @@ pub struct AvccBridge {
 
 impl AvccBridge {
     pub fn new(h265: bool, width: u16, height: u16) -> Self {
-        AvccBridge { h265, width, height, sps: None, pps: None, config: None, params_dirty: false }
+        AvccBridge { h265, width, height, vps: None, sps: None, pps: None, config: None, params_dirty: false }
     }
 
     /// Update the picture size (from a BcMedia `InfoV2` message). A later Info
@@ -153,7 +307,13 @@ impl AvccBridge {
 
     fn rebuild_config(&mut self) {
         if let (Some(sps), Some(pps)) = (&self.sps, &self.pps) {
-            let Some(next) = build_avc_config(sps, pps) else { return };
+            let next = if self.h265 {
+                let Some(vps) = &self.vps else { return };
+                build_hevc_config(vps, sps, pps)
+            } else {
+                build_avc_config(sps, pps)
+            };
+            let Some(next) = next else { return };
             if self.config.as_deref() != Some(next.as_slice()) {
                 self.config = Some(next);
                 self.params_dirty = true;
@@ -165,11 +325,39 @@ impl AvccBridge {
     /// converted frame, or `None` when the unit carried only parameter sets (or
     /// nothing usable, or H.265 which is not yet supported).
     pub fn push_frame(&mut self, annexb: &[u8]) -> Option<BridgedFrame> {
-        if self.h265 {
-            return None; // TODO(reader phase): HEVCDecoderConfigurationRecord
-        }
         let mut out = Vec::new();
         let mut key = false;
+        if self.h265 {
+            for nal in split_annexb(annexb) {
+                let Some(t) = h265_type(nal) else { continue };
+                let slot = match t {
+                    HEVC_VPS => &mut self.vps,
+                    HEVC_SPS => &mut self.sps,
+                    HEVC_PPS => &mut self.pps,
+                    HEVC_AUD => continue,
+                    _ => {
+                        // IRAP pictures (BLA, IDR, CRA: types 16..=21) are keyframes.
+                        if (16..=21).contains(&t) {
+                            key = true;
+                        }
+                        push_avcc(&mut out, nal);
+                        continue;
+                    }
+                };
+                if slot.as_deref() != Some(nal) {
+                    *slot = Some(nal.to_vec());
+                    self.rebuild_config();
+                }
+            }
+            if out.is_empty() {
+                return None;
+            }
+            let new_params = self.params_dirty && self.config.is_some();
+            if new_params {
+                self.params_dirty = false;
+            }
+            return Some(BridgedFrame { data: out, key, new_params });
+        }
         for nal in split_annexb(annexb) {
             match h264_type(nal) {
                 Some(NAL_SPS) => {
@@ -460,10 +648,99 @@ mod tests {
         assert!(keys >= 1, "at least one keyframe reaches the recorder");
     }
 
+    // An H.265 SPS (Main profile, level 5.1, 4:2:0, 8-bit, 4608x1728),
+    // built here bit by bit so the test needs no capture.
+    fn hevc_sps() -> Vec<u8> {
+        struct W {
+            v: Vec<u8>,
+            n: u32,
+        }
+        impl W {
+            fn bit(&mut self, b: u32) {
+                if self.n % 8 == 0 {
+                    self.v.push(0);
+                }
+                let l = self.v.len() - 1;
+                self.v[l] |= ((b & 1) as u8) << (7 - self.n % 8);
+                self.n += 1;
+            }
+            fn bits(&mut self, v: u32, k: u32) {
+                for i in (0..k).rev() {
+                    self.bit(v >> i);
+                }
+            }
+            fn ue(&mut self, v: u32) {
+                let x = v + 1;
+                let k = 32 - x.leading_zeros();
+                self.bits(0, k - 1);
+                self.bits(x, k);
+            }
+        }
+        let mut w = W { v: vec![], n: 0 };
+        w.bits(0, 4); // vps id
+        w.bits(0, 3); // max_sub_layers_minus1
+        w.bit(1); // temporal_id_nesting
+        w.bits(0, 2);
+        w.bit(0);
+        w.bits(1, 5); // profile space, tier, idc = Main
+        w.bits(0x6000_0000, 32); // compatibility flags 1 and 2
+        w.bits(0x9000, 16);
+        w.bits(0, 32); // constraint flags (progressive, frame-only)
+        w.bits(153, 8); // level 5.1
+        w.ue(0); // sps id
+        w.ue(1); // chroma 4:2:0
+        w.ue(4608);
+        w.ue(1728);
+        w.bit(0); // no conformance window
+        w.ue(0);
+        w.ue(0); // 8-bit
+        w.bit(1); // (more syntax follows in a real SPS)
+        let mut nal = vec![0x42, 0x01];
+        // Emulation prevention, as a real SPS needs it.
+        let mut zeros = 0;
+        for b in w.v {
+            if zeros >= 2 && b <= 3 {
+                nal.push(3);
+                zeros = 0;
+            }
+            zeros = if b == 0 { zeros + 1 } else { 0 };
+            nal.push(b);
+        }
+        nal
+    }
+
     #[test]
-    fn h265_bridge_is_not_yet_supported() {
+    fn h265_frames_get_an_hevc_record_and_irap_keyframes() {
+        let vps = vec![0x40, 0x01, 0x0c, 0x01, 0xff, 0xff];
+        let sps = hevc_sps();
+        let pps = vec![0x44, 0x01, 0xc1, 0x72, 0xb4];
+        let idr = vec![0x26, 0x01, 0xaf, 0x10, 0x20]; // IDR_W_RADL (19)
+        let trail = vec![0x02, 0x01, 0xd0, 0x09]; // TRAIL_R (1)
+        let mut b = AvccBridge::new(true, 4608, 1728);
+        let f = b.push_frame(&annexb(&[&vps, &sps, &pps, &idr], true)).unwrap();
+        assert!(f.key && f.new_params);
+        assert_eq!(f.data, [&(idr.len() as u32).to_be_bytes()[..], &idr].concat(), "parameter sets taken out");
+        let vp = b.video_params().unwrap();
+        assert!(vp.h265);
+        assert_eq!(vp.codec, "hvc1.1.6.L153.90");
+        let rec = &vp.extra_data;
+        assert_eq!(rec[0], 1);
+        assert_eq!(rec[16] & 3, 1, "chroma 4:2:0");
+        assert_eq!(rec[21] & 3, 3, "4-byte NAL lengths");
+        assert_eq!(rec[22], 3, "VPS, SPS and PPS arrays");
+        // decode.rs must be able to pull the sets back out.
+        let sets = parameter_sets_annexb(Codec::H265, rec).unwrap();
+        assert_eq!(split_annexb(&sets), vec![vps.as_slice(), sps.as_slice(), pps.as_slice()]);
+        let p = b.push_frame(&annexb(&[&trail], false)).unwrap();
+        assert!(!p.key && !p.new_params);
+    }
+
+    #[test]
+    fn an_unreadable_hevc_sps_gives_no_record() {
+        assert!(build_hevc_config(&[0x40, 1, 0], &[0x42, 1], &[0x44, 1, 0]).is_none());
         let mut b = AvccBridge::new(true, 1920, 1080);
-        assert!(b.push_frame(&annexb(&[&sps(), &pps(), &idr()], false)).is_none());
+        let f = b.push_frame(&annexb(&[&[0x40, 1, 0], &[0x42, 1, 0], &[0x44, 1, 0], &[0x26, 1, 0xaf]], false)).unwrap();
+        assert!(f.key && !f.new_params);
         assert!(b.video_params().is_none());
     }
 }

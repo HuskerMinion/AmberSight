@@ -268,6 +268,13 @@ enum Commands {
         /// Stream a 16-bit PCM WAV file instead (audible on the camera!)
         #[arg(long)]
         wav: Option<String>,
+        /// Talk over the camera's Baichuan session (Reolink, TCP 9000)
+        /// instead of the RTSP backchannel. Without --wav only asks what
+        /// talk the camera takes (nothing is played). Opens a session of
+        /// its own: stop the service first if it streams this camera over
+        /// Baichuan (cameras allow about two sessions)
+        #[arg(long)]
+        baichuan: bool,
     },
     /// Index recordings on disk that the database does not know about yet
     Index {
@@ -396,6 +403,9 @@ enum Commands {
         /// How many times to run it
         #[arg(long, default_value_t = 3)]
         runs: u32,
+        /// Seconds to wait between runs (to time a check after the card has been idle)
+        #[arg(long, default_value_t = 0)]
+        gap: u64,
         /// Settings file: its graphics card choices, and (Linux) where the
         /// NVIDIA add-on is kept, downloaded first when it is missing
         #[arg(long)]
@@ -918,6 +928,7 @@ pub async fn run() -> Result<()> {
                 username: cam.username.clone(),
                 password: cam.password.clone(),
                 transport: cam.transport.clone(),
+                baichuan: None,
             };
             println!("recording {} for {} s into {}", engine::redact_url(src.url.clone()), seconds, out);
             let segs = crate::ingest::recorder::record_stream(
@@ -1065,7 +1076,7 @@ pub async fn run() -> Result<()> {
             let cfg = Config::load(&config)?;
             crate::engine::packages::scan(&cfg, &camera, hours)
         }
-        Commands::AiTest { model, min_score, cpu, runs, config, image } => {
+        Commands::AiTest { model, min_score, cpu, runs, gap, config, image } => {
             let ai = match &config {
                 Some(c) => Config::load(c)?.ai,
                 None => crate::config::AiConfig::default(),
@@ -1075,40 +1086,59 @@ pub async fn run() -> Result<()> {
                 let cfg = Config::load(c)?;
                 let data_dir = &cfg.storage.data_dir;
                 crate::gpu_addon::configure(data_dir, &cfg.update.repo, cfg.update.check);
-                let wanted = !cpu && ai.gpu && !crate::gpu::list().is_empty() && crate::gpu_addon::missing_system_libs().is_none();
-                match crate::gpu_addon::find() {
-                    // A copy this user may not load (another user's, e.g. the service's while running as root).
-                    Err(why) if wanted => anyhow::bail!("{why}"),
-                    Ok(None) if wanted => match crate::gpu_addon::downloads_allowed(data_dir, cfg.update.check) {
-                        Err(why) => println!("{why}"),
-                        Ok(()) => {
-                            println!("downloading the NVIDIA add-on into {}", crate::gpu_addon::folder(data_dir).display());
-                            let last = std::sync::atomic::AtomicU64::new(u64::MAX);
-                            match crate::gpu_addon::download(data_dir, &cfg.update.repo, &|d, _| {
-                                // Once per MB, not per chunk (a log or ssh session keeps every line).
-                                let mb = d >> 20;
-                                if mb != last.swap(mb, std::sync::atomic::Ordering::Relaxed) {
-                                    print!("\r  {mb} MB");
-                                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                // The add-on for the card the AI would use, when the card's own libraries are there.
+                use crate::gpu_addon::Addon;
+                let cards = if !cpu && ai.gpu { crate::gpu::list() } else { Vec::new() };
+                let card = crate::gpu::pick(&cards, ai.gpu_name.as_deref());
+                let addon = card.as_ref().and_then(|c| match c.api {
+                    "CUDA" => crate::gpu_addon::missing_system_libs().is_none().then_some(Addon::Cuda),
+                    _ => {
+                        let render: Vec<String> = cards.iter().filter(|g| g.api == "OpenVINO").map(|g| g.render.clone()).collect();
+                        crate::openvino::missing_driver(&render).is_none().then_some(Addon::OpenVino)
+                    }
+                });
+                if let Some(addon) = addon {
+                    match crate::gpu_addon::find(addon) {
+                        // A copy this user may not load (another user's, e.g. the service's while running as root).
+                        Err(why) => anyhow::bail!("{why}"),
+                        Ok(None) => match crate::gpu_addon::downloads_allowed(addon, data_dir, cfg.update.check) {
+                            Err(why) => println!("{why}"),
+                            Ok(()) => {
+                                println!("downloading {} into {}", addon.what(), addon.folder(data_dir).display());
+                                let last = std::sync::atomic::AtomicU64::new(u64::MAX);
+                                match crate::gpu_addon::download(addon, data_dir, &cfg.update.repo, &|d, _| {
+                                    // Once per MB, not per chunk (a log or ssh session keeps every line).
+                                    let mb = d >> 20;
+                                    if mb != last.swap(mb, std::sync::atomic::Ordering::Relaxed) {
+                                        print!("\r  {mb} MB");
+                                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                                    }
+                                }) {
+                                    Ok(_) => println!(),
+                                    Err(e) => anyhow::bail!("{} could not be downloaded: {e:#}", addon.what()),
                                 }
-                            }) {
-                                Ok(_) => println!(),
-                                Err(e) => anyhow::bail!("the NVIDIA add-on could not be downloaded: {e:#}"),
                             }
-                        }
-                    },
-                    _ => {}
+                        },
+                        Ok(Some(_)) => {}
+                    }
                 }
             }
             let t0 = std::time::Instant::now();
             let det = crate::ai::AiDetector::load_on(std::path::Path::new(&model), 4, !cpu && ai.gpu, ai.gpu_name.as_deref(), ai.gpu_memory_mb)?;
-            println!("model loaded in {:?} (input {}x{}, on {})", t0.elapsed(), det.input_size(), det.input_size(), det.gpu_name().unwrap_or("the CPU"));
+            let on = match (det.gpu_name(), det.gpu_api()) {
+                (Some(n), Some(api)) => format!("{n} ({api})"),
+                _ => "the CPU".to_string(),
+            };
+            println!("model loaded in {:?} (input {}x{}, on {on})", t0.elapsed(), det.input_size(), det.input_size());
             if let Some(why) = crate::ai::gpu_note() {
                 println!("not on the graphics card: {why}");
             }
             let bytes = std::fs::read(&image).context("could not read image")?;
             let runs = runs.max(1);
             for run in 0..runs {
+                if run > 0 && gap > 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(gap));
+                }
                 let t = std::time::Instant::now();
                 let found = det.detect(&bytes, min_score)?;
                 println!("run {}: {} objects in {:?}", run + 1, found.len(), t.elapsed());
@@ -1159,9 +1189,17 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Commands::TalkTest { config, camera, seconds, silence: _, wav } => {
+        Commands::TalkTest { config, camera, seconds, silence: _, wav, baichuan } => {
             let cfg = Config::load(&config)?;
             let cam = cfg.cameras.iter().find(|c| c.name.eq_ignore_ascii_case(&camera)).context("camera not found in config")?;
+            if baichuan {
+                if let Some(why) = crate::engine::connect_way::battery_reason(cam) {
+                    anyhow::bail!("not talking over Baichuan: {why}");
+                }
+                let mut cam = cam.clone();
+                crate::engine::normalize_creds(&mut cam);
+                return crate::talk::run_test_baichuan(&cam, seconds, wav.as_deref()).await;
+            }
             crate::talk::run_test(&cam.url, &cam.username, &cam.password, seconds, wav.as_deref()).await
         }
         Commands::IngestTest { config, camera, seconds, sub_url } => {
@@ -1184,6 +1222,7 @@ pub async fn run() -> Result<()> {
                     username: cam.username.clone(),
                     password: cam.password.clone(),
                     transport: cam.transport.clone(),
+                baichuan: None,
                 };
                 match crate::ingest::probe(&src, seconds).await {
                     Ok(r) => println!("{}", crate::ingest::format_report(
@@ -1209,6 +1248,7 @@ pub async fn run() -> Result<()> {
                 username: cam.username.clone(),
                 password: cam.password.clone(),
                 transport: cam.transport.clone(),
+                baichuan: None,
             };
             decode_test(&src, seconds, hwaccel, fps, scale, every.max(1), &out).await
         }
@@ -1302,6 +1342,8 @@ pub async fn run_server_until(config: String, shutdown: impl std::future::Future
     crate::remote::start(engine.clone());
     let e = engine.clone();
     crate::update::spawn_checker(move || e.config.lock().unwrap().update.clone());
+    // Language packs left over from an older version, and the default's: fetched again in the background.
+    crate::lang::refresh_after_start(&engine);
     // Stop on the caller's signal, or when an installed update restarts us.
     let shutdown = async {
         tokio::select! {
@@ -1354,7 +1396,14 @@ pub async fn run_server_until(config: String, shutdown: impl std::future::Future
     tokio::task::spawn_blocking(move || crate::account_http::finish_alerts(&e, std::time::Duration::from_secs(10))).await.ok();
     println!("AmberSight stopping: closing camera sessions...");
     let e = engine.clone();
-    tokio::task::spawn_blocking(move || e.shutdown(std::time::Duration::from_secs(8))).await.ok();
+    tokio::task::spawn_blocking(move || {
+        e.shutdown(std::time::Duration::from_secs(8));
+        // Then the AI on a graphics card: its check in progress finishes
+        // and its session is let go (a card left mid-check can fault).
+        e.stop_ai(std::time::Duration::from_secs(5));
+    })
+    .await
+    .ok();
     if crate::update::restart_pending() {
         // An error exit makes the service manager start it again: the new
         // version after an update, or new settings after a restart from

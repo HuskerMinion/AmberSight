@@ -2,6 +2,7 @@
 // sound model downloads by itself when turned on). The loud-sound trigger
 // itself is set per camera (camera settings, Alerts tab).
 
+import { t } from './i18n.js';
 import { api, esc, toast, errText, savedToast } from './core.js';
 import { registerAdminPage } from './admin.js';
 import { lead, how, notice } from './sp_kit.js';
@@ -19,20 +20,20 @@ function soundPage(el) {
   function paint() {
     const d = st.download;
     let state = '';
-    if (!st.supported) state = '<p class="hint warn">Sound names cannot be used on this computer; loud sounds still start events.</p>';
+    if (!st.supported) state = '<p class="hint warn">' + t('admin_sound.cannot_use', 'Sound names cannot be used on this computer; loud sounds still start events.') + '</p>';
     else if (st.labels) {
-      if (d.running) state = '<div class="hint">Downloading the sound model... ' + Math.round(100 * d.done / Math.max(1, d.total)) + '% of ' + st.model_mb + ' MB</div><progress class="smq-prog" max="' + d.total + '" value="' + d.done + '"></progress>';
-      else if (d.error) state = notice('warn', esc(d.error), '<button class="btn" data-retry>Try again</button>');
-      else if (!st.loaded) state = '<div class="hint">Starting...</div>';
-      else state = '<div class="hint">Ready. Loud sounds are named: ' + st.names.map(esc).join(', ') + '.</div>';
+      if (d.running) state = '<div class="hint">' + t('admin_sound.downloading', 'Downloading the sound model... {pct}% of {mb} MB', { pct: Math.round(100 * d.done / Math.max(1, d.total)), mb: st.model_mb }) + '</div><progress class="smq-prog" max="' + d.total + '" value="' + d.done + '"></progress>';
+      else if (d.error) state = notice('warn', esc(d.error), '<button class="btn" data-retry>' + t('admin_sound.try_again', 'Try again') + '</button>');
+      else if (!st.loaded) state = '<div class="hint">' + t('admin_sound.starting', 'Starting...') + '</div>';
+      else state = '<div class="hint">' + t('admin_sound.ready', 'Ready. Loud sounds are named: {names}.', { names: st.names.map(esc).join(', ') }) + '</div>';
     }
-    const cams = st.cameras.length ? 'Cameras listening for loud sounds: ' + st.cameras.map(esc).join(', ') + '.' : 'No camera listens for loud sounds yet: turn it on in a camera\'s settings, Alerts tab.';
+    const cams = st.cameras.length ? t('admin_sound.cams_listen', 'Cameras listening for loud sounds: {cams}.', { cams: st.cameras.map(esc).join(', ') }) : t('admin_sound.no_cams', 'No camera listens for loud sounds yet: turn it on in a camera\'s settings, Alerts tab.');
     el.innerHTML = '<div class="ac">' +
-      lead('Optional. Names the loud sounds a camera hears, such as glass breaking or a dog barking.', 'Turn it on if a camera with a microphone watches somewhere sound matters.') +
-      how('A camera with a microphone can start an event when it hears a sudden loud sound. Turn that on per camera (camera settings, Alerts tab), where a live meter helps choose how loud is loud. The model labels sound events and lets a camera react to only some of them.') +
-      '<div class="ac-card"><div class="ac-card-t">Sound names</div>' +
+      lead(t('admin_sound.optional', 'Optional. Names the loud sounds a camera hears, such as glass breaking or a dog barking.'), t('admin_sound.turn_on_hint', 'Turn it on if a camera with a microphone watches somewhere sound matters.')) +
+      how(t('admin_sound.how', 'A camera with a microphone can start an event when it hears a sudden loud sound. Turn that on per camera (camera settings, Alerts tab), where a live meter helps choose how loud is loud. The model labels sound events and lets a camera react to only some of them.')) +
+      '<div class="ac-card"><div class="ac-card-t">' + t('admin_sound.sound_names', 'Sound names') + '</div>' +
       '<label class="sw"><input type="checkbox" role="switch" data-en' + (st.labels ? ' checked' : '') + (st.supported ? '' : ' disabled') + '><span class="sw-track" aria-hidden="true"></span>' +
-      '<span class="sw-text"><b>Name what was heard</b><small>Labels sound events (glass break, dog bark, alarm, shouting, bang, doorbell, knock, car horn, crying) and lets a camera react to only some of them. Turning it on downloads a small model once (about ' + st.model_mb + ' MB: Google YAMNet, free to use). It runs on this server\'s processor, a few milliseconds per sound; nothing leaves this server.</small></span></label>' +
+      '<span class="sw-text"><b>' + t('admin_sound.name_what_heard', 'Name what was heard') + '</b><small>' + t('admin_sound.sw_text', 'Labels sound events (glass break, dog bark, alarm, shouting, bang, doorbell, knock, car horn, crying) and lets a camera react to only some of them. Turning it on downloads a small model once (about {mb} MB: Google YAMNet, free to use). It runs on this server\'s processor, a few milliseconds per sound; nothing leaves this server.', { mb: st.model_mb }) + '</small></span></label>' +
       state + '</div>' +
       '<div class="hint">' + cams + '</div></div>';
     const en = el.querySelector('[data-en]');
@@ -51,10 +52,10 @@ function soundPage(el) {
     busy = false;
     load();
   }
-  el.innerHTML = '<div class="ac"><p class="empty">Loading...</p></div>';
+  el.innerHTML = '<div class="ac"><p class="empty">' + t('admin_sound.loading', 'Loading...') + '</p></div>';
   load();
   return () => clearTimeout(timer);
 }
 
 let stop = null;
-registerAdminPage({ id: 'sound', title: 'Sounds', order: 67, render(el) { stop = soundPage(el); }, leave() { if (stop) stop(); } });
+registerAdminPage({ id: 'sound', title: t('admin_sound.title', 'Sounds'), order: 67, render(el) { stop = soundPage(el); }, leave() { if (stop) stop(); } });

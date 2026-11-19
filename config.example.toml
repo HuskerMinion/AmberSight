@@ -181,6 +181,8 @@ post_roll = 10          # seconds of footage after the trigger
 # smtp_host = "smtp.example.com"                     # e-mail (see Settings > Detection & alerts > Alerts)
 # email_to = ["you@example.com"]
 # mqtt_url = "mqtt://192.168.1.5:1883"               # events and states for Home Assistant
+# mqtt_siren = false        # also offer cameras' sirens over MQTT / Home Assistant (anyone who
+#                           # can publish to the broker could then sound them)
 # ha_url = "http://homeassistant.local:8123"         # Home Assistant notify service
 # link_url = "https://nvr.example:8090"              # tap a notification to open the camera at the event
 # action_command = "/path/to/script {clip}"          # run a program for each alert (no shell)
@@ -209,7 +211,8 @@ post_roll = 10          # seconds of footage after the trigger
 # ignore_parked = true      # objects that sit still for minutes do not confirm
 # strict = false            # true: an object must be seen in 2 of 3 looks in a row, moving
 # gpu = true                # use a graphics card where possible (Windows: DirectML; Linux:
-#                           # an NVIDIA card with CUDA 13 + cuDNN 9; Apple silicon: Core ML)
+#                           # an NVIDIA card with CUDA 13 + cuDNN 9, or Intel graphics with
+#                           # Intel's compute driver (OpenVINO); Apple silicon: Core ML)
 # gpu_name = "NVIDIA GeForce RTX 5060 Ti"   # which card (default: the one with the most memory)
 # gpu_memory_mb = 1536      # NVIDIA: the most video memory the AI's pool may take
 # A camera can use its own: ai = false, ai_labels = [...], ai_min_score = 0.6, ai_strict = true
@@ -304,6 +307,26 @@ post_roll = 10          # seconds of footage after the trigger
 # # How RTSP video travels: "auto" (TCP; a camera that answers "461 Unsupported
 # # Transport" is asked again over UDP, and UDP is kept for it), "tcp" or "udp".
 # # transport = "auto"
+# # Reolink only: "rtsp" (default), "baichuan" (Reolink's own protocol on TCP
+# # port 9000, same host as url; url/sub_url still say main/sub and, on a hub,
+# # Preview_0N the channel) or "auto" (Baichuan first; RTSP after Baichuan fails
+# # 3 times or sends no video for 2 minutes; Baichuan tried again every 30
+# # minutes). A refused password stops both. Not for battery cameras.
+# # connect = "rtsp"
+# # baichuan_port = 9000
+# # baichuan_channel = 0
+# # Lights and siren of a Reolink camera (spotlight, siren, infrared, status light):
+# # [cameras.controls]
+# # kind = "auto"             # "auto" (Reolinks found by their address), "reolink" or "off"
+# # scheme = "https"          # "https", "http" (sends the password unencrypted) or "baichuan"
+# #                           # (Reolink port 9000, for cameras whose web interface is off)
+# # http_port = 443
+# # light_on_detect = false   # spotlight on when AI confirms one of labels (at night)
+# # light_minutes = 2
+# # siren_on_detect = false   # siren while armed when AI confirms one of labels
+# # siren_seconds = 10
+# # siren_cooldown_minutes = 10
+# # labels = ["person"]
 # # Hardware decoding for motion detection. Unset = Auto: the [hwdecode] prefer
 # # order over the ways that passed a test decode at start, else the processor. A
 # # way that fails later is replaced at once and tried again after 15 minutes (later

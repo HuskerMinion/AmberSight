@@ -8,7 +8,8 @@
 // Each tile owns two <video> elements: the next window is loaded into the hidden one
 // before the current one ends, so playback continues without a gap.
 
-import { playVideo, $, state, api, bus, enc, esc, ic, can, camFromId, toast, fmtWall, pad2, SPEEDS, REVERSE_SPEEDS, MAX_RATE, speedLabel, speedOptions, safeRate, lowQ, dataSaver, bigQ, overlayOpen, backLayer, overlaysChanged } from './core.js';
+import { t } from './i18n.js';
+import { playVideo, $, state, api, bus, enc, esc, ic, can, camFromId, toast, pad2, SPEEDS, REVERSE_SPEEDS, MAX_RATE, speedLabel, speedOptions, objName, fmtWhen, safeRate, lowQ, dataSaver, bigQ, overlayOpen, backLayer, overlaysChanged } from './core.js';
 import { isActive } from './nav.js';
 import * as Live from './live.js';
 import { tvOn, tvOne, enterTv, exitTv, setOneQuiet, setEscFirst } from './fullscreen.js';
@@ -49,12 +50,12 @@ const VEH = new Set(['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'vehicle', 
 const ANI = new Set(['dog', 'cat', 'bird', 'animal', 'pet', 'horse', 'cow', 'sheep', 'bear', 'fox', 'deer', 'squirrel', 'rabbit', 'raccoon', 'coyote']);
 // (face and package have no sprite icon in the page: drawn inline, see kIcon.)
 const KINDS = {
-  face: { ic: 'face', label: 'Face', rank: 6 },
-  package: { ic: 'package', label: 'Package', rank: 5 },
-  person: { ic: 'person', label: 'Person', rank: 4 },
-  vehicle: { ic: 'car', label: 'Vehicle', rank: 3 },
-  animal: { ic: 'paw', label: 'Animal', rank: 2 },
-  other: { ic: 'alert', label: 'Alert', rank: 1 },
+  face: { ic: 'face', label: t('livetl.label_face', 'Face'), rank: 6 },
+  package: { ic: 'package', label: t('livetl.label_package', 'Package'), rank: 5 },
+  person: { ic: 'person', label: t('livetl.label_person', 'Person'), rank: 4 },
+  vehicle: { ic: 'car', label: t('livetl.label_vehicle', 'Vehicle'), rank: 3 },
+  animal: { ic: 'paw', label: t('livetl.label_animal', 'Animal'), rank: 2 },
+  other: { ic: 'alert', label: t('livetl.label_alert', 'Alert'), rank: 1 },
 };
 const KIND_ORDER = ['person', 'vehicle', 'animal', 'face', 'package', 'other'];
 const SVG_ICONS = {
@@ -683,7 +684,7 @@ function tickPic(p) {
   for (const s of p.slots) { if (s.ready || s.loading) resetSlot(s); s.v.hidden = true; }
   p.shownIdx = -1;
   const pc = picState(p);
-  const t = S.playhead, now = Date.now(), tick = performance.now();
+  const ts = S.playhead, now = Date.now(), tick = performance.now();
   const playing = S.playing && !S.scrubbing;
   // Did the playhead jump (not just move on with playback)? While playing
   // it moves about speed x time; a second of watching off from that, or
@@ -693,25 +694,25 @@ function tickPic(p) {
     const expect = playing && pc.lastPlaying ? dt * S.speed : 0;
     const fastest = Math.max(Math.abs(S.speed), Math.abs(pc.lastSpeed));
     const allow = playing || pc.lastPlaying ? Math.max(2000, fastest * (1000 + dt)) : 500;
-    if (Math.abs(t - pc.lastT - expect) > allow) picJumped(pc);
+    if (Math.abs(ts - pc.lastT - expect) > allow) picJumped(pc);
   }
-  pc.lastT = t; pc.lastTick = tick; pc.lastPlaying = playing; pc.lastSpeed = S.speed;
+  pc.lastT = ts; pc.lastTick = tick; pc.lastPlaying = playing; pc.lastSpeed = S.speed;
   // Ask ahead by the time a picture takes to arrive.
-  const at = playing ? t + S.speed * pc.lat : t;
+  const at = playing ? ts + S.speed * pc.lat : ts;
   const rec = recorded(p.cam.name, at);
   if (!pc.busy && rec && now >= pc.retryAt && now - pc.lastAsk >= (playing ? keyGap(p) : 0) && (playing || pc.askedAt !== at)) askPic(p, at);
   // The last picture stays while the next comes, and through short breaks
   // in the recording: up to about 5 s of watching from the moment it was
   // asked for (at 128x pictures come a couple of times a second).
   const hold = 5000 * Math.max(1, Math.abs(S.speed));
-  const show = pc.drawn && pc.shownFor !== null && !pc.none && Math.abs(pc.shownFor - t) < hold;
+  const show = pc.drawn && pc.shownFor !== null && !pc.none && Math.abs(pc.shownFor - ts) < hold;
   pc.cv.hidden = !show;
   if (show) { p.cv.hidden = true; p.msg.hidden = true; p.waitSince = 0; return; }
   let pic = false;
-  if (rec) pic = drawStrip(p, t); else p.cv.hidden = true;
-  const text = rec && !pc.none ? waitText(p) : (p.waitSince = 0, 'No recording');
+  if (rec) pic = drawStrip(p, ts); else p.cv.hidden = true;
+  const text = rec && !pc.none ? waitText(p) : (p.waitSince = 0, t('livetl.no_recording', 'No recording'));
   if (p.msg.textContent !== text) p.msg.textContent = text;
-  p.msg.classList.toggle('wait', text !== 'No recording');
+  p.msg.classList.toggle('wait', text !== t('livetl.no_recording', 'No recording'));
   p.msg.hidden = pic;
 }
 
@@ -720,9 +721,9 @@ function tickPic(p) {
 function waitText(p) {
   const now = Date.now();
   if (!p.waitSince) p.waitSince = now;
-  if (now - p.waitSince < 1000) return 'Loading…';
+  if (now - p.waitSince < 1000) return t('livetl.loading', 'Loading…');
   const d = new Date(S.playhead);
-  return 'Buffering ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  return t('livetl.buffering', 'Buffering {time}', { time: clockSec(d) });
 }
 
 function resetSlot(s) {
@@ -853,13 +854,13 @@ function tickPlayer(p) { tickVideo(p); applySound(p); paintTime(p); }
 function paintTime(p) {
   const d = new Date(S.playhead), n = new Date();
   const day = d.toDateString() === n.toDateString() ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ';
-  const text = day + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  const text = day + clockSec(d);
   if (p.tm.textContent !== text) { p.tm.textContent = text; if (p.ot) Live.paintOverlayText(p.ot); }
 }
 function tickVideo(p) {
   // Another server's camera: its recordings are there, not here.
   if (p.cam.remote) {
-    const text = 'Recordings are on ' + ((p.cam.remote && p.cam.remote.site) || 'the other server');
+    const text = t('livetl.remote_recordings','Recordings are on {site}',{site: ((p.cam.remote && p.cam.remote.site) || t('livetl.other_server', 'the other server'))});
     if (p.msg.textContent !== text) p.msg.textContent = text;
     p.msg.classList.remove('wait'); p.msg.hidden = false; p.cv.hidden = true;
     return;
@@ -867,7 +868,7 @@ function tickVideo(p) {
   if (S.live && !S.scrubbing) { stopPic(p); showLive(p); return; }
   if (p.live) stopLive(p);
   if (picMode(p)) { tickPic(p); return; }
-  const t = S.playhead, now = Date.now();
+  const ts = S.playhead, now = Date.now();
   let cs = p.slots[p.cur], os = p.slots[1 - p.cur];
   for (const s of p.slots) if (s.loading && now - s.since > 20000) resetSlot(s);   // stuck request
   if (!p.tier) p.tier = 'sub';
@@ -875,14 +876,14 @@ function tickVideo(p) {
   const back = rev();
   for (const s of p.slots) if ((s.ready || s.loading) && (s.k !== k || !!s.rev !== back)) resetSlot(s);   // speed crossed 16x, to/from keyframes only, or direction changed
   // (Backwards a piece covers (start, end]; its time 0 is `end`.)
-  const covers = (s) => s.ready && (back ? t > s.start + 30 && t <= s.end : t >= s.start && t < s.end - 30);
-  const wantOf = (s) => (back ? (s.end - t) / 1000 : (t - s.start) / 1000 / s.k);
+  const covers = (s) => s.ready && (back ? ts > s.start + 30 && ts <= s.end : ts >= s.start && ts < s.end - 30);
+  const wantOf = (s) => (back ? (s.end - ts) / 1000 : (ts - s.start) / 1000 / s.k);
   // A load for a moment the user has since clicked away from: drop it now
   // (waiting for it would delay the new one by its whole load time).
   // (The next window loads ahead of the playhead: up to `lead` before it
   // is still wanted.)
   const lead = Math.max(2000, 30000 * Math.abs(S.speed));
-  for (const s of p.slots) if (s.loading && !(back ? t > s.reqFrom - 2000 && t <= s.reqTo + lead : t >= s.reqFrom - lead && t < s.reqTo)) resetSlot(s);
+  for (const s of p.slots) if (s.loading && !(back ? ts > s.reqFrom - 2000 && ts <= s.reqTo + lead : ts >= s.reqFrom - lead && ts < s.reqTo)) resetSlot(s);
   // The full-quality copy has caught up (showing the playhead's moment):
   // swap it in, no gap.
   const caughtUp = (s) => covers(s) && !s.v.seeking && s.v.readyState >= 3 && Math.abs(s.v.currentTime - wantOf(s)) < 0.5;
@@ -894,7 +895,7 @@ function tickVideo(p) {
   // (A preload may start after a short break in the recording.)
   const gapOk = Math.max(1000, cs.k === 1 ? 60000 * Math.max(1, Math.abs(S.speed)) : 1000);
   if (use >= 0 && os.ready && !os.up && !(back ? os.end >= cs.start - 1000 && os.start < cs.start : os.start >= cs.end - 1000 - (cs.end - cs.start) && os.start <= cs.end + gapOk && os.end > cs.end)) resetSlot(os);   // stale preload
-  if (use >= 0 && os.up && (os.ready || os.loading) && !(t >= os.start - 2000)) resetSlot(os);   // upgrade for a moment left behind
+  if (use >= 0 && os.up && (os.ready || os.loading) && !(ts >= os.start - 2000)) resetSlot(os);   // upgrade for a moment left behind
   watchWait(p, use < 0);
   if (use < 0) {
     // The video on screen stays (frozen) while the next one loads when it
@@ -906,39 +907,39 @@ function tickVideo(p) {
     const hold = shown && shown.k > 1 ? 5000 * Math.abs(S.speed) : 3000 * Math.max(1, Math.abs(S.speed));
     // A window loaded for the stretch after a break, starting a little
     // ahead: kept, it plays when the playhead gets there.
-    const ahead = (s) => !back && !S.scrubbing && s.ready && s.start > t && s.start - t < 60000 * Math.max(1, Math.abs(S.speed));
+    const ahead = (s) => !back && !S.scrubbing && s.ready && s.start > ts && s.start - ts < 60000 * Math.max(1, Math.abs(S.speed));
     // In a break in the recording with the next stretch already waiting,
     // the last picture stays up until it starts (it showed "Loading…" after
     // 3 s; some cameras' recordings have breaks of a few seconds).
-    const bridging = shown && !back && p.slots.some(s => s !== shown && ahead(s)) && t > shownAt;
-    const near = shown && shown.ready && !S.scrubbing && (Math.abs(shownAt - t) < hold || bridging);
+    const bridging = shown && !back && p.slots.some(s => s !== shown && ahead(s)) && ts > shownAt;
+    const near = shown && shown.ready && !S.scrubbing && (Math.abs(shownAt - ts) < hold || bridging);
     for (const s of p.slots) if (s.ready && !(near && s === shown) && !ahead(s)) resetSlot(s);
     const waiting = p.slots.some(ahead);
     const into = near ? p.slots.indexOf(shown) === 0 ? 1 : 0 : p.cur;
     const target = p.slots[into];
     // Start on the sub stream (small, starts at once); the full picture follows.
-    if (!waiting && !target.loading && !S.scrubbing && now >= p.failUntil && recorded(p.cam.name, t)) { p.noUpTo = 0; p.cur = into; load(p, into, back ? t + 500 : t, 'low', false, FIRST_WIN); }
+    if (!waiting && !target.loading && !S.scrubbing && now >= p.failUntil && recorded(p.cam.name, ts)) { p.noUpTo = 0; p.cur = into; load(p, into, back ? ts + 500 : ts, 'low', false, FIRST_WIN); }
     const busy = cs.loading || os.loading;
-    const rec = recorded(p.cam.name, t);
+    const rec = recorded(p.cam.name, ts);
     // Just back from fast pictures: the last one stays until the video is there.
-    if (!near && p.pic && p.pic.drawn && p.pic.shownFor !== null && Math.abs(p.pic.shownFor - t) < 5000 * Math.max(1, Math.abs(S.speed))) {
+    if (!near && p.pic && p.pic.drawn && p.pic.shownFor !== null && Math.abs(p.pic.shownFor - ts) < 5000 * Math.max(1, Math.abs(S.speed))) {
       p.pic.cv.hidden = false; p.cv.hidden = true; p.msg.hidden = true;
       return;
     }
     if (near) {
       if (!shown.v.paused) shown.v.pause();
       shown.v.hidden = false; shown.v.classList.remove('tlup');
-      p.cv.hidden = !S.scrubbing || !drawStrip(p, t);
+      p.cv.hidden = !S.scrubbing || !drawStrip(p, ts);
       p.msg.hidden = true; p.waitSince = 0;
       return;
     }
     // While the video loads (or while scrubbing, or if it could not play),
     // the filmstrip picture of a recorded moment stands in for it.
     let pic = false;
-    if (rec) pic = drawStrip(p, t); else p.cv.hidden = true;
-    const text = (!busy && (now < p.failUntil || !rec)) ? (p.waitSince = 0, 'No recording') : waitText(p);
+    if (rec) pic = drawStrip(p, ts); else p.cv.hidden = true;
+    const text = (!busy && (now < p.failUntil || !rec)) ? (p.waitSince = 0, t('livetl.no_recording','No recording')) : waitText(p);
     if (p.msg.textContent !== text) p.msg.textContent = text;
-    p.msg.classList.toggle('wait', text !== 'No recording');
+    p.msg.classList.toggle('wait', text !== t('livetl.no_recording','No recording'));
     p.msg.hidden = pic;
     for (const s of p.slots) s.v.hidden = true;
     p.shownIdx = -1;
@@ -970,10 +971,10 @@ function tickVideo(p) {
   watchHealth(p, cs, cs.v.seeking ? 0 : Math.abs(cs.v.currentTime - wantOf(cs)), cs.k > 1 ? 0.6 : 0.6 + 0.25 * Math.abs(S.speed));
   // Scrubbing: the filmstrip shows the moment at once; the video takes over
   // when the pointer lets go and it has caught up.
-  if (!(S.scrubbing && drawStrip(p, t)) && !(cs.v.seeking && !p.cv.hidden)) p.cv.hidden = true;
+  if (!(S.scrubbing && drawStrip(p, ts)) && !(cs.v.seeking && !p.cv.hidden)) p.cv.hidden = true;
   // Backwards: the piece before this one, early.
   if (back) {
-    if (S.playing && !os.ready && !os.loading && now >= p.failUntil && t - cs.start < 4000 * Math.abs(S.speed) && recorded(p.cam.name, cs.start - 200)) load(p, 1 - p.cur, cs.start, 'low');
+    if (S.playing && !os.ready && !os.loading && now >= p.failUntil && ts - cs.start < 4000 * Math.abs(S.speed) && recorded(p.cam.name, cs.start - 200)) load(p, 1 - p.cur, cs.start, 'low');
     return;
   }
   // Playing the sub stream where the main picture is wanted: fetch it
@@ -982,10 +983,10 @@ function tickVideo(p) {
   // the other way. Swapped in when it has caught up, no gap.
   const wq = tierQ(p);
   const idle = cs.k === 1 && !S.scrubbing && !os.loading && !os.ready;
-  if (idle && wq === 'full' && cs.sub && !(p.noUpTo && t < p.noUpTo)) load(p, 1 - p.cur, t, 'full', true, FIRST_WIN);
-  else if (idle && wq === 'low' && !cs.sub && camQ(p.cam.name).hasSub !== false && !(p.noDownTo && t < p.noDownTo)) load(p, 1 - p.cur, t, 'low', true, FIRST_WIN);
+  if (idle && wq === 'full' && cs.sub && !(p.noUpTo && ts < p.noUpTo)) load(p, 1 - p.cur, ts, 'full', true, FIRST_WIN);
+  else if (idle && wq === 'low' && !cs.sub && camQ(p.cam.name).hasSub !== false && !(p.noDownTo && ts < p.noDownTo)) load(p, 1 - p.cur, ts, 'low', true, FIRST_WIN);
   // Load the next window early so the hand-over has no gap.
-  else if (S.playing && !os.up && !os.ready && !os.loading && now >= p.failUntil && cs.end - t < 25000 * S.speed) {
+  else if (S.playing && !os.up && !os.ready && !os.loading && now >= p.failUntil && cs.end - ts < 25000 * S.speed) {
     // The next window, or (a break in the recording follows) the next
     // stretch, when it is not far.
     let next = recorded(p.cam.name, cs.end + 200) ? cs.end : null;
@@ -1014,7 +1015,7 @@ const soundSpeedOk = () => S.speed > 0 && S.speed <= SOUND_MAX_RATE;
 function setSound(id, on, vol) {
   const was = SND.on && soundSpeedOk();
   SND.id = id; SND.on = !!on; SND.vol = vol;
-  if (SND.on && !was && !soundSpeedOk()) note('Sound plays at up to ' + SOUND_MAX_RATE + 'x');
+  if (SND.on && !was && !soundSpeedOk()) note(t('livetl.sound_plays', 'Sound plays at up to {max}x', { max: SOUND_MAX_RATE }));
   players.forEach(applySound);
 }
 function applySound(p) {
@@ -1050,7 +1051,8 @@ function showLive(p) {
   p.shownIdx = -1;
   p.cv.hidden = true;
   if (p.live.failed) {
-    if (p.msg.textContent !== 'No live picture') p.msg.textContent = 'No live picture';
+    const noLive = t('livetl.no_live_picture', 'No live picture');
+    if (p.msg.textContent !== noLive) p.msg.textContent = noLive;
     p.msg.classList.remove('wait');
   }
   p.msg.hidden = !p.live.failed;
@@ -1227,7 +1229,7 @@ function drawBoxes(p) {
     g.strokeRect(x, y, w, h);
     g.globalAlpha = 1;
     g.setLineDash([]);
-    const text = b.label + ' ' + Math.round((b.score || 0) * 100) + '%' + (b.parked ? ' (parked)' : '');
+    const text = b.label + ' ' + Math.round((b.score || 0) * 100) + '%' + (b.parked ? ' ' + t('livetl.parked', '(parked)') : '');
     const tw = g.measureText(text).width + 10, th = 20;
     // Above the box when there is room, and always inside the picture.
     const ty = y >= th ? y - th : Math.max(oy, y);
@@ -1264,7 +1266,7 @@ function setPlaying(on) {
   syncAll();
 }
 function setSpeed(x) {
-  if (SND.on && soundSpeedOk() && !(x > 0 && x <= SOUND_MAX_RATE)) note('No sound above ' + SOUND_MAX_RATE + 'x or backwards');
+  if (SND.on && soundSpeedOk() && !(x > 0 && x <= SOUND_MAX_RATE)) note(t('livetl.sound_limit', 'No sound above {max}x or backwards', { max: SOUND_MAX_RATE }));
   if (S.live && x !== 1) { leaveLive(); S.playhead = Date.now() - LIVE_EDGE_MS; } S.speed = x; S.anchorHead = S.playhead; S.anchorWall = performance.now(); updateControls(); syncAll(); }
 
 function note(text) {
@@ -1317,12 +1319,21 @@ function zoomAt(ms, factor) {
 }
 
 const STEPS = [1e3, 2e3, 5e3, 10e3, 15e3, 30e3, 60e3, 120e3, 300e3, 600e3, 900e3, 1800e3, 3600e3, 7200e3, 10800e3, 21600e3, 43200e3, 86400e3, 172800e3];
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS = [t('livetl.month_jan', 'Jan'), t('livetl.month_feb', 'Feb'), t('livetl.month_mar', 'Mar'), t('livetl.month_apr', 'Apr'), t('livetl.month_may', 'May'), t('livetl.month_jun', 'Jun'), t('livetl.month_jul', 'Jul'), t('livetl.month_aug', 'Aug'), t('livetl.month_sep', 'Sep'), t('livetl.month_oct', 'Oct'), t('livetl.month_nov', 'Nov'), t('livetl.month_dec', 'Dec')];
+// Times on the timeline follow the user's clock choice (12 or 24 hour, or the language's own), like
+// the header clock; the default options are the header's (hour, minutes, seconds).
+const clockSec = (d) => d.toLocaleTimeString();
+// The playback position with its date ("Nov 19, 2026, 8:30:56 AM").
+const clockPos = (d) => fmtWhen(d.getTime());
+const clockMin = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+// About 7 px a character, plus room on both sides: ticks are never closer than their own labels.
+const SAMPLE = new Date(2026, 0, 1, 10, 45, 30);
+const TICK_GAP = { sec: Math.max(74, clockSec(SAMPLE).length * 7 + 16), min: Math.max(74, clockMin(SAMPLE).length * 7 + 16) };
 function ticksHtml(W) {
   const { from, to } = S.view;
   const ppm = W / (to - from);
   let step = STEPS[STEPS.length - 1];
-  for (const s of STEPS) if (s * ppm >= 74) { step = s; break; }
+  for (const s of STEPS) if (s * ppm >= (s < 60e3 ? TICK_GAP.sec : TICK_GAP.min)) { step = s; break; }
   const off = new Date(from).getTimezoneOffset() * 60000;
   // Where the "Live" word is (beside the now line, to its left near the
   // right end, as drawNow places it): a tick's time never runs into it.
@@ -1334,7 +1345,7 @@ function ticksHtml(W) {
     const mid = d.getHours() === 0 && d.getMinutes() === 0;
     const x = (t - from) * ppm;
     let lab = mid ? MONTHS[d.getMonth()] + ' ' + d.getDate()
-      : pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + (step < 60e3 ? ':' + pad2(d.getSeconds()) : '');
+      : (step < 60e3 ? clockSec(d) : clockMin(d));
     // (The time starts 4 px right of its line; about 7 px a character.)
     if (liveAt && x + 4 < liveAt[1] && x + 8 + lab.length * 7 > liveAt[0]) lab = '';
     html += '<span class="tlt' + (mid ? ' day' : '') + '" style="left:' + x.toFixed(1) + 'px">' + lab + '</span>';
@@ -1391,12 +1402,12 @@ function spansHtml(W) {
   for (const n of cams) for (const s of (D.card[n] || [])) {
     if (s[1] < from || s[0] > to) continue;
     const x0 = (Math.max(s[0], from) - from) * ppm, x1 = (Math.min(s[1], to) - from) * ppm;
-    html += '<i class="card" title="' + esc(n) + ': from the camera\'s card" style="left:' + x0.toFixed(1) + 'px;width:' + Math.max(3, x1 - x0).toFixed(1) + 'px"></i>';
+    html += '<i class="card" title="' + t('livetl.from_card_title', '{name}: from the camera\'s card', { name: esc(n) }) + '" style="left:' + x0.toFixed(1) + 'px;width:' + Math.max(3, x1 - x0).toFixed(1) + 'px"></i>';
   }
   // (The recording-now end stays visible when zoomed out: at least 8 px,
   // ending at now.)
   let cur = null;
-  const flush = () => { if (cur) { const w = Math.max(8, cur[1] - cur[0]); html += '<i class="tail" title="Recording now (still being saved)" style="left:' + (cur[1] - w).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px"></i>'; } };
+  const flush = () => { if (cur) { const w = Math.max(8, cur[1] - cur[0]); html += '<i class="tail" title="' + t('livetl.recording_now', 'Recording now (still being saved)') + '" style="left:' + (cur[1] - w).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px"></i>'; } };
   for (const [a, b] of mergeSpans(tails)) {
     const x0 = (a - from) * ppm, x1 = (b - from) * ppm;
     if (cur && x0 - cur[1] < 1.5) cur[1] = Math.max(cur[1], x1); else { flush(); cur = [x0, x1]; }
@@ -1434,7 +1445,7 @@ function groupEvents() {
 function markWord(g) {
   if (g.n === 1 && g.evs.length === 1) {
     const o = (g.evs[0].objects || []).find(x => x && x !== 'unusual' && !x.includes(':') && x.length <= 12 && kindOf({ objects: [x] }) === g.kind);
-    if (o) return o.charAt(0).toUpperCase() + o.slice(1);
+    if (o) { const nm = objName(o); return nm.charAt(0).toUpperCase() + nm.slice(1); }
   }
   return KINDS[g.kind].label;
 }
@@ -1469,7 +1480,7 @@ function drawNow() {
     const top = base + i * SIG_LANE;
     const bars = g.spans.filter(sp => sp[1] >= from && sp[0] <= to).map(sp => {
       const x0 = Math.max(0, (sp[0] - from) * ppm), x1 = Math.min(W, (sp[1] - from) * ppm);
-      return '<i style="left:' + x0.toFixed(1) + 'px;width:' + Math.max(2, x1 - x0).toFixed(1) + 'px" title="' + esc(g.name) + ': on ' + new Date(sp[0]).toLocaleTimeString() + ' to ' + new Date(sp[1]).toLocaleTimeString() + '"></i>';
+      return '<i style="left:' + x0.toFixed(1) + 'px;width:' + Math.max(2, x1 - x0).toFixed(1) + 'px" title="' + t('livetl.sig_title', '{name}: on {from} to {to}', { name: esc(g.name), from: new Date(sp[0]).toLocaleTimeString(), to: new Date(sp[1]).toLocaleTimeString() }) + '"></i>';
     }).join('');
     return '<div class="tlsig' + (g.on ? ' on' : '') + '" style="top:' + top + 'px">' + bars + '<span>' + esc(g.name) + '</span></div>';
   }).join('');
@@ -1478,7 +1489,7 @@ function drawNow() {
     const k = KINDS[g.kind];
     const dur = Math.max(2, Math.min(60, (g.t1 - g.t0) * ppm));
     const word = markWord(g);
-    const label = (g.n > 1 ? g.n + ' alerts, ' : '') + word + ' at ' + new Date(g.t0).toLocaleTimeString();
+    const label = g.n > 1 ? t('livetl.mark_label_n', '{n} {n, plural, one {alert} other {alerts}}, {word} at {time}', { n: g.n, word, time: new Date(g.t0).toLocaleTimeString() }) : t('livetl.mark_label', '{word} at {time}', { word, time: new Date(g.t0).toLocaleTimeString() });
     // The word shows when it fits before the next mark (or the end of the strip).
     // (The "now" line is an end too: a word never runs into it.)
     const nowPx = (Date.now() - from) * ppm;
@@ -1512,9 +1523,9 @@ function updateHead() {
   const sec = Math.floor(S.playhead / 1000);
   if (sec !== S.lastSec) {
     S.lastSec = sec;
-    $('tlClock').textContent = (S.live ? 'Live · ' : '') + fmtWall(S.playhead);
     const d = new Date(S.playhead);
-    $('tlHeadT').textContent = pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    $('tlClock').textContent = (S.live ? t('livetl.live', 'Live') + ' · ' : '') + clockPos(d);
+    $('tlHeadT').textContent = clockSec(d);
     const gt = $('tlGoto');
     if (gt && document.activeElement !== gt) gt.value = toLocalSec(S.playhead);
   }
@@ -1709,13 +1720,13 @@ function showTip(btn) {
   let h = '';
   if (e.thumb) h += '<img src="/api/events/' + enc(e.id) + '/thumb" alt="" loading="lazy">';
   if (g.n === 1) {
-    const objs = (e.objects || []).length ? e.objects.join(', ') : 'unrecognized';
+    const objs = (e.objects || []).length ? e.objects.map(objName).join(', ') : t('livetl.unrecognized', 'unrecognized');
     h += '<div class="tt1">' + ic(KINDS[g.kind].ic) + '<b>' + KINDS[g.kind].label + '</b></div><div>' + esc(day(e.start * 1000)) + '</div><div class="tm">' + esc(e.camera) + ' · ' + esc(objs) + '</div>';
   } else {
-    h += '<div class="tt1"><b>' + g.n + ' alerts</b></div><div>' + esc(day(g.t0)) + '</div>';
-    h += g.evs.slice(0, 4).map(x => '<div class="tm">' + esc(new Date(x.start * 1000).toLocaleTimeString()) + ' · ' + esc(x.camera) + ' · ' + esc((x.objects || []).join(', ') || 'alert') + (x.n > 1 ? ' · ' + x.n + ' alerts' : '') + '</div>').join('');
+    h += '<div class="tt1"><b>' + t('livetl.n_alerts', '{n} {n, plural, one {alert} other {alerts}}', { n: g.n }) + '</b></div><div>' + esc(day(g.t0)) + '</div>';
+    h += g.evs.slice(0, 4).map(x => '<div class="tm">' + esc(new Date(x.start * 1000).toLocaleTimeString()) + ' · ' + esc(x.camera) + ' · ' + esc((x.objects || []).map(objName).join(', ') || t('livetl.alert_lc', 'alert')) + (x.n > 1 ? ' · ' + t('livetl.n_alerts', '{n} {n, plural, one {alert} other {alerts}}', { n: x.n }) : '') + '</div>').join('');
     const rest = g.n - g.evs.slice(0, 4).reduce((s, x) => s + (x.n || 1), 0);
-    if (rest > 0) h += '<div class="tm">and ' + rest + ' more (zoom in)</div>';
+    if (rest > 0) h += '<div class="tm">' + t('livetl.more_zoom', 'and {n} more (zoom in)', { n: rest }) + '</div>';
   }
   if (!tipEl) { tipEl = document.createElement('div'); tipEl.className = 'tltip'; tipEl.setAttribute('role', 'tooltip'); document.body.appendChild(tipEl); }
   tipEl.innerHTML = h;
@@ -1779,7 +1790,7 @@ function showCovTip(i, x) {
   if (!g) return;
   if (!covTip) { covTip = document.createElement('div'); covTip.className = 'tltip tlcov'; covTip.setAttribute('role', 'tooltip'); document.body.appendChild(covTip); }
   const M = S.covM || 0;
-  covTip.innerHTML = '<div class="tt1"><b>' + (M - g.miss.length) + ' of ' + M + ' cameras recorded</b></div><div class="tm">No recording: ' + g.miss.map(esc).join(', ') + '</div>';
+  covTip.innerHTML = '<div class="tt1"><b>' + t('livetl.cams_recorded', '{n} of {total} cameras recorded', { n: M - g.miss.length, total: M }) + '</b></div><div class="tm">' + t('livetl.no_recording_list', 'No recording: {names}', { names: g.miss.map(esc).join(', ') }) + '</div>';
   covTip.hidden = false;
   placeCovTip(x);
 }
@@ -1803,12 +1814,12 @@ function closePop() {
 }
 function openPop(btn, g) {
   const rows = g.evs.slice(0, 60);
-  if (!popEl) { popEl = document.createElement('div'); popEl.className = 'tlpop'; popEl.setAttribute('role', 'dialog'); popEl.setAttribute('aria-label', 'Alerts here'); document.body.appendChild(popEl); }
+  if (!popEl) { popEl = document.createElement('div'); popEl.className = 'tlpop'; popEl.setAttribute('role', 'dialog'); popEl.setAttribute('aria-label', t('livetl.alerts_here', 'Alerts here')); document.body.appendChild(popEl); }
   const more = g.n - rows.reduce((a, x) => a + (x.n || 1), 0);
-  popEl.innerHTML = '<div class="tlpoph">' + g.n + ' alerts</div>' + rows.map((e, i) => {
+  popEl.innerHTML = '<div class="tlpoph">' + t('livetl.n_alerts', '{n} {n, plural, one {alert} other {alerts}}', { n: g.n }) + '</div>' + rows.map((e, i) => {
     const k = kindOf(e);
     return '<button type="button" class="tlpr k-' + k + '" data-i="' + i + '"><span class="tlpi">' + kIcon(k) + '</span><b>' + esc(new Date(e.start * 1000).toLocaleTimeString()) + '</b><span>' + esc(e.camera) + '</span><em>' + esc(KINDS[k].label + (e.n > 1 ? ' x' + e.n : '')) + '</em></button>';
-  }).join('') + (more > 0 ? '<div class="tlpoph">and ' + more + ' more</div>' : '');
+  }).join('') + (more > 0 ? '<div class="tlpoph">' + t('livetl.and_more', 'and {more} more', { more }) + '</div>' : '');
   popEl.hidden = false;
   const top = Math.min(btn.getBoundingClientRect().top, $('tlArea').getBoundingClientRect().top);
   const r = btn.getBoundingClientRect(), pw = popEl.offsetWidth;
@@ -1845,12 +1856,12 @@ function clearRange() {
 function markIn() {
   R.a = Math.round(S.playhead);
   if (R.b !== null && R.b <= R.a) R.b = null;
-  updateRange(); note('Range start ' + fmtWall(R.a).slice(-8));
+  updateRange(); note(t('livetl.range_start', 'Range start {time}', { time: clockSec(new Date(R.a)) }));
 }
 function markOut() {
   R.b = Math.round(S.playhead);
   if (R.a !== null && R.a >= R.b) R.a = null;
-  updateRange(); note('Range end ' + fmtWall(R.b).slice(-8));
+  updateRange(); note(t('livetl.range_end', 'Range end {time}', { time: clockSec(new Date(R.b)) }));
 }
 function updateRange() {
   const box = $('tlRange');
@@ -1871,7 +1882,7 @@ function updateRange() {
   box.style.width = Math.max(full ? 2 : 0, x1 - x0).toFixed(1) + 'px';
   if (full) {
     const n = rangeCams().length;
-    exp.textContent = 'Export ' + fmtDur(b - a) + ' \u00b7 ' + n + ' camera' + (n === 1 ? '' : 's');
+    exp.textContent = t('livetl.export', 'Export {dur} \u00b7 {n, plural, one {# camera} other {# cameras}}', { dur: fmtDur(b - a), n });
     // Centered over the visible part of the range, kept inside the strip.
     const vis0 = Math.max(0, x0), vis1 = Math.min(W, x1);
     const bw = exp.offsetWidth || 150;
@@ -1906,16 +1917,16 @@ function initRange() {
 function exportRange() {
   let a = R.a, b = R.b;
   if (a !== null && b === null && S.playhead > a + 500) b = Math.round(S.playhead);
-  if (a === null || b === null || b <= a) { note('Mark a range first: I and O, or Shift + drag'); return; }
+  if (a === null || b === null || b <= a) { note(t('livetl.mark_range', 'Mark a range first: I and O, or Shift + drag')); return; }
   const cams = rangeCams();
-  if (!cams.length) { note('No cameras with recordings here'); return; }
+  if (!cams.length) { note(t('livetl.no_cams', 'No cameras with recordings here')); return; }
   closePop();
   if (S.playing) setPlaying(false);
   exportDialog({ cams, camera: S.solo !== null ? (camFromId(S.solo) || {}).name : undefined, from: a, to: b });
 }
 
 // ---------- zoom presets / go to ----------
-const CHIPS = [['1h', 3600e3], ['6h', 6 * 3600e3], ['24h', 86400e3], ['7d', 7 * 86400e3]];
+const CHIPS = [[t('livetl.chip_1h', '1h'), 3600e3], [t('livetl.chip_6h', '6h'), 6 * 3600e3], [t('livetl.chip_24h', '24h'), 86400e3], [t('livetl.chip_7d', '7d'), 7 * 86400e3]];
 function viewWidth(w) {
   const now = Date.now();
   if (S.live || S.playhead > now - w * 0.1) userView(now - w * 0.85, now + w * 0.15);
@@ -1975,7 +1986,7 @@ async function stepAlert(dir) {
       if (c.length) hit = c.reduce((a, b) => ((dir < 0) === (landing(a) > landing(b)) ? a : b));
     }
     if (!hit) { try { hit = await findOutside(dir, head, names); } catch (e) { hit = null; } }
-    if (!hit) { const w = kindsOn.size ? [...kindsOn].map(k => KINDS[k].label.toLowerCase()).join('/') + ' ' : ''; note(dir < 0 ? 'No earlier ' + w + 'alert' : 'No later ' + w + 'alert'); return; }
+    if (!hit) { const w = kindsOn.size ? [...kindsOn].map(k => KINDS[k].label.toLowerCase()).join('/') + ' ' : ''; note(dir < 0 ? t('livetl.no_earlier', 'No earlier {kinds}alert', { kinds: w }) : t('livetl.no_later', 'No later {kinds}alert', { kinds: w })); return; }
     seek(landing(hit), true);
     // zoom so the alert is not lost in a very wide view
     if (S.view.to - S.view.from > 6 * 3600000) { const c = S.playhead; setView(c - 1.5 * 3600000, c + 1.5 * 3600000); }
@@ -1988,47 +1999,47 @@ function buildDock() {
   dock.innerHTML =
     '<div class="tlbar">' +
       '<div class="tlgrp">' +
-        '<button class="btn tlstep" id="tlPrev" title="Previous alert  ," aria-label="Previous alert">' + ic('prevalert') + '<span>Previous alert</span></button>' +
-        '<button class="btn tlplay" id="tlPlay" title="Play / pause  Space"></button>' +
-        '<button class="btn tlstep" id="tlNext" title="Next alert  ." aria-label="Next alert">' + '<span>Next alert</span>' + ic('nextalert') + '</button>' +
+        '<button class="btn tlstep" id="tlPrev" title="' + t('livetl.prev_tip', 'Previous alert  ,') + '" aria-label="' + t('livetl.prev', 'Previous alert') + '">' + ic('prevalert') + '<span>' + t('livetl.prev', 'Previous alert') + '</span></button>' +
+        '<button class="btn tlplay" id="tlPlay" title="' + t('livetl.play_tip', 'Play / pause  Space') + '"></button>' +
+        '<button class="btn tlstep" id="tlNext" title="' + t('livetl.next_tip', 'Next alert  .') + '" aria-label="' + t('livetl.next', 'Next alert') + '">' + '<span>' + t('livetl.next', 'Next alert') + '</span>' + ic('nextalert') + '</button>' +
       '</div>' +
-      '<label class="tlspdsel" title="Playback speed  [ slower  ] faster  J reverse / slower  L faster"><span class="sr">Speed</span><select id="tlSpeed" aria-label="Playback speed">' + speedOptions(S.speed || 1, 0, PIC_OK ? FAST_REVERSE.concat(REVERSE_SPEEDS) : true) + '</select></label>' +
+      '<label class="tlspdsel" title="' + t('livetl.speed_tip', 'Playback speed  [ slower  ] faster  J reverse / slower  L faster') + '"><span class="sr">' + t('livetl.speed', 'Speed') + '</span><select id="tlSpeed" aria-label="' + t('livetl.playback_speed', 'Playback speed') + '">' + speedOptions(S.speed || 1, 0, PIC_OK ? FAST_REVERSE.concat(REVERSE_SPEEDS) : true) + '</select></label>' +
       '<div class="tlclk"><span id="tlClock"></span><span id="tlNote" class="tlnote" aria-live="polite"></span></div>' +
       '<div class="tlgrp tlright">' +
-        '<button class="btn icon" id="tlBm" title="Bookmark this moment, with a note  B" aria-label="Bookmark this moment">' + Bm.bookmarkAddIcon() + '</button>' +
-        '<button class="btn icon' + (S.boxes ? ' on' : '') + '" id="tlBoxes" aria-pressed="' + S.boxes + '" title="Show what the AI detected: a box around each object, colored like the alert icons" aria-label="Show AI detections">' + ic('zone') + '</button>' +
-        '<button class="btn" id="tlBack" hidden title="Back to all cameras  Esc" aria-label="Back to all cameras">' + ic('left') + '<span>All cameras</span></button>' +
-        '<button class="btn" id="tlLive" title="Jump to now and keep playing live on the timeline  End" aria-label="Jump to live">' + ic('live') + '<span>Live</span></button>' +
-        '<button class="btn icon" id="tlFs" aria-pressed="' + tvOn() + '" title="Full screen, with these controls  F" aria-label="Full screen">' + ic('expand') + '</button>' +
-        '<button class="btn icon tlmore" id="tlMore" aria-expanded="false" title="More: zoom, alert types, go to a date, mark a range" aria-label="More timeline controls">' + ic('more') + '</button>' +
-        '<button class="btn icon" id="tlClose" title="Close the timeline (Esc, Back, T)" aria-label="Close the timeline">' + ic('x') + '</button>' +
+        '<button class="btn icon" id="tlBm" title="' + t('livetl.bookmark_tip', 'Bookmark this moment, with a note  B') + '" aria-label="' + t('livetl.bookmark', 'Bookmark this moment') + '">' + Bm.bookmarkAddIcon() + '</button>' +
+        '<button class="btn icon' + (S.boxes ? ' on' : '') + '" id="tlBoxes" aria-pressed="' + S.boxes + '" title="' + t('livetl.boxes_tip', 'Show what the AI detected: a box around each object, colored like the alert icons') + '" aria-label="' + t('livetl.boxes', 'Show AI detections') + '">' + ic('zone') + '</button>' +
+        '<button class="btn" id="tlBack" hidden title="' + t('livetl.back_tip', 'Back to all cameras  Esc') + '" aria-label="' + t('livetl.back', 'Back to all cameras') + '">' + ic('left') + '<span>' + t('livetl.all_cameras', 'All cameras') + '</span></button>' +
+        '<button class="btn" id="tlLive" title="' + t('livetl.live_tip', 'Jump to now and keep playing live on the timeline  End') + '" aria-label="' + t('livetl.jump_live', 'Jump to live') + '">' + ic('live') + '<span>' + t('livetl.live', 'Live') + '</span></button>' +
+        '<button class="btn icon" id="tlFs" aria-pressed="' + tvOn() + '" title="' + t('livetl.fs_tip', 'Full screen, with these controls  F') + '" aria-label="' + t('livetl.fs', 'Full screen') + '">' + ic('expand') + '</button>' +
+        '<button class="btn icon tlmore" id="tlMore" aria-expanded="false" title="' + t('livetl.more_tip', 'More: zoom, alert types, go to a date, mark a range') + '" aria-label="' + t('livetl.more', 'More timeline controls') + '">' + ic('more') + '</button>' +
+        '<button class="btn icon" id="tlClose" title="' + t('livetl.close_tip', 'Close the timeline (Esc, Back, T)') + '" aria-label="' + t('livetl.close', 'Close the timeline') + '">' + ic('x') + '</button>' +
       '</div>' +
     '</div>' +
     '<div class="tlbar tlbar2">' +
       '<div class="tlgrp">' +
-        '<button class="btn icon" id="tlZoomOut" title="Zoom out  -" aria-label="Zoom out">' + ic('minus') + '</button>' +
-        '<button class="btn icon" id="tlZoomIn" title="Zoom in  +  (closest: 10 seconds)" aria-label="Zoom in">' + ic('plus') + '</button>' +
-        '<div class="tlchips" id="tlChips" role="group" aria-label="Show this much time">' +
-          CHIPS.map(([l, ms]) => '<button class="btn tlchip" data-ms="' + ms + '" title="Show the last ' + l + ' around the playhead" aria-label="Show ' + l + '">' + l + '</button>').join('') +
+        '<button class="btn icon" id="tlZoomOut" title="' + t('livetl.zoom_out_tip', 'Zoom out  -') + '" aria-label="' + t('livetl.zoom_out', 'Zoom out') + '">' + ic('minus') + '</button>' +
+        '<button class="btn icon" id="tlZoomIn" title="' + t('livetl.zoom_in_tip', 'Zoom in  +  (closest: 10 seconds)') + '" aria-label="' + t('livetl.zoom_in', 'Zoom in') + '">' + ic('plus') + '</button>' +
+        '<div class="tlchips" id="tlChips" role="group" aria-label="' + t('livetl.show_time', 'Show this much time') + '">' +
+          CHIPS.map(([l, ms]) => '<button class="btn tlchip" data-ms="' + ms + '" title="' + t('livetl.chip_tip', 'Show the last {span} around the playhead', { span: l }) + '" aria-label="' + t('livetl.chip_label', 'Show {span}', { span: l }) + '">' + l + '</button>').join('') +
         '</div>' +
       '</div>' +
-      '<label class="tlgoto" title="Jump to a date and time"><span>Go to</span><input type="datetime-local" step="1" id="tlGoto" aria-label="Go to date and time"><button type="button" class="btn icon" id="tlCal" aria-haspopup="dialog" aria-expanded="false" title="Pick a day: days with recordings are tinted, days with alerts have a dot" aria-label="Pick a day from a calendar">' + ic('cal') + '</button></label>' +
+      '<label class="tlgoto" title="' + t('livetl.goto_tip', 'Jump to a date and time') + '"><span>' + t('livetl.goto', 'Go to') + '</span><input type="datetime-local" step="1" id="tlGoto" aria-label="' + t('livetl.goto_label', 'Go to date and time') + '"><button type="button" class="btn icon" id="tlCal" aria-haspopup="dialog" aria-expanded="false" title="' + t('livetl.cal_tip', 'Pick a day: days with recordings are tinted, days with alerts have a dot') + '" aria-label="' + t('livetl.cal', 'Pick a day from a calendar') + '">' + ic('cal') + '</button></label>' +
       '<div class="tlgrp tlright">' +
-        '<div class="tlkinds" id="tlKinds" role="group" aria-label="Show only these alert types">' +
-          KIND_ORDER.map(k => '<button class="btn icon tlkind k-' + k + '" data-k="' + k + '" aria-pressed="false" title="Show only ' +
-            (k === 'other' ? 'unrecognized' : KINDS[k].label.toLowerCase()) + ' alerts (click again to show all)" aria-label="' + KINDS[k].label + ' alerts">' + kIcon(k) + '</button>').join('') +
+        '<div class="tlkinds" id="tlKinds" role="group" aria-label="' + t('livetl.kinds_label', 'Show only these alert types') + '">' +
+          KIND_ORDER.map(k => '<button class="btn icon tlkind k-' + k + '" data-k="' + k + '" aria-pressed="false" title="' +
+            t('livetl.kind_tip', 'Show only {kind} alerts (click again to show all)', { kind: k === 'other' ? t('livetl.unrecognized', 'unrecognized') : KINDS[k].label.toLowerCase() }) + '" aria-label="' + t('livetl.kind_alerts', '{kind} alerts', { kind: KINDS[k].label }) + '">' + kIcon(k) + '</button>').join('') +
         '</div>' +
-        '<button class="btn" id="tlBmList" title="Bookmarks: search, play, edit" aria-label="Bookmarks">' + Bm.bookmarkListIcon() + '<span>Bookmarks</span></button>' +
-        '<button class="btn tlmk" id="tlIn" title="Mark range start at the playhead  I" aria-label="Mark range start">In</button>' +
-        '<button class="btn tlmk" id="tlOut" title="Mark range end at the playhead  O  (or Shift + drag on the strip)" aria-label="Mark range end">Out</button>' +
-        '<button class="btn icon tlmk" id="tlClr" title="Clear the range  Esc" aria-label="Clear the range" hidden>' + ic('x') + '</button>' +
+        '<button class="btn" id="tlBmList" title="' + t('livetl.bookmarks_tip', 'Bookmarks: search, play, edit') + '" aria-label="' + t('livetl.bookmarks', 'Bookmarks') + '">' + Bm.bookmarkListIcon() + '<span>' + t('livetl.bookmarks', 'Bookmarks') + '</span></button>' +
+        '<button class="btn tlmk" id="tlIn" title="' + t('livetl.in_tip', 'Mark range start at the playhead  I') + '" aria-label="' + t('livetl.in_label', 'Mark range start') + '">' + t('livetl.in', 'In') + '</button>' +
+        '<button class="btn tlmk" id="tlOut" title="' + t('livetl.out_tip', 'Mark range end at the playhead  O  (or Shift + drag on the strip)') + '" aria-label="' + t('livetl.out_label', 'Mark range end') + '">' + t('livetl.out', 'Out') + '</button>' +
+        '<button class="btn icon tlmk" id="tlClr" title="' + t('livetl.clear_tip', 'Clear the range  Esc') + '" aria-label="' + t('livetl.clear', 'Clear the range') + '" hidden>' + ic('x') + '</button>' +
       '</div>' +
     '</div>' +
-    '<div class="tlarea" id="tlArea" tabindex="0" aria-label="Timeline: click to play from there, drag to scrub, drag the time ruler to move, scroll or pinch to zoom, Shift and drag to select a range">' +
+    '<div class="tlarea" id="tlArea" tabindex="0" aria-label="' + t('livetl.area_label', 'Timeline: click to play from there, drag to scrub, drag the time ruler to move, scroll or pinch to zoom, Shift and drag to select a range') + '">' +
       '<div class="tlticks" id="tlTicks"></div><div class="tlspans" id="tlSpans"></div><div class="tlmarks" id="tlMarks"></div><div class="tlbms" id="tlBms"></div><div id="tlSigs"></div>' +
-      '<div class="tlrange" id="tlRange" hidden><span class="tlrh" data-w="a" title="Drag to move the start"></span><span class="tlrh" data-w="b" title="Drag to move the end"></span></div>' +
-      '<button class="tlexp" id="tlExport" hidden title="Save this range as MP4  E">Export</button>' +
-      '<div class="tlnow" id="tlNow" hidden><span>Live</span></div>' +
+      '<div class="tlrange" id="tlRange" hidden><span class="tlrh" data-w="a" title="' + t('livetl.drag_start', 'Drag to move the start') + '"></span><span class="tlrh" data-w="b" title="' + t('livetl.drag_end', 'Drag to move the end') + '"></span></div>' +
+      '<button class="tlexp" id="tlExport" hidden title="' + t('livetl.export_tip', 'Save this range as MP4  E') + '">' + t('livetl.export_btn', 'Export') + '</button>' +
+      '<div class="tlnow" id="tlNow" hidden><span>' + t('livetl.live', 'Live') + '</span></div>' +
       '<div class="tlhead" id="tlHead"><span id="tlHeadT"></span></div>' +
       '<div class="tlload" aria-hidden="true"></div>' +
     '</div>';
@@ -2069,10 +2080,10 @@ function buildDock() {
   const goTo = (box) => {
     if (box.value === gotoWas) return;
     gotoWas = box.value;
-    const t = new Date(box.value).getTime();
-    if (!(t > 0)) return;
-    seek(t, true);
-    note('Went to ' + fmtWall(t));
+    const when = new Date(box.value).getTime();
+    if (!(when > 0)) return;
+    seek(when, true);
+    note(t('livetl.went_to', 'Went to {time}', { time: clockPos(new Date(when)) }));
   };
   $('tlGoto').onfocus = (e) => { gotoWas = e.target.value; };
   $('tlGoto').onkeydown = (e) => {
@@ -2092,9 +2103,9 @@ function buildDock() {
       // The same time of day on the picked day.
       onPick: (y, m, d) => {
         const p = new Date(S.playhead);
-        const t = new Date(y, m, d, p.getHours(), p.getMinutes(), p.getSeconds()).getTime();
-        seek(Math.min(t, Date.now()), true);
-        note('Went to ' + fmtWall(Math.min(t, Date.now())));
+        const when = new Date(y, m, d, p.getHours(), p.getMinutes(), p.getSeconds()).getTime();
+        seek(Math.min(when, Date.now()), true);
+        note(t('livetl.went_to', 'Went to {time}', { time: clockPos(new Date(Math.min(when, Date.now()))) }));
       },
     });
   };
@@ -2163,7 +2174,7 @@ function updateControls() {
   const pl = $('tlPlay');
   if (!pl) return;
   pl.innerHTML = ic(S.playing ? 'pause' : 'play');
-  pl.setAttribute('aria-label', S.playing ? 'Pause' : 'Play');
+  pl.setAttribute('aria-label', S.playing ? t('livetl.pause', 'Pause') : t('livetl.play', 'Play'));
   $('tlSpeed').value = String(S.speed);
   $('tlSpeed').classList.toggle('fast', S.speed !== 1);
   const solo = S.solo !== null;
@@ -2329,7 +2340,7 @@ export async function enterFromFull() {
   if (id === null) return;
   // Another server's camera: its recordings are on that server.
   const rc = camFromId(id);
-  if (rc && rc.remote) { toast('Recordings of ' + rc.remote.camera + ' are on ' + rc.remote.site + ': right-click the picture > Open on ' + rc.remote.site); return; }
+  if (rc && rc.remote) { toast(t('livetl.remote_toast', 'Recordings of {camera} are on {site}: right-click the picture {arrow} Open on {site}', { camera: rc.remote.camera, site: rc.remote.site, arrow: '>' })); return; }
   const wasFull = Live.fullIsOpen();
   const alertAt = Live.fullAlertAt();
   const at = alertAt ? alertAt - LEAD : 0;
@@ -2374,7 +2385,7 @@ function clearTransient(ev) {
 // playing at 1x either way.
 function ladder() { return (PIC_OK ? FAST_REVERSE.slice().sort((a, b) => a - b) : []).concat([-4, -2, -1], [1, 2, 4, 8, 16, 32, 64, 128, 256]); }
 function shuttle(dir) {
-  if (S.live && dir > 0) { note('Already live'); return; }
+  if (S.live && dir > 0) { note(t('livetl.already_live', 'Already live')); return; }
   const lad = ladder();
   let n;
   if (!S.playing) n = dir > 0 ? 1 : -1;

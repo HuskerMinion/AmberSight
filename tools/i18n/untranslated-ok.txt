@@ -1,0 +1,171 @@
+palette.js:add camera remove camera rename camera stream address rtsp ip
+palette.js:discover scan network onvif add camera automatically new camera
+palette.js:group rooms outside inside organize
+palette.js:how long to keep video delete old recordings disk space full storage limit days keep forever protect
+palette.js:where recordings are saved external drive nas network folder move recordings usb
+palette.js:too many alerts false alarms shadows sensitive missed motion low medium high
+palette.js:person vehicle animal package ai object detection what to look for
+palette.js:phone alerts notifications notify ntfy pushover telegram push email webhook home assistant messages
+palette.js:too many notifications quiet snooze priority rate limit
+palette.js:only alert when quiet hours delivery truck conditions
+palette.js:daily digest recap overnight report
+palette.js:why no alert missing alerts false alarms
+palette.js:face recognition known people names strangers
+palette.js:number plate lpr anpr car registration
+palette.js:audio glass break bark loud noise scream
+palette.js:describe find red truck search by description
+palette.js:home away night schedule when to arm sunrise sunset
+palette.js:phone at home away geofence arrive leave
+palette.js:password add user accounts sign in viewer admin family pair code invite
+palette.js:secure certificate tls ssl remote access tailscale padlock
+palette.js:wall tv tablet kiosk display mode pair code monitor
+palette.js:rtsp restream home assistant vlc frigate scrypted
+palette.js:other site link servers second location cabin
+palette.js:custom detector hook codeproject
+palette.js:reboot camera power cycle frozen camera smart plug offline
+palette.js:health problems warnings update version upgrade uptime
+palette.js:errors warnings debug
+palette.js:who changed sign in history
+palette.js:restore export settings save settings
+palette.js:gpu graphics card nvidia nvdec intel quick sync vaapi amd decode processor cpu
+palette.js:Recent
+palette.js:Events
+palette.js:Enter
+palette.js:Esc
+admin_offsite.js:hint warn
+core.js:Canceled
+core.js:input, select, textarea, [aria-pressed]
+help.js:accounts admin viewer operator role rights permissions cameras sign-in code password
+help.js:add camera remove copy settings list
+help.js:alert pop-ups keep screen awake sleep text size larger font data saver phone mobile cellular start page password trust certificate sign out
+help.js:alert rules plain words quiet rule delivery truck smart search threshold test tag priority notice
+help.js:algorithm objects frame-diff min object contrast travel min frames pre-roll post-roll arm window
+help.js:also trigger other cameras group camera detection onvif reolink
+help.js:arm disarm detection off on away home delay undo
+help.js:audio sound overlay text burn timestamp subtitle download
+help.js:Basics
+help.js:bookmark note notes mark moment flag keep video save search B
+help.js:Camera settings
+help.js:download export send share video clip snapshot picture zip
+help.js:external detector command
+help.js:face recognition people names known unknown doorbell import no alerts family
+help.js:find cameras onvif scan subnet add
+help.js:folders drives archive cap full event footage disk guard network share days
+help.js:follow track same person vehicle other cameras path re-identification smart search
+help.js:grid tiles fit focus layout arrange group full screen zoom snapshot clip side panel
+help.js:group organize filter
+help.js:hardware decoding gpu graphics card nvidia nvdec cuda intel quick sync qsv vaapi amd processor cpu decode keep free memory
+help.js:health online offline reconnects bitrate per day days kept fits storage forecast warnings problems connections transcode transcoding encoder convert
+help.js:home away night profile rules sunrise sunset schedule
+help.js:https tls ssl certificate encrypted secure restart tailscale name own certificate trust http redirect
+help.js:keys keyboard
+help.js:license plate number plate lpr anpr car vehicle known unknown driveway gate read
+help.js:link another server code fingerprint share cameras tailscale
+help.js:linked server site cabin switch split
+help.js:model yolox download labels confidence parked codeproject ai server
+help.js:morning summary digest daily overnight report recap unknown people vehicles packages offline tamper email
+help.js:motion detection zones ignore sensitivity object size contrast travel arm window schedule break time false alarms
+help.js:mqtt home assistant sensor motion problem automation
+help.js:named zones area line loitering crossing tripwire direction arrow gate driveway person stays
+help.js:name short name groups enabled
+help.js:notifications channels hours interval priority quiet
+help.js:ntfy pushover telegram webhook home assistant system problems offline disk full test interval priority link browser phone push unifiedpush app push servers
+help.js:object detection person car dog confidence parked labels confirm strict stricter false alerts remembered spots same spot bush shrub bin not a person camera own detection agree
+help.js:Other settings
+help.js:playback scrub rewind speed alerts strip history L
+help.js:presence geofence geofencing phone home away leave arrive arm disarm everyone left
+help.js:privacy mask black out hide neighbor window ignore zone
+help.js:ptz pan tilt zoom preset talk speaker intercom profile dock
+help.js:record mode continuous motion only sub stream around events pre-roll post-roll direct battery on demand space copy event clips folder onedrive google drive dropbox cloud off-site clone camera missed events card catch up argus
+help.js:remote outside internet vpn tailscale phone travel access port forward
+help.js:search motion alerts objects person car protect export zip today unseen new badge list grid
+help.js:segment retention days max storage cap automatic free space full
+help.js:Settings
+help.js:setup new install checklist first steps
+help.js:share restream rtsp home assistant scrypted vlc frigate nvr stream address url snapshot mjpeg generic camera port 8554 sub stream tcp
+help.js:strangers unknown person unknown vehicle known face known plate night first time seen quiet
+help.js:tabs header menu account theme phone bottom bar more
+help.js:tamper covered blocked blacked out spray paint blurred out of focus moved knocked turned reference picture day night infrared sabotage
+help.js:timelapse day fast summary nightly
+help.js:two-step two factor 2fa mfa totp authenticator code recovery lost phone token app home assistant rtsp password security your account signed-in devices sign out other devices new device alert
+help.js:unusual out of pattern rare normal baseline learning hour of the week person night 3 am
+help.js:update upgrade new version release download install previous rollback github apt dnf
+help.js:url rtsp sub stream main username password address port protocol path preset onvif full address paste ingest ffmpeg hardware decoding fps analysis camera report bug issue guide brand transport tcp udp 461
+help.js:wall tv tablet kiosk monitor always on dashboard pair code display fire tv android tv ipad guided access raspberry pi chromium burn in dim night
+help.js:warnings errors log
+help.js:watchdog reboot restart frozen offline power cycle smart plug shelly tasmota poe switch
+help.js:watchdog reboot restart offline frozen power cycle quiet hours limit
+help.js:Watching
+help.js:who changed sign in history
+help.js:why no alert missing alerts false alarms almost nothing found frames fix
+events.js:unknown plate
+auth.js:Windows
+live.js:pill ptl
+live.js:pill pbl
+live.js:pill pdet
+live.js:pill pbr
+status_page.js: has been offline
+admin_config.js:Home
+admin_config.js:Away
+admin_config.js:Home
+admin_config.js:Profile
+admin_config.js:Camera
+push.js:Notification
+cam_watch.js:Tamper
+cam_watch.js:on dot
+settings.js:Quick Sync
+settings.js:Telegram
+settings.js:Pushover
+settings.js:Home Assistant
+settings.js:Everyday
+settings.js:Optional
+settings.js:Admin
+controls.js:btn glass
+cam_controls.js:on dot
+cam_controls.js:Reolink
+camaddr.js:Reolink
+camaddr.js:Reolink (h264Preview)
+camaddr.js:Amcrest
+camaddr.js:Hikvision
+camaddr.js:Uniview
+camaddr.js:Tapo / TP-Link
+camaddr.js:Axis
+camaddr.js:Foscam
+dock.js:diag ul
+dock.js:diag ur
+dock.js:diag dl
+dock.js:diag dr
+shortcuts.js:Ctrl
+shortcuts.js:Esc
+shortcuts.js:Shift
+shortcuts.js:Space
+shortcuts.js:Enter
+shortcuts.js:End
+display.js:Amber
+display.js:Sight
+helperpick.js:ambersight.exe capture --pair
+cameras.js:NVIDIA (NVDEC)
+cameras.js:Quick Sync (QSV)
+cameras.js:ffmpeg -re -i INPUT -c:v libx264 -preset veryfast -g 50 -c:a aac -f flv -tls_verify 0
+cameras.js:Telegram
+cameras.js:Pushover
+cameras.js:Webhook
+cameras.js:Home Assistant
+cameras.js:glass break
+cameras.js:dog bark
+cameras.js:car horn
+cameras.js:Reolink
+cameras.js:Dahua / Amcrest
+cameras.js:Hikvision
+cameras.js:on dot
+lang_ui.js:English
+lang_ui.js:Deutsch
+lang_ui.js:Nederlands
+lang_ui.js:Italiano
+lang_ui.js:Polski
+lang_ui.js:Português (Brasil)
+lang_ui.js:Svenska
+account.js:btn danger
+core.js:-> 401 (sign in)
+livetl.js:(pointer: coarse)
+livetl.js:(any-pointer: fine)

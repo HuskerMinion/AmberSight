@@ -13,3 +13,5 @@ dist/
 # Docker Compose example's folders (docker/compose.yaml)
 docker/config/
 docker/data/
+__pycache__/
+tools/i18n/out/

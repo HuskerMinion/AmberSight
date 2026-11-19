@@ -7,6 +7,7 @@ A prebuilt image is published with each release:
 | `ghcr.io/huskerminion/ambersight:latest` | the newest release, `amd64` and `arm64` (such as a Raspberry Pi 5) |
 | `ghcr.io/huskerminion/ambersight:<version>` | one release, e.g. `0.11.0` |
 | `ghcr.io/huskerminion/ambersight:cuda` | the newest release with the AI on an NVIDIA card, `amd64` only (also `<version>-cuda`) |
+| `ghcr.io/huskerminion/ambersight:openvino` | the newest release with the AI on Intel graphics, `amd64` only (also `<version>-openvino`) |
 
 It holds the AmberSight program, ffmpeg and the Intel/AMD video drivers; your
 settings and recordings live in two folders you mount. You can also build the
@@ -174,6 +175,27 @@ in `[ai]`). The plain image given `--gpus all` finds the card but has no CUDA
 libraries: it stays on the processor, downloads nothing, and says why in
 Settings (*libcudart.so.13 not found*).
 
+## AI on Intel graphics
+
+For Intel graphics (an Arc card, or the graphics built into a recent Intel
+processor), use the OpenVINO image (`:openvino`, built from
+`Dockerfile.openvino`: Ubuntu 26.04 with Intel's compute driver and
+AmberSight's Intel graphics add-on; `amd64` only). It needs only the card's
+device files:
+
+```sh
+docker run -d --name ambersight --restart unless-stopped --stop-timeout 30 --device /dev/dri --network host \
+  -v ./config:/config -v ./data:/data ghcr.io/huskerminion/ambersight:openvino
+```
+
+With compose, use `image: ghcr.io/huskerminion/ambersight:openvino` and the
+same `devices: - /dev/dri:/dev/dri` as for hardware decoding. The container
+user gets the group of the device files by itself. Settings > Detection &
+alerts > Objects (AI) then shows *Running on: Intel(R) Arc(TM) ...
+(OpenVINO)*. The plain image has no Intel compute driver (Debian has no
+package of it): given `/dev/dri` it decodes video on the card but runs the AI
+on the processor, and Settings says to use the `:openvino` image.
+
 ## Recordings whose files are gone
 
 After moving recordings or replacing a drive, Settings > Recording > Drives & folders can find and
@@ -204,7 +226,7 @@ ghcr.io/huskerminion/ambersight:latest`, then remove the container and run it
 again with the same `docker run` line. An image you built yourself: `git pull`
 and `docker compose -f docker/compose.yaml up -d --build`.
 
-`:latest` and `:cuda` always point at the newest release; use a version tag
+`:latest`, `:cuda` and `:openvino` always point at the newest release; use a version tag
 (e.g. `ghcr.io/huskerminion/ambersight:0.11.0`) to stay on one release and
 update when you choose. Settings and recordings stay in the mounted folders.
 
@@ -248,6 +270,7 @@ To build the image from this repository instead of pulling it:
 git clone https://github.com/HuskerMinion/AmberSight.git
 cd AmberSight
 docker build -t ambersight .                        # or: -f Dockerfile.cuda -t ambersight:cuda
+                                                    # or: -f Dockerfile.openvino -t ambersight:openvino
 ```
 
 With Compose, replace the `image:` line in `docker/compose.yaml` with the

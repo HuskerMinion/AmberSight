@@ -25,6 +25,24 @@ pub const MSG_BATTERY: u32 = 253;       // read battery/solar state
 pub const MSG_DOWNLOAD: u32 = 143;      // stream SD-card recordings for a time range (read-only)
 pub const MSG_DOWNLOAD_STOP: u32 = 144; // stop a cmd-143 stream early
 pub const MSG_GENERAL: u32 = 104;       // read the camera's clock and time zone
+/// Read what the device and each of its channels support (`<Support>`, one
+/// `<item>` per channel with flags such as `ledCtrl`, `audioVersion`,
+/// `battery`). Camera controls: what a camera has. Read-only.
+pub const MSG_SUPPORT: u32 = 199;
+/// Read the infrared and status lights (`<LedState>`: `state` = infrared
+/// auto/open/close, `lightState` = status light open/close). Read-only.
+pub const MSG_LED_GET: u32 = 208;
+/// WRITE: set the infrared and status lights (the `<LedState>` read with 208,
+/// one field changed). Camera controls only: see `CONTROL_WRITES`.
+pub const MSG_LED_SET: u32 = 209;
+/// WRITE: sound the siren for a number of rounds, or stop it
+/// (`<audioPlayInfo>`). Camera controls only: see `CONTROL_WRITES`.
+pub const MSG_AUDIO_PLAY: u32 = 263;
+// Talk (two-way audio; see `super::talk`). Ids and their XML from public
+// protocol notes (the neolink project's dissector/messages.md).
+pub const MSG_TALK_ABILITY: u32 = 10;   // read what talk audio the camera takes (read-only)
+pub const MSG_TALK_CONFIG: u32 = 201;   // open a talk: the audio format the client will send
+pub const MSG_TALK: u32 = 202;          // talk audio (ADPCM packets) to the camera's speaker
 
 /// Message ids this client is allowed to send. All are read-only or housekeeping
 /// (sign in/out, preview, subscribe to motion, ack keep-alives, read battery,
@@ -33,7 +51,16 @@ pub const MSG_GENERAL: u32 = 104;       // read the camera's clock and time zone
 /// setting (e.g. the PIR-config write, 213) is deliberately absent.
 pub const ALLOWED: &[u32] =
     &[MSG_LOGIN, MSG_LOGOUT, MSG_PREVIEW, MSG_PREVIEW_STOP, MSG_MOTION_REQUEST, MSG_KEEPALIVE, MSG_BATTERY, MSG_ABILITY, MSG_DOWNLOAD,
-      MSG_DOWNLOAD_STOP, MSG_GENERAL];
+      MSG_DOWNLOAD_STOP, MSG_GENERAL, MSG_SUPPORT, MSG_LED_GET,
+      // Talk: plays sound on the camera's speaker but changes no setting.
+      MSG_TALK_ABILITY, MSG_TALK_CONFIG, MSG_TALK];
+
+/// The only messages that change something on a camera, sent only through
+/// [`write_control_msg`] (the camera controls, after their rights, confirm,
+/// rate limit and audit): the infrared/status lights (209) and the siren
+/// (263). Nothing else that writes is listed: no spotlight, no PIR, no
+/// settings, no reboot.
+pub const CONTROL_WRITES: &[u32] = &[MSG_LED_SET, MSG_AUDIO_PLAY];
 
 pub const CLASS_LEGACY: u16 = 0x6514;
 pub const CLASS_MODERN: u16 = 0x6614;
@@ -166,6 +193,18 @@ pub fn write_msg<W: Write>(w: &mut W, header: &Header, body: &[u8]) -> Result<()
     if !ALLOWED.contains(&header.msg_id) {
         bail!("refusing to send message id {} (not on the read-only list)", header.msg_id);
     }
+    put_msg(w, header, body)
+}
+
+/// Send one of the [`CONTROL_WRITES`] (and nothing else).
+pub fn write_control_msg<W: Write>(w: &mut W, header: &Header, body: &[u8]) -> Result<()> {
+    if !CONTROL_WRITES.contains(&header.msg_id) {
+        bail!("refusing to send message id {} (not a camera control)", header.msg_id);
+    }
+    put_msg(w, header, body)
+}
+
+fn put_msg<W: Write>(w: &mut W, header: &Header, body: &[u8]) -> Result<()> {
     let mut h = header.clone();
     h.body_len = body.len() as u32;
     let mut out = h.encode();
@@ -296,6 +335,19 @@ mod tests {
         let mut out = Vec::new();
         assert!(write_msg(&mut out, &h, b"").is_err());
         assert!(out.is_empty());
+        // The control writes go only one way, and that way sends nothing else.
+        for id in CONTROL_WRITES {
+            let h = Header { msg_id: *id, ..h.clone() };
+            assert!(write_msg(&mut out, &h, b"").is_err(), "{id} is not on the read-only list");
+            assert!(!ALLOWED.contains(id));
+        }
+        for id in [MSG_LOGIN, MSG_PREVIEW, MSG_SUPPORT, 288, 289, 290, 23, 105] {
+            let h = Header { msg_id: id, ..h.clone() };
+            assert!(write_control_msg(&mut out, &h, b"").is_err(), "{id} is not a control write");
+        }
+        assert!(out.is_empty());
+        let h = Header { msg_id: MSG_AUDIO_PLAY, ..h };
+        assert!(write_control_msg(&mut out, &h, b"x").is_ok());
     }
 
     #[test]

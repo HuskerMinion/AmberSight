@@ -51,6 +51,38 @@ pub fn shield_state_topic(prefix: &str) -> String { format!("{prefix}/shield/sta
 pub fn camera_topic(prefix: &str, cam: &str, leaf: &str) -> String { format!("{prefix}/{cam}/{leaf}") }
 pub fn trigger_filter(prefix: &str) -> String { format!("{prefix}/+/trigger") }
 pub fn wake_filter(prefix: &str) -> String { format!("{prefix}/+/wake") }
+/// Camera controls: `<prefix>/<camera>/light/set` (ON/OFF), `.../light/brightness/set`
+/// (a number) and `.../siren/set` (ON/OFF, or JSON with a duration; only when
+/// the admin offered sirens to Home Assistant).
+pub fn light_set_filter(prefix: &str) -> String { format!("{prefix}/+/light/set") }
+pub fn light_brightness_filter(prefix: &str) -> String { format!("{prefix}/+/light/brightness/set") }
+pub fn siren_set_filter(prefix: &str) -> String { format!("{prefix}/+/siren/set") }
+
+/// The camera of a `<prefix>/<camera>/<a>/<b>...` command topic with this tail.
+pub fn camera_with_tail<'a>(prefix: &str, topic: &'a str, tail: &str) -> Option<&'a str> {
+    let rest = topic.strip_prefix(prefix)?.strip_prefix('/')?.strip_suffix(tail)?.strip_suffix('/')?;
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
+}
+
+/// A siren command: Some(seconds) to sound it (None: the default length),
+/// or stop. `{"state":"ON","duration":10}` is what Home Assistant sends with a duration.
+#[derive(Debug, PartialEq)]
+pub enum SirenCmd {
+    On(Option<u32>),
+    Off,
+}
+
+pub fn parse_siren(payload: &[u8]) -> Option<SirenCmd> {
+    let t = String::from_utf8_lossy(payload);
+    let t = t.trim();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+        if v.is_object() {
+            let on = v["state"].as_str().map(|s| s.eq_ignore_ascii_case("on"))?;
+            return Some(if on { SirenCmd::On(v["duration"].as_f64().map(|d| d.clamp(1.0, 3600.0) as u32)) } else { SirenCmd::Off });
+        }
+    }
+    parse_shield(t.as_bytes()).map(|on| if on { SirenCmd::On(None) } else { SirenCmd::Off })
+}
 /// `<prefix>/signal/<name>/set` with ON or OFF sets a timeline signal.
 pub fn signal_filter(prefix: &str) -> String { format!("{prefix}/signal/+/set") }
 pub fn signal_name<'a>(prefix: &str, topic: &'a str) -> Option<&'a str> {
@@ -192,6 +224,10 @@ pub struct DiscoCam {
     pub plates: bool,
     /// Tamper detection is on for this camera.
     pub tamper: bool,
+    /// The camera has a spotlight (its brightness's top, when it can be set).
+    pub light: Option<Option<u32>>,
+    /// The camera has a siren, and the admin offered sirens to Home Assistant.
+    pub siren: bool,
 }
 
 /// A named zone as far as discovery is concerned.
@@ -235,6 +271,11 @@ pub fn event_payload(ev: &Event) -> String {
 pub fn discovery_messages(prefix: &str, cameras: &[DiscoCam], profiles: &[String], with_shield: bool) -> Vec<(String, String)> {
     let avail = status_topic(prefix);
     let mut out = Vec::new();
+    // Entities a camera does not have (any more): an empty config removes them.
+    let mut out_removals: Vec<(String, String)> = Vec::new();
+    fn out_empty(v: &mut Vec<(String, String)>, kind: &str, id: &str) {
+        v.push((format!("{DISCOVERY_PREFIX}/{kind}/{id}/config"), String::new()));
+    }
     let mut add = |kind: &str, id: &str, body: serde_json::Value| {
         out.push((format!("{DISCOVERY_PREFIX}/{kind}/{prefix}_{id}/config"), body.to_string()));
     };
@@ -345,7 +386,7 @@ pub fn discovery_messages(prefix: &str, cameras: &[DiscoCam], profiles: &[String
             "device": dev,
         }));
     }
-    for DiscoCam { slug: cam, name, on_demand, faces, packages, zones, plates, tamper } in cameras {
+    for DiscoCam { slug: cam, name, on_demand, faces, packages, zones, plates, tamper, light, siren } in cameras {
         let dev = json!({
             "identifiers": [format!("{prefix}_{cam}")],
             "name": name,
@@ -411,6 +452,48 @@ pub fn discovery_messages(prefix: &str, cameras: &[DiscoCam], profiles: &[String
             let mut v = binary("Tamper", "tamper", Some("tamper"), false);
             v["icon"] = json!("mdi:camera-off");
             add("binary_sensor", &format!("{cam}_tamper"), v);
+        }
+        // Camera controls: the spotlight (on for a few minutes, then back to
+        // the camera's own setting) and, when offered, the siren. Gone again
+        // (an empty config) when the camera has none.
+        match light {
+            Some(top) => {
+                let mut v = json!({
+                    "name": "Spotlight",
+                    "unique_id": format!("{prefix}_{cam}_light"),
+                    "command_topic": camera_topic(prefix, cam, "light/set"),
+                    "state_topic": camera_topic(prefix, cam, "light/state"),
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "icon": "mdi:light-flood-down",
+                    "availability_topic": avail,
+                    "device": dev,
+                });
+                if let Some(top) = top {
+                    v["brightness_command_topic"] = json!(camera_topic(prefix, cam, "light/brightness/set"));
+                    v["brightness_state_topic"] = json!(camera_topic(prefix, cam, "light/brightness"));
+                    v["brightness_scale"] = json!(top);
+                    v["on_command_type"] = json!("brightness");
+                }
+                add("light", &format!("{cam}_light"), v);
+            }
+            None => out_empty(&mut out_removals, "light", &format!("{prefix}_{cam}_light")),
+        }
+        if *siren {
+            add("siren", &format!("{cam}_siren"), json!({
+                "name": "Siren",
+                "unique_id": format!("{prefix}_{cam}_siren"),
+                "command_topic": camera_topic(prefix, cam, "siren/set"),
+                "state_topic": camera_topic(prefix, cam, "siren/state"),
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "support_duration": true,
+                "support_volume_set": false,
+                "availability_topic": avail,
+                "device": dev,
+            }));
+        } else {
+            out_empty(&mut out_removals, "siren", &format!("{prefix}_{cam}_siren"));
         }
         add("binary_sensor", &format!("{cam}_online"), binary("Online", "online", Some("connectivity"), true));
         if *on_demand {
@@ -483,6 +566,7 @@ pub fn discovery_messages(prefix: &str, cameras: &[DiscoCam], profiles: &[String
             "device": dev,
         }));
     }
+    out.extend(out_removals);
     out
 }
 
@@ -641,9 +725,16 @@ pub fn start(engine: &Arc<Engine>) -> Option<MqttHandle> {
                         let _ = client.try_subscribe(signal_filter(&prefix), QoS::AtLeastOnce);
                         let _ = client.try_subscribe(profile_set_topic(&prefix), QoS::AtLeastOnce);
                         let _ = client.try_subscribe(overlay_set_filter(&prefix), QoS::AtLeastOnce);
+                        let _ = client.try_subscribe(light_set_filter(&prefix), QoS::AtLeastOnce);
+                        let _ = client.try_subscribe(light_brightness_filter(&prefix), QoS::AtLeastOnce);
+                        let _ = client.try_subscribe(siren_set_filter(&prefix), QoS::AtLeastOnce);
                         announce.store(true, Ordering::Relaxed);
                     }
-                    Ok(MqEvent::Incoming(Packet::Publish(p))) => handle_command(&engine, &prefix, &p.topic, &p.payload),
+                    Ok(MqEvent::Incoming(Packet::Publish(p))) => {
+                        if takes_message(&prefix, &p.topic, p.retain) {
+                            handle_command(&engine, &prefix, &p.topic, &p.payload)
+                        }
+                    }
                     Ok(_) => {}
                     Err(e) => {
                         if !was_down {
@@ -678,6 +769,23 @@ fn camera_id_by_slug(engine: &Engine, cam: &str) -> Option<usize> {
         .map(|h| h.id)
 }
 
+/// Whether a message is acted on. A retained command (arm, profile, a
+/// siren, a light...) would be done again at every reconnect, so retained
+/// messages are ignored, told once per topic. Overlay values are values, not
+/// commands: a retained one sets the value again after a restart, as documented.
+pub fn takes_message(prefix: &str, topic: &str, retain: bool) -> bool {
+    if !retain || overlay_var_name(prefix, topic).is_some() {
+        return true;
+    }
+    static TOLD: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    let mut g = TOLD.lock().unwrap_or_else(|e| e.into_inner());
+    let told = g.get_or_insert_with(Default::default);
+    if told.len() < 1000 && told.insert(topic.to_string()) {
+        warn!("mqtt: ignoring a retained command on {topic}: commands are acted on only when sent (publish them without retain)");
+    }
+    false
+}
+
 fn handle_command(engine: &Arc<Engine>, prefix: &str, topic: &str, payload: &[u8]) {
     if topic == shield_set_topic(prefix) {
         match parse_shield(payload) {
@@ -706,6 +814,31 @@ fn handle_command(engine: &Arc<Engine>, prefix: &str, topic: &str, payload: &[u8
         }
     } else if let Some(name) = overlay_var_name(prefix, topic) {
         engine.set_overlay_var(name, &String::from_utf8_lossy(payload));
+    } else if let Some(cam) = camera_with_tail(prefix, topic, "light/set") {
+        let on = parse_shield(payload);
+        control(engine, cam, "light", move || match on {
+            Some(true) => Some(crate::controls::Action::LightOn { seconds: None, brightness: None }),
+            Some(false) => Some(crate::controls::Action::LightOff),
+            None => None,
+        });
+    } else if let Some(cam) = camera_with_tail(prefix, topic, "light/brightness/set") {
+        let b = String::from_utf8_lossy(payload).trim().parse::<f64>().ok().filter(|b| b.is_finite() && *b >= 0.0).map(|b| b.round() as u32);
+        control(engine, cam, "light brightness", move || match b {
+            Some(0) => Some(crate::controls::Action::LightOff),
+            Some(b) => Some(crate::controls::Action::LightOn { seconds: None, brightness: Some(b) }),
+            None => None,
+        });
+    } else if let Some(cam) = camera_with_tail(prefix, topic, "siren/set") {
+        if !engine.config.lock().unwrap().alerts.mqtt_siren {
+            warn!("mqtt: siren command for '{cam}' ignored: sirens are not offered to Home Assistant (Settings, Notifications)");
+            return;
+        }
+        let cmd = parse_siren(payload);
+        control(engine, cam, "siren", move || match cmd {
+            Some(SirenCmd::On(secs)) => Some(crate::controls::Action::Siren { seconds: secs }),
+            Some(SirenCmd::Off) => Some(crate::controls::Action::SirenStop),
+            None => None,
+        });
     } else if let Some(cam) = trigger_camera(prefix, topic) {
         match camera_id_by_slug(engine, cam) {
             Some(id) => {
@@ -726,6 +859,27 @@ fn handle_command(engine: &Arc<Engine>, prefix: &str, topic: &str, payload: &[u8
     }
 }
 
+/// A camera control from Home Assistant, on its own thread (the camera is
+/// asked; the MQTT connection must not wait). Recorded in the audit as "(mqtt)".
+fn control(engine: &Arc<Engine>, cam: &str, what: &str, action: impl FnOnce() -> Option<crate::controls::Action>) {
+    let Some(id) = camera_id_by_slug(engine, cam) else {
+        warn!("mqtt: {what} for unknown camera '{cam}'");
+        return;
+    };
+    let Some(a) = action() else {
+        warn!("mqtt: {what} for '{cam}': payload not understood");
+        return;
+    };
+    let e = engine.clone();
+    let cam = cam.to_string();
+    std::thread::spawn(move || {
+        let who = crate::controls::Caller { user: "(mqtt)".into(), ip: String::new(), source: "mqtt" };
+        if let Err(r) = crate::controls::act(&e, id, &who, a, false) {
+            warn!("mqtt: control of '{cam}': {}", r.msg);
+        }
+    });
+}
+
 fn poll_state(engine: Arc<Engine>, client: Client, prefix: String, discovery: bool, announce: Arc<AtomicBool>) {
     // Last published payload per state topic; cleared on reconnect.
     let mut last: HashMap<String, String> = HashMap::new();
@@ -735,9 +889,9 @@ fn poll_state(engine: Arc<Engine>, client: Client, prefix: String, discovery: bo
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let mut cams: Vec<DiscoCam> = Vec::new();
-        let (faces_cfg, lpr_cfg) = {
+        let (faces_cfg, lpr_cfg, siren_offered) = {
             let c = engine.config.lock().unwrap();
-            (c.faces.clone(), c.lpr.clone())
+            (c.faces.clone(), c.lpr.clone(), c.alerts.mqtt_siren)
         };
         let mut states: Vec<(String, String)> = Vec::new();
         for h in engine.cameras.read().unwrap().iter().flatten() {
@@ -776,7 +930,21 @@ fn poll_state(engine: Arc<Engine>, client: Client, prefix: String, discovery: bo
                 let on = st.zones_occupied.iter().any(|n| slug(n) == z.slug);
                 states.push((zone_state_topic(&prefix, &s, &z.slug), on_off(on).into()));
             }
-            cams.push(DiscoCam { slug: s, name: st.name.clone(), on_demand, faces, packages, zones, plates, tamper });
+            // Camera controls, as known (nothing is asked of the camera here).
+            let light = crate::controls::light_now(&engine, &st.name);
+            if let Some((on, bright, _)) = &light {
+                // "None": Home Assistant shows the state as unknown.
+                states.push((camera_topic(&prefix, &s, "light/state"), on.map(on_off).unwrap_or("None").into()));
+                if let Some(b) = bright {
+                    states.push((camera_topic(&prefix, &s, "light/brightness"), b.to_string()));
+                }
+            }
+            let siren = siren_offered && crate::controls::has_siren(&engine, &st.name);
+            if siren {
+                states.push((camera_topic(&prefix, &s, "siren/state"), on_off(crate::controls::siren_playing(&engine, &st.name)).into()));
+            }
+            let light = light.map(|(_, _, range)| range.map(|(_, hi)| hi));
+            cams.push(DiscoCam { slug: s, name: st.name.clone(), on_demand, faces, packages, zones, plates, tamper, light, siren });
         }
         let profiles: Vec<String> =
             engine.config.lock().unwrap().automation.profiles.iter().map(|p| p.name.clone()).collect();
@@ -869,7 +1037,7 @@ mod tests {
     }
 
     fn cam(slug: &str, name: &str, on_demand: bool) -> DiscoCam {
-        DiscoCam { slug: slug.into(), name: name.into(), on_demand, faces: false, packages: false, zones: Vec::new(), plates: false, tamper: false }
+        DiscoCam { slug: slug.into(), name: name.into(), on_demand, faces: false, packages: false, zones: Vec::new(), plates: false, tamper: false, light: None, siren: false }
     }
 
     #[test]
@@ -998,7 +1166,8 @@ mod tests {
         let profiles = vec!["Home".to_string(), "Away".to_string()];
         let msgs = discovery_messages("ambersight", &[cam("front_door", "Front Door", false)], &profiles, true);
         // shield, profile, active profile, problem + motion, 3 objects, online, record clip, snapshot
-        assert_eq!(msgs.len(), 4 + 7);
+        // (+2: the empty light and siren configs of a camera with neither.)
+        assert_eq!(msgs.len(), 4 + 7 + 2);
         let v = find(&msgs, "homeassistant/binary_sensor/ambersight_problem/config");
         assert_eq!(v["device_class"], "problem");
         assert_eq!(v["state_topic"], "ambersight/problems");
@@ -1075,6 +1244,51 @@ mod tests {
         assert_eq!(v["command_topic"], "p/yard/wake");
         assert_eq!(v["payload_press"], "PRESS");
         assert_eq!(v["availability_topic"], "p/status");
-        assert_eq!(msgs.len(), 10);
+        assert_eq!(msgs.len(), 10 + 2);
+    }
+
+    #[test]
+    fn controls_discovery_light_siren_and_removal() {
+        let lit = DiscoCam { light: Some(Some(100)), siren: true, ..cam("yard", "Yard", false) };
+        let plain_light = DiscoCam { light: Some(None), ..cam("deck", "Deck", false) };
+        let msgs = discovery_messages("p", &[lit, plain_light, cam("shed", "Shed", false)], &[], false);
+        let v = find(&msgs, "homeassistant/light/p_yard_light/config");
+        assert_eq!(v["command_topic"], "p/yard/light/set");
+        assert_eq!(v["state_topic"], "p/yard/light/state");
+        assert_eq!(v["brightness_command_topic"], "p/yard/light/brightness/set");
+        assert_eq!(v["brightness_scale"], 100);
+        let v = find(&msgs, "homeassistant/siren/p_yard_siren/config");
+        assert_eq!((v["command_topic"].as_str(), v["support_duration"].as_bool()), (Some("p/yard/siren/set"), Some(true)));
+        let v = find(&msgs, "homeassistant/light/p_deck_light/config");
+        assert!(v.get("brightness_command_topic").is_none());
+        // What a camera does not have: removed (empty retained config).
+        for t in ["homeassistant/siren/p_deck_siren/config", "homeassistant/light/p_shed_light/config", "homeassistant/siren/p_shed_siren/config"] {
+            assert!(msgs.iter().any(|(x, p)| x == t && p.is_empty()), "{t}");
+        }
+    }
+
+    #[test]
+    fn retained_commands_are_not_replayed() {
+        for t in ["p/shield/set", "p/profile/set", "p/yard/siren/set", "p/yard/light/set", "p/yard/trigger", "p/signal/x/set"] {
+            assert!(!takes_message("p", t, true), "{t}");
+            assert!(takes_message("p", t, false), "{t}");
+        }
+        assert!(takes_message("p", "p/overlay/temp/set", true), "a value, documented as retained");
+    }
+
+    #[test]
+    fn controls_commands() {
+        assert_eq!(camera_with_tail("p", "p/yard/light/set", "light/set"), Some("yard"));
+        assert_eq!(camera_with_tail("p", "p/yard/light/brightness/set", "light/set"), None);
+        assert_eq!(camera_with_tail("p", "p/yard/light/brightness/set", "light/brightness/set"), Some("yard"));
+        assert_eq!(camera_with_tail("p", "p/a/b/light/set", "light/set"), None);
+        assert_eq!(camera_with_tail("p", "p//light/set", "light/set"), None);
+        assert_eq!(camera_with_tail("p", "q/yard/light/set", "light/set"), None);
+        assert_eq!(parse_siren(b"ON"), Some(SirenCmd::On(None)));
+        assert_eq!(parse_siren(b"off"), Some(SirenCmd::Off));
+        assert_eq!(parse_siren(br#"{"state":"ON","duration":12}"#), Some(SirenCmd::On(Some(12))));
+        assert_eq!(parse_siren(br#"{"state":"OFF"}"#), Some(SirenCmd::Off));
+        assert_eq!(parse_siren(br#"{"duration":12}"#), None);
+        assert_eq!(parse_siren(b"maybe"), None);
     }
 }

@@ -84,6 +84,42 @@ doorbell and the Reolink Home Hub with cameras on it. Firmware not recorded.
   - The Duo Floodlight changes the timing fields of its H.264 settings (SPS) during the stream.
     AmberSight ignores changes that only touch timing, so recordings no longer split.
   - A Home Hub can stop answering for a while when many sessions to it are restarted at once.
+- **Reolink's own protocol (Baichuan, TCP port 9000) instead of RTSP:** set the camera's
+  **Connect with** (Stream settings, More settings; `connect` in the config) to:
+  - **RTSP**: the default, as before.
+  - **Reolink port 9000 (Baichuan)** (`connect = "baichuan"`): video and AAC audio come over
+    Reolink's own protocol from the same address as the RTSP one. The RTSP addresses stay in the
+    settings: their host gives the camera, `_main` / `_sub` (or `_ext`) the stream, and on a hub or
+    NVR `Preview_0N` the channel (or set `reolink_channel` / `baichuan_channel`, 0-based). One
+    session to the device carries all its streams. The port is 9000 unless `baichuan_port` says
+    otherwise.
+  - **Auto** (`connect = "auto"`): port 9000 first, RTSP as the backup. After port 9000 fails 3
+    times in a row, or sends no video for 2 minutes, AmberSight switches to RTSP and says why
+    ("Baichuan failed 3 times: ...; using RTSP"). On RTSP it tries port 9000 again every 30
+    minutes, at the end of a recording segment, and goes back to it when it works. It never uses
+    both at once. Find cameras picks Auto for a Reolink that answers on port 9000 (you can change
+    it). Cameras without the setting stay on RTSP as before.
+  - Reolink's RTSP timestamps jitter (on one sub stream, frame steps of 26 to 260 ms at about
+    9 fps). AmberSight smooths them on RTSP (within 50 ms of the camera's own time), so
+    recordings play evenly. Port 9000's timestamps are smooth already.
+  - A wrong user name or password stops both ways and shows the error until the settings change:
+    Reolink locks the account after a few failed sign-ins.
+  - Not for battery cameras: they keep their on-demand path (`on_demand`, or a UID). On a Home Hub
+    or NVR, AmberSight first asks the device's web API (`GetChannelstatus`, `GetAbility`) about the
+    channel and streams it only when the hub shows it online, awake, and with no battery. An
+    offline channel, or a hub whose web API is off, is refused too (it might be a battery camera).
+  - Some cameras pick a session that is not AES-encrypted (BC/XOR). AmberSight accepts it, logs
+    it once per session, and says so in the camera report. Use it on a trusted network only.
+  - Not yet: ADPCM audio (some models send that instead of AAC), and controls over this session.
+  - **Talk** (the Talk button) goes over this same session when the camera's video comes over
+    Baichuan, or when a Reolink has no RTSP audio backchannel. The camera's talk format is read from
+    it (16 kHz ADPCM on the cameras we asked). A talk opens on the first sound, not on silence, and is
+    let go 2 s after the last sound, so the Reolink app can talk again. If the camera refuses (for
+    example while the Reolink app is talking), AmberSight waits 5 s and tries again; video and
+    recording go on. Not for battery cameras or hub battery channels. **Untested on a real camera
+    so far** (tested against a simulated camera only).
+  - **Tested** (2026-11-19, main and sub): Duo Floodlight PoE (H.265 4608x1728 main), E1 Outdoor SE
+    PoE (H.265 3840x2160 main), E1 Pro (H.264), and a wired doorbell on a Home Hub (channel 1).
 - **Sources:** our tests;
   [Reolink: Introduction to RTSP](https://support.reolink.com/hc/en-us/articles/900000630706-Introduction-to-RTSP/),
   [Reolink: port settings](https://support.reolink.com/hc/en-us/articles/900000621783-How-to-Configure-Reolink-Ports-Settings).
@@ -325,4 +361,4 @@ These are common defaults. Your camera may use others; its web page or app shows
 | 2020 | ONVIF on Tapo (from TP-Link's FAQ) |
 | 7441 / 7447 | RTSPS / RTSP on UniFi Protect (from Ubiquiti's port list) |
 | 8000 | ONVIF on many Reolink cameras (reported, not confirmed in our notes) |
-| 9000 | Reolink's own protocol (battery cameras over `baichuan://`) |
+| 9000 | Reolink's own protocol (battery cameras over `baichuan://`; always-on cameras with Connect with = Baichuan or Auto) |

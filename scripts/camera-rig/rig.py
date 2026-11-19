@@ -44,7 +44,12 @@ ONVIF_PORTS = [18001, 18002, 18003]
 ONVIF_GO_PORT = 18010
 NO_ONVIF_PORT = 18099  # nothing listens: stops AmberSight probing other ports on this machine
 PUBLISHER = ("publisher", "pub-secret-9")
-ALL_PORTS = list(SERVERS.values()) + list(MTX_API.values()) + ONVIF_PORTS + [ONVIF_GO_PORT, AS_PORT] + list(range(18600, 18606))
+# Fake Reolink web APIs for the camera controls (reolink_sim.py): a good one, one that changes nothing.
+REOLINK_PORTS = {"reolink-ctl": 18680, "reolink-noop": 18681}
+REOLINK_LOGIN = ("admin", "sim-secret-3")
+# A fake Reolink on Baichuan TCP (bc_sim.py, controls over port 9000): (its port, its /sim/state port).
+BC_SIM = ("baichuan-ctl", 18682, 18683)
+ALL_PORTS = list(SERVERS.values()) + list(MTX_API.values()) + ONVIF_PORTS + [ONVIF_GO_PORT, AS_PORT] + list(range(18600, 18606)) + list(REOLINK_PORTS.values()) + [BC_SIM[1], BC_SIM[2]]
 DEADLINE_S = 15 * 60
 
 STARTED = time.time()
@@ -310,6 +315,15 @@ def as_config(cams, logins, data_dir, admin_pw):
         if c.get("trigger"):
             out.append(f"trigger = {tq(c['trigger'])}")
         out.append("")
+    # Camera controls: cameras whose web API is a fake Reolink (no video: their stream port is off).
+    for name, port in REOLINK_PORTS.items():
+        out += ["[[cameras]]", f"name = {tq(name)}", "url = " + tq("rtsp://127.0.0.1:%d/h264Preview_01_main" % SERVERS["off"]),
+                f"username = {tq(REOLINK_LOGIN[0])}", f"password = {tq(REOLINK_LOGIN[1])}", "record = false", "motion = false",
+                f"onvif_port = {NO_ONVIF_PORT}", "", "[cameras.controls]", 'scheme = "http"', f"http_port = {port}", ""]
+    # Camera controls over Reolink port 9000 (bc_sim.py; no video: its stream port is off).
+    out += ["[[cameras]]", f"name = {tq(BC_SIM[0])}", "url = " + tq("rtsp://127.0.0.1:%d/Preview_01_sub" % SERVERS["off"]),
+            f"username = {tq(REOLINK_LOGIN[0])}", f"password = {tq(REOLINK_LOGIN[1])}", "record = false", "motion = false",
+            f"onvif_port = {NO_ONVIF_PORT}", f"baichuan_port = {BC_SIM[1]}", "", "[cameras.controls]", 'scheme = "baichuan"', ""]
     # More settings for a run by hand, e.g. CAMRIG_EXTRA_TOML=$'[transcode]\nencoder = "software"'.
     if os.environ.get("CAMRIG_EXTRA_TOML"):
         out.append(os.environ["CAMRIG_EXTRA_TOML"])
@@ -544,6 +558,91 @@ def main():
         say(f"cleaned up; results in {res_dir}")
 
 
+def sim_state(port):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/sim/state", timeout=3) as r:
+            return json.loads(r.read())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def check_controls(api, listed, add):
+    """Camera controls against the fake Reolink APIs: what is found, a timed light given
+    back, the siren limited and stopping, a camera that changes nothing reported."""
+    good, noop = listed.get("reolink-ctl"), listed.get("reolink-noop")
+    if not good or not noop:
+        add("controls", "listed", False, "the fake Reolink cameras are not in /api/cameras")
+        return
+    port = REOLINK_PORTS["reolink-ctl"]
+    path = f"/api/cameras/{good['id']}/controls"
+    s, v, _ = api.get(path, timeout=30)
+    ok = s == 200 and isinstance(v, dict) and v.get("supported") and v.get("light") and v.get("siren") and v.get("ir")
+    add("controls", "abilities", bool(ok), f"status {s} {str(v)[:200]}")
+    s, v, _ = api.req("POST", path, {"action": "light_on", "seconds": 3, "brightness": 40}, timeout=30)
+    on = (sim_state(port).get("light") or {})
+    add("controls", "light on", s == 200 and on.get("state") == 1 and on.get("bright") == 40, f"status {s}; camera {on}")
+    end = time.time() + 15
+    while time.time() < end:
+        back = sim_state(port).get("light") or {}
+        if back.get("state") == 0 and back.get("bright") == 85 and back.get("mode") == 1:
+            break
+        time.sleep(0.5)
+    add("controls", "light given back", back.get("state") == 0 and back.get("bright") == 85 and back.get("mode") == 1, f"camera {back}")
+    s, v, _ = api.req("POST", path, {"action": "siren", "seconds": 2}, timeout=30)
+    st = sim_state(port)
+    plays = [e for e in st.get("log", []) if e.get("cmd") == "AudioAlarmPlay" and (e.get("param") or {}).get("alarm_mode") == "times"]
+    add("controls", "siren", s == 200 and bool(plays), f"status {s}; {len(plays)} plays")
+    s2, _, _ = api.req("POST", path, {"action": "siren", "seconds": 2}, timeout=30)
+    add("controls", "siren limited", s2 == 429, f"second siren: status {s2}")
+    end = time.time() + 15
+    stops = []
+    while time.time() < end:
+        stops = [e for e in sim_state(port).get("log", []) if e.get("cmd") == "AudioAlarmPlay" and (e.get("param") or {}).get("manual_switch") == 0 and (e.get("param") or {}).get("alarm_mode") == "manu"]
+        if stops:
+            break
+        time.sleep(0.5)
+    add("controls", "siren stopped on time", bool(stops), f"{len(stops)} stops")
+    s, v, _ = api.req("POST", f"/api/cameras/{noop['id']}/controls", {"action": "light_on", "seconds": 3}, timeout=30)
+    add("controls", "no-op camera reported", s == 502 and "nothing changed" in str(v), f"status {s} {str(v)[:160]}")
+    s, a, _ = api.get("/api/audit?limit=50")
+    n = sum(1 for e in (a.get("entries", []) if isinstance(a, dict) else []) if e.get("action") == "camera control")
+    add("controls", "audit", n >= 4, f"{n} camera control entries")
+
+
+def check_bc_controls(api, listed, add):
+    """Camera controls over Reolink port 9000 against bc_sim.py: what is found, the infrared
+    lights changed and read back, the siren played as rounds and stopped when its time is up."""
+    cam = listed.get(BC_SIM[0])
+    if not cam:
+        add("controls-9000", "listed", False, "the fake Baichuan camera is not in /api/cameras")
+        return
+    port = BC_SIM[2]
+    path = f"/api/cameras/{cam['id']}/controls"
+    s, v, _ = api.get(path, timeout=40)
+    ok = s == 200 and isinstance(v, dict) and v.get("via") == "port9000" and v.get("siren") and v.get("ir") and v.get("status_led") and not v.get("light")
+    add("controls-9000", "abilities", bool(ok), f"status {s} {str(v)[:200]}")
+    s, v, _ = api.req("POST", path, {"action": "ir", "state": "Off"}, timeout=30)
+    st = sim_state(port)
+    add("controls-9000", "infrared off", s == 200 and st.get("ir") == "close" and (v.get("state") or {}).get("ir") == "Off", f"status {s}; camera {st.get('ir')}")
+    s, v, _ = api.req("POST", path, {"action": "siren", "seconds": 2}, timeout=30)
+    plays = [e for e in sim_state(port).get("log", []) if e.get("id") == 263 and "<playMode>0</playMode>" in e.get("xml", "")]
+    add("controls-9000", "siren", s == 200 and bool(plays), f"status {s}; {len(plays)} plays")
+    end = time.time() + 15
+    stops = []
+    while time.time() < end:
+        stops = [e for e in sim_state(port).get("log", []) if e.get("id") == 263 and "<onOff>0</onOff>" in e.get("xml", "")]
+        if stops:
+            break
+        time.sleep(0.5)
+    add("controls-9000", "siren stopped on time", bool(stops), f"{len(stops)} stops")
+    st = sim_state(port)
+    # A controls-only session signs out about 60 s after its last exchange (it
+    # frees one of the camera's ~2 session slots), so a later action signs in
+    # again: what must hold is one session at a time and no refused sign-in.
+    add("controls-9000", "one session at a time", st.get("max_open") == 1 and st.get("logins", 0) >= 1 and st.get("refused") == 0,
+        f"{st.get('logins')} sign-ins, at most {st.get('max_open')} at once, {st.get('refused')} refused")
+
+
 def run_rig(a, binary, cfg, logins, cams, tmp, logs, res_dir, hard_stop):
     host_ip = lan_ip()
     media = os.path.join(HOME, "media")
@@ -604,6 +703,13 @@ def run_rig(a, binary, cfg, logins, cams, tmp, logs, res_dir, hard_stop):
     missing = [w for w in want if w not in ready]
     if missing:
         say(f"WARNING streams not ready: {missing}")
+
+    # Fake Reolink web APIs (camera controls)
+    for name, port in REOLINK_PORTS.items():
+        spawn([sys.executable, os.path.join(HERE, "reolink_sim.py"), "--port", str(port), "--user", REOLINK_LOGIN[0], "--password", REOLINK_LOGIN[1]]
+              + (["--noop"] if name == "reolink-noop" else []), os.path.join(logs, f"{name}.log"))
+    spawn([sys.executable, os.path.join(HERE, "bc_sim.py"), "--port", str(BC_SIM[1]), "--state-port", str(BC_SIM[2]),
+           "--user", REOLINK_LOGIN[0], "--password", REOLINK_LOGIN[1]], os.path.join(logs, f"{BC_SIM[0]}.log"))
 
     # AmberSight
     admin_pw = "rig-" + base64.b32encode(os.urandom(10)).decode().lower()
@@ -806,6 +912,10 @@ def run_rig(a, binary, cfg, logins, cams, tmp, logs, res_dir, hard_stop):
             st, ev, _ = api.get(f"/api/events?camera={urllib.parse.quote(name)}&limit=50&all=1")
             evs = ev.get("events", ev) if isinstance(ev, (dict, list)) else []
             add(name, "camera motion makes events", st == 200 and len(evs) >= 1, f"{len(evs)} events (trigger = camera)")
+
+    if time.time() < hard_stop:
+        check_controls(api, listed, add)
+        check_bc_controls(api, listed, add)
 
     # AmberSight's own log: panics, and fallbacks no case expected.
     log_text = open(as_log, errors="replace").read()

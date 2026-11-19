@@ -2,6 +2,11 @@
 //! RTSP client over TCP that asks the camera for its `sendonly` audio track,
 //! sets it up with interleaved transport and streams G.711 RTP to it, plus
 //! the PCM -> 8 kHz -> G.711 conversion and the WebSocket entry point.
+//!
+//! A Reolink can also be talked to over its Baichuan session (TCP 9000,
+//! `ingest::baichuan::talk`): when its video comes that way, or when it has
+//! no RTSP backchannel. The same WebSocket and the same one-talker-per-camera
+//! slot front both ways; `route` picks one per camera.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -769,9 +774,9 @@ pub async fn handle(
     let Some(handle) = engine.camera(id) else {
         return (StatusCode::NOT_FOUND, "no such camera").into_response();
     };
-    let (name, url, user, pass) = {
+    let (name, url, user, pass, cfg) = {
         let c = handle.cfg.read().unwrap();
-        (c.name.clone(), c.url.clone(), c.username.clone(), c.password.clone())
+        (c.name.clone(), c.url.clone(), c.username.clone(), c.password.clone(), c.clone())
     };
     if !access.can_name(&name) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -788,23 +793,232 @@ pub async fn handle(
     let who = Some((engine.clone(), caller.0.clone(), caller.1));
     ws.on_upgrade(move |socket| crate::web::while_account_allowed(who, async move {
         match slot {
-            Some(slot) => talk_session(socket, slot, name, url, user, pass, rate, caller.0).await,
+            Some(slot) => {
+                // This camera's own video on Baichuan (not another channel of the device).
+                let bc_streaming = bc_target(&cfg).and_then(|t| crate::ingest::baichuan::wired::status(&t.host, t.port)).is_some_and(|s| s.signed_in && s.owners.iter().any(|o| o == &cfg.name));
+                match route(&cfg, bc_streaming) {
+                    Route::Rtsp => talk_session(socket, slot, name, url, user, pass, rate, caller.0, None).await,
+                    Route::RtspThenBaichuan => talk_session(socket, slot, name, url, user, pass, rate, caller.0, Some(cfg)).await,
+                    Route::Baichuan => bc_talk_session(socket, slot, name, cfg, rate, caller.0).await,
+                }
+            }
             None => close_with(socket, 4409, "another talker is already connected to this camera").await,
         }
     }))
 }
 
+/// Which way talk takes to a camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Rtsp,
+    /// The Baichuan session (its video comes that way, or `connect = "baichuan"`).
+    Baichuan,
+    /// RTSP, and Baichuan when the camera has no usable RTSP backchannel.
+    RtspThenBaichuan,
+}
+
+/// The way for `cfg`. Battery and on-demand cameras (and anything not on an
+/// rtsp:// address) only ever use RTSP: Baichuan talk never wakes one.
+/// `bc_streaming`: its video is coming over Baichuan now.
+pub fn route(cfg: &crate::config::CameraConfig, bc_streaming: bool) -> Route {
+    use crate::engine::connect_way::{battery_reason, mode_of, Mode};
+    if battery_reason(cfg).is_some() {
+        return Route::Rtsp;
+    }
+    match mode_of(cfg) {
+        Mode::Baichuan => Route::Baichuan,
+        Mode::Auto if bc_streaming => Route::Baichuan,
+        Mode::Auto if looks_reolink(cfg) => Route::RtspThenBaichuan,
+        Mode::Auto => Route::Rtsp,
+        Mode::Rtsp if looks_reolink(cfg) => Route::RtspThenBaichuan,
+        Mode::Rtsp => Route::Rtsp,
+    }
+}
+
+/// Stream addresses that look like a Reolink's.
+fn looks_reolink(cfg: &crate::config::CameraConfig) -> bool {
+    let u = format!("{} {}", cfg.url, cfg.sub_url.as_deref().unwrap_or("")).to_ascii_lowercase();
+    cfg.reolink_channel.is_some() || cfg.baichuan_port.is_some() || cfg.baichuan_channel.is_some() || u.contains("preview_0") || u.contains("h264preview") || u.contains("h265preview")
+}
+
+/// The camera's Baichuan device and channel (as its video would use).
+fn bc_target(cfg: &crate::config::CameraConfig) -> Option<crate::ingest::baichuan::wired::Target> {
+    use crate::ingest::baichuan::wired::{target_for, StreamKind};
+    let port = cfg.baichuan_port.unwrap_or(crate::ingest::baichuan::transport::TCP_PORT);
+    let channel = cfg.baichuan_channel.or(cfg.reolink_channel.and_then(|c| u8::try_from(c).ok()));
+    target_for(&cfg.url, port, channel, StreamKind::Main)
+}
+
+/// An RTSP failure worth trying Baichuan after: anything but a refused
+/// password (asking again another way could lock the account out).
+/// (401 or 403 from DESCRIBE, SETUP or PLAY included.)
+fn worth_baichuan(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    !(crate::engine::native::is_auth_error(e)
+        || crate::engine::native::is_refused_password(e)
+        || l.contains(" 401 ")
+        || l.contains(" 403 ")
+        || l.contains("forbidden")
+        || l.contains("authentication")
+        || l.contains("credentials")
+        || l.contains("password"))
+}
+
+/// Open a talk on the camera's shared Baichuan session (blocking work off
+/// the runtime). The same user and password as its video, so the session is
+/// shared, never a second one.
+pub async fn bc_open(cfg: &crate::config::CameraConfig) -> Result<crate::ingest::baichuan::talk::TalkHandle> {
+    let t = bc_target(cfg).context("the camera's address has no host for Baichuan")?;
+    let (user, pass) = if cfg.username.is_empty() {
+        let (_, u, p, ..) = split_url(&cfg.url, "", "")?;
+        (u, p)
+    } else {
+        (cfg.username.clone(), cfg.password.clone())
+    };
+    let owner = cfg.name.clone();
+    tokio::task::spawn_blocking(move || crate::ingest::baichuan::wired::client_for(&t.host, t.port, &user, &pass, &owner)?.talk_open(t.channel))
+        .await
+        .map_err(|e| anyhow!("{e}"))?
+        .map_err(|e| anyhow!("{e}"))
+}
+
+async fn bc_talk_session(mut socket: WebSocket, _slot: TalkSlot, name: String, cfg: crate::config::CameraConfig, rate: u32, who: String) {
+    // The set-up can take a while (a hub check): a client that goes away
+    // meanwhile frees the slot at once.
+    let opened = {
+        let open = bc_open(&cfg);
+        tokio::pin!(open);
+        loop {
+            tokio::select! {
+                r = &mut open => break Some(r),
+                msg = socket.recv() => match msg {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break None,
+                    _ => {} // audio before the talk is ready: dropped
+                },
+            }
+        }
+    };
+    let h = match opened {
+        None => {
+            tracing::info!("talk {name}: client closed while the Baichuan talk was being set up");
+            return;
+        }
+        Some(Ok(h)) => h,
+        Some(Err(e)) => {
+            tracing::warn!("talk {name}: Baichuan talk failed: {e:#}");
+            close_with(socket, 1011, &format!("{e:#}")).await;
+            return;
+        }
+    };
+    tracing::info!("talk {name}: Baichuan talk for {who} ({}, input {rate} Hz)", h.format.describe());
+    let mut enc = crate::ingest::baichuan::talk::TalkEncoder::new(rate, &h.format);
+    let mut check = interval(Duration::from_millis(500));
+    let (reason, client_gone) = loop {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    if !enc.push_pcm(&b).into_iter().all(|blk| h.send(blk)) {
+                        break (h.ended().unwrap_or_else(|| "the Baichuan session ended".into()), false);
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => break ("client closed".to_string(), true),
+                Some(Ok(_)) => {}
+                Some(Err(e)) => break (format!("socket error: {e}"), true),
+            },
+            _ = check.tick() => {
+                if let Some(r) = h.ended() {
+                    break (r, false);
+                }
+            }
+        }
+    };
+    tracing::info!("talk {name}: closed ({reason}); {}", bc_stats(&h));
+    drop(h);
+    if client_gone {
+        let _ = timeout(Duration::from_secs(1), socket.recv()).await;
+    } else {
+        close_with(socket, 1011, &reason).await;
+    }
+}
+
+fn bc_stats(h: &crate::ingest::baichuan::talk::TalkHandle) -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let st = &h.stats;
+    format!(
+        "Baichuan: {} blocks sent, {} dropped, {} opened, {} refused, {} let go",
+        st.blocks_sent.load(Relaxed),
+        st.blocks_dropped.load(Relaxed),
+        st.opens.load(Relaxed),
+        st.refusals.load(Relaxed),
+        st.releases.load(Relaxed)
+    )
+}
+
+/// CLI helper for Baichuan talk: ask what talk the camera takes, then (with
+/// a WAV file) play it in real time, sound-gated as live talk is. Without a
+/// WAV only the read-only question is asked: silence opens no talk. This is
+/// a process of its own, so it opens a Baichuan session of its own: with the
+/// service streaming the camera that is a second session (firmware allows
+/// about two). It signs out before it returns.
+pub async fn run_test_baichuan(cfg: &crate::config::CameraConfig, seconds: u64, wav: Option<&str>) -> Result<()> {
+    println!("note: this opens a Baichuan session of its own. If the AmberSight service streams this camera over Baichuan, stop the service first (cameras allow about two sessions).");
+    let t = bc_target(cfg).context("the camera's address has no host for Baichuan")?;
+    let r = bc_test_inner(cfg, seconds, wav).await;
+    let (host, port) = (t.host.clone(), t.port);
+    let out = tokio::task::spawn_blocking(move || crate::ingest::baichuan::wired::sign_out(&host, port, Duration::from_secs(5))).await.unwrap_or(false);
+    println!("{}", if out { "signed out" } else { "the session did not sign out within 5 s" });
+    r
+}
+
+async fn bc_test_inner(cfg: &crate::config::CameraConfig, seconds: u64, wav: Option<&str>) -> Result<()> {
+    let h = bc_open(cfg).await?;
+    println!("camera talk format: {}", h.format.describe());
+    let Some(path) = wav else {
+        println!("no WAV file given: nothing sent (silence opens no talk)");
+        return Ok(());
+    };
+    let (rate, samples) = read_wav(&std::fs::read(path).with_context(|| format!("cannot read {path}"))?)?;
+    let mut enc = crate::ingest::baichuan::talk::TalkEncoder::new(rate, &h.format);
+    let step = (rate as usize / 50).max(1);
+    let mut tick = interval(PACKET_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut at = 0;
+    for _ in 0..seconds * 50 {
+        tick.tick().await;
+        let end = (at + step).min(samples.len());
+        let chunk: Vec<i16> = if at < end { samples[at..end].to_vec() } else { vec![0; step] };
+        at = end;
+        for b in enc.push_samples(&chunk) {
+            if !h.send(b) {
+                bail!("{}", h.ended().unwrap_or_default());
+            }
+        }
+    }
+    // Let the paced queue drain and the talk be let go.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    println!("{}", bc_stats(&h));
+    if let Some(p) = h.stats.last_problem.lock().unwrap().clone() {
+        println!("last problem: {p}");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn talk_session(mut socket: WebSocket, _slot: TalkSlot, name: String, url: String, user: String, pass: String, rate: u32, who: String) {
+async fn talk_session(mut socket: WebSocket, slot: TalkSlot, name: String, url: String, user: String, pass: String, rate: u32, who: String, then_bc: Option<crate::config::CameraConfig>) {
     let log = |m: &str| tracing::info!("talk {name}: {m}");
     let mut bc = match Backchannel::open(&url, &user, &pass, &log).await {
         Ok(bc) => bc,
         Err(e) => {
+            if let Some(cfg) = then_bc.filter(|_| worth_baichuan(&format!("{e:#}"))) {
+                tracing::info!("talk {name}: no RTSP backchannel ({e:#}); trying Baichuan");
+                return bc_talk_session(socket, slot, name, cfg, rate, who).await;
+            }
             tracing::warn!("talk {name}: backchannel failed: {e:#}");
             close_with(socket, 1011, &format!("{e:#}")).await;
             return;
         }
     };
+    let _slot = slot;
     tracing::info!("talk {name}: backchannel opened for {who} ({}, session {}, input {rate} Hz)", bc.codec.name(), bc.session);
     let mut pk = Packetizer::new(bc.codec, rate);
     let mut tick = interval(PACKET_INTERVAL);
@@ -964,6 +1178,37 @@ m=audio 0 RTP/AVP 0\r\na=control:track3\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\
         assert_eq!((u.as_str(), user.as_str(), pass.as_str(), host.as_str(), port), ("rtsp://10.0.0.5:554/a/b?x=1", "adm@", "p:w", "10.0.0.5", 554));
         let (_, user, pass, ..) = split_url("rtsp://u:p@h:8554/x", "cfg", "secret").unwrap();
         assert_eq!((user.as_str(), pass.as_str()), ("cfg", "secret"));
+    }
+
+    #[test]
+    fn talk_route_is_picked_per_camera_and_never_baichuan_for_battery_cameras() {
+        let cam = |url: &str, connect: &str| {
+            let mut c: crate::config::CameraConfig = toml::from_str(&format!("name = \"x\"\nurl = \"{url}\"")).unwrap();
+            c.connect = connect.into();
+            c
+        };
+        let reo = "rtsp://192.0.2.5/Preview_01_main";
+        assert_eq!(route(&cam(reo, "baichuan"), false), Route::Baichuan);
+        assert_eq!(route(&cam(reo, "auto"), true), Route::Baichuan, "video on Baichuan now");
+        assert_eq!(route(&cam(reo, "auto"), false), Route::RtspThenBaichuan);
+        assert_eq!(route(&cam("rtsp://192.0.2.9/live/ch0", "auto"), false), Route::Rtsp, "Auto, but not a Reolink by its address");
+        assert_eq!(route(&cam(reo, "rtsp"), false), Route::RtspThenBaichuan, "a Reolink with no backchannel");
+        assert_eq!(route(&cam("rtsp://192.0.2.9/cam/realmonitor?channel=1", "rtsp"), false), Route::Rtsp, "not a Reolink");
+        // Battery / on-demand: RTSP only, whatever the setting.
+        let mut b = cam(reo, "baichuan");
+        b.on_demand = true;
+        assert_eq!(route(&b, true), Route::Rtsp);
+        let mut b = cam(reo, "auto");
+        b.uid = Some("95270000ABCDEFGH".into());
+        assert_eq!(route(&b, true), Route::Rtsp);
+        assert_eq!(route(&cam("baichuan://192.0.2.5?uid=X", "baichuan"), true), Route::Rtsp);
+        assert!(!worth_baichuan("authentication rejected (wrong username or password?)"));
+        assert!(!worth_baichuan("DESCRIBE failed: RTSP/1.0 401 Unauthorized"));
+        assert!(!worth_baichuan("SETUP failed: RTSP/1.0 403 Forbidden"));
+        assert!(!worth_baichuan("PLAY failed: RTSP/1.0 403 Forbidden"));
+        assert!(!worth_baichuan("camera said unauthorized"));
+        assert!(worth_baichuan("timed out connecting to 192.0.2.5:554"));
+        assert!(worth_baichuan("camera offers no audio backchannel (no sendonly audio track in its SDP)"));
     }
 
     #[test]

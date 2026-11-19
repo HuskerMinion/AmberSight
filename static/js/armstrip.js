@@ -21,9 +21,10 @@
 //    NOT gated by the shield or windows (the shield only gates detection).
 //  Each half hour is judged at its middle minute (the current one at the real minute).
 
-import { esc } from './core.js';
+import { t } from './i18n.js';
+import { esc, objName } from './core.js';
 
-const DAY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const DAY = [t('armstrip.day_mon', 'Mon'), t('armstrip.day_tue', 'Tue'), t('armstrip.day_wed', 'Wed'), t('armstrip.day_thu', 'Thu'), t('armstrip.day_fri', 'Fri'), t('armstrip.day_sat', 'Sat'), t('armstrip.day_sun', 'Sun')];
 const KEYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 
 const CSS = `
@@ -65,7 +66,7 @@ function ensureCss() {
 }
 
 const p2 = (n) => String(n).padStart(2, '0');
-const hm = (t) => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(t || '').trim()); return m && +m[1] < 24 && +m[2] < 60 ? +m[1] * 60 + +m[2] : null; };
+const hm = (v) => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim()); return m && +m[1] < 24 && +m[2] < 60 ? +m[1] * 60 + +m[2] : null; };
 // "HH:MM-HH:MM" -> [a, b] minutes (the server accepts any 0-23 hours); null = no/invalid window.
 function parseWin(s) {
   if (!s || !String(s).trim()) return null;
@@ -76,8 +77,8 @@ function parseWin(s) {
 }
 const winActive = (w, m) => !w || (w[0] <= w[1] ? w[0] <= m && m <= w[1] : m >= w[0] || m <= w[1]);
 
-function specMin(t, sun) {
-  const s = String(t || '').trim().toLowerCase();
+function specMin(spec, sun) {
+  const s = String(spec || '').trim().toLowerCase();
   const m = /^(sunrise|sunset)\s*([+-]\s*\d+)?$/.exec(s);
   if (!m) return hm(s);
   const b = sun ? hm(m[1] === 'sunrise' ? sun.sunrise : sun.sunset) : null;
@@ -115,14 +116,14 @@ export function computeArm(cam, data, now) {
   const manual = live.manual || null;
   const camWin = parseWin(cam.schedule), glob = parseWin(data.globalWindow);
   const detWin = camWin || glob;
-  const detWinTxt = camWin ? 'camera arm window ' + cam.schedule.trim() : glob ? 'shared arm window ' + String(data.globalWindow).trim() : null;
+  const detWinTxt = camWin ? t('armstrip.cam_arm_window', 'camera arm window {schedule}', { schedule: cam.schedule.trim() }) : glob ? t('armstrip.shared_arm_window', 'shared arm window {schedule}', { schedule: String(data.globalWindow).trim() }) : null;
   const altWin = parseWin(cam.alert_schedule);
   const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const nowSlot = now.getHours() * 2 + (now.getMinutes() >= 30 ? 1 : 0);
   const nowIdx = nowSlot;
   const pauseUntil = cam.alerts_paused ? (cam.alerts_paused_until ? cam.alerts_paused_until * 1000 : Infinity) : 0;
   const slots = [];
-  let shield = data.armed, shieldWhy = data.armed ? 'armed now' : 'disarmed now';
+  let shield = data.armed, shieldWhy = data.armed ? t('armstrip.armed_now', 'armed now') : t('armstrip.disarmed_now', 'disarmed now');
   let prevProf = null;
   for (let d = 0; d < 7; d++) {
     for (let k = 0; k < 48; k++) {
@@ -136,53 +137,53 @@ export function computeArm(cam, data, now) {
       // profile
       let pname, psrc;
       if (isNow) {
-        pname = live.active || ''; psrc = manual ? 'set by hand' : live.scheduled ? 'schedule' : 'default';
+        pname = live.active || ''; psrc = manual ? t('armstrip.set_by_hand', 'set by hand') : live.scheduled ? t('armstrip.schedule', 'schedule') : t('armstrip.default', 'default');
       } else if (manual && manual.until && date.getTime() < manual.until * 1000 && !past) {
-        pname = manual.name; psrc = 'set by hand until ' + new Date(manual.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+        pname = manual.name; psrc = t('armstrip.set_by_hand_until', 'set by hand until {when}', { when: new Date(manual.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) });
       } else {
         const r = (auto.schedule || []).find(x => ruleMatches(x, wd, minute, sun));
-        if (r) { pname = r.profile; psrc = 'rule ' + r.from + ' to ' + r.to; } else { pname = auto.default_profile || ''; psrc = pname ? 'default' : ''; }
+        if (r) { pname = r.profile; psrc = t('armstrip.rule_range', 'rule {from} to {to}', { from: r.from, to: r.to }); } else { pname = auto.default_profile || ''; psrc = pname ? t('armstrip.default', 'default') : ''; }
       }
       const prof = profs.get(pname) || null;
       const ov = (prof && prof.cameras && prof.cameras[cam.name]) || {};
       // shield: only a profile CHANGE applies the profile's own arm setting
       let shieldNote = '';
       if (past || isNow) { prevProf = pname; } else {
-        if (pname !== prevProf && prof && prof.armed != null) { shield = prof.armed; shieldWhy = pname + ' profile ' + (prof.armed ? 'arms' : 'disarms') + ' the system'; }
+        if (pname !== prevProf && prof && prof.armed != null) { shield = prof.armed; shieldWhy = prof.armed ? t('armstrip.profile_arms', '{name} profile arms the system', { name: pname }) : t('armstrip.profile_disarms', '{name} profile disarms the system', { name: pname }); }
         prevProf = pname;
       }
       shieldNote = shieldWhy;
-      const profTxt = pname ? pname + ' profile (' + psrc + ')' : 'no profile';
+      const profTxt = pname ? t('armstrip.profile_src', '{name} profile ({src})', { name: pname, src: psrc }) : t('armstrip.no_profile', 'no profile');
       // recording
       let rec, recWhy;
-      if (cam.enabled === false) { rec = 'off'; recWhy = 'camera is disabled'; }
+      if (cam.enabled === false) { rec = 'off'; recWhy = t('armstrip.camera_disabled', 'camera is disabled'); }
       else {
         const on = ov.record != null ? ov.record : cam.record !== false;
         const mo = ov.record_motion_only != null ? ov.record_motion_only : !!cam.record_motion_only;
-        const via = (ov.record != null || ov.record_motion_only != null) ? pname + ' profile override' : 'camera setting';
-        if (!on) { rec = 'off'; recWhy = 'recording off (' + via + ')'; }
-        else if (mo) { rec = 'mo'; recWhy = 'records motion only (' + via + ')'; }
-        else { rec = 'on'; recWhy = 'records continuously (' + via + ')'; }
+        const via = (ov.record != null || ov.record_motion_only != null) ? t('armstrip.profile_override', '{name} profile override', { name: pname }) : t('armstrip.camera_setting', 'camera setting');
+        if (!on) { rec = 'off'; recWhy = t('armstrip.rec_off', 'recording off ({via})', { via }); }
+        else if (mo) { rec = 'mo'; recWhy = t('armstrip.rec_motion', 'records motion only ({via})', { via }); }
+        else { rec = 'on'; recWhy = t('armstrip.rec_continuous', 'records continuously ({via})', { via }); }
       }
       // detection
       let det = false, detWhy;
       // cam.motion in /api/cameras is the live motion flag, so use motion_enabled (default on).
       const mOn = ov.motion != null ? ov.motion : cam.motion_enabled !== false;
       const sound = !!cam.audio_trigger;
-      if (cam.enabled === false) detWhy = 'camera is disabled';
-      else if (!mOn && !sound) detWhy = 'motion detection is off' + (ov.motion === false ? ' (' + pname + ' profile override)' : ' for this camera');
-      else if (!shield) detWhy = 'disarmed (' + shieldNote + ')';
-      else if (!winActive(detWin, minute)) detWhy = 'outside the ' + detWinTxt;
-      else { det = true; detWhy = (mOn ? 'detects motion' : 'listens for loud sounds only') + (detWinTxt ? ' inside the ' + detWinTxt : ' all day') + ', armed'; }
+      if (cam.enabled === false) detWhy = t('armstrip.camera_disabled', 'camera is disabled');
+      else if (!mOn && !sound) detWhy = ov.motion === false ? t('armstrip.motion_off_profile', 'motion detection is off ({name} profile override)', { name: pname }) : t('armstrip.motion_off_cam', 'motion detection is off for this camera');
+      else if (!shield) detWhy = t('armstrip.disarmed', 'disarmed ({why})', { why: shieldNote });
+      else if (!winActive(detWin, minute)) detWhy = t('armstrip.outside_window', 'outside the {window}', { window: detWinTxt });
+      else { det = true; detWhy = t('armstrip.det_on', '{what} {where}, armed', { what: mOn ? t('armstrip.detects_motion', 'detects motion') : t('armstrip.listens_sounds', 'listens for loud sounds only'), where: detWinTxt ? t('armstrip.inside_window', 'inside the {window}', { window: detWinTxt }) : t('armstrip.all_day', 'all day') }); }
       // alerts
       let alr = false, alrWhy;
-      if (!det) alrWhy = 'nothing is detected, so nothing is sent';
-      else if (prof && prof.alerts === false) alrWhy = pname + ' profile mutes alerts';
-      else if (ov.alerts === false) alrWhy = pname + ' profile mutes alerts for this camera';
-      else if (cam.alerts === false) alrWhy = 'notifications are off for this camera';
-      else if (!winActive(altWin, minute)) alrWhy = 'outside the camera alert window ' + String(cam.alert_schedule).trim();
-      else if (date.getTime() < pauseUntil) alrWhy = 'notifications are paused' + (pauseUntil === Infinity ? ' until resumed' : '');
-      else { alr = true; alrWhy = 'alerts on' + ((cam.alert_labels || []).length ? ' for ' + cam.alert_labels.join(', ') + ' only' : '') + (altWin ? ' (camera alert window ' + String(cam.alert_schedule).trim() + ')' : ''); }
+      if (!det) alrWhy = t('armstrip.nothing_detected', 'nothing is detected, so nothing is sent');
+      else if (prof && prof.alerts === false) alrWhy = t('armstrip.profile_mutes', '{name} profile mutes alerts', { name: pname });
+      else if (ov.alerts === false) alrWhy = t('armstrip.profile_mutes_cam', '{name} profile mutes alerts for this camera', { name: pname });
+      else if (cam.alerts === false) alrWhy = t('armstrip.notif_off', 'notifications are off for this camera');
+      else if (!winActive(altWin, minute)) alrWhy = t('armstrip.outside_alert_window', 'outside the camera alert window {schedule}', { schedule: String(cam.alert_schedule).trim() });
+      else if (date.getTime() < pauseUntil) alrWhy = pauseUntil === Infinity ? t('armstrip.paused_until_resumed', 'notifications are paused until resumed') : t('armstrip.paused', 'notifications are paused');
+      else { alr = true; alrWhy = t('armstrip.alerts_on', 'alerts on') + ((cam.alert_labels || []).length ? ' ' + t('armstrip.alerts_for', 'for {labels} only', { labels: cam.alert_labels.map(objName).join(', ') }) : '') + (altWin ? ' ' + t('armstrip.alert_window_paren', '(camera alert window {schedule})', { schedule: String(cam.alert_schedule).trim() }) : ''); }
       slots.push({ d, k, isNow, past, rec, det, alr, profTxt,
         tip: { rec: recWhy, det: detWhy, alr: alrWhy } });
     }
@@ -192,11 +193,11 @@ export function computeArm(cam, data, now) {
 
 function notes(cam, data) {
   const out = [], live = data.live || {};
-  if (live.manual && !live.manual.until) out.push('The profile "' + live.manual.name + '" is held by hand until changed: that only counts for now; later times assume the weekly schedule.');
-  else if (live.manual) out.push('A profile is held by hand for a while; after that the schedule resumes.');
-  out.push('Arm and Disarm can be switched by hand at any time, so later times assume it stays as it is now unless a profile change sets it.');
-  if ((data.automation.schedule || []).some(r => /sun/i.test(r.from + r.to))) out.push('Sunrise and sunset use today\'s times for every day (they drift by a minute or two per day).');
-  if (cam.alerts_paused) out.push('Notifications for this camera are paused ' + (cam.alerts_paused_until ? 'until ' + new Date(cam.alerts_paused_until * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'until resumed') + '.');
+  if (live.manual && !live.manual.until) out.push(t('armstrip.profile_held', 'The profile "{name}" is held by hand until changed: that only counts for now; later times assume the weekly schedule.', { name: live.manual.name }));
+  else if (live.manual) out.push(t('armstrip.profile_held_temp', 'A profile is held by hand for a while; after that the schedule resumes.'));
+  out.push(t('armstrip.arm_disarm_manual', 'Arm and Disarm can be switched by hand at any time, so later times assume it stays as it is now unless a profile change sets it.'));
+  if ((data.automation.schedule || []).some(r => /sun/i.test(r.from + r.to))) out.push(t('armstrip.sunrise_sunset_note', "Sunrise and sunset use today's times for every day (they drift by a minute or two per day)."));
+  if (cam.alerts_paused) out.push(cam.alerts_paused_until ? t('armstrip.cam_paused_until', 'Notifications for this camera are paused until {time}.', { time: new Date(cam.alerts_paused_until * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) }) : t('armstrip.cam_paused', 'Notifications for this camera are paused until resumed.'));
   return out;
 }
 
@@ -211,9 +212,9 @@ export function armStrip(container, camera, data) {
 
   const info = () => root.querySelector('.as-info');
   function say(slot, lane) {
-    const t = slot.k * 30;
-    const when = DAY[(res.day0.getDay() + 6 + slot.d) % 7] + ' ' + p2(Math.floor(t / 60)) + ':' + p2(t % 60) + (slot.isNow ? ' (now)' : slot.past ? ' (earlier today, estimated)' : '');
-    const names = { rec: 'Recording', det: 'Detection', alr: 'Alerts' };
+    const mins = slot.k * 30;
+    const when = DAY[(res.day0.getDay() + 6 + slot.d) % 7] + ' ' + p2(Math.floor(mins / 60)) + ':' + p2(mins % 60) + (slot.isNow ? ' ' + t('armstrip.now_paren', '(now)') : slot.past ? ' ' + t('armstrip.earlier_paren', '(earlier today, estimated)') : '');
+    const names = { rec: t('armstrip.lane_recording', 'Recording'), det: t('armstrip.lane_detection', 'Detection'), alr: t('armstrip.lane_alerts', 'Alerts') };
     return when + ' · ' + slot.profTxt + ' · ' + names[lane] + ': ' + slot.tip[lane];
   }
   function draw() {
@@ -223,7 +224,7 @@ export function armStrip(container, camera, data) {
     h += '</div>';
     for (let d = 0; d < 7; d++) {
       const lab = DAY[(res.day0.getDay() + 6 + d) % 7];
-      h += '<div class="as-row' + (d === 0 ? ' today' : '') + '"><span class="as-day">' + (d === 0 ? 'Today' : lab) + '</span><div class="as-lanes">';
+      h += '<div class="as-row' + (d === 0 ? ' today' : '') + '"><span class="as-day">' + (d === 0 ? t('armstrip.today', 'Today') : lab) + '</span><div class="as-lanes">';
       for (const lane of ['rec', 'det', 'alr']) {
         h += '<div class="as-lane">';
         for (let k = 0; k < 48; k++) {
@@ -237,11 +238,11 @@ export function armStrip(container, camera, data) {
       h += '</div></div>';
     }
     h += '<div class="as-info" aria-live="polite"></div>' +
-      '<div class="as-leg"><span><b class="rec"></b>recording</span><span><b class="mo"></b>recording on motion only</span><span><b class="det"></b>motion detection on</span><span><b class="alr"></b>alerts sent</span></div>' +
+      '<div class="as-leg"><span><b class="rec"></b>' + t('armstrip.legend_recording', 'recording') + '</span><span><b class="mo"></b>' + t('armstrip.legend_motion_only', 'recording on motion only') + '</span><span><b class="det"></b>' + t('armstrip.legend_detection', 'motion detection on') + '</span><span><b class="alr"></b>' + t('armstrip.legend_alerts', 'alerts sent') + '</span></div>' +
       '<ul class="as-notes">' + notes(cam, dat).map(n => '<li>' + esc(n) + '</li>').join('') + '</ul>';
     root.innerHTML = h;
     const now = res.slots[res.nowIdx];
-    info().textContent = 'Now: ' + now.profTxt + ' · Recording: ' + now.tip.rec + ' · Detection: ' + now.tip.det + ' · Alerts: ' + now.tip.alr + '. Hover or tap a cell for the reason.';
+    info().textContent = t('armstrip.now_info', 'Now: {prof} · Recording: {rec} · Detection: {det} · Alerts: {alr}. Hover or tap a cell for the reason.', { prof: now.profTxt, rec: now.tip.rec, det: now.tip.det, alr: now.tip.alr });
   }
   const pick = (e) => {
     const c = e.target.closest('i[data-i]');

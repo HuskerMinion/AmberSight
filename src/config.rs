@@ -33,6 +33,8 @@ fn is_default_idle(v: &u64) -> bool { *v == 300 }
 fn is_default_trigger(s: &String) -> bool { s == "video" }
 fn is_default_ingest(s: &String) -> bool { s == "auto" }
 fn default_transport() -> String { "auto".into() }
+fn default_connect() -> String { "rtsp".into() }
+fn is_default_connect(s: &String) -> bool { s.is_empty() || s == "rtsp" }
 fn is_default_transport(s: &String) -> bool { s == "auto" }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,11 +102,17 @@ pub struct OperatorPerms {
     /// Change the detection and alert settings of the cameras they may see.
     #[serde(default = "yes")]
     pub camera_detection: bool,
+    /// Turn a camera's spotlight on (for a while) and off.
+    #[serde(default = "yes")]
+    pub lights: bool,
+    /// Sound a camera's siren. Off unless an admin turns it on.
+    #[serde(default = "no")]
+    pub siren: bool,
 }
 
 impl Default for OperatorPerms {
     fn default() -> Self {
-        OperatorPerms { ptz: true, talk_clip: true, arm: true, events: true, camera_detection: true }
+        OperatorPerms { ptz: true, talk_clip: true, arm: true, events: true, camera_detection: true, lights: true, siren: false }
     }
 }
 
@@ -503,6 +511,22 @@ pub struct CameraConfig {
     /// reader and ffmpeg use it.
     #[serde(default = "default_transport", skip_serializing_if = "is_default_transport")]
     pub transport: String,
+    /// How the built-in reader connects: "rtsp" (the default), "baichuan"
+    /// (Reolink's own protocol on TCP port 9000, read from the same host as
+    /// `url`; main/sub follow `url`/`sub_url`) or "auto" (Baichuan, moving to
+    /// RTSP when Baichuan keeps failing and trying Baichuan again every 30
+    /// minutes; see engine/connect_way.rs). Always-on Reolinks only: battery
+    /// cameras keep their own on-demand path.
+    #[serde(default = "default_connect", skip_serializing_if = "is_default_connect")]
+    pub connect: String,
+    /// Baichuan TCP port (unset: 9000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baichuan_port: Option<u16>,
+    /// Baichuan channel, 0-based (unset: `reolink_channel`, else from a
+    /// `Preview_NN` address, else 0): the lens of a dual-lens camera, or the
+    /// channel of a hub or recorder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baichuan_channel: Option<u8>,
     /// Hardware video decode for motion analysis: unset or "auto" (the
     /// server-wide `[hwdecode] prefer` order over the ways that passed the
     /// start-up test, else the processor), "off", "cuda", "vaapi",
@@ -792,6 +816,10 @@ pub struct CameraConfig {
     /// optional smart plug / PoE port to cut its power). Unset = defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<CameraWatchdog>,
+    /// Camera controls (spotlight, siren, IR, status light) and the actions
+    /// that use them next to alerts. Unset = found by itself, no actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls: Option<ControlsConfig>,
     /// Tamper detection (covered, blurred or moved camera). Unset = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tamper: Option<TamperConfig>,
@@ -1300,6 +1328,48 @@ pub struct CameraWatchdog {
     pub power: Option<PowerSwitch>,
 }
 
+/// A camera's controls (controls/). Every field is optional; what the camera
+/// can do is asked of the camera itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ControlsConfig {
+    /// "auto" (default: Reolink cameras are found by their stream address),
+    /// "reolink", or "off" (no controls for this camera).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The camera's web port for its controls (unset: the watchdog's web
+    /// port, else 443, then 80).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<u16>,
+    /// "https" (the default; "auto" is the same) or "http" (plain HTTP:
+    /// sends the camera's password unencrypted, only when picked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// Next to alerts: when the AI confirms one of `labels`, turn the
+    /// spotlight on for `light_minutes` (only at night unless
+    /// `light_night_only` is false). Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub light_on_detect: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_night_only: Option<bool>,
+    /// Next to alerts: when the AI confirms one of `labels` while armed,
+    /// sound the siren for `siren_seconds`, at most once per
+    /// `siren_cooldown_minutes`. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub siren_on_detect: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub siren_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub siren_cooldown_minutes: Option<u32>,
+    /// Only at night for the siren too (unset: any time while armed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub siren_night_only: Option<bool>,
+    /// What the actions react to (unset: person).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+}
+
 /// A switch that can cut a camera's power over the network.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PowerSwitch {
@@ -1670,6 +1740,11 @@ pub struct AlertConfig {
     /// Publish Home Assistant MQTT discovery messages.
     #[serde(default)]
     pub mqtt_discovery: bool,
+    /// Also offer cameras' sirens to Home Assistant (MQTT discovery and
+    /// commands). Off by default: anyone who can publish to the broker could
+    /// sound them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mqtt_siren: bool,
     /// Email alerts over SMTP; needs smtp_host, smtp_from and email_to.
     #[serde(default)]
     pub smtp_host: Option<String>,
@@ -2758,6 +2833,11 @@ impl Config {
     /// back to `.last` when `path` is damaged.
     pub fn save(&self, path: &str) -> Result<()> {
         use std::io::Write;
+        // No file to save to (an engine made for tests): write nothing, not even `.last` in the
+        // working folder.
+        if path.is_empty() {
+            anyhow::bail!("no config file to save to");
+        }
         let text = self.to_toml()?;
         let last = format!("{path}.last");
         let write_synced = |p: &str| -> std::io::Result<()> {
@@ -2793,6 +2873,15 @@ pub fn slug(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Config, parse_schedule, schedule_active};
+
+    #[test]
+    fn saving_with_no_config_file_writes_nothing() {
+        // Engines made for tests have no config path: a save must not leave `.last` in the working folder.
+        let before = std::path::Path::new(".last").exists();
+        let c: Config = toml::from_str("").unwrap();
+        assert!(c.save("").is_err());
+        assert_eq!(std::path::Path::new(".last").exists(), before);
+    }
 
     #[test]
     fn battery_uid_comes_from_the_setting_or_the_address() {

@@ -1,0 +1,222 @@
+{
+ "camera": {
+  "es": "cámara",
+  "de": "Kamera",
+  "fr": "caméra"
+ },
+ "alert": {
+  "es": "alerta",
+  "de": "Alarm",
+  "fr": "alerte"
+ },
+ "alerts (tab)": {
+  "es": "Alertas",
+  "de": "Alarme",
+  "fr": "Alertes"
+ },
+ "recording": {
+  "es": "grabación",
+  "de": "Aufnahme",
+  "fr": "enregistrement"
+ },
+ "recordings (tab)": {
+  "es": "Grabaciones",
+  "de": "Aufnahmen",
+  "fr": "Enregistrements"
+ },
+ "clip": {
+  "es": "clip",
+  "de": "Clip",
+  "fr": "clip"
+ },
+ "live": {
+  "es": "en directo",
+  "de": "live",
+  "fr": "en direct"
+ },
+ "timeline": {
+  "es": "línea de tiempo",
+  "de": "Zeitleiste",
+  "fr": "chronologie"
+ },
+ "wall (camera wall)": {
+  "es": "mosaico",
+  "de": "Wand",
+  "fr": "mur"
+ },
+ "group": {
+  "es": "grupo",
+  "de": "Gruppe",
+  "fr": "groupe"
+ },
+ "snooze (alerts)": {
+  "es": "silenciar",
+  "de": "stummschalten",
+  "fr": "mettre en sourdine"
+ },
+ "snoozed": {
+  "es": "silenciada",
+  "de": "stumm",
+  "fr": "en sourdine"
+ },
+ "armed / disarmed": {
+  "es": "activado / desactivado",
+  "de": "scharf / unscharf",
+  "fr": "armé / désarmé"
+ },
+ "arm / disarm": {
+  "es": "activar / desactivar",
+  "de": "scharf schalten / unscharf schalten",
+  "fr": "armer / désarmer"
+ },
+ "server": {
+  "es": "servidor",
+  "de": "Server",
+  "fr": "serveur"
+ },
+ "sign in / sign out": {
+  "es": "iniciar sesión / cerrar sesión",
+  "de": "anmelden / abmelden",
+  "fr": "se connecter / se déconnecter"
+ },
+ "account": {
+  "es": "cuenta",
+  "de": "Konto",
+  "fr": "compte"
+ },
+ "password": {
+  "es": "contraseña",
+  "de": "Passwort",
+  "fr": "mot de passe"
+ },
+ "two-step code": {
+  "es": "código de dos pasos",
+  "de": "Zwei-Schritt-Code",
+  "fr": "code en deux étapes"
+ },
+ "invite": {
+  "es": "invitación",
+  "de": "Einladung",
+  "fr": "invitation"
+ },
+ "zone": {
+  "es": "zona",
+  "de": "Zone",
+  "fr": "zone"
+ },
+ "motion": {
+  "es": "movimiento",
+  "de": "Bewegung",
+  "fr": "mouvement"
+ },
+ "person / vehicle / animal": {
+  "es": "persona / vehículo / animal",
+  "de": "Person / Fahrzeug / Tier",
+  "fr": "personne / véhicule / animal"
+ },
+ "snapshot (picture)": {
+  "es": "imagen",
+  "de": "Bild",
+  "fr": "image"
+ },
+ "stream (main / sub)": {
+  "es": "flujo principal / secundario",
+  "de": "Haupt- / Substream",
+  "fr": "flux principal / secondaire"
+ },
+ "pan, tilt and zoom (PTZ)": {
+  "es": "girar, inclinar y zoom",
+  "de": "Schwenken, Neigen, Zoomen",
+  "fr": "orientation et zoom"
+ },
+ "preset (PTZ)": {
+  "es": "posición guardada",
+  "de": "Position",
+  "fr": "préréglage"
+ },
+ "talk (two-way audio)": {
+  "es": "hablar",
+  "de": "Sprechen",
+  "fr": "parler"
+ },
+ "low data": {
+  "es": "pocos datos",
+  "de": "Datensparen",
+  "fr": "économie de données"
+ },
+ "picture-in-picture": {
+  "es": "imagen en imagen",
+  "de": "Bild-in-Bild",
+  "fr": "image dans l'image"
+ },
+ "presence (home / away)": {
+  "es": "presencia (en casa / fuera)",
+  "de": "Anwesenheit (zu Hause / weg)",
+  "fr": "présence (à la maison / absent)"
+ },
+ "battery camera": {
+  "es": "cámara de batería",
+  "de": "Akkukamera",
+  "fr": "caméra sur batterie"
+ },
+ "app lock": {
+  "es": "bloqueo de la app",
+  "de": "App-Sperre",
+  "fr": "verrouillage de l'app"
+ },
+ "home screen (start view)": {
+  "es": "pantalla de inicio",
+  "de": "Startansicht",
+  "fr": "écran d'accueil"
+ },
+ "home-screen widget": {
+  "es": "widget",
+  "de": "Widget",
+  "fr": "widget"
+ },
+ "Quick Settings tile": {
+  "es": "ajuste rápido",
+  "de": "Schnelleinstellung",
+  "fr": "réglage rapide"
+ },
+ "feedback": {
+  "es": "comentarios",
+  "de": "Feedback",
+  "fr": "avis"
+ },
+ "settings": {
+  "es": "Ajustes",
+  "de": "Einstellungen",
+  "fr": "Réglages"
+ },
+ "retry": {
+  "es": "Reintentar",
+  "de": "Erneut versuchen",
+  "fr": "Réessayer"
+ },
+ "demo": {
+  "es": "demo",
+  "de": "Demo",
+  "fr": "démo"
+ },
+ "language": {
+  "es": "idioma",
+  "de": "Sprache",
+  "fr": "langue"
+ },
+ "follow the phone": {
+  "es": "como el teléfono",
+  "de": "wie das Telefon",
+  "fr": "comme le téléphone"
+ },
+ "event": {
+  "es": "evento",
+  "de": "Ereignis",
+  "fr": "événement"
+ },
+ "Settings > System (menu path)": {
+  "es": "Ajustes > Sistema",
+  "de": "Einstellungen > System",
+  "fr": "Réglages > Système"
+ }
+}

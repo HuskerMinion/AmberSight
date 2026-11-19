@@ -5,6 +5,7 @@
 // escaped where they are shown. "Keep" holds the recordings 2 minutes either side of the moment
 // back from automatic cleanup (the server's KEEP_WINDOW_MS).
 
+import { t } from './i18n.js';
 import { $, state, api, esc, enc, ic, can, toast, openDlg, confirmDialog, errText, fmtWall } from './core.js';
 import { exportDialog } from './export.js';
 
@@ -27,7 +28,7 @@ export function attach(t) { T = t; }
 const localCams = () => (state.cams || []).filter(c => !c.remote).map(c => c.name);
 const camId = (name) => { const c = (state.cams || []).find(x => x.name === name && !x.remote); return c ? c.id : null; };
 const when = (ms) => fmtWall(ms);
-const where = (b) => (b.camera ? b.camera : 'All cameras');
+const where = (b) => (b.camera ? b.camera : t('bookmarks.all_cameras', 'All cameras'));
 // ("All cameras" are this server's: never drawn over a linked server's camera.)
 const isLocal = (name) => localCams().includes(name);
 
@@ -53,7 +54,7 @@ export function marksHtml(from, to, W, shown) {
   const anyLocal = [...shown].some(isLocal);
   return D.list.filter(b => b.at >= from && b.at <= to && (b.camera ? shown.has(b.camera) : anyLocal)).sort((x, y) => x.at - y.at).map(b => {
     const x = (b.at - from) * ppm;
-    const label = 'Bookmark at ' + when(b.at) + ', ' + where(b) + ': ' + b.note;
+    const label = t('bookmarks.bookmark_at', 'Bookmark at {when}, {where}: {note}', { when: when(b.at), where: where(b), note: b.note });
     return '<button type="button" class="tlbm' + (b.keep ? ' kept' : '') + (b.camera ? '' : ' all') + '" data-id="' + b.id + '" style="left:' + x.toFixed(1) + 'px" aria-label="' + esc(label) + '">' + BM_SVG + '</button>';
   }).join('');
 }
@@ -66,7 +67,7 @@ function showTip(btn) {
   // (Not over the bookmark's own popover.)
   if (!b || (pop && !pop.hidden)) return;
   if (!tipEl) { tipEl = document.createElement('div'); tipEl.className = 'tltip bmtip'; tipEl.setAttribute('role', 'tooltip'); document.body.appendChild(tipEl); }
-  tipEl.innerHTML = '<div class="tt1">' + BM_SVG + '<b>' + esc(when(b.at)) + '</b></div><div class="bmnote">' + esc(b.note) + '</div><div class="tm">' + esc(where(b)) + ' · ' + esc(b.user) + (b.keep ? ' · kept' : '') + '</div>';
+  tipEl.innerHTML = '<div class="tt1">' + BM_SVG + '<b>' + esc(when(b.at)) + '</b></div><div class="bmnote">' + esc(b.note) + '</div><div class="tm">' + esc(where(b)) + ' · ' + esc(b.user) + (b.keep ? ' · ' + t('bookmarks.kept', 'kept') : '') + '</div>';
   tipEl.hidden = false;
   const r = btn.getBoundingClientRect(), tw = tipEl.offsetWidth;
   tipEl.style.left = Math.max(6, Math.min(window.innerWidth - tw - 6, r.left + r.width / 2 - tw / 2)) + 'px';
@@ -104,16 +105,16 @@ function openPopAt(anchor, html) {
 // The add / edit form. `b` = an existing bookmark (edit), else a new one at `at`.
 function formHtml(b, at, cams, pick) {
   const limited = !!state.limited;
-  const opts = (limited ? '' : '<option value=""' + (pick === '' ? ' selected' : '') + '>All cameras</option>') +
+  const opts = (limited ? '' : '<option value=""' + (pick === '' ? ' selected' : '') + '>' + esc(t('bookmarks.all_cameras', 'All cameras')) + '</option>') +
     cams.map(n => '<option' + (pick === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
   const keep = b ? b.keep : false;
   return '<form class="bmform" novalidate>' +
-    '<div class="bmh">' + BM_SVG + '<b>' + (b ? 'Edit bookmark' : 'Bookmark') + '</b><span class="tm">' + esc(when(b ? b.at : at)) + '</span></div>' +
-    '<textarea name="note" rows="3" maxlength="' + NOTE_MAX + '" placeholder="What happened here?" aria-label="Note" required>' + esc(b ? b.note : '') + '</textarea>' +
-    '<div class="bmrow"><select name="camera" aria-label="Camera">' + opts + '</select>' +
-    '<label class="bmkeep" title="Hold the recordings from 2 minutes before to 2 minutes after this moment back from automatic cleanup"><input type="checkbox" name="keep"' + (keep ? ' checked' : '') + '> Keep video</label></div>' +
+    '<div class="bmh">' + BM_SVG + '<b>' + (b ? t('bookmarks.edit_bookmark', 'Edit bookmark') : t('bookmarks.bookmark', 'Bookmark')) + '</b><span class="tm">' + esc(when(b ? b.at : at)) + '</span></div>' +
+    '<textarea name="note" rows="3" maxlength="' + NOTE_MAX + '" placeholder="' + esc(t('bookmarks.what_happened', 'What happened here?')) + '" aria-label="' + esc(t('bookmarks.note', 'Note')) + '" required>' + esc(b ? b.note : '') + '</textarea>' +
+    '<div class="bmrow"><select name="camera" aria-label="' + esc(t('bookmarks.camera', 'Camera')) + '">' + opts + '</select>' +
+    '<label class="bmkeep" title="' + esc(t('bookmarks.keep_title', 'Hold the recordings from 2 minutes before to 2 minutes after this moment back from automatic cleanup')) + '"><input type="checkbox" name="keep"' + (keep ? ' checked' : '') + '> ' + t('bookmarks.keep_video', 'Keep video') + '</label></div>' +
     '<div class="bmerr" role="alert" hidden></div>' +
-    '<div class="bmbtns"><span class="tm bmcount"></span><button type="button" class="btn" data-x>Cancel</button><button type="submit" class="primary">Save</button></div>' +
+    '<div class="bmbtns"><span class="tm bmcount"></span><button type="button" class="btn" data-x>' + t('bookmarks.cancel', 'Cancel') + '</button><button type="submit" class="primary">' + t('bookmarks.save', 'Save') + '</button></div>' +
     '</form>';
 }
 function wireForm(p, b, at, onSaved) {
@@ -128,7 +129,7 @@ function wireForm(p, b, at, onSaved) {
     const lock = !state.isAdmin && !camSel.value && !(b && b.keep && !b.camera);
     keepEl.disabled = lock;
     if (lock) keepEl.checked = false;
-    keepLabel.title = lock ? 'Only an admin can keep video for all cameras. Pick one camera.' : keepTitle;
+    keepLabel.title = lock ? t('bookmarks.only_admin_keep', 'Only an admin can keep video for all cameras. Pick one camera.') : keepTitle;
   };
   camSel.onchange = syncKeep; syncKeep();
   // Enter saves, Shift+Enter is a new line; the keys stay here (not the timeline's shortcuts).
@@ -141,7 +142,7 @@ function wireForm(p, b, at, onSaved) {
   f.onsubmit = async (ev) => {
     ev.preventDefault();
     const note = ta.value.trim();
-    if (!note) { er.textContent = 'Write a note'; er.hidden = false; ta.focus(); return; }
+    if (!note) { er.textContent = t('bookmarks.write_note', 'Write a note'); er.hidden = false; ta.focus(); return; }
     const body = bodyOf(f, b, note);
     if (!b) body.at = Math.round(at);
     const btn = f.querySelector('[type=submit]');
@@ -150,7 +151,7 @@ function wireForm(p, b, at, onSaved) {
       const r = b ? await api('/api/bookmarks/' + b.id, { method: 'PUT', json: body }) : await api('/api/bookmarks', { json: body });
       closePop();
       onSaved(r);
-      toast(b ? 'Bookmark saved' : 'Bookmarked ' + fmtWall(r.at) + (r.keep ? ' (video kept)' : ''), { kind: 'ok', ms: 2200 });
+      toast(b ? t('bookmarks.saved', 'Bookmark saved') : t('bookmarks.bookmarked', 'Bookmarked {when}{kept}', { when: fmtWall(r.at), kept: r.keep ? t('bookmarks.video_kept_paren', ' (video kept)') : '' }), { kind: 'ok', ms: 2200 });
     } catch (e) {
       er.textContent = errText(e); er.hidden = false; btn.disabled = false;
     }
@@ -169,13 +170,13 @@ function bodyOf(f, b, note) {
 // B / the Bookmark button: a new bookmark at the playhead.
 export function addAtPlayhead(anchor) {
   if (!T) return;
-  if (!can('events')) { T.note('This account cannot add bookmarks'); return; }
+  if (!can('events')) { T.note(t('bookmarks.cannot_add', 'This account cannot add bookmarks')); return; }
   const at = Math.min(Date.now(), Math.round(T.playhead()));
   T.pause();
   const shown = T.shown().filter(n => localCams().includes(n));
   const solo = T.solo();
   const cams = solo ? [solo] : shown;
-  if (!cams.length) { T.note('No cameras with recordings here'); return; }
+  if (!cams.length) { T.note(t('bookmarks.no_cams', 'No cameras with recordings here')); return; }
   // One camera in view: that one; several: all of them (an account limited to some cameras: the first).
   const pick = cams.length === 1 || state.limited ? cams[0] : '';
   const p = openPopAt(anchor || $('tlHead'), formHtml(null, at, cams, pick));
@@ -189,9 +190,9 @@ function openEdit(b, anchor) {
 }
 
 async function remove(b) {
-  const ok = await confirmDialog({ title: 'Delete bookmark?', body: '"' + b.note.slice(0, 80) + (b.note.length > 80 ? '...' : '') + '"' + (b.keep ? ' Its video is no longer kept.' : ''), ok: 'Delete', danger: true });
+  const ok = await confirmDialog({ title: t('bookmarks.delete_q', 'Delete bookmark?'), body: '"' + b.note.slice(0, 80) + (b.note.length > 80 ? '...' : '') + '"' + (b.keep ? ' ' + t('bookmarks.video_no_longer_kept', 'Its video is no longer kept.') : ''), ok: t('bookmarks.delete', 'Delete'), danger: true });
   if (!ok) return false;
-  try { await api('/api/bookmarks/' + b.id, { method: 'DELETE' }); drop(b.id); toast('Bookmark deleted', { kind: 'ok', ms: 2000 }); return true; } catch (e) { toast(errText(e), { kind: 'err' }); return false; }
+  try { await api('/api/bookmarks/' + b.id, { method: 'DELETE' }); drop(b.id); toast(t('bookmarks.deleted', 'Bookmark deleted'), { kind: 'ok', ms: 2000 }); return true; } catch (e) { toast(errText(e), { kind: 'err' }); return false; }
 }
 
 // Save the 4 minutes around a bookmark (the existing export dialog).
@@ -206,10 +207,10 @@ function viewPop(b, anchor) {
   const p = openPopAt(anchor, '<div class="bmview">' +
     '<div class="bmh">' + BM_SVG + '<b>' + esc(when(b.at)) + '</b><span class="tm">' + esc(where(b)) + '</span></div>' +
     '<div class="bmnote">' + esc(b.note) + '</div>' +
-    '<div class="tm">By ' + esc(b.user) + (b.keep ? ' · video kept 2 min either side' : '') + '</div>' +
+    '<div class="tm">' + t('bookmarks.by_user', 'By {user}', { user: esc(b.user) }) + (b.keep ? ' · ' + t('bookmarks.kept_2min', 'video kept 2 min either side') : '') + '</div>' +
     '<div class="bmbtns">' +
-      '<button type="button" class="btn" data-ex title="Save the 4 minutes around it as MP4">' + ic('dl') + '<span>Export</span></button>' +
-      (b.can_edit ? '<button type="button" class="btn" data-ed>Edit</button><button type="button" class="btn danger" data-del>Delete</button>' : '') +
+      '<button type="button" class="btn" data-ex title="' + esc(t('bookmarks.export_title', 'Save the 4 minutes around it as MP4')) + '">' + ic('dl') + '<span>' + t('bookmarks.export', 'Export') + '</span></button>' +
+      (b.can_edit ? '<button type="button" class="btn" data-ed>' + t('bookmarks.edit', 'Edit') + '</button><button type="button" class="btn danger" data-del>' + t('bookmarks.delete', 'Delete') + '</button>' : '') +
     '</div></div>');
   p.querySelector('[data-ex]').onclick = () => { closePop(); exportAround(b); };
   const ed = p.querySelector('[data-ed]');
@@ -250,12 +251,12 @@ async function jump(b) {
 export function openList() {
   const cams = localCams();
   const html = '<div class="bmlist">' +
-    '<div class="bmfil"><label class="bmq">' + ic('search') + '<input type="search" placeholder="Search notes" aria-label="Search notes" autocomplete="off" spellcheck="false"></label>' +
-    '<select aria-label="Camera"><option value="">All cameras</option>' + cams.map(n => '<option>' + esc(n) + '</option>').join('') + '</select></div>' +
+    '<div class="bmfil"><label class="bmq">' + ic('search') + '<input type="search" placeholder="' + esc(t('bookmarks.search_notes', 'Search notes')) + '" aria-label="' + esc(t('bookmarks.search_notes', 'Search notes')) + '" autocomplete="off" spellcheck="false"></label>' +
+    '<select aria-label="' + esc(t('bookmarks.camera', 'Camera')) + '"><option value="">' + esc(t('bookmarks.all_cameras', 'All cameras')) + '</option>' + cams.map(n => '<option>' + esc(n) + '</option>').join('') + '</select></div>' +
     '<div class="bmrows" role="list" aria-live="polite"></div>' +
-    '<div class="hint">Click a bookmark to play that moment. ' + (can('events') ? 'Add one on the timeline: Bookmark, or ' + '<kbd>B</kbd>.' : '') + '</div>' +
+    '<div class="hint">' + t('bookmarks.list_hint', 'Click a bookmark to play that moment.') + ' ' + (can('events') ? t('bookmarks.list_hint_add', 'Add one on the timeline: Bookmark, or <kbd>B</kbd>.') : '') + '</div>' +
     '</div>';
-  const d = openDlg('Bookmarks', html);
+  const d = openDlg(t('bookmarks.title', 'Bookmarks'), html);
   d.classList.add('bmdlg');
   listDlg = d;
   const q = d.querySelector('input[type=search]'), sel = d.querySelector('select'), rows = d.querySelector('.bmrows');
@@ -270,20 +271,20 @@ export function openList() {
     shown = r.bookmarks || [];
     rows.innerHTML = shown.length ? shown.map((b, i) =>
       '<div class="bmr" role="listitem">' +
-        '<button type="button" class="bmgo" data-i="' + i + '" title="Play this moment">' +
+        '<button type="button" class="bmgo" data-i="' + i + '" title="' + esc(t('bookmarks.play_moment', 'Play this moment')) + '">' +
           '<span class="bmt"><b>' + esc(fmtWall(b.at)) + '</b><span class="tm">' + esc(where(b)) + ' · ' + esc(b.user) + '</span></span>' +
-          (b.keep ? '<span class="bmk" title="Video kept 2 min either side">' + ic('lock') + '</span>' : '') +
+          (b.keep ? '<span class="bmk" title="' + esc(t('bookmarks.kept_title', 'Video kept 2 min either side')) + '">' + ic('lock') + '</span>' : '') +
           '<span class="bmnote">' + esc(b.note) + '</span>' +
         '</button>' +
         '<span class="bmacts">' +
-          '<button type="button" class="btn icon" data-ex="' + i + '" title="Export the 4 minutes around it" aria-label="Export">' + ic('dl') + '</button>' +
-          (b.can_edit ? '<button type="button" class="btn" data-ed="' + i + '">Edit</button><button type="button" class="btn icon" data-del="' + i + '" title="Delete" aria-label="Delete">' + ic('x') + '</button>' : '') +
+          '<button type="button" class="btn icon" data-ex="' + i + '" title="' + esc(t('bookmarks.export_around', 'Export the 4 minutes around it')) + '" aria-label="' + esc(t('bookmarks.export', 'Export')) + '">' + ic('dl') + '</button>' +
+          (b.can_edit ? '<button type="button" class="btn" data-ed="' + i + '">' + t('bookmarks.edit', 'Edit') + '</button><button type="button" class="btn icon" data-del="' + i + '" title="' + esc(t('bookmarks.delete', 'Delete')) + '" aria-label="' + esc(t('bookmarks.delete', 'Delete')) + '">' + ic('x') + '</button>' : '') +
         '</span>' +
-      '</div>').join('') : '<div class="bmempty">' + (q.value.trim() || sel.value ? 'No bookmarks match.' : 'No bookmarks yet.') + '</div>';
+      '</div>').join('') : '<div class="bmempty">' + (q.value.trim() || sel.value ? t('bookmarks.no_match', 'No bookmarks match.') : t('bookmarks.no_yet', 'No bookmarks yet.')) + '</div>';
   };
   d.__reload = reload;
-  let t = 0;
-  q.oninput = () => { clearTimeout(t); t = setTimeout(reload, 250); };
+  let debounce = 0;
+  q.oninput = () => { clearTimeout(debounce); debounce = setTimeout(reload, 250); };
   q.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === 'Escape' && q.value) { ev.preventDefault(); q.value = ''; reload(); } else if (ev.key === 'Escape') { d.__close(); } };
   sel.onchange = reload;
   rows.onclick = async (ev) => {
@@ -300,7 +301,7 @@ export function openList() {
 // Edit from the list: the same form, in a small dialog of its own.
 function listEdit(b) {
   const cams = localCams();
-  const d = openDlg('Edit bookmark', formHtml(b, b.at, b.camera && !cams.includes(b.camera) ? cams.concat([b.camera]) : cams, b.camera || ''), true);
+  const d = openDlg(t('bookmarks.edit_bookmark', 'Edit bookmark'), formHtml(b, b.at, b.camera && !cams.includes(b.camera) ? cams.concat([b.camera]) : cams, b.camera || ''), true);
   d.classList.add('bmdlg');
   wireFormIn(d, b, () => d.__close(), upsert);
 }
@@ -315,14 +316,14 @@ function wireFormIn(d, b, done, onSaved) {
   f.onsubmit = async (ev) => {
     ev.preventDefault();
     const note = ta.value.trim();
-    if (!note) { er.textContent = 'Write a note'; er.hidden = false; ta.focus(); return; }
+    if (!note) { er.textContent = t('bookmarks.write_note', 'Write a note'); er.hidden = false; ta.focus(); return; }
     const btn = f.querySelector('[type=submit]');
     btn.disabled = true;
     try {
       const r = await api('/api/bookmarks/' + b.id, { method: 'PUT', json: bodyOf(f, b, note) });
       done();
       onSaved(r);
-      toast('Bookmark saved', { kind: 'ok', ms: 2000 });
+      toast(t('bookmarks.saved', 'Bookmark saved'), { kind: 'ok', ms: 2000 });
     } catch (e) { er.textContent = errText(e); er.hidden = false; btn.disabled = false; }
   };
   setTimeout(() => { try { ta.focus(); } catch (e) { /* gone */ } }, 0);

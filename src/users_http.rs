@@ -110,12 +110,15 @@ pub struct PermsReq {
     arm: Option<bool>,
     events: Option<bool>,
     camera_detection: Option<bool>,
+    lights: Option<bool>,
+    siren: Option<bool>,
 }
 
 impl From<PermsReq> for crate::config::OperatorPerms {
     fn from(p: PermsReq) -> Self {
         let on = |x: Option<bool>| x.unwrap_or(true);
-        crate::config::OperatorPerms { ptz: on(p.ptz), talk_clip: on(p.talk_clip), arm: on(p.arm), events: on(p.events), camera_detection: on(p.camera_detection) }
+        // (The siren is off unless asked for.)
+        crate::config::OperatorPerms { ptz: on(p.ptz), talk_clip: on(p.talk_clip), arm: on(p.arm), events: on(p.events), camera_detection: on(p.camera_detection), lights: on(p.lights), siren: p.siren.unwrap_or(false) }
     }
 }
 
@@ -221,7 +224,7 @@ fn operator_gain(cfg: &crate::config::Config, name: &str, w: &Wanted, disabled: 
     }
     let old = target.map(|u| u.perms).unwrap_or_default();
     let new = w.perms.unwrap_or(old);
-    let gained = (new.ptz && !old.ptz) || (new.talk_clip && !old.talk_clip) || (new.arm && !old.arm) || (new.events && !old.events) || (new.camera_detection && !old.camera_detection);
+    let gained = (new.ptz && !old.ptz) || (new.talk_clip && !old.talk_clip) || (new.arm && !old.arm) || (new.events && !old.events) || (new.camera_detection && !old.camera_detection) || (new.lights && !old.lights) || (new.siren && !old.siren);
     // More cameras: limits taken away, or a camera added to them.
     let old_cams = target.map(|u| u.cameras.clone()).unwrap_or_default();
     let wider = w.cameras.as_ref().is_some_and(|c| (c.is_empty() && !old_cams.is_empty()) || (!old_cams.is_empty() && c.iter().any(|x| !old_cams.contains(x))));
@@ -858,7 +861,7 @@ mod tests {
         };
         let needs = |name: &str, x: Wanted, disabled: Option<bool>| needs_proof(&cfg, "boss", name, &x, false, disabled);
         let no_arm = Some(OperatorPerms { arm: false, ..Default::default() });
-        let none = Some(OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false });
+        let none = Some(OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false, lights: false, siren: false });
         assert!(needs("new", w(Some("operator"), None, None), None), "a new operator");
         assert!(needs("new", w(Some("operator"), None, none), None), "even with no rights: it is made an operator");
         assert!(needs("view", w(Some("operator"), None, None), None), "a viewer made an operator");

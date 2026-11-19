@@ -1,6 +1,6 @@
 [package]
 name = "ambersight"
-version = "0.11.3"
+version = "0.12.0"
 edition = "2021"
 description = "AmberSight - a self-hosted camera security and recording server"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -92,6 +92,10 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = ["directml
 windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance"] }
 windows-service = "0.7"
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_RemoteDesktop", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_UI_HiDpi"] }
+
+# build.rs fixes the hash of every lang/<code>.json into the program (src/lang.rs).
+[build-dependencies]
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

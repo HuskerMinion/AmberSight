@@ -691,9 +691,33 @@ pub fn inspect(xaddr: &str, username: &str, password: &str) -> Result<Inspection
             c["name"] = format!("{base} channel {}", n + 1).into();
         }
     }
+    // A single-channel Reolink that answers on Reolink's own port: Auto
+    // (Baichuan first, RTSP as the backup). Only a TCP connect, no sign-in.
+    // Hubs and recorders (several channels) are left on RTSP: some of their
+    // channels may be battery cameras.
+    if let [cam] = cameras.as_mut_slice() {
+        let url = cam["url"].as_str().unwrap_or_default().to_string();
+        let open = || {
+            use std::net::ToSocketAddrs;
+            (creds.host.as_str(), crate::ingest::baichuan::transport::TCP_PORT)
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut a| a.next())
+                .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(1500)).is_ok())
+        };
+        if suggest_auto(&info.manufacturer, &url) && open() {
+            cam["connect"] = "auto".into();
+        }
+    }
     let (main, sub) = chans.first().copied().unwrap_or((None, None));
     let suggested = cameras.first().cloned().unwrap_or_else(|| suggested_camera(&info, &creds.host, creds.port, username, &profiles, None, None));
     Ok(Inspection { info, media_xaddr: media, ptz_xaddr: ptz, profiles, main, sub, suggested, cameras })
+}
+
+/// Whether a found camera (one channel) gets `connect = "auto"` when it
+/// answers on port 9000: a Reolink with an RTSP address.
+fn suggest_auto(manufacturer: &str, url: &str) -> bool {
+    manufacturer.to_ascii_lowercase().contains("reolink") && url.to_ascii_lowercase().starts_with("rtsp://")
 }
 
 /// Render a suggested camera as a `[[cameras]]` TOML block.
@@ -1403,6 +1427,15 @@ pub fn tour_running(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn find_cameras_suggests_auto_only_for_a_reolink_on_rtsp() {
+        assert!(super::suggest_auto("Reolink", "rtsp://192.0.2.5:554/Preview_01_main"));
+        assert!(super::suggest_auto("REOLINK", "rtsp://192.0.2.5/h264Preview_01_main"));
+        assert!(!super::suggest_auto("Amcrest", "rtsp://192.0.2.5/cam/realmonitor?channel=1"));
+        assert!(!super::suggest_auto("Reolink", "https://192.0.2.5/flv?port=1935&app=bcs&stream=channel0_sub.bcs"));
+        assert!(!super::suggest_auto("", ""));
+    }
+
     use super::*;
 
     #[test]
@@ -1856,6 +1889,53 @@ mod tests {
         });
         assert_eq!(probe_ports("127.0.0.1", &[1, port]), Some(port));
         assert_eq!(probe_ports("127.0.0.1", &[1]), None);
+    }
+
+    /// A camera that echoes the WS-Security header in its faults: the PTZ
+    /// error kept for admins (capabilities cache), a PTZ call's error and an
+    /// inspection's error hold none of it.
+    #[test]
+    fn ptz_and_inspect_errors_hold_no_echoed_security_header() {
+        use crate::onvif::echo_device;
+        // Answers the lookups (with the header echoed in each), faults the rest.
+        let (port, sent) = echo_device::start_with("400 Bad Request", |req, port| {
+            if req.contains("GetCapabilities") {
+                Some(format!("<tds:GetCapabilitiesResponse xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\" xmlns:tt=\"{NS_SCHEMA}\"><tds:Capabilities><tt:Media><tt:XAddr>http://127.0.0.1:{port}/onvif/media</tt:XAddr></tt:Media><tt:PTZ><tt:XAddr>http://127.0.0.1:{port}/onvif/ptz</tt:XAddr></tt:PTZ></tds:Capabilities></tds:GetCapabilitiesResponse>"))
+            } else if req.contains("GetProfiles") {
+                Some(format!("<trt:GetProfilesResponse xmlns:trt=\"{NS_MEDIA}\" xmlns:tt=\"{NS_SCHEMA}\"><trt:Profiles token=\"p1\"><tt:Name>main</tt:Name><tt:VideoEncoderConfiguration><tt:Encoding>H264</tt:Encoding><tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration><tt:PTZConfiguration token=\"z\"/></trt:Profiles></trt:GetProfilesResponse>"))
+            } else if req.contains("GetDeviceInformation") {
+                Some(format!("<tds:GetDeviceInformationResponse xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"><tds:Manufacturer>Example</tds:Manufacturer><tds:Model>Cam 1</tds:Model><tds:FirmwareVersion>1.0</tds:FirmwareVersion><tds:SerialNumber>S1</tds:SerialNumber><tds:HardwareId>H1</tds:HardwareId></tds:GetDeviceInformationResponse>"))
+            } else {
+                None
+            }
+        });
+        let mut c: CameraConfig = toml::from_str(&format!("name = \"c\"\nurl = \"rtsp://127.0.0.1:554/s\"\nonvif_port = {port}\n")).unwrap();
+        c.username = echo_device::USER.into();
+        c.password = echo_device::PASS.into();
+        // The capabilities error kept for admins (GetNodes faults).
+        let id = 9_000_123;
+        let err = check_caps(id, &c).error.expect("an error is kept");
+        assert!(err.contains("SOAP fault: Sender not Authorized"), "{err}");
+        echo_device::assert_clean(&err, &sent);
+        echo_device::assert_clean(&cached_any(id).unwrap().error.unwrap(), &sent);
+        // A PTZ call's error (GetPresets faults), and the log lines meanwhile.
+        let t = target_from_config(&c).unwrap();
+        let (r, logs) = echo_device::capture_logs(|| ptz_presets(&t));
+        let pe = r.unwrap_err();
+        assert!(format!("{pe:#}").contains("SOAP fault: Sender not Authorized"), "{pe:#}");
+        echo_device::assert_clean(&format!("{pe:#} / {pe:?}"), &sent);
+        echo_device::assert_clean(&logs, &sent);
+        // An inspection read from answers that carry the header (GetStreamUri faults:
+        // logged), and what it gives the page.
+        let (i, logs) = echo_device::capture_logs(|| inspect(&format!("http://127.0.0.1:{port}/onvif/device_service"), echo_device::USER, echo_device::PASS));
+        let i = i.expect("the lookups answer");
+        assert_eq!(i.info.model, "Cam 1");
+        assert_eq!(i.profiles.len(), 1);
+        // (The suggested camera carries the user name the admin typed, on purpose.)
+        echo_device::assert_clean_but_user(&serde_json::to_string(&i).unwrap(), &sent);
+        echo_device::assert_clean_but_user(&format!("{i:?}"), &sent);
+        assert!(logs.contains("GetStreamUri"), "{logs}");
+        echo_device::assert_clean(&logs, &sent);
     }
 
     /// A local port that answers every request with this.

@@ -1,5 +1,6 @@
 // core.js - shared plumbing: API helper, event bus, session state, dialogs, toast, small utils.
 // Every other module imports from here; this module imports only split.js (which imports nothing).
+import { t } from './i18n.js';
 import { paneFilter } from './split.js';
 
 export const state = {
@@ -65,14 +66,14 @@ export async function api(url, opts) {
     if (r.status === 403 && body.startsWith('this change needs your own password') && !(opts && opts.proofSent)) {
       const { confirmWithPassword } = await import('./account.js');
       return new Promise((res, rej) => confirmWithPassword({
-        reason: 'This change is a sensitive one, so it takes your own password.', ok: 'Confirm',
+        reason: t('core.sensitive_change', 'This change is a sensitive one, so it takes your own password.'), ok: t('core.confirm', 'Confirm'),
         onCancel: () => rej(new ApiError(403, 'Canceled', 'Canceled')),
         call: async (proof) => {
           res(await api(url, Object.assign({}, opts, { method: o.method, json: Object.assign({}, opts && opts.json, proof), proofSent: true })));
         },
       }));
     }
-    if (r.status === 403) throw new ApiError(403, url + ' -> 403 (' + (body || 'this account is view-only') + ')', body);
+    if (r.status === 403) throw new ApiError(403, url + ' -> 403 (' + (body || t('core.account_view_only', 'this account is view-only')) + ')', body);
     throw new ApiError(r.status, url + ' -> ' + r.status + (body && body.length < 200 ? ': ' + body : ''), body);
   }
   const txt = await r.text();
@@ -84,23 +85,23 @@ export async function api(url, opts) {
 // the server is busy or out of reach, so it says so, with a Retry that calls
 // `retry`. Watches `root` (the page's own element, also when it is drawn
 // again meanwhile) until it leaves the page.
-const WAIT_TEXT = 'Still waiting for the server…';
+const WAIT_TEXT = t('core.waiting_server', 'Still waiting for the server…');
 export function stillWaiting(root, retry, ms = 10000) {
   let since = 0, seen = false;
   const iv = setInterval(() => {
     if (!root.isConnected) { if (seen) clearInterval(iv); return; }
     seen = true;
     const ps = [...root.querySelectorAll('p.empty')];
-    const loading = ps.filter(p => /^Loading/.test(p.textContent));
+    const loading = ps.filter(p => /(\.\.\.|\u2026)\s*$/.test(p.textContent));
     if (!loading.length && !ps.some(p => p.dataset.waiting)) { since = 0; return; }
     if (!since) since = Date.now();
     if (Date.now() - since < ms) return;
     for (const p of loading) {
       p.dataset.waiting = '1';
-      p.innerHTML = esc(WAIT_TEXT) + ' <button type="button" class="btn sm">Retry</button>';
+      p.innerHTML = esc(WAIT_TEXT) + ' <button type="button" class="btn sm">' + esc(t('core.retry', 'Retry')) + '</button>';
       p.querySelector('button').onclick = () => {
         since = Date.now();
-        root.querySelectorAll('p.empty[data-waiting]').forEach(x => { x.textContent = 'Loading...'; delete x.dataset.waiting; });
+        root.querySelectorAll('p.empty[data-waiting]').forEach(x => { x.textContent = t('core.loading', 'Loading...'); delete x.dataset.waiting; });
         retry();
       };
     }
@@ -156,6 +157,19 @@ export function fmtSize(b) {
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return (i === 0 ? v : v.toFixed(1)) + ' ' + u[i];
 }
+// How long ago, as a short phrase ("just now", "5 min ago", "3 h ago", "2 days ago"); seconds in.
+export function fmtAgo(sec) {
+  const s = Math.max(0, sec);
+  if (s < 90) return t('core.ago_now', 'just now');
+  if (s < 5400) return t('core.ago_min', '{n} min ago', { n: Math.round(s / 60) });
+  if (s < 129600) return t('core.ago_h', '{n} h ago', { n: Math.round(s / 3600) });
+  return t('core.ago_days', '{n, plural, one {# day ago} other {# days ago}}', { n: Math.round(s / 86400) });
+}
+// A short span ("45 s", "3 min 20 s"); seconds in.
+export function fmtSpan(sec) {
+  const s = Math.max(0, Math.round(sec));
+  return s >= 60 ? t('core.span_min_s', '{m} min {s} s', { m: Math.floor(s / 60), s: s % 60 }) : t('core.span_s', '{s} s', { s });
+}
 export function toLocalInput(ms) {
   const d = new Date(ms);
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
@@ -163,6 +177,11 @@ export function toLocalInput(ms) {
 export function fmtWall(ms) {
   const d = new Date(ms);
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+}
+// A moment for people to read, with its date: the app's language and the user's clock choice
+// ("Nov 19, 2026, 8:30:56 AM"). fmtWall stays the fixed form for file names and inputs.
+export function fmtWhen(ms) {
+  return new Date(ms).toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' });
 }
 export function camFromId(id) { return state.cams.find(c => String(c.id) === String(id)) || null; }
 
@@ -208,7 +227,7 @@ export function playVideo(v) {
     if (playNote) return;
     playNote = document.createElement('button');
     playNote.type = 'button'; playNote.className = 'playnote';
-    playNote.innerHTML = '<svg class="ic"><use href="#i-play"/></svg><span>Tap to start video</span>';
+    playNote.innerHTML = '<svg class="ic"><use href="#i-play"/></svg><span>' + esc(t('core.tap_to_start_video', 'Tap to start video')) + '</span>';
     playNote.onclick = startBlocked;
     document.body.appendChild(playNote);
     for (const ev of ['pointerdown', 'keydown', 'touchend']) document.addEventListener(ev, startBlocked, { once: true, capture: true });
@@ -230,47 +249,47 @@ export const isOperator = () => !state.isAdmin && state.role === 'operator';
 let viewOnlyTold = false;
 export function viewOnlyNote(what) {
   // (Arming by an operator limited to some cameras: said every time, it is not a missing right.)
-  if (what === 'arm' && isOperator() && state.limited && state.perms && state.perms.pause) { toast('This account sees only some cameras, so it cannot arm, disarm or switch profiles: those change every camera.'); return; }
+  if (what === 'arm' && isOperator() && state.limited && state.perms && state.perms.pause) { toast(t('core.account_limited', 'This account sees only some cameras, so it cannot arm, disarm or switch profiles: those change every camera.')); return; }
   if (viewOnlyTold) return;
   viewOnlyTold = true;
-  toast(isOperator() ? 'This account may not do that: an admin can allow it in Settings, Users.' : 'This account is view-only: an admin can give it more rights in Settings, Users.');
+  toast(isOperator() ? t('core.account_may_not', 'This account may not do that: an admin can allow it in Settings, Users.') : t('core.account_view_only_admin', 'This account is view-only: an admin can give it more rights in Settings, Users.'));
 }
 
 export function toast(msg, onClick, opts) {
   if (onClick && typeof onClick === 'object') { opts = onClick; onClick = null; }
   opts = opts || {};
   const kind = opts.kind === 'err' || opts.kind === 'ok' ? opts.kind : 'info';
-  const t = document.createElement('div');
-  t.className = 'toast ' + kind;
-  t.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.setAttribute('role', kind === 'err' ? 'alert' : 'status');
   const m = document.createElement('span');
   m.className = 'tmsg';
   m.textContent = msg;
-  t.appendChild(m);
-  const gone = () => { clearTimeout(timer); t.remove(); };
-  if (onClick) { t.classList.add('click'); t.title = 'Open this camera'; t.onclick = () => { gone(); onClick(); }; }
+  el.appendChild(m);
+  const gone = () => { clearTimeout(timer); el.remove(); };
+  if (onClick) { el.classList.add('click'); el.title = t('core.open_camera', 'Open this camera'); el.onclick = () => { gone(); onClick(); }; }
   if (opts.action) {
     const a = document.createElement('button');
     a.type = 'button'; a.className = 'tact'; a.textContent = opts.action.label;
     a.onclick = (ev) => { ev.stopPropagation(); gone(); opts.action.run(); };
-    t.appendChild(a);
+    el.appendChild(a);
   }
   if (kind === 'err' || opts.dismiss) {
     const x = document.createElement('button');
-    x.type = 'button'; x.className = 'tx'; x.setAttribute('aria-label', 'Dismiss'); x.title = 'Dismiss'; x.innerHTML = '&times;';
+    x.type = 'button'; x.className = 'tx'; x.setAttribute('aria-label', t('core.dismiss', 'Dismiss')); x.title = t('core.dismiss', 'Dismiss'); x.innerHTML = '&times;';
     x.onclick = (ev) => { ev.stopPropagation(); gone(); };
-    t.appendChild(x);
+    el.appendChild(x);
   }
-  toastBox().appendChild(t);
+  toastBox().appendChild(el);
   let timer = 0, left = opts.ms || 6000;
   if (kind !== 'err' || opts.ms) {
     let started = 0;
     const run = () => { started = Date.now(); timer = setTimeout(gone, left); };
-    t.addEventListener('mouseenter', () => { clearTimeout(timer); left -= Date.now() - started; });
-    t.addEventListener('mouseleave', () => { left = Math.max(left, 1500); run(); });
+    el.addEventListener('mouseenter', () => { clearTimeout(timer); left -= Date.now() - started; });
+    el.addEventListener('mouseleave', () => { left = Math.max(left, 1500); run(); });
     run();
   }
-  return t;
+  return el;
 }
 
 // ---------- the Back gesture / button closes what is open ----------
@@ -381,7 +400,7 @@ export function raiseDlg(d) {
   if (!d || !d.isConnected) return false;
   const i = dlgStack.indexOf(d);
   if (i >= 0 && i < dlgStack.length - 1) { dlgStack.push(...dlgStack.splice(i, 1)); syncDlgLayers(); } else if (!d.isConnected) document.body.appendChild(d);
-  const f = d.querySelector('input, select, textarea, button:not([aria-label="close"])');
+  const f = d.querySelector('input, select, textarea, button:not([data-dlg-close])');
   if (f) f.focus();
   return true;
 }
@@ -435,7 +454,7 @@ export function openDlg(title, html, small) {
   d.style.left = '50%';
   d.style.top = '50%';
   d.style.transform = 'translate(-50%, -50%)';
-  d.innerHTML = '<div class="bar"><span class="ttl" id="' + tid + '">' + esc(title) + '</span><button type="button" title="Close (Esc)" aria-label="close"><svg class="ic"><use href="#i-x"/></svg></button></div><div class="body">' + html + '</div>';
+  d.innerHTML = '<div class="bar"><span class="ttl" id="' + tid + '">' + esc(title) + '</span><button type="button" title="' + esc(t('core.close_esc', 'Close (Esc)')) + '" aria-label="' + esc(t('core.close', 'Close')) + '" data-dlg-close><svg class="ic"><use href="#i-x"/></svg></button></div><div class="body">' + html + '</div>';
   document.body.appendChild(d);
   dlgStack.push(d);
   syncDlgLayers();
@@ -536,18 +555,18 @@ export function currentTheme() {
   return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 // t: 'auto' | 'light' | 'dark'
-export function setTheme(t) {
-  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-  else { t = 'auto'; delete document.documentElement.dataset.theme; }
-  try { if (t === 'auto') localStorage.removeItem('ambs.theme'); else localStorage.setItem('ambs.theme', t); } catch (e) { /* private mode */ }
+export function setTheme(mode) {
+  if (mode === 'light' || mode === 'dark') document.documentElement.dataset.theme = mode;
+  else { mode = 'auto'; delete document.documentElement.dataset.theme; }
+  try { if (mode === 'auto') localStorage.removeItem('ambs.theme'); else localStorage.setItem('ambs.theme', mode); } catch (e) { /* private mode */ }
   const eff = currentTheme();
   const u = document.getElementById('themeUse');
-  if (u) u.setAttribute('href', t === 'auto' ? '#i-auto' : t === 'light' ? '#i-sun' : '#i-moon');   // the icon shows the mode now
+  if (u) u.setAttribute('href', mode === 'auto' ? '#i-auto' : mode === 'light' ? '#i-sun' : '#i-moon');   // the icon shows the mode now
   const b = document.getElementById('themeBtn');
-  if (b) b.title = 'Theme: ' + (t === 'auto' ? 'Auto (follows this device)' : t === 'light' ? 'Light' : 'Dark') + '. Click to change.';
+  if (b) b.title = t('core.theme_btn_title','Theme: {mode}. Click to change.',{ mode: mode === 'auto' ? t('core.theme_auto', 'Auto (follows this device)') : mode === 'light' ? t('core.theme_light', 'Light') : t('core.theme_dark', 'Dark') });
   const m = document.querySelector('meta[name=theme-color]');
   if (m) m.content = eff === 'light' ? '#ffffff' : '#14181e';
-  for (const x of document.querySelectorAll('.themeseg [data-mode]')) x.setAttribute('aria-pressed', String(x.dataset.mode === t));
+  for (const x of document.querySelectorAll('.themeseg [data-mode]')) x.setAttribute('aria-pressed', String(x.dataset.mode === mode));
 }
 // Light <-> dark (what a plain "switch theme" command means); the header button cycles Auto/Light/Dark.
 export function toggleTheme() { setTheme(currentTheme() === 'light' ? 'dark' : 'light'); }
@@ -562,6 +581,12 @@ export function downloadUrl(url, fname) {
   document.body.appendChild(a); a.click(); a.remove();
 }
 
+// ---------- object names ----------
+// What an object label (as the AI model or the server names it) is called on screen, in the user's
+// language; one the list lacks shows as sent. Display only: matching, search and API values keep the label.
+const OBJ_NAME = { person: t('livetl.obj_person', 'person'), people: t('livetl.obj_people', 'people'), face: t('livetl.obj_face', 'face'), car: t('livetl.obj_car', 'car'), truck: t('livetl.obj_truck', 'truck'), bus: t('livetl.obj_bus', 'bus'), motorcycle: t('livetl.obj_motorcycle', 'motorcycle'), bicycle: t('livetl.obj_bicycle', 'bicycle'), vehicle: t('livetl.obj_vehicle', 'vehicle'), dog: t('livetl.obj_dog', 'dog'), cat: t('livetl.obj_cat', 'cat'), bird: t('livetl.obj_bird', 'bird'), animal: t('livetl.obj_animal', 'animal'), package: t('livetl.obj_package', 'package'), unusual: t('livetl.obj_unusual', 'unusual'), motion: t('armstrip.obj_motion', 'motion') };
+export const objName = (o) => OBJ_NAME[String(o).toLowerCase()] || o;
+
 // ---------- playback speed ----------
 // Speeds offered for recorded video. Browsers play at most 16x; faster speeds are
 // emulated where a player supports it (the playback timeline skips ahead).
@@ -569,7 +594,7 @@ export const SPEEDS = [0.125, 0.25, 0.5, 1, 2, 4, 6, 8, 16, 32, 64, 128, 256];
 export const MAX_RATE = 16;
 // Backwards (the timeline): -1, -2, -4.
 export const REVERSE_SPEEDS = [-4, -2, -1];
-export const speedLabel = (x) => (x < 0 ? '◀ Reverse ' + (-x) + 'x' : x === 1 ? 'Normal (1x)' : (x < 1 ? String(x) : x) + 'x');
+export const speedLabel = (x) => (x < 0 ? t('core.speed_reverse', '◀ Reverse {n}x', { n: -x }) : x === 1 ? t('core.speed_normal', 'Normal (1x)') : (x < 1 ? String(x) : x) + 'x');
 // <option>s for a speed <select>; `max` drops speeds a player cannot do;
 // `reverse` adds the backwards speeds first.
 export function speedOptions(cur, max, reverse) {
@@ -597,12 +622,12 @@ export function errText(e) {
   return (e && e.message) || String(e);
 }
 
-export function savedToast(text = 'Saved') { return toast(text, { kind: 'ok', ms: 2200 }); }
+export function savedToast(text = t('core.saved', 'Saved')) { return toast(text, { kind: 'ok', ms: 2200 }); }
 
 // confirmDialog({ title, body, ok, cancel, danger }) -> Promise<boolean>. A small centred dialog
 // that names the consequence; Esc, the close button and Back all mean "cancel". The page behind it
 // is inert while it is open.
-export function confirmDialog({ title, body = '', ok = 'OK', cancel = 'Cancel', danger = false, safeFocus = false }) {
+export function confirmDialog({ title, body = '', ok = t('core.ok', 'OK'), cancel = t('core.cancel', 'Cancel'), danger = false, safeFocus = false }) {
   return new Promise((resolve) => {
     const d = openDlg(title, (body ? '<p class="cfm-body">' + esc(body) + '</p>' : '') +
       '<div class="row cfm-row"><button type="button" class="btn" data-cfm-no>' + esc(cancel) + '</button>' +
@@ -627,7 +652,7 @@ export function confirmDialog({ title, body = '', ok = 'OK', cancel = 'Cancel', 
 
 // promptDialog({ title, label, value, ok, placeholder }) -> Promise<string|null>. Same dialog as
 // confirmDialog with one text field (focused and selected; Enter = OK). null = cancelled.
-export function promptDialog({ title, label = '', value = '', ok = 'OK', cancel = 'Cancel', placeholder = '' }) {
+export function promptDialog({ title, label = '', value = '', ok = t('core.ok', 'OK'), cancel = t('core.cancel', 'Cancel'), placeholder = '' }) {
   return new Promise((resolve) => {
     const d = openDlg(title, '<label class="fld pmt-l"><span class="fld-l">' + esc(label) + '</span><input type="text" data-pmt value="' + esc(value) + '" placeholder="' + esc(placeholder) + '" autocomplete="off" spellcheck="false"></label>' +
       '<div class="row cfm-row"><button type="button" class="btn" data-cfm-no>' + esc(cancel) + '</button><button type="button" class="primary" data-cfm-yes>' + esc(ok) + '</button></div>', true);
@@ -672,7 +697,7 @@ export function clearUnsaved(root) {
 // true = nothing to lose, or the person chose to leave.
 export async function confirmLeave() {
   if (!hasUnsaved()) return true;
-  const ok = await confirmDialog({ title: 'Leave without saving?', body: 'You changed settings on this page and have not saved them. If you leave now, the changes are lost.', ok: 'Leave', cancel: 'Keep editing', danger: true });
+  const ok = await confirmDialog({ title: t('core.leave_title', 'Leave without saving?'), body: t('core.leave_body', 'You changed settings on this page and have not saved them. If you leave now, the changes are lost.'), ok: t('core.leave_ok', 'Leave'), cancel: t('core.leave_cancel', 'Keep editing'), danger: true });
   if (ok) clearUnsaved();
   return ok;
 }
@@ -705,8 +730,8 @@ export function fld(label, attrs, unit, hint, type = 'number') {
 
 // ---------- the sticky save bar ----------
 export function pageBar() {
-  return '<div class="ac-bar" hidden role="region" aria-label="Unsaved changes"><span class="ac-state" data-bar-state role="status">Unsaved changes</span><span class="ac-sp"></span>' +
-    '<button type="button" class="btn" data-bar-revert>Revert</button><button type="button" class="primary" data-bar-save>Save</button></div>';
+  return '<div class="ac-bar" hidden role="region" aria-label="' + t('core.unsaved_changes','Unsaved changes') + '"><span class="ac-state" data-bar-state role="status">' + t('core.unsaved_changes','Unsaved changes') + '</span><span class="ac-sp"></span>' +
+    '<button type="button" class="btn" data-bar-revert>' + t('core.revert','Revert') + '</button><button type="button" class="primary" data-bar-save>' + t('core.save','Save') + '</button></div>';
 }
 // Wire the bar inside `el`: dirty() says whether there is something to save; save() may return
 // false to say it showed its own message. Returns update() - call it after every edit.
@@ -717,16 +742,16 @@ export function wireBar(el, dirty, save, revert) {
   let busy = false;
   const update = () => {
     const d = dirty();
-    st.textContent = 'Unsaved changes';
+    st.textContent = t('core.unsaved_changes','Unsaved changes');
     bar.hidden = !d && !busy;
     bar.classList.toggle('dirty', d);
     sv.disabled = !d || busy; rv.disabled = !d || busy;
   };
   sv.onclick = async () => {
-    busy = true; sv.disabled = true; sv.textContent = 'Saving...';
+    busy = true; sv.disabled = true; sv.textContent = t('core.saving','Saving...');
     try { const r = await save(); if (r !== false) savedToast(); }
     catch (e) { toast(errText(e), { kind: 'err' }); }
-    busy = false; sv.textContent = 'Save'; update();
+    busy = false; sv.textContent = t('core.save','Save'); update();
   };
   rv.onclick = () => { revert(); update(); };
   update();

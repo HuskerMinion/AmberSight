@@ -1,0 +1,38 @@
+# file:line:selector for rules setting letter-spacing or text-transform: uppercase
+static/css/app.css:83:.logo
+static/css/app.css:229:th
+static/css/app.css:298:.keys h4
+static/css/app.css:315:#credCode
+static/css/app.css:437:.sm-lbl
+static/css/app.css:439:.sm-val b
+static/css/app.css:472:.sm-sec h4
+static/css/app.css:473:.sm-sec h4 small
+static/css/app.css:522:.tlnone
+static/css/app.css:570:.tlnow span
+static/css/app.css:601:.sm-line .sm-val b
+static/css/app.css:638:.dk-sec h4
+static/css/app.css:642:.dk-lbl
+static/css/app.css:685:(continuation line)
+static/css/app.css:691:.sm.indock .sm-title
+static/css/app.css:808:.ctxmenu .ctxhead
+static/css/app.css:908:.lk-code
+static/css/app.css:958:.st-ct
+static/css/app.css:987:.asys-tile .k
+static/css/app.css:1032:.ac-sub
+static/css/app.css:1077:.ac-ovr-h
+static/css/app.css:1112:.ac-tbl th
+static/css/app.css:1356:.lp-text
+static/css/calendar.css:10:.calwd
+static/css/camera-panel.css:179:.ze-sub
+static/css/display.css:20:(continuation line)
+static/css/display.css:53:.dsp-clock b
+static/css/display.css:76:.dsp-code
+static/css/display.css:90:.dsp-sec h3
+static/css/health.css:26:.pf-ttl
+static/css/palette.css:11:.cp-h
+static/css/review.css:35:.evh
+static/css/settings.css:6:.sp-group
+static/css/settings.css:290:.dsa-code input
+static/css/tiles.css:56:.pbl
+static/css/tiles.css:147:.fc-card h2
+static/css/tiles.css:239:(continuation line)

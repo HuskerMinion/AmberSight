@@ -218,8 +218,10 @@ fn ok_status(a: &Answer) -> Result<()> {
     }
 }
 
+/// The start of a camera's answer for an error, through the same scrubber as
+/// ONVIF answers (no markup, nothing that looks like a sign-in echoed back).
 fn short_body(b: &str) -> String {
-    let t: String = b.trim().chars().take(120).collect();
+    let t: String = crate::onvif::scrub_device_text(b).chars().take(120).collect();
     if t.is_empty() { String::new() } else { format!(": {t}") }
 }
 
@@ -808,6 +810,31 @@ mod tests {
             ("400 Bad Request".into(), r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><s:Fault><s:Code><s:Value>s:Sender</s:Value></s:Code><s:Reason><s:Text xml:lang="en">Sender not Authorized</s:Text></s:Reason></s:Fault></s:Body></s:Envelope>"#.into())
         });
         assert!(onvif_reboot("127.0.0.1", &[port], "u", "p").is_err());
+    }
+
+    /// A restart refused by a camera that echoes the WS-Security header: the
+    /// error (shown to the admin, logged) and the log lines hold none of it.
+    #[test]
+    fn onvif_reboot_error_holds_no_echoed_security_header() {
+        use crate::onvif::echo_device;
+        let (port, sent) = echo_device::start("400 Bad Request");
+        let (r, logs) = echo_device::capture_logs(|| onvif_reboot("127.0.0.1", &[port], echo_device::USER, echo_device::PASS));
+        let e = r.unwrap_err();
+        let text = format!("{e:#} / {e:?}");
+        assert!(text.contains("SOAP fault: Sender not Authorized"), "{text}");
+        echo_device::assert_clean(&text, &sent);
+        echo_device::assert_clean(&logs, &sent);
+    }
+
+    /// Other restart methods put the start of the camera's answer in the error:
+    /// it goes through the same scrubber.
+    #[test]
+    fn short_body_drops_markup_and_sign_in_echoes() {
+        let h = "<wsse:Security><wsse:UsernameToken><wsse:Username>echo-user-q7z</wsse:Username><wsse:Password>c2VjcmV0ZGlnZXN0</wsse:Password></wsse:UsernameToken></wsse:Security>";
+        let s = short_body(&format!("<html><body>Error 500 {h}</body></html>"));
+        assert_eq!(s, ": Error 500");
+        assert_eq!(short_body("   "), "");
+        assert!(short_body(&"x".repeat(1000)).chars().count() <= 122);
     }
 
     fn plug(kind: &str) -> PowerSwitch {

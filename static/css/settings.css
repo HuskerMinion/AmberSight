@@ -35,6 +35,9 @@
 .sp-body .row button:not(.primary) { display: inline-flex; align-items: center; background: var(--surface2); border: 1px solid var(--field-line); color: var(--text); border-radius: var(--r1); padding: 6px 12px; cursor: pointer; }
 .sp-body .row button:not(.primary):hover { border-color: var(--muted); background: var(--raised); }
 .sp-body .row button.danger, .sp-body button.danger { color: var(--fault); }
+/* A long (or translated) button label wraps inside the button instead of running off a phone screen;
+   short labels still sit on one line (they only wrap when the row cannot hold them). */
+.sp-body .btn, .sp-body button.primary, .sp-body .row button { white-space: normal; max-width: 100%; text-align: center; overflow-wrap: break-word; }
 .sp-body .hint.bad { color: var(--fault); }
 .sp-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 var(--s3); max-width: 640px; }
 .sp-lead { margin: 0 0 var(--s3); max-width: 70ch; }

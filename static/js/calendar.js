@@ -1,6 +1,7 @@
 // A small month calendar for the timeline's "Go to": days with recordings are
 // tinted, days with alerts get a dot. Days are the browser's own local days;
 // their start times go to the server, which only looks them up.
+import { t, locale } from './i18n.js';
 import { api, esc } from './core.js';
 
 const DAY = 86400000;
@@ -51,7 +52,7 @@ export function openCalendar(opts) {
   el = document.createElement('div');
   el.className = 'cal';
   el.setAttribute('role', 'dialog');
-  el.setAttribute('aria-label', 'Choose a day');
+  el.setAttribute('aria-label', t('calendar.choose_day', 'Choose a day'));
   document.body.appendChild(el);
   opts.anchor.setAttribute('aria-expanded', 'true');
   st.onKey = (ev) => keyDown(ev);
@@ -118,26 +119,26 @@ function apply({ cells, res }) {
 
 function render() {
   const { year, month, fd } = st;
-  const mname = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(new Date(year, month, 1));
+  const mname = new Intl.DateTimeFormat(locale(), { month: 'long', year: 'numeric' }).format(new Date(year, month, 1));
   const wd = [];
   for (let i = 0; i < 7; i++) {
     const t = new Date(2024, 0, 7 + ((fd % 7) + i)); // 2024-01-07 is a Sunday
-    wd.push([new Intl.DateTimeFormat(undefined, { weekday: 'narrow' }).format(t), new Intl.DateTimeFormat(undefined, { weekday: 'long' }).format(t)]);
+    wd.push([new Intl.DateTimeFormat(locale(), { weekday: 'narrow' }).format(t), new Intl.DateTimeFormat(locale(), { weekday: 'long' }).format(t)]);
   }
   el.innerHTML =
     '<div class="calhd">' +
-      '<button type="button" class="calnav" data-nav="-1" aria-label="Previous month">&#8249;</button>' +
+      '<button type="button" class="calnav" data-nav="-1" aria-label="' + esc(t('calendar.prev_month', 'Previous month')) + '">&#8249;</button>' +
       '<div class="caltitle" aria-live="polite">' + esc(mname) + '</div>' +
-      '<button type="button" class="calnav" data-nav="1" aria-label="Next month">&#8250;</button>' +
+      '<button type="button" class="calnav" data-nav="1" aria-label="' + esc(t('calendar.next_month', 'Next month')) + '">&#8250;</button>' +
     '</div>' +
     '<div class="calgrid" role="grid" aria-label="' + esc(mname) + '">' +
       '<div class="calrow calwd" role="row">' + wd.map(([n, l]) => '<span role="columnheader" aria-label="' + esc(l) + '">' + esc(n) + '</span>').join('') + '</div>' +
       '<div class="calbody"></div>' +
     '</div>' +
     '<div class="calft">' +
-      '<span class="calkey"><i class="calsw rec"></i>Recorded</span>' +
-      '<span class="calkey"><i class="caldot"></i>Alerts</span>' +
-      '<button type="button" class="calnow">Today</button>' +
+      '<span class="calkey"><i class="calsw rec"></i>' + t('calendar.recorded', 'Recorded') + '</span>' +
+      '<span class="calkey"><i class="caldot"></i>' + t('calendar.alerts', 'Alerts') + '</span>' +
+      '<button type="button" class="calnow">' + t('calendar.today', 'Today') + '</button>' +
     '</div>';
   el.querySelectorAll('.calnav').forEach(b => { b.onclick = () => shift(+b.dataset.nav); });
   el.querySelector('.calnow').onclick = () => { const t = new Date(); go(t.getFullYear(), t.getMonth(), t.getDate()); };
@@ -153,7 +154,7 @@ function paint() {
   const body = el.querySelector('.calbody');
   // Redrawing replaces the day buttons: a focused one gets its focus back below.
   const hadFocus = body.contains(document.activeElement);
-  const fmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const fmt = new Intl.DateTimeFormat(locale(), { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   let html = '';
   for (let r = 0; r < 6; r++) {
     html += '<div class="calrow" role="row">';
@@ -166,8 +167,8 @@ function paint() {
       const isSel = x.y === st.sel.y && x.m === st.sel.m && x.d === st.sel.d;
       const cls = 'calday' + (x.in ? '' : ' out') + (info && info.rec ? ' rec' : '') + (info && info.alerts ? ' alert' : '') + (k === tk ? ' today' : '') + (isSel ? ' sel' : '') + (future ? ' future' : '');
       let label = fmt.format(new Date(x.y, x.m, x.d));
-      if (info) label += info.rec ? ', recorded' : ', nothing recorded';
-      if (info && info.alerts) label += ', ' + (info.alerts >= 100 ? 'many' : info.alerts) + (info.alerts === 1 ? ' alert' : ' alerts');
+      if (info) label += info.rec ? ', recorded' : t('calendar.nothing_recorded', ', nothing recorded');
+      if (info && info.alerts) label += t('calendar.comma_space', ', ') + (info.alerts >= 100 ? t('calendar.many_alerts', 'many alerts') : t('calendar.n_alerts', '{n, plural, one {# alert} other {# alerts}}', { n: info.alerts }));
       html += '<span role="gridcell" aria-selected="' + isSel + '"><button type="button" class="' + cls + '" data-y="' + x.y + '" data-m="' + x.m + '" data-d="' + x.d + '" tabindex="' + (isFocus ? 0 : -1) + '"' +
         (k === tk ? ' aria-current="date"' : '') + ' aria-label="' + esc(label) + '">' + x.d + '</button></span>';
     }

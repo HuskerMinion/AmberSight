@@ -2,6 +2,7 @@
 // their cameras. A camera can be in several groups; membership is saved on each
 // camera (PUT /api/cameras/:id {groups}).
 
+import { t } from './i18n.js';
 import { state, bus, api, esc, toast, openDlg, refreshCameras, confirmDialog, errText } from './core.js';
 
 const groupsOf = (c) => c.groups || [];
@@ -24,47 +25,47 @@ export async function setGroup(name, ids, old) {
   }
   await refreshCameras();
   // (Another server's camera can be unreachable for a moment.)
-  if (failed.length) throw new Error('not changed for ' + failed.join(', ') + ' (try again in a moment)');
+  if (failed.length) throw new Error(t('groups.not_changed', 'not changed for {names} (try again in a moment)', { names: failed.join(', ') }));
 }
 
 function editDlg(name) {
   const isNew = name == null;
   const members = new Set(state.cams.filter(c => !isNew && groupsOf(c).includes(name)).map(c => c.id));
-  const d = openDlg(isNew ? 'New group' : 'Group: ' + name,
-    '<label>Name <input data-name value="' + esc(name || '') + '" placeholder="e.g. Outside"></label>' +
-    '<div class="sec">Cameras in this group</div><div class="cs-copygrid">' +
+  const d = openDlg(isNew ? t('groups.new_group','New group') : t('groups.group_label','Group: {name}',{name}),
+    '<label>' + t('groups.name', 'Name') + ' <input data-name value="' + esc(name || '') + '" placeholder="' + t('groups.example_outside','e.g. Outside') + '"></label>' +
+    '<div class="sec">' + t('groups.cameras_in_group', 'Cameras in this group') + '</div><div class="cs-copygrid">' +
     state.cams.map(c => '<label class="asys-chk"><input type="checkbox" data-cam="' + c.id + '"' + (members.has(c.id) ? ' checked' : '') + '> ' + esc(c.name) + '</label>').join('') +
-    '</div><div class="hint">Groups only filter and organize cameras; they never trigger recording by themselves.</div>' +
-    '<div class="asys-err" data-err></div><div class="row"><button class="primary" data-save>Save</button><button class="btn" data-no>Cancel</button></div>', true);
+    '</div><div class="hint">' + t('groups.hint_groups','Groups only filter and organize cameras; they never trigger recording by themselves.') + '</div>' +
+    '<div class="asys-err" data-err></div><div class="row"><button class="primary" data-save>' + t('groups.save', 'Save') + '</button><button class="btn" data-no>' + t('groups.cancel', 'Cancel') + '</button></div>', true);
   d.classList.add('wide');
   d.querySelector('[data-no]').onclick = () => d.__close();
   d.querySelector('[data-save]').onclick = async () => {
     const n = d.querySelector('[data-name]').value.trim();
     const err = d.querySelector('[data-err]');
-    if (!n) { err.textContent = 'Enter a name.'; return; }
-    if (n !== name && allGroups().some(g => g.toLowerCase() === n.toLowerCase())) { err.textContent = 'There is already a group called ' + n + '.'; return; }
+    if (!n) { err.textContent = t('groups.enter_name','Enter a name.'); return; }
+    if (n !== name && allGroups().some(g => g.toLowerCase() === n.toLowerCase())) { err.textContent = t('groups.group_exists','There is already a group called {n}.',{n}); return; }
     const ids = [...d.querySelectorAll('[data-cam]:checked')].map(x => +x.dataset.cam);
-    try { await setGroup(n, ids, name); d.__close(); toast(isNew ? 'Group ' + n + ' created' : 'Group saved'); }
+    try { await setGroup(n, ids, name); d.__close(); toast((isNew ? t('groups.created','Group {n} created',{n}) : t('groups.saved','Group saved'))); }
     catch (e) { err.textContent = e.body || e.message; }
   };
   setTimeout(() => d.querySelector('[data-name]').focus(), 0);
 }
 
 async function deleteDlg(name) {
-  if (!(await confirmDialog({ title: 'Delete group ' + name + '?', body: 'The cameras stay; they just leave this group.', ok: 'Delete group', danger: true }))) return;
-  try { await setGroup('', [], name); toast('Group deleted'); }
+  if (!(await confirmDialog({ title: t('groups.delete_title','Delete group {name}?',{name}), body: t('groups.delete_body','The cameras stay; they just leave this group.'), ok: t('groups.delete_ok','Delete group'), danger: true }))) return;
+  try { await setGroup('', [], name); toast(t('groups.deleted','Group deleted')); }
   catch (e) { toast(errText(e), { kind: 'err' }); }
 }
 
 export function mountGroups(host) {
   function draw() {
     const gs = allGroups();
-    host.innerHTML = '<div class="cs-listbar"><span class="hint">Groups organize cameras for the live view. A camera can be in several groups.</span><button class="btn" data-new>+ New group</button></div>' +
+    host.innerHTML = '<div class="cs-listbar"><span class="hint">' + t('groups.hint_list','Groups organize cameras for the live view. A camera can be in several groups.') + '</span><button class="btn" data-new>' + t('groups.new_group_btn', '+ New group') + '</button></div>' +
       (gs.length ? '<div class="cs-list">' + gs.map(g => {
         const cams = state.cams.filter(c => groupsOf(c).includes(g));
-        return '<div class="cs-item"><div class="cs-name"><b>' + esc(g) + '</b><div class="cs-url">' + cams.length + ' camera' + (cams.length === 1 ? '' : 's') + ': ' + esc(cams.map(c => c.name).join(', ')) + '</div></div>' +
-          '<button class="btn" data-edit="' + esc(g) + '">Edit</button><button class="btn danger" data-del="' + esc(g) + '">Delete</button></div>';
-      }).join('') + '</div>' : '<p class="empty">No groups yet. Create one here, from a layout, or in a camera\'s settings.</p>');
+        return '<div class="cs-item"><div class="cs-name"><b>' + esc(g) + '</b><div class="cs-url">' + t('groups.cams_label', '{cams, plural, one {# camera} other {# cameras}}: {names}', { cams: cams.length, names: esc(cams.map(c => c.name).join(', ')) }) + '</div></div>' +
+          '<button class="btn" data-edit="' + esc(g) + '">' + t('groups.edit', 'Edit') + '</button><button class="btn danger" data-del="' + esc(g) + '">' + t('groups.delete', 'Delete') + '</button></div>';
+      }).join('') + '</div>' : '<p class="empty">' + t('groups.empty','No groups yet. Create one here, from a layout, or in a camera\'s settings.') + '</p>');
     host.querySelector('[data-new]').onclick = () => editDlg(null);
     host.querySelectorAll('[data-edit]').forEach(b => { b.onclick = () => editDlg(b.dataset.edit); });
     host.querySelectorAll('[data-del]').forEach(b => { b.onclick = () => deleteDlg(b.dataset.del); });

@@ -1,0 +1,110 @@
+display.cameras	Cameras
+display.display_settings	Display settings
+display.full_screen	Full screen
+display.reconnecting	Reconnecting…
+display.settings	Settings
+index.ai_off_note	Smart alerts are off, so every motion is listed.
+index.animal	Animal
+index.any_time	Any time
+index.arrange_cancel_tip	Discard the new order (Esc)
+index.arrange_tip	Drag the tiles into the order you want
+index.auto	Auto
+index.awake_tip	While AmberSight is open and showing, this computer's screen stays on and it does not go to sleep
+index.cam_clips_tip	Clips from this camera
+index.cam_controls_tip	Camera controls: PTZ, talk, profile
+index.cam_full_screen_tip	Full screen: only this camera, nothing else on the screen (F)
+index.cam_menu_tip	More for this camera (or right-click the picture)
+index.cam_timeline_tip	Play back this camera's recordings (L)
+index.camera	Camera
+index.cancel	Cancel
+index.change_password	Change password
+index.change_theme	Change theme
+index.choose_cameras_tip	Choose cameras
+index.clear	Clear
+index.clip	Clip
+index.clip_tip	Record a 20 s clip now (C)
+index.clips	Clips
+index.close	Close
+index.close_tip	Close (Esc)
+index.code_label	Code from your authenticator app
+index.cycle	Cycle
+index.cycle_tip	Step through the pages of cameras by itself
+index.dark	Dark
+index.data_saver_tip	Use less data on this device: smaller live and playback video (the cameras' sub streams)
+index.dbl_click	Double-click opens…
+index.dock_open_tip	Open the sidebar: profile, picture, camera controls
+index.events	Events
+index.face	Face
+index.fit	Fit
+index.focus	Focus
+index.focus_2	Focus 2
+index.full_screen	Full screen
+index.full_screen_tip	Full screen: the cameras fill the screen (F)
+index.gate_intro	Sign in first. Your access level controls which settings you can see and change.
+index.grid	Grid
+index.help	Help
+index.hide_false	Hide false alarms
+index.hide_false_tip	Leave out events marked as not a real alert (X marks one)
+index.kept	Kept
+index.kept_tip	Only events you chose to keep forever
+index.keyboard_shortcuts	Keyboard shortcuts
+index.keys_tip	Keyboard shortcuts (?)
+index.layouts	Layouts
+index.layouts_tip	Saved layouts: edit them, or arrange the cameras
+index.light	Light
+index.lights	Lights
+index.lights_tip	Lights and siren
+index.list	List
+index.menu	Menu
+index.more	More
+index.next_camera	Next camera
+index.next_page	Next page
+index.notifications	Notifications on this device…
+index.other	Other
+index.package	Package
+index.password	Password
+index.person	Person
+index.prev_camera	Previous camera
+index.prev_page	Previous page
+index.range_30d	30 days
+index.range_7d	7 days
+index.recovery_label	Recovery code
+index.saved_layouts	Saved layouts
+index.seconds_per_page	Seconds per page
+index.sections	Sections
+index.select_event	Select an event to see it here.
+index.shield_tip	Arm or disarm motion detection on all cameras (S)
+index.sign_in	Sign in
+index.sign_out	Sign out
+index.smart_aria	Describe what to find
+index.smart_ph	Describe...
+index.smart_tip	Smart search: describe what you are looking for, then press Enter
+index.snapshot	Snapshot
+index.snapshot_tip	Save snapshot (P)
+index.split_tip	Two servers side by side (or one above the other)
+index.split_view	Split view
+index.start_over	Start over
+index.start_page	Start page…
+index.start_page_tip	Go to your start page
+index.style_fit_tip	Fit: every camera fills the window, no scrolling
+index.style_focus2_tip	Focus 2: the first two cameras large, the rest below
+index.style_focus_tip	Focus: the first camera large, the rest around it (Arrange picks which)
+index.style_grid_tip	Grid: equal tiles, scroll for more (V cycles the styles)
+index.sub_stream	Sub stream
+index.sub_stream_tip	Showing the smaller sub stream: this browser cannot play the main stream's video (usually H.265).
+index.text_size_tip	Make all text in AmberSight larger on this device
+index.theme	Theme
+index.time_lapse	Time-lapse
+index.timeline	Timeline
+index.timeline_tip	Timeline: play back recordings with alerts (T)
+index.tl_controls_tip	Docked: the timeline controls sit under the cameras. Auto-hide: they float over the cameras and fade out while playing; tap to bring them back
+index.today	Today
+index.trust_server	Trust this server (HTTPS)…
+index.turn_on	Turn on
+index.unusual	Unusual
+index.unusual_tip	Events out of this camera's usual pattern
+index.username	Username
+index.vehicle	Vehicle
+index.view	View
+index.view_style	View style (V)
+index.your_account	Your account…

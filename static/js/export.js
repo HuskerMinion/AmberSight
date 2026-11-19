@@ -1,4 +1,5 @@
 // export.js - the export dialog (download a time range as MP4), used by the live timeline.
+import { t } from './i18n.js';
 import { state, enc, esc, fmtWall, toLocalInput, openDlg, msgDlg, downloadUrl } from './core.js';
 
 // "Burn the text into this clip": a switch for every place clips are
@@ -10,7 +11,7 @@ export function burnText() { try { return localStorage.getItem(BURN_KEY) === '1'
 function setBurnText(on) { try { if (on) localStorage.setItem(BURN_KEY, '1'); else localStorage.removeItem(BURN_KEY); } catch (e) { /* not kept */ } }
 export function burnTextSwitch(short) {
   return '<label class="sw' + (short ? ' sw-burn' : '') + '"><input type="checkbox" role="switch" data-burntext' + (burnText() ? ' checked' : '') + '><span class="sw-track" aria-hidden="true"></span>' +
-    '<span class="sw-text"><b>Burn the text into this clip</b>' + (short ? '' : '<small>The camera\'s text on the picture (or its name and the time) becomes part of the video. Takes longer: the clip is re-encoded. Without it the time comes as subtitles a player can show.</small>') + '</span></label>';
+    '<span class="sw-text"><b>' + t('export.burn_text', 'Burn the text into this clip') + '</b>' + (short ? '' : '<small>' + t('export.burn_text_help', 'The camera\'s text on the picture (or its name and the time) becomes part of the video. Takes longer: the clip is re-encoded. Without it the time comes as subtitles a player can show.') + '</small>') + '</span></label>';
 }
 // Wires the switches in `root` (saved when flipped); onChange() after each flip.
 export function wireBurnText(root, onChange) {
@@ -28,23 +29,23 @@ export function exportDialog(opts) {
   const mid = Date.now() - 60000;
   const pick = opts.camera || (opts.cams && opts.cams.length > 1 ? '*' : undefined);
   const all = opts.cams && opts.cams.length > 1;
-  const sel = (all ? '<option value="*"' + (pick === '*' ? ' selected' : '') + '>All ' + cams.length + ' cameras (one file each)</option>' : '') +
+  const sel = (all ? '<option value="*"' + (pick === '*' ? ' selected' : '') + '>' + esc(t('export.all_cameras', 'All {n} cameras (one file each)', { n: cams.length })) + '</option>' : '') +
     cams.map(n => '<option' + (pick === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
   const from = opts.from != null ? opts.from : mid - 30000;
   const to = opts.to != null ? opts.to : mid + 30000;
-  const d = openDlg('Export recording',
-    '<label>Camera <select id="exCam" style="width:100%">' + sel + '</select></label>' +
-    '<label>Start <input id="exFrom" type="datetime-local" step="1" value="' + toLocalInput(from) + '"></label>' +
-    '<label>End <input id="exTo" type="datetime-local" step="1" value="' + toLocalInput(to) + '"></label>' +
-    '<div class="hint">' + (opts.from != null ? 'The range you marked on the timeline. ' : 'Defaults to 30 s either side of the playhead. ') + 'The saved MP4 starts at the nearest earlier keyframe.</div>' +
+  const d = openDlg(t('export.title','Export recording'),
+    '<label>' + t('export.camera', 'Camera') + ' <select id="exCam" style="width:100%">' + sel + '</select></label>' +
+    '<label>' + t('export.start', 'Start') + ' <input id="exFrom" type="datetime-local" step="1" value="' + toLocalInput(from) + '"></label>' +
+    '<label>' + t('export.end', 'End') + ' <input id="exTo" type="datetime-local" step="1" value="' + toLocalInput(to) + '"></label>' +
+    '<div class="hint">' + (opts.from != null ? t('export.range_marked', 'The range you marked on the timeline.') : t('export.defaults_30s', 'Defaults to 30 s either side of the playhead.')) + ' ' + t('export.starts_keyframe', 'The saved MP4 starts at the nearest earlier keyframe.') + '</div>' +
     burnTextSwitch(false) +
-    '<button class="primary" data-go="1">Download MP4</button>');
+    '<button class="primary" data-go="1">' + t('export.download_mp4', 'Download MP4') + '</button>');
   wireBurnText(d);
   d.querySelector('[data-go]').onclick = async () => {
     const cam = d.querySelector('#exCam').value;
     const a = new Date(d.querySelector('#exFrom').value).getTime();
     const b = new Date(d.querySelector('#exTo').value).getTime();
-    if (!(a > 0) || !(b > a)) { msgDlg('End must be after start'); return; }
+    if (!(a > 0) || !(b > a)) { msgDlg(t('export.end_must_be_after_start','End must be after start')); return; }
     const url = (n) => '/api/playback?camera=' + enc(n) + '&from=' + a + '&to=' + b + '&download=1' + burnTextQuery();
     const one = (n) => downloadUrl(url(n), n + '-' + fmtWall(a).replace(/[: ]/g, '-') + '.mp4');
     // Ask first (nothing is made): a camera whose recordings can only be
@@ -54,7 +55,7 @@ export function exportDialog(opts) {
       try {
         const r = await fetch(url(n) + '&check=1');
         if (r.ok || r.status >= 500) return '';
-        return n + ': ' + ((await r.text()) || 'nothing is recorded in that range');
+        return n + ': ' + ((await r.text()) || t('export.nothing_recorded','nothing is recorded in that range'));
       } catch (e) { return ''; }
     };
     const list = cam === '*' ? cams : [cam];

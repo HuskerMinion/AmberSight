@@ -17,6 +17,10 @@ fn running(until: i64, now: i64) -> bool {
     until > now
 }
 
+/// ui_kv place of the arm state ("1|0" armed; "0|<epoch s>" disarmed, arming then).
+const SHIELD_SCOPE: &str = "server";
+const SHIELD_KEY: &str = "shield";
+
 impl Engine {
     /// Whether motion detection is armed now. Finishes a due arm delay.
     pub fn armed_now(&self) -> bool {
@@ -31,6 +35,7 @@ impl Engine {
                 if self.arm_at.load(Ordering::Relaxed) == at {
                     self.arm_at.store(0, Ordering::Relaxed);
                     self.shield.store(true, Ordering::Relaxed);
+                    self.save_shield();
                     Some(self.arm_by.lock().unwrap().clone())
                 } else {
                     None
@@ -70,9 +75,34 @@ impl Engine {
             }
             *self.arm_by.lock().unwrap() = by.to_string();
             self.arm_at.store(at, Ordering::Relaxed);
+            self.save_shield();
         }
         info!("shield arms in {secs} s (by {by})");
         at
+    }
+
+    /// Keep the arm state (and a running arm delay) across restarts. (It used
+    /// to come back only from a retained MQTT command, which is ignored now.)
+    pub(super) fn save_shield(&self) {
+        // (Who started a running arm delay too: the log names them when it arms.)
+        let v = format!("{}|{}|{}", u8::from(self.shield.load(Ordering::Relaxed)), self.arm_at.load(Ordering::Relaxed), self.arm_by.lock().unwrap());
+        if let Err(e) = self.db.ui_put(SHIELD_SCOPE, SHIELD_KEY, &v) {
+            warn!("could not save the arm state: {e:#}");
+        }
+    }
+
+    /// The arm state as saved (at start). Nothing saved: armed, as before.
+    pub(super) fn load_shield(&self) {
+        let Some(v) = self.db.ui_get(SHIELD_SCOPE, SHIELD_KEY).ok().flatten() else { return };
+        let mut parts = v.splitn(3, '|');
+        let (armed, at, by) = (parts.next().unwrap_or("1"), parts.next().unwrap_or("0"), parts.next().unwrap_or(""));
+        if armed == "0" {
+            self.shield.store(false, Ordering::Relaxed);
+            *self.arm_by.lock().unwrap() = by.to_string();
+            // A running arm delay goes on (or arms at once when it ended meanwhile: armed_now).
+            self.arm_at.store(at.parse().unwrap_or(0), Ordering::Relaxed);
+            info!("starting disarmed, as when it stopped");
+        }
     }
 
     /// Read the pauses kept in the database (at start).
@@ -145,7 +175,36 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::running;
+    use super::*;
+
+    #[test]
+    fn the_arm_state_survives_a_restart() {
+        let e = Engine::for_test(toml::from_str("").unwrap());
+        e.shield.store(true, Ordering::Relaxed);
+        e.set_shield(false, "tester", "");
+        // "Restart": a new engine on the same database starts armed, then reads it.
+        e.shield.store(true, Ordering::Relaxed);
+        e.load_shield();
+        assert!(!e.armed_now(), "disarmed, as it was");
+        // A running arm delay goes on.
+        let at = e.arm_after(3600, "tester");
+        e.shield.store(true, Ordering::Relaxed);
+        e.arm_at.store(0, Ordering::Relaxed);
+        *e.arm_by.lock().unwrap() = String::new();
+        e.load_shield();
+        assert_eq!(e.arming_until(), Some(at));
+        assert_eq!(*e.arm_by.lock().unwrap(), "tester", "who started it, for the log when it arms");
+        // One that ended while stopped: armed.
+        e.arm_at.store(Utc::now().timestamp() - 5, Ordering::Relaxed);
+        e.save_shield();
+        e.shield.store(true, Ordering::Relaxed);
+        e.load_shield();
+        assert!(e.armed_now());
+        // Armed and saved: starts armed.
+        e.set_shield(true, "tester", "");
+        e.load_shield();
+        assert!(e.armed_now());
+    }
 
     #[test]
     fn pause_runs_until_its_end() {

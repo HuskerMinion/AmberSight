@@ -7,7 +7,8 @@
 // remembered in localStorage: 'tiles' and 'detail' (rows plus per-drive meters,
 // per-camera fps, AmberSight's own CPU/RSS, uptime).
 
-import { api, fmtSize } from './core.js';
+import { t } from './i18n.js';
+import { api, fmtSize, esc } from './core.js';
 import { paneId, paneSite } from './split.js';
 
 // A split-view pane for another server shows that server's status.
@@ -29,7 +30,6 @@ const ICONS = {
   pulse: '<path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>',
 };
 const icon = (n, cls = '') => '<svg class="ic ' + cls + '" viewBox="0 0 24 24" aria-hidden="true">' + ICONS[n] + '</svg>';
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 let root, mode, timer = null, started = false, inflight = false, docked = false;
 let since = 0, last = null;
@@ -51,7 +51,7 @@ function setMode(m) {
   try { localStorage.setItem(KEY, m); } catch (e) { /* ignore */ }
   root.dataset.mode = m;
   root.querySelector('[data-act=detail]').innerHTML = icon(m === 'detail' ? 'down' : 'up');
-  root.querySelector('[data-act=detail]').title = m === 'detail' ? 'Hide details' : 'Show details';
+  root.querySelector('[data-act=detail]').title = m === 'detail' ? t('sysmon.hide_details','Hide details') : t('sysmon.show_details','Show details');
   detailKey = '';
   if (last) render();
 }
@@ -80,32 +80,32 @@ function build() {
   root = document.createElement('aside');
   root.id = 'sysmon';
   root.className = 'sm';
-  root.setAttribute('aria-label', 'Server status');
+  root.setAttribute('aria-label', t('sysmon.server_status','Server status'));
   root.innerHTML =
-    '<div class="sm-panel" role="region" aria-label="Server status">' +
-      '<div class="sm-head"><span class="sm-title">Server</span><span class="sm-up" data-p="up"></span>' +
-        '<button class="sm-btn" data-act="detail" aria-label="Toggle details"></button></div>' +
+    '<div class="sm-panel" role="region" aria-label="' + esc(t('sysmon.server_status', 'Server status')) + '">' +
+      '<div class="sm-head"><span class="sm-title">' + t('sysmon.server', 'Server') + '</span><span class="sm-up" data-p="up"></span>' +
+        '<button class="sm-btn" data-act="detail" aria-label="' + esc(t('sysmon.toggle_details', 'Toggle details')) + '"></button></div>' +
       '<div class="sm-tiles">' +
-        tileHtml('cpu', 'CPU', false) + tileHtml('mem', 'Memory', false) +
-        tileHtml('fps', 'FPS', true) + tileHtml('ai', 'AI', true) + tileHtml('gpu', 'GPU', true) + tileHtml('disk', 'Disk', false) +
+        tileHtml('cpu', 'CPU', false) + tileHtml('mem', t('sysmon.memory', 'Memory'), false) +
+        tileHtml('fps', 'FPS', true) + tileHtml('ai', 'AI', true) + tileHtml('gpu', 'GPU', true) + tileHtml('disk', t('sysmon.disk', 'Disk'), false) +
       '</div>' +
       '<div class="sm-detail"></div>' +
     '</div>' +
     '<div class="sm-tip" hidden></div>';
   // (Not in the page until hostIn() puts it in the dock.)
 
-  for (const t of root.querySelectorAll('.sm-tile')) {
-    const k = t.dataset.k;
+  for (const tl of root.querySelectorAll('.sm-tile')) {
+    const k = tl.dataset.k;
     els[k] = {
-      tile: t, chip: t.querySelector('.sm-chip'), val: t.querySelector('.sm-val b'), unit: t.querySelector('.sm-val small'),
-      cap: t.querySelector('.sm-cap'), spark: t.querySelector('.sm-spark'), meter: t.querySelector('.sm-meter'),
-      area: t.querySelector('.a'), line: t.querySelector('.l'), rule: t.querySelector('.sm-rule'), dot: t.querySelector('.sm-dot'),
+      tile: tl, chip: tl.querySelector('.sm-chip'), val: tl.querySelector('.sm-val b'), unit: tl.querySelector('.sm-val small'),
+      cap: tl.querySelector('.sm-cap'), spark: tl.querySelector('.sm-spark'), meter: tl.querySelector('.sm-meter'),
+      area: tl.querySelector('.a'), line: tl.querySelector('.l'), rule: tl.querySelector('.sm-rule'), dot: tl.querySelector('.sm-dot'),
     };
     if (els[k].spark) bindSpark(k);
   }
   // GPU: memory bar under the trend; Disk: one bar per tier. Both hidden until there is data.
   els.gpu.tile.hidden = true; els.ai.tile.hidden = true;
-  els.gpu.tile.insertAdjacentHTML('beforeend', '<div class="sm-meter hl-vram" role="meter" aria-label="Video memory" aria-valuemin="0" aria-valuemax="100"><i></i></div>');
+  els.gpu.tile.insertAdjacentHTML('beforeend', '<div class="sm-meter hl-vram" role="meter" aria-label="' + esc(t('sysmon.video_memory', 'Video memory')) + '" aria-valuemin="0" aria-valuemax="100"><i></i></div>');
   els.gpu.vram = els.gpu.tile.querySelector('.hl-vram');
   els.disk.tile.insertAdjacentHTML('beforeend', '<div class="hl-tiers"></div>');
   els.disk.tiers = els.disk.tile.querySelector('.hl-tiers');
@@ -124,7 +124,7 @@ function build() {
 const SPARK = {
   cpu: { src: 'cpu', top: (v) => Math.max(25, Math.ceil(Math.max(...v) / 25) * 25), fmt: (v) => v.toFixed(1) + '%' },
   mem: { src: 'mem', top: () => 100, fmt: (v) => v.toFixed(1) + '%' },
-  ai: { src: 'ai_p50', top: (v) => Math.max(500, Math.ceil(Math.max(...v) * 1.2 / 500) * 500), fmt: (v) => (v ? fmtMs(v) : 'no checks') },
+  ai: { src: 'ai_p50', top: (v) => Math.max(500, Math.ceil(Math.max(...v) * 1.2 / 500) * 500), fmt: (v) => (v ? fmtMs(v) : t('sysmon.no_checks','no checks')) },
   gpu: { src: 'gpu', top: () => 100, fmt: (v) => v.toFixed(0) + '%' },
   fps: { src: 'fps', top: (v) => Math.max(5, Math.ceil(Math.max(...v) * 1.2)), fmt: (v) => v.toFixed(1) + ' fps' },
 };
@@ -166,7 +166,7 @@ function bindSpark(k) {
     const ago = (n - 1 - i) * (last ? last.interval_s : 2);
     const tip = els.tip;
     tip.hidden = false;
-    tip.textContent = SPARK[k].fmt(vals[i]) + '  ·  ' + (ago === 0 ? 'now' : fmtAgo(ago));
+    tip.textContent = SPARK[k].fmt(vals[i]) + '  \u00b7  ' + (ago === 0 ? t('sysmon.now', 'now') : fmtAgo(ago));
     const rr = root.getBoundingClientRect();
     const tx = Math.min(rr.width - tip.offsetWidth - 4, Math.max(4, r.left - rr.left + px * r.width - tip.offsetWidth / 2));
     tip.style.left = tx + 'px';
@@ -180,9 +180,11 @@ function bindSpark(k) {
   e.spark.addEventListener('pointercancel', hide);
 }
 
-function fmtMs(v) { return v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms'; }
+// [number, unit] of a duration in ms (the tile shows them apart).
+function msParts(v) { return v >= 1000 ? [(v / 1000).toFixed(1), t('sysmon.unit_s', 's')] : [String(Math.round(v)), t('sysmon.unit_ms', 'ms')]; }
+function fmtMs(v) { return msParts(v).join(' '); }
 function fmtAgo(s) {
-  return s >= 60 ? Math.floor(s / 60) + ' min ' + (s % 60 ? (s % 60) + ' s ' : '') + 'ago' : s + ' s ago';
+  return s >= 60 ? (s % 60 ? t('sysmon.ago_min_s', '{m} min {s} s ago', { m: Math.floor(s / 60), s: s % 60 }) : t('sysmon.ago_min', '{m} min ago', { m: Math.floor(s / 60) })) : t('sysmon.ago_s', '{s} s ago', { s });
 }
 
 // ---------- status levels ----------
@@ -190,14 +192,14 @@ function fmtAgo(s) {
 function cpuStatus() {
   const v = hist.cpu.slice(-5);
   if (v.length < 5) return null;
-  if (v.every((x) => x > 85)) return { lvl: 'crit', label: 'High load' };
-  if (v.every((x) => x > 70)) return { lvl: 'warn', label: 'Busy' };
+  if (v.every((x) => x > 85)) return { lvl: 'crit', label: t('sysmon.high_load', 'High load') };
+  if (v.every((x) => x > 70)) return { lvl: 'warn', label: t('sysmon.busy', 'Busy') };
   return null;
 }
 function memStatus(j) {
   const p = j.mem.total ? 100 * j.mem.used / j.mem.total : 0;
-  if (p > 92) return { lvl: 'crit', label: 'Low memory' };
-  if (p > 85) return { lvl: 'warn', label: 'Memory high' };
+  if (p > 92) return { lvl: 'crit', label: t('sysmon.low_memory', 'Low memory') };
+  if (p > 85) return { lvl: 'warn', label: t('sysmon.memory_high', 'Memory high') };
   return null;
 }
 // The server works the disk level out (full while the oldest make room is
@@ -208,31 +210,33 @@ function diskStatus(d) {
   const free = d.drive_total ? d.drive_free / d.drive_total : 1;
   // A folder that hands its oldest recordings to the archive runs full.
   const capped = d.cap > 0 && !d.rolls;
-  if (capped && d.pct > 90) return { lvl: 'crit', label: 'Near cap' };
-  if (d.drive_total && (free < 0.05)) return { lvl: 'crit', label: 'Drive full' };
-  if (capped && d.pct > 75) return { lvl: 'warn', label: 'Filling up' };
-  if (d.drive_total && free < 0.1) return { lvl: 'warn', label: 'Low space' };
-  if (d.cap === 0 && d.pct > 90) return { lvl: 'crit', label: 'Drive full' };
+  if (capped && d.pct > 90) return { lvl: 'crit', label: t('sysmon.near_cap', 'Near cap') };
+  if (d.drive_total && (free < 0.05)) return { lvl: 'crit', label: t('sysmon.drive_full', 'Drive full') };
+  if (capped && d.pct > 75) return { lvl: 'warn', label: t('sysmon.filling_up', 'Filling up') };
+  if (d.drive_total && free < 0.1) return { lvl: 'warn', label: t('sysmon.low_space', 'Low space') };
+  if (d.cap === 0 && d.pct > 90) return { lvl: 'crit', label: t('sysmon.drive_full', 'Drive full') };
   return null;
 }
 function camStatus(j) {
   const off = j.cameras.filter((c) => c.enabled && !c.online && !c.sleeping).length;
   if (!off) return null;
   const all = off === j.fps.cameras - j.fps.sleeping;
-  return { lvl: all ? 'crit' : 'warn', label: off + ' offline' };
+  return { lvl: all ? 'crit' : 'warn', label: t('sysmon.offline', '{off} offline', { off }) };
 }
 
 // AI: stalled is a fault, a slow 95th percentile a warning.
 function aiStatus(j) {
   const a = j.ai;
   if (!a) return null;
-  if (a.state === 'stalled') return { lvl: 'crit', label: 'AI stalled' };
-  if (a.p95_ms != null && a.p95_ms > 2000) return { lvl: 'warn', label: 'AI slow' };
+  if (a.state === 'stalled') return { lvl: 'crit', label: t('sysmon.ai_stalled', 'AI stalled') };
+  if (a.p95_ms != null && a.p95_ms > 2000) return { lvl: 'warn', label: t('sysmon.ai_slow', 'AI slow') };
   return null;
 }
 
 // Tiers ("new" recordings, "stored" archive): the fullest folder's fill and
 // the least free space among them.
+// The tier's word as shown ("new"/"stored" stay the API's values).
+const tierName = (tier) => (tier === 'stored' ? t('sysmon.tier_stored', 'stored') : t('sysmon.tier_new', 'new'));
 function tiersOf(j) {
   const out = [];
   for (const tier of ['new', 'stored']) {
@@ -260,7 +264,7 @@ function worstDisk(j) {
     const used = st.reduce((a, d) => a + d.used, 0), cap = st.reduce((a, d) => a + d.cap, 0);
     // An automatic cap follows the free space and can dip under what is stored.
     const pct = 100 * used / cap;
-    return { name: 'All recordings', used, cap, pct: st.some(d => d.auto) ? Math.min(100, pct) : pct };
+    return { name: t('sysmon.all_recordings', 'All recordings'), used, cap, pct: st.some(d => d.auto) ? Math.min(100, pct) : pct };
   }
   let w = null;
   for (const d of st) if (!w || d.pct > w.pct) w = d;
@@ -287,7 +291,7 @@ const text = (el, s) => { if (el.textContent !== s) el.textContent = s; };
 // ---------- render ----------
 function fmtUp(s) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
-  return d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m + 'm';
+  return d ? t('sysmon.up_dh', '{d}d {h}h', { d, h }) : h ? t('sysmon.up_hm', '{h}h {m}m', { h, m }) : t('sysmon.up_m', '{m}m', { m });
 }
 const gb = (b) => fmtSize(b).replace(/\.0 /, ' ');
 const pctNum = (v) => (v >= 10 ? Math.round(v) : v.toFixed(1).replace(/\.0$/, ''));
@@ -305,19 +309,19 @@ function render() {
   // A neutral note (a folder full as intended) does not count as a problem.
   const worst = worstOf([sCpu, sMem, sCam, sDisk, sAi].filter((x) => x && x.lvl !== 'info'));
   root.dataset.lvl = worst ? worst.lvl : '';
-  text(els.p_up, 'up ' + fmtUp(j.uptime_s));
+  text(els.p_up, t('sysmon.up', 'up {time}', { time: fmtUp(j.uptime_s) }));
 
   // tiles
   text(els.cpu.val, pctNum(cpu)); text(els.cpu.unit, '%');
-  text(els.cpu.cap, 'AmberSight ' + pctNum(j.cpu.process) + '%');
+  text(els.cpu.cap, t('sysmon.cpu_cap', 'AmberSight {pct}%', { pct: pctNum(j.cpu.process) }));
   setChip(els.cpu, sCpu);
   text(els.mem.val, pctNum(memPct)); text(els.mem.unit, '%');
-  text(els.mem.cap, gb(j.mem.used) + ' of ' + gb(j.mem.total));
+  text(els.mem.cap, t('sysmon.mem_of', '{used} of {total}', { used: gb(j.mem.used), total: gb(j.mem.total) }));
   setChip(els.mem, sMem);
-  text(els.fps.val, fpsTxt); text(els.fps.unit, 'fps');
+  text(els.fps.val, fpsTxt); text(els.fps.unit, t('sysmon.fps', 'fps'));
   const live = j.fps.cameras - j.fps.sleeping;
-  text(els.fps.cap, j.fps.streaming + ' of ' + live + ' camera' + (live === 1 ? '' : 's'));
-  els.fps.cap.title = j.fps.streaming + ' of ' + live + ' cameras streaming';
+  text(els.fps.cap, t('sysmon.fps_cap', '{streaming} of {live, plural, one {# camera} other {# cameras}}', { streaming: j.fps.streaming, live: live }));
+  els.fps.cap.title = t('sysmon.fps_cap_title', '{streaming} of {live} cameras streaming', { streaming: j.fps.streaming, live: live });
   setChip(els.fps, sCam);
   drawSpark('fps');
   renderAi(j, sAi);
@@ -326,15 +330,15 @@ function render() {
   setMeter(els.mem.meter, memPct);
   if (w) {
     text(els.disk.val, pctNum(w.pct)); text(els.disk.unit, '%');
-    text(els.disk.cap, w.name + (w.cap ? ' ' + gb(w.used) + ' / ' + gb(w.cap) : ' (drive)'));
+    text(els.disk.cap, w.name + (w.cap ? ' ' + gb(w.used) + ' / ' + gb(w.cap) : ' ' + t('sysmon.drive_paren', '(drive)')));
     setMeter(els.disk.meter, w.pct);
-  } else { text(els.disk.val, '--'); text(els.disk.unit, ''); text(els.disk.cap, 'no storage'); }
+  } else { text(els.disk.val, '--'); text(els.disk.unit, ''); text(els.disk.cap, t('sysmon.no_storage', 'no storage')); }
   setChip(els.disk, sDisk);
   const tiers = tiersOf(j);
-  const th = tiers.map((t) => '<div class="hl-tier"' + (t.st && t.st.lvl !== 'info' ? ' data-lvl="' + t.st.lvl + '"' : '') + '><span>' + t.tier + '</span>' +
-    '<div class="sm-meter" role="meter" aria-label="' + t.tier + ' recordings" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(t.pct) + '"><i style="width:' + Math.min(100, t.pct) + '%"></i></div>' +
-    '<em>' + (t.free != null ? gb(t.free) + ' free' : '') + '</em></div>' +
-    (t.bps > 0 ? '<div class="hl-w">writing ' + rate(t.bps) + '</div>' : '')).join('');
+  const th = tiers.map((tr) => '<div class="hl-tier"' + (tr.st && tr.st.lvl !== 'info' ? ' data-lvl="' + tr.st.lvl + '"' : '') + '><span>' + esc(tierName(tr.tier)) + '</span>' +
+    '<div class="sm-meter" role="meter" aria-label="' + esc(t('sysmon.tier_recordings', '{tier} recordings', { tier: tierName(tr.tier) })) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(tr.pct) + '"><i style="width:' + Math.min(100, tr.pct) + '%"></i></div>' +
+    '<em>' + (tr.free != null ? t('sysmon.free', '{size} free', { size: gb(tr.free) }) : '') + '</em></div>' +
+    (tr.bps > 0 ? '<div class="hl-w">' + t('sysmon.writing', 'writing {rate}', { rate: rate(tr.bps) }) + '</div>' : '')).join('');
   if (els.disk.tiers.dataset.h !== th) { els.disk.tiers.innerHTML = th; els.disk.tiers.dataset.h = th; }
   els.disk.tiers.hidden = tiers.length < 1;
 
@@ -345,11 +349,11 @@ function renderAi(j, st) {
   const a = j.ai, e = els.ai;
   e.tile.hidden = !a || a.state === 'off';
   if (e.tile.hidden) return;
-  if (a.p50_ms != null) { const t = fmtMs(a.p50_ms).split(' '); text(e.val, t[0]); text(e.unit, t[1]); }
-  else { text(e.val, a.state === 'idle' ? 'idle' : '--'); text(e.unit, ''); }
-  text(e.cap, a.checks_1m + ' check' + (a.checks_1m === 1 ? '' : 's') + '/min · ' + (a.device || ''));
-  e.cap.title = 'AI object detection on ' + (a.device || '?') + '. Median time per check' + (a.p95_ms != null ? ', 95th percentile ' + fmtMs(a.p95_ms) : '') +
-    (a.errors_1m ? '; ' + a.errors_1m + ' failed in the last minute' : '') + (a.last_ok_s != null ? '; last success ' + a.last_ok_s + ' s ago' : '');
+  if (a.p50_ms != null) { const pr = msParts(a.p50_ms); text(e.val, pr[0]); text(e.unit, pr[1]); }
+  else { text(e.val, a.state === 'idle' ? t('sysmon.idle', 'idle') : '--'); text(e.unit, ''); }
+  text(e.cap, t('sysmon.checks_per_min', '{n, plural, one {# check} other {# checks}}/min · {device}', { n: a.checks_1m, device: a.device || '' }));
+  e.cap.title = t('sysmon.ai_title', 'AI object detection on {device}. Median time per check{p95}', { device: a.device || '?', p95: a.p95_ms != null ? t('sysmon.ai_95th', ', 95th percentile {time}', { time: fmtMs(a.p95_ms) }) : '' }) +
+    (a.errors_1m ? t('sysmon.ai_failed', '; {n} failed in the last minute', { n: a.errors_1m }) : '') + (a.last_ok_s != null ? t('sysmon.ai_last_ok', '; last success {n} s ago', { n: a.last_ok_s }) : '');
   setChip(e, st);
   drawSpark('ai');
 }
@@ -361,11 +365,11 @@ function renderGpu(j) {
   const a = (g.adapters || []).slice().sort((x, y) => (y.vram_total || 0) - (x.vram_total || 0))[0];
   text(e.val, pctNum(g.util)); text(e.unit, '%');
   const vu = a && a.vram_used, vt = a && a.vram_total;
-  text(e.cap, a ? a.name + (vu != null && vt ? ' · ' + gb(vu) + ' / ' + gb(vt) + ' (all programs)' : '') : '');
+  text(e.cap, a ? a.name + (vu != null && vt ? ' · ' + gb(vu) + ' / ' + gb(vt) + ' ' + t('sysmon.all_programs', '(all programs)') : '') : '');
   // Busy % and memory are for the whole card: every program on it, not only AmberSight.
-  e.cap.title = (g.adapters || []).map((x) => x.name + ' ' + pctNum(x.util) + '%' + (x.vram_used != null ? ', ' + gb(x.vram_used) + ' memory used' : '')).join('\n') +
-    '\nWhole card: all programs on it, not only AmberSight.';
-  e.vram.title = 'Video memory used by all programs on this card';
+  e.cap.title = (g.adapters || []).map((x) => x.name + ' ' + pctNum(x.util) + '%' + (x.vram_used != null ? ', ' + t('sysmon.mem_used', '{size} memory used', { size: gb(x.vram_used) }) : '')).join('\n') +
+    '\n' + t('sysmon.whole_card', 'Whole card: all programs on it, not only AmberSight.');
+  e.vram.title = t('sysmon.vram_title', 'Video memory used by all programs on this card');
   e.vram.hidden = !(vu != null && vt);
   if (!e.vram.hidden) setMeter(e.vram, 100 * vu / vt);
   drawSpark('gpu');
@@ -373,40 +377,40 @@ function renderGpu(j) {
 
 function meterRow(d) {
   const st = diskStatus(d);
-  const free = d.drive_total != null && d.drive_free != null ? gb(d.drive_free) + ' free of ' + gb(d.drive_total) : '';
-  const usedTxt = d.cap > 0 || d.auto ? gb(d.used) + ' / ' + gb(d.cap) + (d.auto ? ' (auto)' : '') : gb(d.used) + ' used, no cap';
+  const free = d.drive_total != null && d.drive_free != null ? t('sysmon.free_of', '{free} free of {total}', { free: gb(d.drive_free), total: gb(d.drive_total) }) : '';
+  const usedTxt = d.cap > 0 || d.auto ? gb(d.used) + ' / ' + gb(d.cap) + (d.auto ? ' (auto)' : '') : t('sysmon.used_no_cap', '{size} used, no cap', { size: gb(d.used) });
   return '<div class="sm-row" ' + (st && st.lvl !== 'info' ? 'data-lvl="' + st.lvl + '"' : '') + '>' +
     '<div class="sm-rh"><span class="sm-rn">' + esc(d.name) + '</span>' +
     (st ? '<span class="sm-chip" data-lvl="' + st.lvl + '">' + icon(st.lvl) + '<span>' + esc(st.label) + '</span></span>' : '') +
     '<span class="sm-rv">' + usedTxt + '</span></div>' +
     '<div class="sm-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(d.pct) + '"><i style="width:' + Math.min(100, d.pct) + '%"></i></div>' +
-    '<div class="sm-rs" title="' + esc(d.path) + '">' + (d.cap > 0 ? pctNum(d.pct) + (d.auto ? '% of what the drive can spare · ' : '% of cap · ') : '') + (d.rolls && d.pct >= 95 ? 'full: oldest move to the archive · ' : '') + free + '</div></div>';
+    '<div class="sm-rs" title="' + esc(d.path) + '">' + (d.cap > 0 ? (d.auto ? t('sysmon.pct_spare', '{pct}% of what the drive can spare · ', { pct: pctNum(d.pct) }) : t('sysmon.pct_cap', '{pct}% of cap · ', { pct: pctNum(d.pct) })) : '') + (d.rolls && d.pct >= 95 ? t('sysmon.full_archive', 'full: oldest move to the archive · ') : '') + free + '</div></div>';
 }
 
 function camRow(c) {
   let st, cls = '';
-  if (!c.enabled) { st = '<span class="sm-cs mut">Disabled</span>'; cls = 'mut'; }
-  else if (c.sleeping) { st = '<span class="sm-cs mut">' + icon('moon') + 'Asleep</span>'; cls = 'mut'; }
-  else if (!c.online) { st = '<span class="sm-cs" data-lvl="crit">' + icon('crit') + 'Offline</span>'; cls = 'off'; }
-  else st = '<span class="sm-cv">' + c.fps.toFixed(1) + ' <small>fps</small></span>';
+  if (!c.enabled) { st = '<span class="sm-cs mut">' + t('sysmon.disabled', 'Disabled') + '</span>'; cls = 'mut'; }
+  else if (c.sleeping) { st = '<span class="sm-cs mut">' + icon('moon') + t('sysmon.asleep', 'Asleep') + '</span>'; cls = 'mut'; }
+  else if (!c.online) { st = '<span class="sm-cs" data-lvl="crit">' + icon('crit') + t('sysmon.cam_offline', 'Offline') + '</span>'; cls = 'off'; }
+  else st = '<span class="sm-cv">' + c.fps.toFixed(1) + ' <small>' + t('sysmon.fps', 'fps') + '</small></span>';
   return '<li class="' + cls + '"><span class="sm-cn">' + esc(c.name) + '</span>' + st + '</li>';
 }
 
 function renderDetail(j) {
   const memPct = j.mem.total ? 100 * j.mem.used / j.mem.total : 0;
   const html =
-    '<div class="sm-sec"><h4>Processor and memory</h4><dl>' +
-    '<dt>Machine CPU</dt><dd>' + pctNum(j.cpu.machine) + '% <small>' + j.cpu.cores + ' cores</small></dd>' +
-    '<dt>AmberSight CPU</dt><dd>' + pctNum(j.cpu.process) + '% <small>of the machine</small></dd>' +
-    '<dt>Memory used</dt><dd>' + gb(j.mem.used) + ' <small>of ' + gb(j.mem.total) + ' (' + pctNum(memPct) + '%)</small></dd>' +
-    '<dt>AmberSight memory</dt><dd>' + gb(j.mem.process) + '</dd>' +
-    '<dt>Uptime</dt><dd>' + fmtUp(j.uptime_s) + '</dd>' +
-    (j.net ? '<dt>Network</dt><dd>&darr; ' + rate(j.net.rx_bps) + ' <small>&uarr; ' + rate(j.net.tx_bps) + '</small></dd>' : '') +
+    '<div class="sm-sec"><h4>' + t('sysmon.proc_mem_header', 'Processor and memory') + '</h4><dl>' +
+    '<dt>' + t('sysmon.machine_cpu', 'Machine CPU') + '</dt><dd>' + pctNum(j.cpu.machine) + '% <small>' + t('sysmon.n_cores', '{n} cores', { n: j.cpu.cores }) + '</small></dd>' +
+    '<dt>' + t('sysmon.amber_cpu', 'AmberSight CPU') + '</dt><dd>' + pctNum(j.cpu.process) + '% <small>' + t('sysmon.of_machine', 'of the machine') + '</small></dd>' +
+    '<dt>' + t('sysmon.memory_used_label', 'Memory used') + '</dt><dd>' + gb(j.mem.used) + ' <small>' + t('sysmon.mem_detail', 'of {total} ({pct}%)', { total: gb(j.mem.total), pct: pctNum(memPct) }) + '</small></dd>' +
+    '<dt>' + t('sysmon.amber_memory', 'AmberSight memory') + '</dt><dd>' + gb(j.mem.process) + '</dd>' +
+    '<dt>' + t('sysmon.uptime', 'Uptime') + '</dt><dd>' + fmtUp(j.uptime_s) + '</dd>' +
+    (j.net ? '<dt>' + t('sysmon.network', 'Network') + '</dt><dd>&darr; ' + rate(j.net.rx_bps) + ' <small>&uarr; ' + rate(j.net.tx_bps) + '</small></dd>' : '') +
     (j.ai && j.ai.state !== 'off' ? '<dt>AI</dt><dd>' + j.ai.state + ' <small>' + (j.ai.p95_ms != null ? 'p95 ' + fmtMs(j.ai.p95_ms) : '') + '</small></dd>' : '') +
     '</dl></div>' +
-    '<div class="sm-sec"><h4>Storage</h4>' + (j.storage.map(meterRow).join('') || '<p class="sm-none">No storage information yet</p>') + '</div>' +
-    '<div class="sm-sec"><h4>Cameras <small>' + j.fps.streaming + ' of ' + (j.fps.cameras - j.fps.sleeping) + ' streaming' + (j.fps.sleeping ? ', ' + j.fps.sleeping + ' asleep' : '') + '</small></h4>' +
-    '<ul class="sm-cams">' + (j.cameras.map(camRow).join('') || '<li class="mut">No cameras</li>') + '</ul></div>';
+    '<div class="sm-sec"><h4>' + t('sysmon.storage_header', 'Storage') + '</h4>' + (j.storage.map(meterRow).join('') || '<p class="sm-none">' + t('sysmon.no_storage_info', 'No storage information yet') + '</p>') + '</div>' +
+    '<div class="sm-sec"><h4>' + t('sysmon.cameras_header', 'Cameras') + ' <small>' + t('sysmon.streaming_of', '{streaming} of {live} streaming', { streaming: j.fps.streaming, live: j.fps.cameras - j.fps.sleeping }) + (j.fps.sleeping ? t('sysmon.n_asleep', ', {n} asleep', { n: j.fps.sleeping }) : '') + '</small></h4>' +
+    '<ul class="sm-cams">' + (j.cameras.map(camRow).join('') || '<li class="mut">' + t('sysmon.no_cameras', 'No cameras') + '</li>') + '</ul></div>';
   if (html !== detailKey) { els.detail.innerHTML = html; detailKey = html; }
 }
 

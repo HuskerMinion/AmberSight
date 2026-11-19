@@ -4,32 +4,33 @@
 // inputs (data-k url / sub_url) always hold what is saved, so the rest of the form reads them
 // as before. Split and join live in camaddr.js.
 
+import { t } from './i18n.js';
 import { api, esc } from './core.js';
 import { PROTOCOLS, DEFAULT_PORT, BRANDS, splitUrl, hasScheme, fieldsFromUrls, urlsFromFields, addrProblems, brandOf, brandPort, batteryUrl, normUid, addrUid } from './camaddr.js';
 
 const GUIDE = 'https://github.com/HuskerMinion/AmberSight/blob/master/docs/cameras.md';
 const WHY = {
-  scheme: 'This kind of address is edited as a full address.',
-  bad: 'This address has no protocol (like rtsp://), so it is shown as it is.',
-  'query-login': 'This address carries its sign-in in it, so it is shown as a full address.',
-  'sub-place': 'The sub stream is on another address, port or protocol, so both are shown as full addresses.',
-  'sub-login': 'The sub stream signs in with its own user, so both are shown as full addresses.',
+  scheme: t('camaddr_form.scheme','This kind of address is edited as a full address.'),
+  bad: t('camaddr_form.bad','This address has no protocol (like rtsp://), so it is shown as it is.'),
+  'query-login': t('camaddr_form.query_login','This address carries its sign-in in it, so it is shown as a full address.'),
+  'sub-place': t('camaddr_form.sub_place','The sub stream is on another address, port or protocol, so both are shown as full addresses.'),
+  'sub-login': t('camaddr_form.sub_login','The sub stream signs in with its own user, so both are shown as full addresses.'),
 };
 const errText = (e) => { const b = (e && e.body) || ''; try { const j = JSON.parse(b); if (j && j.error) return j.error; } catch (x) { /* text */ } return b || (e && e.message) || String(e); };
 
 const cell = (cls, label, input) => '<div class="ca-cell ' + cls + '"><label class="cs-f ca-f"><span>' + label + '</span>' + input + '</label></div>';
 const inp = (k, val, extra) => '<input data-k="' + k + '" value="' + esc(val == null ? '' : val) + '" ' + (extra || '') + '>';
 
-const BATTERY_HINT = 'This camera has no video address: AmberSight talks to it directly and needs its UID (Reolink app, Device info).';
+const BATTERY_HINT = t('camaddr_form.battery_hint','This camera has no video address: AmberSight talks to it directly and needs its UID (Reolink app, Device info).');
 // (The brand note under the picker already shows BATTERY_HINT; the message line adds only this.)
-const BATTERY_PICKED = 'Battery camera is on, with 30 s idle, and recording is motion only. Set up the camera and your network as the camera guide says.';
+const BATTERY_PICKED = t('camaddr_form.battery_picked','Battery camera is on, with 30 s idle, and recording is motion only. Set up the camera and your network as the camera guide says.');
 
 function brandOptions(cur) {
   const opt = (b) => '<option value="' + b.id + '"' + (b.id === cur ? ' selected' : '') + '>' + esc(b.name) + '</option>';
-  return '<option value="">Pick a brand...</option>' +
-    '<optgroup label="Tested">' + BRANDS.filter(b => b.tested && !b.battery).map(opt).join('') + '</optgroup>' +
-    '<optgroup label="Battery camera, no hub">' + BRANDS.filter(b => b.battery).map(opt).join('') + '</optgroup>' +
-    '<optgroup label="Not tested">' + BRANDS.filter(b => !b.tested).map(opt).join('') + '</optgroup>';
+  return '<option value="">' + t('camaddr_form.pick_brand', 'Pick a brand...') + '</option>' +
+    '<optgroup label="' + t('camaddr_form.tested', 'Tested') + '">' + BRANDS.filter(b => b.tested && !b.battery).map(opt).join('') + '</optgroup>' +
+    '<optgroup label="' + t('camaddr_form.battery_nohub', 'Battery camera, no hub') + '">' + BRANDS.filter(b => b.battery).map(opt).join('') + '</optgroup>' +
+    '<optgroup label="' + t('camaddr_form.not_tested', 'Not tested') + '">' + BRANDS.filter(b => !b.tested).map(opt).join('') + '</optgroup>';
 }
 
 // The address fields for camera c. `net`: the camera is a network camera now (its url belongs here).
@@ -42,34 +43,34 @@ export function addrHtml(c, isNew, net) {
   const ns = 'data-nosig spellcheck="false" autocomplete="off" autocapitalize="off"';
   return '<div class="ca" data-addr data-mode="' + f.mode + '">' +
     '<div class="ca-r1" data-ca-split' + (full ? ' hidden' : '') + '>' +
-      cell('ca-host', 'Camera address', inp('addr_host', f.host, ns + ' inputmode="url" placeholder="192.168.1.50"')) +
-      cell('ca-port', 'Port', inp('addr_port', f.port, 'data-nosig inputmode="numeric" maxlength="5" autocomplete="off" placeholder="' + (bat ? 'usual' : DEFAULT_PORT[f.scheme] || 554) + '"')) +
-      cell('ca-proto', 'Protocol', '<select data-k="addr_scheme" data-nosig>' + PROTOCOLS.map(([v, t]) => '<option value="' + v + '"' + (v === f.scheme ? ' selected' : '') + '>' + t + '</option>').join('') + '</select>').replace('<div class="ca-cell', '<div data-ca-nobat' + (bat ? ' hidden' : '') + ' class="ca-cell') +
+      cell('ca-host', t('camaddr_form.camera_address','Camera address'), inp('addr_host', f.host, ns + ' inputmode="url" placeholder="192.168.1.50"')) +
+      cell('ca-port', t('camaddr_form.port','Port'), inp('addr_port', f.port, 'data-nosig inputmode="numeric" maxlength="5" autocomplete="off" placeholder="' + (bat ? t('camaddr_form.usual','usual') : DEFAULT_PORT[f.scheme] || 554) + '"')) +
+      cell('ca-proto', t('camaddr_form.protocol','Protocol'), '<select data-k="addr_scheme" data-nosig>' + PROTOCOLS.map(([v, label]) => '<option value="' + v + '"' + (v === f.scheme ? ' selected' : '') + '>' + label + '</option>').join('') + '</select>').replace('<div class="ca-cell', '<div data-ca-nobat' + (bat ? ' hidden' : '') + ' class="ca-cell') +
     '</div>' +
     '<div class="ca-r2" data-ca-bat' + (bat ? '' : ' hidden') + '>' +
-      cell('ca-user', 'UID <em>Reolink app, Device info</em>', inp('uid', uid, 'spellcheck="false" autocomplete="off" autocapitalize="characters" maxlength="40" placeholder="95270000ABCDEFGH"')) +
-      (isNew ? '' : '<div class="ca-cell ca-batdef"><button type="button" class="btn" data-ca-batdef title="Battery camera on, 30 s idle, motion-only recording">Use battery settings</button></div>') +
+      cell('ca-user', t('camaddr_form.uid_label','UID <em>Reolink app, Device info</em>'), inp('uid', uid, 'spellcheck="false" autocomplete="off" autocapitalize="characters" maxlength="40" placeholder="95270000ABCDEFGH"')) +
+      (isNew ? '' : '<div class="ca-cell ca-batdef"><button type="button" class="btn" data-ca-batdef title="' + t('camaddr_form.battery_title', 'Battery camera on, 30 s idle, motion-only recording') + '">' + t('camaddr_form.use_battery', 'Use battery settings') + '</button></div>') +
     '</div>' +
     '<div class="ca-full" data-ca-full' + (full ? '' : ' hidden') + '>' +
-      cell('ca-wide', 'Main stream address <em>records, full size</em>', inp('url', url, 'placeholder="rtsp://192.168.1.50:554/stream1" spellcheck="false" autocomplete="off"')) +
-      cell('ca-wide', 'Sub stream address <em>motion and the Live grid (optional)</em>', inp('sub_url', net ? c.sub_url : '', 'placeholder="lower resolution, for the grid and motion" spellcheck="false" autocomplete="off"')) +
+      cell('ca-wide', t('camaddr_form.main_stream_address','Main stream address <em>records, full size</em>'), inp('url', url, 'placeholder="rtsp://192.168.1.50:554/stream1" spellcheck="false" autocomplete="off"')) +
+      cell('ca-wide', t('camaddr_form.sub_stream_address','Sub stream address <em>motion and the Live grid (optional)</em>'), inp('sub_url', net ? c.sub_url : '', 'placeholder="' + t('camaddr_form.sub_ph', 'lower resolution, for the grid and motion') + '" spellcheck="false" autocomplete="off"')) +
     '</div>' +
     '<div class="ca-r2">' +
-      cell('ca-user', 'User name', inp('username', c.username, 'autocomplete="off" autocapitalize="off" spellcheck="false"')) +
-      cell('ca-pass', 'Password', '<input data-k="password" type="password" autocomplete="new-password" placeholder="' + (isNew ? 'camera password' : 'blank keeps the saved one') + '">') +
+      cell('ca-user', t('camaddr_form.user_name','User name'), inp('username', c.username, 'autocomplete="off" autocapitalize="off" spellcheck="false"')) +
+      cell('ca-pass', t('camaddr_form.password', 'Password'), '<input data-k="password" type="password" autocomplete="new-password" placeholder="' + (isNew ? t('camaddr_form.camera_password','camera password') : t('camaddr_form.blank_keeps_saved','blank keeps the saved one')) + '">') +
     '</div>' +
     '<div class="ca-paths" data-ca-split data-ca-nobat' + (full || bat ? ' hidden' : '') + '>' +
-      cell('ca-wide', 'Main stream <em>records, full size</em>', inp('addr_main', f.main, ns + ' placeholder="/stream1"')) +
-      cell('ca-wide', 'Sub stream <em>motion and the Live grid (optional)</em>', inp('addr_sub', f.sub, ns + ' placeholder="/stream2"')) +
+      cell('ca-wide', t('camaddr_form.main_stream', 'Main stream <em>records, full size</em>'), inp('addr_main', f.main, ns + ' placeholder="/stream1"')) +
+      cell('ca-wide', t('camaddr_form.sub_stream', 'Sub stream <em>motion and the Live grid (optional)</em>'), inp('addr_sub', f.sub, ns + ' placeholder="/stream2"')) +
       '<div class="ca-prev" data-ca-prev aria-live="off"></div>' +
     '</div>' +
     '<div class="ca-tools" data-ca-split' + (full ? ' hidden' : '') + '>' +
-      '<label class="cs-f ca-f ca-brand"><span>Brand</span><select data-ca-brand data-nosig aria-describedby="ca-brandhint">' + brandOptions(bat ? 'reolink-battery' : brandOf(f.main, f.sub)) + '</select></label>' +
-      '<div class="ca-brandnote"><span id="ca-brandhint">' + (bat ? esc(BATTERY_HINT) : 'Fills both paths.') + '</span> <a href="' + GUIDE + '" target="_blank" rel="noopener noreferrer">Camera guide</a></div>' +
+      '<label class="cs-f ca-f ca-brand"><span>' + t('camaddr_form.brand', 'Brand') + '</span><select data-ca-brand data-nosig aria-describedby="ca-brandhint">' + brandOptions(bat ? 'reolink-battery' : brandOf(f.main, f.sub)) + '</select></label>' +
+      '<div class="ca-brandnote"><span id="ca-brandhint">' + (bat ? esc(BATTERY_HINT) : t('camaddr_form.fills_both_paths','Fills both paths.')) + '</span> <a href="' + GUIDE + '" target="_blank" rel="noopener noreferrer">' + t('camaddr_form.camera_guide', 'Camera guide') + '</a></div>' +
     '</div>' +
     '<div class="ca-acts">' +
-      '<button type="button" class="btn" data-ca-onvif data-ca-split data-ca-nobat data-touch' + (full || bat ? ' hidden' : '') + '>Find via ONVIF</button>' +
-      '<label class="asys-chk ca-fullchk"><input type="checkbox" data-ca-fullchk data-nosig' + (full ? ' checked' : '') + '> Use full addresses</label>' +
+      '<button type="button" class="btn" data-ca-onvif data-ca-split data-ca-nobat data-touch' + (full || bat ? ' hidden' : '') + '>' + t('camaddr_form.find_onvif', 'Find via ONVIF') + '</button>' +
+      '<label class="asys-chk ca-fullchk"><input type="checkbox" data-ca-fullchk data-nosig' + (full ? ' checked' : '') + '> ' + t('camaddr_form.use_full', 'Use full addresses') + '</label>' +
     '</div>' +
     '<div class="ca-msg" data-ca-msg role="status" aria-live="polite">' + (full && f.why ? esc(WHY[f.why] || '') : '') + '</div>' +
     '<div class="ca-found" data-ca-found></div>' +
@@ -112,7 +113,7 @@ export function wireAddr(d, c, isNew) {
   const uidEl = el('uid');
   const net = !/^(push|device|screen):\/\//i.test(c.url || '') && !c.capture;
   const storedUrl = net ? (c.url || '') : '', storedSub = net ? (c.sub_url || '') : '';
-  const msg = (t) => { msgEl.textContent = t || ''; };
+  const msg = (text) => { msgEl.textContent = text || ''; };
   const isFull = () => box.dataset.mode === 'full';
   const isBat = () => box.dataset.mode === 'battery';
   const fields = () => ({ scheme: sch.value, host: host.value.trim(), port: port.value.trim(), main: main.value, sub: sub.value });
@@ -122,13 +123,13 @@ export function wireAddr(d, c, isNew) {
   const paintPrev = () => {
     const r = urlsFromFields(fields(), storedUrl, storedSub);
     const strip = (u) => { const s = splitUrl(u); return s && s.creds ? u.replace(/\/\/[^/]*@/, '//') : u; };
-    prev.innerHTML = r.url ? '<span>Saves as:</span><span class="ca-u">' + esc(strip(r.url)) + '</span>' + (r.sub_url ? '<span class="ca-u">' + esc(strip(r.sub_url)) + '</span>' : '') : '';
+    prev.innerHTML = r.url ? '<span>' + t('camaddr_form.saves_as', 'Saves as:') + '</span><span class="ca-u">' + esc(strip(r.url)) + '</span>' + (r.sub_url ? '<span class="ca-u">' + esc(strip(r.sub_url)) + '</span>' : '') : '';
   };
   // Split fields -> the full addresses that are saved.
   let lastScheme = sch.value;
   const sync = () => {
     lastScheme = sch.value;
-    port.placeholder = isBat() ? 'usual' : String(DEFAULT_PORT[sch.value] || '');
+    port.placeholder = isBat() ? t('camaddr_form.usual', 'usual') : String(DEFAULT_PORT[sch.value] || '');
     if (isFull()) return;
     if (isBat()) {
       url.value = batteryUrl({ host: host.value.trim(), port: port.value.trim(), uid: uidEl.value }, storedUrl);
@@ -143,8 +144,8 @@ export function wireAddr(d, c, isNew) {
   const setMode = (mode, why) => {
     box.dataset.mode = mode;
     const hint = box.querySelector('#ca-brandhint');
-    if (hint) hint.textContent = mode === 'battery' ? BATTERY_HINT : 'Fills both paths.';
-    port.placeholder = mode === 'battery' ? 'usual' : String(DEFAULT_PORT[sch.value] || '');
+    if (hint) hint.textContent = mode === 'battery' ? BATTERY_HINT : t('camaddr_form.fill_both_paths','Fills both paths.',{});
+    port.placeholder = mode === 'battery' ? t('camaddr_form.usual','usual',{}) : String(DEFAULT_PORT[sch.value] || '');
     box.querySelectorAll('[data-ca-split]').forEach(x => { x.hidden = mode === 'full'; });
     box.querySelectorAll('[data-ca-nobat]').forEach(x => { x.hidden = mode !== 'split'; });
     box.querySelectorAll('[data-ca-bat]').forEach(x => { x.hidden = mode !== 'battery'; });
@@ -216,7 +217,7 @@ export function wireAddr(d, c, isNew) {
     if (s.creds) { user.value = s.user; pw.value = s.pass; }
     brand.value = brandOf(main.value, sub.value);
     sync();
-    msg('Split the address into the fields' + (s.creds ? '; the password went into Password.' : '.'));
+    msg(s.creds ? t('camaddr_form.split_pw', 'Split the address into the fields; the password went into Password.') : t('camaddr_form.split', 'Split the address into the fields.'));
     return true;
   };
   let pasted = null;
@@ -265,7 +266,7 @@ export function wireAddr(d, c, isNew) {
   // An existing camera already shows this type, so picking it again changes
   // nothing: this button applies the same settings.
   const batDef = q('[data-ca-batdef]');
-  if (batDef) batDef.addEventListener('click', () => { batteryDefaults(); msg('Battery camera is on, with 30 s idle, and recording is motion only.'); });
+  if (batDef) batDef.addEventListener('click', () => { batteryDefaults(); msg(t('camaddr_form.battery_msg','Battery camera is on, with 30 s idle, and recording is motion only.',{})); });
   brand.addEventListener('change', () => {
     const b = BRANDS.find(x => x.id === brand.value);
     if (!b) return;
@@ -286,9 +287,9 @@ export function wireAddr(d, c, isNew) {
     port.value = brandPort(port.value, b, sch.value);
     main.value = b.main; sub.value = b.sub;
     sync();
-    msg('Filled the ' + b.name.replace(/ \(.*\)$/, '') + ' paths' + (b.sub ? '' : ' (it has one stream)') + '.' +
-      (b.id.startsWith('reolink') ? ' On a Home Hub or NVR, camera 2 is Preview_02_main, and so on.' : '') +
-      (b.tested ? '' : ' Not tested by us: check them against the camera\'s manual.'));
+    msg(t('camaddr_form.filled_paths', 'Filled the {name} paths{note}.', { name: b.name.replace(/ \(.*\)$/, ''), note: b.sub ? '' : ' ' + t('camaddr_form.one_stream', '(it has one stream)') }) +
+      (b.id.startsWith('reolink') ? ' ' + t('camaddr_form.hub_note', 'On a Home Hub or NVR, camera 2 is Preview_02_main, and so on.') : '') +
+      (b.tested ? '' : ' ' + t('camaddr_form.untested_note', 'Not tested by us: check them against the camera\'s manual.')));
   });
 
   fullChk.addEventListener('change', () => {
@@ -311,24 +312,24 @@ export function wireAddr(d, c, isNew) {
     } else {
       fill(Object.assign(f, { user: '', pass: '' }), false);
     }
-    msg('Filled from ' + what + (cam.sub_url ? '' : '. It has no sub stream') + '.');
+    msg(cam.sub_url ? t('camaddr_form.filled_from', 'Filled from {what}.', { what }) : t('camaddr_form.filled_from_nosub', 'Filled from {what}. It has no sub stream.', { what }));
     changed();
   };
   onvifBtn.addEventListener('click', async () => {
     const f = fields();
     found.innerHTML = '';
     if (isBat()) return;
-    if (!f.host) { msg('Enter the camera address first.'); host.focus(); return; }
+    if (!f.host) { msg(t('camaddr_form.enter_address', 'Enter the camera address first.')); host.focus(); return; }
     onvifBtn.disabled = true;
     try {
       if (!pw.value && !isNew && c.id != null && placeIsStored()) {
-        msg('Asking the camera for its sub stream with the saved sign-in...');
+        msg(t('camaddr_form.asking_sub', 'Asking the camera for its sub stream with the saved sign-in...'));
         let r;
-        try { r = await api('/api/cameras/' + c.id + '/sub-suggest', { json: {} }); } catch (e) { msg('Could not ask just now: ' + errText(e)); return; }
+        try { r = await api('/api/cameras/' + c.id + '/sub-suggest', { json: {} }); } catch (e) { msg(t('camaddr_form.could_not_ask', 'Could not ask just now: {err}', { err: errText(e) })); return; }
         const ok = (r.suggestions || []).find(x => x.works);
-        if (!ok) { msg('No sub stream found that plays. To ask the camera for both streams, type its password and press Find via ONVIF again.'); return; }
+        if (!ok) { msg(t('camaddr_form.no_sub', 'No sub stream found that plays. To ask the camera for both streams, type its password and press Find via ONVIF again.')); return; }
         box.__setSub(ok.url);
-        msg('Found the sub stream ' + (ok.from === 'onvif' ? 'from the camera (ONVIF)' : 'at the usual address for this kind of camera') + '. Type the password to look up both streams.');
+        msg(t('camaddr_form.found_sub', 'Found the sub stream {where}. Type the password to look up both streams.', { where: ok.from === 'onvif' ? t('camaddr_form.from_camera', 'from the camera (ONVIF)') : t('camaddr_form.at_usual', 'at the usual address for this kind of camera') }));
         changed();
         return;
       }
@@ -337,19 +338,19 @@ export function wireAddr(d, c, isNew) {
       const h = f.host.includes(':') ? '[' + f.host + ']' : f.host;
       let ins = null, last = '';
       for (const p of ports) {
-        msg('Asking the camera over ONVIF (port ' + p + ')...');
+        msg(t('camaddr_form.asking_onvif', 'Asking the camera over ONVIF (port {port})...', { port: p }));
         try { ins = await api('/api/discover/inspect', { json: { xaddr: 'http://' + h + ':' + p + '/onvif/device_service', username: user.value.trim(), password: pw.value } }); break; }
         catch (e) { last = errText(e); }
       }
-      if (!ins) { msg('The camera did not answer over ONVIF (ports ' + ports.join(', ') + ')' + (last ? ': ' + last : '') + '. Check that ONVIF is on in the camera and the user name and password are right, or pick its brand.'); return; }
+      if (!ins) { msg(t('camaddr_form.onvif_no_answer', 'The camera did not answer over ONVIF (ports {ports}){detail}. Check that ONVIF is on in the camera and the user name and password are right, or pick its brand.', { ports: ports.join(', '), detail: last ? ': ' + last : '' })); return; }
       const cams = (ins.cameras && ins.cameras.length ? ins.cameras : [ins.suggested]).filter(x => x && x.url);
-      const what = ins.info && ins.info.model ? 'the camera (' + ins.info.model + ')' : 'the camera';
-      if (!cams.length) { msg('The camera answered but gave no stream addresses.'); return; }
+      const what = ins.info && ins.info.model ? t('camaddr_form.the_camera_model', 'the camera ({model})', { model: ins.info.model }) : t('camaddr_form.the_camera', 'the camera');
+      if (!cams.length) { msg(t('camaddr_form.no_streams', 'The camera answered but gave no stream addresses.')); return; }
       if (cams.length === 1) { applyCam(cams[0], what); return; }
-      msg('This device has ' + cams.length + ' cameras. Pick one:');
+      msg(t('camaddr_form.n_cameras', 'This device has {n, plural, one {# camera} other {# cameras}}. Pick one:', { n: cams.length }));
       found.innerHTML = cams.map((x, i) => {
         const s = splitUrl(x.url);
-        return '<div class="ca-cand"><span><b>' + esc(x.name || 'Camera ' + (i + 1)) + '</b> <code>' + esc(s ? s.path : x.url) + '</code></span> <button type="button" class="btn" data-ca-use="' + i + '" data-touch>Use</button></div>';
+        return '<div class="ca-cand"><span><b>' + esc(x.name || t('camaddr_form.camera_n', 'Camera {n}', { n: i + 1 })) + '</b> <code>' + esc(s ? s.path : x.url) + '</code></span> <button type="button" class="btn" data-ca-use="' + i + '" data-touch>' + t('camaddr_form.use', 'Use') + '</button></div>';
       }).join('');
       found.querySelectorAll('[data-ca-use]').forEach(b => {
         b.onclick = () => { const x = cams[Number(b.dataset.caUse)]; found.innerHTML = ''; applyCam(x, esc(x.name || what)); };

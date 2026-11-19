@@ -1,22 +1,23 @@
 // sp_kit.js - small markup helpers shared by the Settings pages, so every page opens the same way:
 // one plain sentence of what it does (lead), an optional "Recommended: ..." line, a "How this works"
 // disclosure for the long explanation, and expert-only fields folded under "More settings" / "Advanced".
+import { t } from './i18n.js';
 import { esc } from './core.js';
 
 // One sentence, then (optionally) what to do. Both are HTML (already escaped by the caller).
 export const lead = (text, recommended) => '<p class="sp-lead sp-one">' + text + '</p>' +
-  (recommended ? '<p class="sp-rec"><b>Recommended:</b> ' + recommended + '</p>' : '');
+  (recommended ? '<p class="sp-rec"><b>' + t('sp_kit.recommended', 'Recommended:') + '</b> ' + recommended + '</p>' : '');
 // A collapsed group of fields or text. title is HTML.
 export const more = (title, html, open) => '<details class="ac-more sp-more"' + (open ? ' open' : '') + '><summary>' + title + '</summary>' + html + '</details>';
 // The long explanation, collapsed.
-export const how = (html) => more('How this works', '<div class="hint sp-how">' + html + '</div>');
+export const how = (html) => more(t('sp_kit.how_this_works', 'How this works'), '<div class="hint sp-how">' + html + '</div>');
 // A notice box. kind: 'warn' | 'bad' | 'info' | 'ok'. action is ready-made button HTML (optional).
 export const notice = (kind, html, action) => '<div class="sp-note ' + kind + '" role="' + (kind === 'bad' ? 'alert' : 'status') + '"><span class="sp-note-t">' + html + '</span>' + (action || '') + '</div>';
 // A segmented control (radio group): opts = [[value, label], ...]. Pass 'data-nt' as extra to keep
 // the save bar from watching the radios themselves (when the fields they set are watched).
 export function seg(name, label, opts, val, extra) {
-  return '<div class="segc" role="radiogroup" aria-label="' + esc(label) + '">' + opts.map(([v, t]) =>
-    '<label class="segc-o"><input type="radio" name="' + esc(name) + '" value="' + esc(v) + '" ' + (extra || '') + (String(v) === String(val) ? ' checked' : '') + '><span>' + esc(t) + '</span></label>').join('') + '</div>';
+  return '<div class="segc" role="radiogroup" aria-label="' + esc(label) + '">' + opts.map(([v, lbl]) =>
+    '<label class="segc-o"><input type="radio" name="' + esc(name) + '" value="' + esc(v) + '" ' + (extra || '') + (String(v) === String(val) ? ' checked' : '') + '><span>' + esc(lbl) + '</span></label>').join('') + '</div>';
 }
 // Tabs semantics for a chip in a sub-page strip (the container gets role="tablist").
 export const tabAttrs = (on) => ' role="tab" aria-selected="' + (on ? 'true' : 'false') + '"';

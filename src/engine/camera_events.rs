@@ -266,17 +266,18 @@ fn spawn_reolink_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &Ca
                 thread::sleep(std::time::Duration::from_millis(100));
             }
         };
-        let mut client = crate::reolink::ReolinkClient::new(&host, &user, &pass);
+        // The device's one shared session (camera controls use it too; see controls/session.rs).
+        let client = crate::controls::session::get(&format!("https://{host}"), &user, &pass);
         let mut last: Option<crate::reolink::ChannelState> = None;
         let mut failing_since: Option<std::time::Instant> = None;
         info!("camera '{name}': reading motion and AI state from {host} channel {channel}");
         loop {
             let current = engine.camera(handle.id).is_some_and(|c| Arc::ptr_eq(&c, &handle));
             if !current || !handle.active.load(Ordering::Relaxed) {
-                client.logout();
+                // (Signed out when nobody has used the session for a while, or at shutdown.)
                 return;
             }
-            match client.channel_state(channel) {
+            match client.with(|c| c.channel_state(channel)) {
                 Ok(s) => {
                     if failing_since.take().is_some() {
                         info!("camera '{name}': Reolink state readable again");

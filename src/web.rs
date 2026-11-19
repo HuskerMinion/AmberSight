@@ -31,6 +31,7 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/cameras/:id/timesync", post(camera_timesync))
         .route("/timesync/all", post(timesync_all))
         .route("/cameras/:id/reboot", post(camera_reboot))
+        .route("/cameras/:id/controls", get(crate::controls::http::get).post(crate::controls::http::post))
         .route("/cameras/:id/powercycle", post(camera_powercycle))
         .route("/cameras/:id/watchdog", get(camera_watchdog))
         .route("/cameras/:id/netinfo", get(camera_netinfo))
@@ -212,6 +213,10 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/system/restart", post(system_restart))
         .route("/overlay", get(list_overlay_vars))
         .route("/overlay/:name", post(set_overlay_var_http))
+        .route("/lang", get(crate::lang::http::get))
+        .route("/lang/default", post(crate::lang::http::set_default))
+        .route("/lang/install", post(crate::lang::http::install))
+        .route("/lang/upload", post(crate::lang::http::upload))
         .layer(axum::middleware::from_fn_with_state(
             engine.clone(),
             auth_mw,
@@ -227,6 +232,8 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         // The notification helper (service worker) must sit at the top to cover every page.
         .route("/sw.js", get(static_files::service_worker))
         .route("/static/*path", get(static_files::asset))
+        // Language packs (static/js/i18n.js): public, the sign-in page uses them too.
+        .merge(crate::lang::public_routes())
         .route("/tls/ca.crt", get(crate::tls::ca_crt))
         .route("/tls/ca.pem", get(crate::tls::ca_pem))
         // Pushed streams (ffmpeg -f flv https://.../push/<key>): the key is the password.
@@ -421,17 +428,7 @@ async fn ai_model_get(State(engine): State<Arc<Engine>>, Json(r): Json<AiModelRe
         let set = |f: &dyn Fn(&mut crate::ai_setup::Job)| f(&mut crate::ai_setup::job().lock().unwrap());
         let r = crate::ai_setup::ensure(&dir, m, &|b, t| set(&|j| { j.bytes = b; j.total = t; })).and_then(|path| {
             set(&|j| j.state = "loading");
-            // Load first; only a model that works goes into the settings.
-            let (threads, gpu, gpu_name, gpu_mb) = {
-                let c = engine.config.lock().unwrap();
-                (c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone(), c.ai.gpu_memory_mb)
-            };
-            let d = crate::ai::AiDetector::load_on(&path, threads, gpu, gpu_name.as_deref(), gpu_mb)?;
-            *engine.ai.write().unwrap() = Some(std::sync::Arc::new(d));
-            let mut c = engine.config.lock().unwrap();
-            c.ai.enabled = true;
-            c.ai.model = Some(std::path::PathBuf::from(crate::ai_setup::clean_path(&path)));
-            c.save(&engine.config_path)
+            engine.use_model(&path)
         });
         match r {
             Ok(()) => {
@@ -738,6 +735,9 @@ const TOKEN_ROUTES: &[(&str, &str, bool)] = &[
     ("/cameras/:id/ptz/aim", "POST", true),
     ("/cameras/:id/ptz/presets", "GET", true),
     ("/cameras/:id/ptz/caps", "GET", true),
+    // Camera controls: the lights (the siren and settings need a password sign-in: controls/http.rs).
+    ("/cameras/:id/controls", "GET", false),
+    ("/cameras/:id/controls", "POST", true),
     ("/cameras/:id/pause", "POST", true),
     ("/clips/record", "POST", true),
     ("/events/:id/review", "POST", true),
@@ -779,6 +779,11 @@ pub type Who = Option<(Arc<Engine>, String, u64)>;
 /// The request came with a device token, of this name.
 #[derive(Clone)]
 pub struct TokenUsed(pub String);
+
+/// The sign-in that let this request in: the session that matched (hashed),
+/// the device token, or the account's password. Per-sign-in limits key on it.
+#[derive(Clone)]
+pub struct SignIn(pub String);
 
 /// How a change came in, for the log of arming and profiles.
 fn source_of(token: &Option<axum::Extension<TokenUsed>>) -> String {
@@ -981,6 +986,8 @@ fn operator_route(path: &str, method: &axum::http::Method) -> Option<Perm> {
     let cam = |id: &str| id.parse::<usize>().is_ok();
     match (method.as_str(), parts.as_slice()) {
         ("POST", ["cameras", id, "ptz"] | ["cameras", id, "ptz", "aim"]) if cam(id) => Some(Perm::Ptz),
+        // Lights or siren; the handler checks which (controls/http.rs).
+        ("POST", ["cameras", id, "controls"]) if cam(id) => Some(Perm::Controls),
         ("POST", ["clips", "record"]) => Some(Perm::TalkClip),
         ("POST", ["shield"] | ["profile"]) => Some(Perm::Arm),
         ("POST", ["cameras", id, "pause"]) if cam(id) => Some(Perm::Arm),
@@ -1159,6 +1166,7 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
     let mut generation_read = None;
     let mut with_token = false;
     let mut token_used: Option<String> = None;
+    let mut sign_in: Option<String> = None;
     let user = if acc.is_empty() {
         "(open)".to_string()
     } else {
@@ -1207,6 +1215,15 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
                 if by_token {
                     token_used = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(crate::auth::token_name);
                 }
+                sign_in = Some(if by_token {
+                    format!("token:{}:{}", id.user, token_used.clone().unwrap_or_default())
+                } else if let Some(t) = &session {
+                    use sha2::Digest;
+                    let d = sha2::Sha256::digest(t.as_bytes());
+                    format!("session:{}", d[..12].iter().map(|b| format!("{b:02x}")).collect::<String>())
+                } else {
+                    format!("password:{}", id.user)
+                });
                 // Changes: admins, and what viewers and operators may do.
                 // Settings, logs, health, accounts and network scans: admins only.
                 if let Err(why) = gate(&path, req.method(), &r, limits.is_some()) {
@@ -1252,6 +1269,7 @@ async fn auth_mw(State(engine): State<Arc<Engine>>, mut req: Request, next: Next
     if let Some(n) = &token_used {
         req.extensions_mut().insert(TokenUsed(n.clone()));
     }
+    req.extensions_mut().insert(SignIn(sign_in.unwrap_or_else(|| format!("open:{user}"))));
     // A change sent slowly: signed in when it began, but the account may have
     // been disabled by the time its body has arrived. Handlers read the body
     // to its end before they act, and this makes that fail in that case.
@@ -1882,7 +1900,7 @@ async fn set_overlay_var_http(
 /// What GET /api/cameras leaves out for anyone not an admin (viewers and
 /// operators alike): logins, folders, event copies, capture helpers, pushed
 /// senders, hardware and the watchdog.
-const HIDDEN_FROM_NON_ADMINS: [&str; 21] = ["username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
+const HIDDEN_FROM_NON_ADMINS: [&str; 26] = ["via_note", "connect", "baichuan_port", "baichuan_channel", "controls_cfg", "username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
 
 /// `GET /api/camera-defaults`: the shared detection and alert settings a
 /// camera uses where it sets none of its own (motion, AI, alert priority and
@@ -1967,6 +1985,9 @@ async fn list_cameras(
             // A battery camera's last reported charge (next to device_sleeping; the
             // json! above is at its macro's depth limit).
             v["battery"] = serde_json::json!(st.battery);
+            // How the built-in reader is connected (RTSP / Baichuan) and why.
+            v["via"] = st.via.into();
+            v["via_note"] = st.via_note.clone().into();
             v["ai_last"] = st.ai_last.as_ref().map(|(l, s, t)| serde_json::json!({"label": l, "score": s, "age_ms": (chrono::Utc::now().timestamp_millis() - t).max(0)})).into();
             v["ai_active"] = ai_active.get(&h.id).copied().unwrap_or(false).into();
             // The camera's motion-detection setting ("motion" above is motion happening now).
@@ -1975,6 +1996,8 @@ async fn list_cameras(
             // even while the camera has no picture yet.
             v["push_motion"] = st.camera_detections.pulse_active().into();
             v["onvif_port"] = cfg.onvif_port.into();
+            // What the camera's controls are, as known (asks the camera nothing).
+            v["controls"] = crate::controls::summary(&engine, &cfg);
             v["uid"] = serde_json::json!(cfg.battery_uid());
             v["no_sub_ok"] = cfg.no_sub_ok.into();
             // Polygon zones (rectangles above are the simple kind).
@@ -2034,6 +2057,8 @@ async fn list_cameras(
             if let (Some(a), serde_json::Value::Object(b)) = (v.as_object_mut(), extra) {
                 a.extend(b);
             }
+            // Camera controls settings and the actions next to alerts (admins only, below).
+            v["controls_cfg"] = serde_json::json!(cfg.controls);
             // Event clips also saved to a folder (admins only, below).
             v["copy_events_to"] = cfg.copy_events_to.clone().into();
             v["copy_events_keep_days"] = cfg.copy_events_keep_days.into();
@@ -2053,6 +2078,10 @@ async fn list_cameras(
             // Why the camera is read by ffmpeg, and the setting that changes it (admins only).
             v["ffmpeg_why"] = crate::engine::ffpath::why_ffmpeg_now(&h.running.read().unwrap(), st.ingest).into();
             v["transport"] = crate::ingest::transport_setting(&cfg.transport).into();
+            // How the camera is connected (RTSP / Baichuan / Auto), so a save keeps it (admins only).
+            if let (Some(o), serde_json::Value::Object(c)) = (v.as_object_mut(), connect_fields(&cfg)) {
+                o.extend(c);
+            }
             // Viewers see what a camera is, not how to reach or impersonate it
             // (a push key is the only secret guarding its stream input).
             if !admin.0 {
@@ -2206,6 +2235,17 @@ fn check_camera_sizes(cam: &CameraConfig, old: Option<&CameraConfig>) -> Result<
     Ok(())
 }
 
+/// The `connect` settings as the camera list sends them (the form shows
+/// and saves them back).
+fn connect_fields(cfg: &crate::config::CameraConfig) -> serde_json::Value {
+    let connect = match cfg.connect.trim().to_ascii_lowercase().as_str() {
+        "baichuan" => "baichuan",
+        "auto" => "auto",
+        _ => "rtsp",
+    };
+    serde_json::json!({ "connect": connect, "baichuan_port": cfg.baichuan_port, "baichuan_channel": cfg.baichuan_channel })
+}
+
 /// Checks of a camera's settings shared by adding and changing one.
 fn check_camera_fields(cam: &crate::config::CameraConfig) -> Result<(), String> {
     if let Some(e) = crate::hwdecode::check(cam.hwaccel.as_deref()) {
@@ -2213,6 +2253,18 @@ fn check_camera_fields(cam: &crate::config::CameraConfig) -> Result<(), String> 
     }
     if !matches!(cam.transport.as_str(), "auto" | "tcp" | "udp") {
         return Err("Transport: auto, tcp or udp".into());
+    }
+    let connect = cam.connect.trim().to_ascii_lowercase();
+    if !matches!(connect.as_str(), "" | "rtsp" | "baichuan" | "auto") {
+        return Err("Connect with: rtsp, baichuan or auto".into());
+    }
+    if !matches!(connect.as_str(), "" | "rtsp") {
+        if let Some(why) = crate::engine::connect_way::battery_reason(cam) {
+            return Err(format!("Connect with: Baichuan and Auto are for always-on Reolink cameras, and {why}. Use RTSP"));
+        }
+        if cam.overlay {
+            return Err("Connect with: burned-in text keeps the camera on RTSP (it needs the ffmpeg reader). Turn the burned-in text off to use Baichuan or Auto".into());
+        }
     }
     crate::engine::check_camera_urls(cam)?;
     cam.check_no_masks()?;
@@ -2252,7 +2304,8 @@ fn check_camera_fields(cam: &crate::config::CameraConfig) -> Result<(), String> 
             return Err("Strangers: outside the hours is normal or quiet".into());
         }
     }
-    check_watchdog(cam)
+    check_watchdog(cam)?;
+    crate::controls::check_settings(cam)
 }
 
 async fn add_camera(
@@ -5003,6 +5056,10 @@ async fn get_settings(State(engine): State<Arc<Engine>>) -> Json<serde_json::Val
             "model_exists": cfg.ai.model.as_ref().map(|m| m.is_file()),
             // The graphics card it runs on (null: the CPU), and the cards there are.
             "running_on": engine.detector().and_then(|d| d.gpu_name().map(String::from)),
+            // What it runs the card with ("CUDA", "OpenVINO", "DirectML", "Core ML"; null: the CPU).
+            "running_api": engine.detector().and_then(|d| d.gpu_api()),
+            // The card "Automatic" uses (null: none).
+            "auto_gpu": crate::gpu::pick(&gpus, None).map(|g| g.name),
             "gpus": gpus,
             // Why it is not on the card although one was found (null: no reason to give).
             "gpu_note": gpu_note,
@@ -5244,6 +5301,10 @@ fn alert_destinations_changed(cur: &AlertConfig, patch: &Option<serde_json::Valu
     }
     if cur.system_alert_secs() != new.system_alert_secs() {
         out.push("system_alert_minutes");
+    }
+    // Sirens offered to whoever can publish to the broker: a physical alarm.
+    if new.mqtt_siren && !cur.mqtt_siren {
+        out.push("mqtt_siren");
     }
     out
 }
@@ -6320,6 +6381,52 @@ mod camera_merge_tests {
         let clear = merge_camera_json(&m, serde_json::json!({"named_zones": []})).unwrap();
         assert!(clear.named_zones.is_empty());
     }
+
+    #[test]
+    fn baichuan_and_auto_are_refused_for_battery_cameras() {
+        let wired: CameraConfig = toml::from_str("name = \"Door\"\nurl = \"rtsp://192.0.2.5/Preview_01_main\"\n").unwrap();
+        for connect in ["baichuan", "auto", "rtsp"] {
+            let m = merge_camera_json(&wired, serde_json::json!({ "connect": connect })).unwrap();
+            assert!(check_camera_fields(&m).is_ok(), "{connect}");
+        }
+        assert!(check_camera_fields(&merge_camera_json(&wired, serde_json::json!({ "connect": "tcp9000" })).unwrap()).is_err());
+        let battery = [
+            serde_json::json!({ "connect": "auto", "on_demand": true }),
+            serde_json::json!({ "connect": "baichuan", "uid": "95270000ABCDEFGH" }),
+            serde_json::json!({ "connect": "baichuan", "url": "baichuan://192.0.2.9?uid=X" }),
+            serde_json::json!({ "connect": "auto", "url": "https://192.0.2.9/flv?port=1935&app=bcs&stream=channel0_sub.bcs" }),
+        ];
+        for b in battery {
+            let m = merge_camera_json(&wired, b.clone()).unwrap();
+            let e = check_camera_fields(&m).unwrap_err();
+            assert!(e.contains("always-on"), "{b}: {e}");
+        }
+        // RTSP stays allowed for a battery camera.
+        let m = merge_camera_json(&wired, serde_json::json!({ "connect": "rtsp", "on_demand": true })).unwrap();
+        assert!(check_camera_fields(&m).is_ok());
+        // Any case, as the reader takes it.
+        assert!(check_camera_fields(&merge_camera_json(&wired, serde_json::json!({ "connect": "Auto" })).unwrap()).is_ok());
+        // Burned-in text keeps a camera on RTSP: said, not silently ignored.
+        let e = check_camera_fields(&merge_camera_json(&wired, serde_json::json!({ "connect": "baichuan", "overlay": true })).unwrap()).unwrap_err();
+        assert!(e.contains("burned-in text"), "{e}");
+    }
+
+    #[test]
+    fn the_camera_list_sends_connect_so_a_save_keeps_it() {
+        let cur: CameraConfig = toml::from_str("name = \"Door\"\nurl = \"rtsp://192.0.2.5/Preview_01_main\"\nconnect = \"auto\"\nbaichuan_port = 9001\nbaichuan_channel = 2\n").unwrap();
+        let sent = connect_fields(&cur);
+        assert_eq!(sent, serde_json::json!({ "connect": "auto", "baichuan_port": 9001, "baichuan_channel": 2 }));
+        assert!(HIDDEN_FROM_NON_ADMINS.contains(&"connect") && HIDDEN_FROM_NON_ADMINS.contains(&"baichuan_port") && HIDDEN_FROM_NON_ADMINS.contains(&"baichuan_channel"));
+        // The form sends back what it was given...
+        let saved = merge_camera_json(&cur, serde_json::json!({ "fps": 7, "connect": sent["connect"] })).unwrap();
+        assert_eq!((saved.connect.as_str(), saved.baichuan_port, saved.baichuan_channel), ("auto", Some(9001), Some(2)));
+        // ...and a save that does not send the field at all keeps it too.
+        let saved = merge_camera_json(&cur, serde_json::json!({ "fps": 8 })).unwrap();
+        assert_eq!((saved.connect.as_str(), saved.baichuan_port, saved.baichuan_channel), ("auto", Some(9001), Some(2)));
+        // The default reads as rtsp.
+        let plain: CameraConfig = toml::from_str("name = \"D\"\nurl = \"rtsp://h/x\"\n").unwrap();
+        assert_eq!(connect_fields(&plain)["connect"], "rtsp");
+    }
 }
 
 #[cfg(test)]
@@ -6847,6 +6954,26 @@ async fn discover_inspect(Json(req): Json<InspectReq>) -> Response {
         Ok(Ok(i)) => Json(i).into_response(),
         Ok(Err(e)) => api_error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
         Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "inspect failed"),
+    }
+}
+
+#[cfg(test)]
+mod discover_inspect_tests {
+    use super::*;
+
+    /// Find cameras > Inspect against a camera that echoes the WS-Security
+    /// header: the error sent to the page holds none of it.
+    #[tokio::test]
+    async fn inspect_error_to_the_page_holds_no_echoed_security_header() {
+        use crate::onvif::echo_device;
+        let (port, sent) = echo_device::start("400 Bad Request");
+        let req = InspectReq { xaddr: format!("http://127.0.0.1:{port}/onvif/device_service"), username: echo_device::USER.into(), password: echo_device::PASS.into() };
+        let r = discover_inspect(Json(req)).await;
+        assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("SOAP fault: Sender not Authorized"), "{text}");
+        echo_device::assert_clean(&text, &sent);
     }
 }
 
@@ -7735,6 +7862,10 @@ mod viewer_write_tests {
     /// Every route of the API that no device token may use, at all. A route
     /// in neither this list nor `TOKEN_ROUTES` fails the test below.
     const TOKEN_REFUSED: &[&str] = &[
+        "/lang",
+        "/lang/default",
+        "/lang/install",
+        "/lang/upload",
         "/cameras/:id",
         "/bookmarks/:id",
         "/camera-defaults",
@@ -7938,6 +8069,8 @@ mod viewer_write_tests {
         for (p, k) in [(j!({"webhook_url": "https://evil/x"}), "webhook_url"), (j!({"webhook_url": null}), "webhook_url"), (j!({"ntfy_url": ""}), "ntfy_url"), (j!({"ntfy_url": "https://evil"}), "ntfy_url"), (j!({"telegram_api_url": "https://evil"}), "telegram_api_url"), (j!({"telegram_chat_id": "9"}), "telegram_chat_id"), (j!({"smtp_host": "evil"}), "smtp_host"), (j!({"smtp_port": 2525}), "smtp_port"), (j!({"smtp_password": "new"}), "smtp_password"), (j!({"email_to": []}), "email_to"), (j!({"email_to": ["evil@example.com"]}), "email_to"), (j!({"ha_url": "http://evil"}), "ha_url"), (j!({"pushover_user": "evil"}), "pushover_user"), (j!({"mqtt_url": "mqtt://evil"}), "mqtt_url"), (j!({"image_post_url": "https://evil"}), "image_post_url")] {
             assert_eq!(ch(p.clone()), vec![k], "{p}");
         }
+        assert_eq!(ch(j!({"mqtt_siren": true})), vec!["mqtt_siren"], "offering sirens over MQTT");
+        assert!(ch(j!({"mqtt_siren": false})).is_empty());
         assert!(ch(j!(5)).is_empty(), "no merge: refused later");
     }
 
@@ -7960,6 +8093,8 @@ mod viewer_write_tests {
         ("/cameras/:id/timesync", "POST", "admin"),
         ("/timesync/all", "POST", "admin"),
         ("/cameras/:id/reboot", "POST", "admin"),
+        ("/cameras/:id/controls", "GET", "viewer"),
+        ("/cameras/:id/controls", "POST", "operator:controls"),
         ("/cameras/:id/powercycle", "POST", "admin"),
         ("/cameras/:id/watchdog", "GET", "viewer"),
         ("/cameras/:id/netinfo", "GET", "viewer"),
@@ -8163,6 +8298,10 @@ mod viewer_write_tests {
         ("/system/restart", "POST", "admin"),
         ("/overlay", "GET", "viewer"),
         ("/overlay/:name", "POST", "admin"),
+        ("/lang", "GET", "viewer"),
+        ("/lang/default", "POST", "admin"),
+        ("/lang/install", "POST", "admin"),
+        ("/lang/upload", "POST", "admin"),
     ];
 
     /// The methods a route line has (`get(..).post(..)`).
@@ -8184,6 +8323,13 @@ mod viewer_write_tests {
             "arm" => x.arm = false,
             "events" => x.events = false,
             "camera_detection" => x.camera_detection = false,
+            "lights" => x.lights = false,
+            "siren" => x.siren = false,
+            // Lights or siren: neither.
+            "controls" => {
+                x.lights = false;
+                x.siren = false;
+            }
             other => panic!("no such right: {other}"),
         }
         x
@@ -8209,7 +8355,7 @@ mod viewer_write_tests {
         for (route, m, _) in ROLE_TABLE {
             assert!(pairs.iter().any(|p| p.0 == *route && p.1 == *m), "{route} {m} is no route");
         }
-        let none = crate::config::OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false };
+        let none = crate::config::OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false, lights: false, siren: false };
         let sample = |route: &str| route.split('/').map(|p| if p.starts_with(':') { "1" } else { p }).collect::<Vec<_>>().join("/");
         for (route, m, who) in ROLE_TABLE {
             let p = sample(route);
@@ -9350,6 +9496,57 @@ mod demo_and_snooze_tests {
 
     fn json(s: &str) -> serde_json::Value {
         serde_json::from_str(s).unwrap_or_else(|e| panic!("{e}: {s}"))
+    }
+
+    #[tokio::test]
+    async fn language_api_rights_and_routes() {
+        let (e, app) = site("lg", "lgdemo");
+        // This build pins real packs: with downloads off, nothing here ever reaches the network.
+        e.config.lock().unwrap().update.check = false;
+        let as_user = |m: &'static str, p: &'static str, u: &str, body: Option<&'static str>| Call { basic: Some(u.to_string()), body, ..call(m, p) };
+        // Public: the server's default language (the code only), and a pack that is not there.
+        let (s, b, _) = send(&app, call("GET", "/api/lang/server-default")).await;
+        assert_eq!((s, json(&b)["code"].is_null()), (StatusCode::OK, true), "{b}");
+        assert_eq!(send(&app, call("GET", "/api/lang/de")).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(send(&app, call("GET", "/api/lang/xx")).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(send(&app, call("GET", "/api/lang/..%2Fsettings")).await.0, StatusCode::NOT_FOUND);
+        // The rest needs a sign-in, whatever the method.
+        for (m, p) in [("GET", "/api/lang"), ("POST", "/api/lang/default"), ("POST", "/api/lang/install"), ("POST", "/api/lang/upload")] {
+            assert_eq!(send(&app, call(m, p)).await.0, StatusCode::UNAUTHORIZED, "{m} {p}");
+        }
+        // A viewer reads the list and changes nothing.
+        let (s, b, _) = send(&app, as_user("GET", "/api/lang", "lgvic", None)).await;
+        let v = json(&b);
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(v["installed"].is_array() && v["available"].is_array() && v["downloads"].is_object() && v["default"].is_null() && v["user"].is_null(), "{b}");
+        for (p, body) in [("/api/lang/default", Some(r#"{"code":null}"#)), ("/api/lang/install", Some(r#"{"code":"de"}"#)), ("/api/lang/upload", Some("{}"))] {
+            assert_eq!(send(&app, as_user("POST", p, "lgvic", body)).await.0, StatusCode::FORBIDDEN, "{p}");
+        }
+        // Their own choice rides in their preferences and comes back in the list; a made-up one does not.
+        assert_eq!(send(&app, as_user("PATCH", "/api/ui/prefs", "lgvic", Some(r#"{"lang":"de"}"#))).await.0, StatusCode::OK);
+        assert_eq!(json(&send(&app, as_user("GET", "/api/lang", "lgvic", None)).await.1)["user"], "de");
+        assert_eq!(send(&app, as_user("PATCH", "/api/ui/prefs", "lgvic", Some(r#"{"lang":"../x"}"#))).await.0, StatusCode::OK);
+        assert!(json(&send(&app, as_user("GET", "/api/lang", "lgvic", None)).await.1)["user"].is_null());
+        // The admin: bad codes are refused; a good one is stored even though its pack cannot be fetched now.
+        for body in [r#"{"code":"zz"}"#, r#"{"code":"en-XA"}"#, r#"{"code":"en"}"#, r#"{"code":5}"#] {
+            assert_eq!(send(&app, as_user("POST", "/api/lang/default", "lgann", Some(body))).await.0, StatusCode::BAD_REQUEST, "{body}");
+        }
+        let (s, b, _) = send(&app, as_user("POST", "/api/lang/default", "lgann", Some(r#"{"code":"de"}"#))).await;
+        assert_eq!((s, json(&b)["default"].clone()), (StatusCode::OK, serde_json::json!("de")), "{b}");
+        assert_eq!(json(&send(&app, call("GET", "/api/lang/server-default")).await.1)["code"], "de");
+        assert_eq!(json(&send(&app, as_user("GET", "/api/lang", "lgvic", None)).await.1)["default"], "de");
+        let (s, _, _) = send(&app, as_user("POST", "/api/lang/default", "lgann", Some(r#"{"code":null}"#))).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(json(&send(&app, call("GET", "/api/lang/server-default")).await.1)["code"].is_null());
+        // Install: refused while downloads are off (a pinned pack is then installed from a file);
+        // upload: a pack that is not the pinned bytes is refused.
+        assert_eq!(send(&app, as_user("POST", "/api/lang/install", "lgann", Some(r#"{"code":"de"}"#))).await.0, StatusCode::CONFLICT);
+        assert_eq!(send(&app, as_user("POST", "/api/lang/install", "lgann", Some(r#"{"code":"../x"}"#))).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(send(&app, as_user("POST", "/api/lang/upload", "lgann", Some(r#"{"lang":"de","messages":{}}"#))).await.0, StatusCode::BAD_REQUEST);
+        // The changes are in the audit log.
+        let seen = e.db.audit_rows();
+        assert!(seen.iter().any(|(u, a, _)| u == "lgann" && a == "language default changed"), "{seen:?}");
+        assert!(seen.iter().any(|(u, a, _)| u == "lgann" && a == "language pack upload refused"), "{seen:?}");
     }
 
     /// The session token in a Set-Cookie value.

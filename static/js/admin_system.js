@@ -1,4 +1,5 @@
 // admin_system.js - Admin pages: Users, Logs, Audit (Status is in status_page.js).
+import { t } from './i18n.js';
 import { api, esc, toast, openDlg, fmtTime, state, ic, enc, downloadUrl, confirmDialog, bus } from './core.js';
 import { registerAdminPage } from './admin.js';
 import { lead, notice, more } from './sp_kit.js';
@@ -8,30 +9,35 @@ const wrap = (html) => '<div class="asys-scroll">' + html + '</div>';
 
 // ---------------------------------------------------------------- Users
 const ROLES = [
-  ['viewer', 'Viewer', 'watch live video, events and recordings'],
-  ['operator', 'Operator', 'also day-to-day control, as ticked below'],
-  ['admin', 'Admin', 'everything, including settings and users (all cameras)'],
+  ['viewer', t('admin_system.role_viewer', 'Viewer'), t('admin_system.role_viewer_desc', 'watch live video, events and recordings')],
+  ['operator', t('admin_system.role_operator', 'Operator'), t('admin_system.role_operator_desc', 'also day-to-day control, as ticked below')],
+  ['admin', t('admin_system.role_admin', 'Admin'), t('admin_system.role_admin_desc', 'everything, including settings and users (all cameras)')],
 ];
 // An operator's rights (the server's names), each on unless unticked.
 const PERMS = [
-  ['ptz', 'Move PTZ cameras, go to presets, click to aim'],
-  ['talk_clip', 'Talk through a camera’s speaker, record a clip now'],
-  ['arm', 'Arm and disarm, switch profiles, pause notifications (an operator limited to some cameras can only pause theirs: arming and profiles change every camera)'],
-  ['events', 'Keep events forever, mark them “not a real alert” or “looks fine”, add timeline bookmarks'],
-  ['camera_detection', 'Change detection and alert settings of their cameras (zones, sensitivity, AI, alert times)'],
+  ['ptz', t('admin_system.perm_ptz', 'Move PTZ cameras, go to presets, click to aim')],
+  ['talk_clip', t('admin_system.perm_talk', 'Talk through a camera’s speaker, record a clip now')],
+  ['arm', t('admin_system.perm_arm', 'Arm and disarm, switch profiles, pause notifications (an operator limited to some cameras can only pause theirs: arming and profiles change every camera)')],
+  ['events', t('admin_system.perm_events', 'Keep events forever, mark them “not a real alert” or “looks fine”, add timeline bookmarks')],
+  ['camera_detection', t('admin_system.perm_detection', 'Change detection and alert settings of their cameras (zones, sensitivity, AI, alert times)')],
+  ['lights', t('admin_system.perm_lights', 'Turn a camera’s spotlight on for a while, and off')],
+  ['siren', t('admin_system.perm_siren', 'Sound a camera’s siren (off unless you tick it; never from a device token)')],
 ];
-const ALL_PERMS = Object.fromEntries(PERMS.map(([k]) => [k, true]));
+// Every right is on for a new operator except the siren.
+const ALL_PERMS = Object.fromEntries(PERMS.map(([k]) => [k, k !== 'siren']));
 // (A server before operators sends no role.)
 const roleOf = (u) => u.role || (u.admin ? 'admin' : 'viewer');
 function permsText(p) {
-  const on = PERMS.filter(([k]) => !p || p[k] !== false);
-  return on.length === PERMS.length ? 'All operator rights' : on.length ? on.map(([, t]) => t).join('; ') : 'No operator rights ticked';
+  const on = PERMS.filter(([k]) => (p && p[k] != null ? p[k] : ALL_PERMS[k]));
+  if (on.length === PERMS.length) return t('admin_system.all_operator_rights', 'All operator rights, the siren too');
+  if (PERMS.every(([k]) => on.some(([x]) => x === k) === ALL_PERMS[k])) return t('admin_system.usual_operator_rights', 'The usual operator rights (no siren)');
+  return on.length ? on.map(([, label]) => label).join('; ') : t('admin_system.no_operator_rights', 'No operator rights ticked');
 }
 
 function usersPage(el) {
-  el.innerHTML = '<div class="asys">' + lead('Who can sign in, and which cameras each person can see.', 'Give everyone their own account, and make most of them Viewers.') +
+  el.innerHTML = '<div class="asys">' + lead(t('admin_system.signin_guide', 'Who can sign in, and which cameras each person can see.'), t('admin_system.account_advice', 'Give everyone their own account, and make most of them Viewers.')) +
     '<div class="asys-head"><span class="hint" id="usHint"></span>' +
-    '<button class="btn" id="usAdd">' + ic('plus') + ' Add user</button></div><div id="usBody"><p class="empty">Loading...</p></div></div>';
+    '<button class="btn" id="usAdd">' + ic('plus') + ' ' + t('admin_system.add_user', 'Add user') + '</button></div><div id="usBody"><p class="empty">' + t('admin_system.loading', 'Loading...') + '</p></div></div>';
   let users = [];
   const body = el.querySelector('#usBody');
   // Two-step codes turned on or off for this account: the badges and an open
@@ -52,7 +58,7 @@ function usersPage(el) {
     try {
       const d = await api('/api/users');
       users = d.users || [];
-    } catch (e) { body.innerHTML = '<p class="empty">Could not load users: ' + esc(errText(e)) + '</p>'; return; }
+    } catch (e) { body.innerHTML = '<p class="empty">' + t('admin_system.load_users_failed', 'Could not load users: {error}', { error: esc(errText(e)) }) + '</p>'; return; }
     draw();
   }
 
@@ -60,34 +66,33 @@ function usersPage(el) {
   const camChips = (list) => {
     const chip = (c) => '<span class="badge">' + esc(c) + '</span>';
     if (list.length <= 4) return list.map(chip).join(' ');
-    return list.slice(0, 4).map(chip).join(' ') + ' <details class="us-more"><summary>' + (list.length - 4) + ' more (' + list.length + ' cameras)</summary>' + list.slice(4).map(chip).join(' ') + '</details>';
+    return list.slice(0, 4).map(chip).join(' ') + ' <details class="us-more"><summary>' + t('admin_system.n_more_cameras', '{n} more ({total} cameras)', { n: list.length - 4, total: list.length }) + '</summary>' + list.slice(4).map(chip).join(' ') + '</details>';
   };
 
   function draw() {
     const admins = users.filter(u => u.admin && !u.disabled).length;
     el.querySelector('#usHint').textContent = users.length
-      ? users.length + ' account' + (users.length === 1 ? '' : 's') + ', ' + admins + ' admin' + (users.some(u => u.disabled) ? ', ' + users.filter(u => u.disabled).length + ' disabled' : '')
+      ? t('admin_system.account_count', '{accounts, plural, one {# account} other {# accounts}}, {admins} admin{off, plural, =0 {} other {, {off} disabled}}', { accounts: users.length, admins, off: users.filter(u => u.disabled).length })
       : '';
     el.querySelector('#usAdd').hidden = !users.length;
     if (!users.length) {
-      body.innerHTML = '<div class="sp-empty"><h3>Sign-in is off</h3><p>Anyone on your network can open AmberSight, watch the cameras and change settings. ' +
-        'The first account you create becomes an admin and turns sign-in on; you will then need to sign in.</p>' +
-        '<div class="row"><button class="primary" type="button" id="usFirst">Create an admin account</button></div></div>';
+      body.innerHTML = '<div class="sp-empty"><h3>' + t('admin_system.signin_off', 'Sign-in is off') + '</h3><p>' + t('admin_system.signin_off_desc', 'Anyone on your network can open AmberSight, watch the cameras and change settings. The first account you create becomes an admin and turns sign-in on; you will then need to sign in.') + '</p>' +
+        '<div class="row"><button class="primary" type="button" id="usFirst">' + t('admin_system.create_admin', 'Create an admin account') + '</button></div></div>';
       body.querySelector('#usFirst').onclick = () => edit(null, true);
       return;
     }
-    body.innerHTML = '<div class="hint us-legend"><b>Admin</b>: everything, including settings and users. <b>Operator</b>: day-to-day control (arming, moving cameras, talking, keeping events, detection and alert settings of their cameras), as far as their rights go; no other settings. <b>Viewer</b>: watch and review, cannot change anything.' + (users.some(u => u.admin && !u.disabled && !u.two_step) ? ' We recommend two-step codes for admins: each person turns them on in <b>Your account</b>, in the menu at the top.' : '') + '</div>' + wrap('<table class="asys-tbl us-tbl"><thead><tr><th>User</th><th>Role</th><th>Cameras</th><th></th></tr></thead><tbody>' +
+    body.innerHTML = '<div class="hint us-legend">' + t('admin_system.legend_admin', '<b>Admin</b>: everything, including settings and users.') + ' ' + t('admin_system.legend_operator', '<b>Operator</b>: day-to-day control (arming, moving cameras, talking, keeping events, detection and alert settings of their cameras), as far as their rights go; no other settings.') + ' ' + t('admin_system.legend_viewer', '<b>Viewer</b>: watch and review, cannot change anything.') + (users.some(u => u.admin && !u.disabled && !u.two_step) ? ' ' + t('admin_system.recommend_two_step', 'We recommend two-step codes for admins: each person turns them on in <b>Your account</b>, in the menu at the top.') : '') + '</div>' + wrap('<table class="asys-tbl us-tbl"><thead><tr><th>' + t('admin_system.th_user', 'User') + '</th><th>' + t('admin_system.th_role', 'Role') + '</th><th>' + t('admin_system.th_cameras', 'Cameras') + '</th><th></th></tr></thead><tbody>' +
       users.map((u, i) => {
         const me = u.username === state.user;
-        const cams = u.admin ? '<span class="muted">All (admin)</span>'
-          : (u.cameras && u.cameras.length ? camChips(u.cameras) : '<span class="muted">All cameras</span>');
-        return '<tr' + (u.disabled ? ' class="us-off"' : '') + '><td class="us-name"><b>' + esc(u.username) + '</b>' + (me ? ' <span class="badge info">you</span>' : '') + (u.disabled ? ' <span class="badge off">Disabled</span>' : '') + (u.two_step ? ' <span class="badge on" title="Signing in also takes a code from an app">Two-step on</span>' : '') + '</td>' +
-          '<td>' + (u.admin ? '<span class="badge on">Admin</span>' : roleOf(u) === 'operator' ? '<span class="badge info" title="' + esc(permsText(u.perms)) + '">Operator</span>' : '<span class="badge">Viewer</span>') + '</td>' +
+        const cams = u.admin ? '<span class="muted">' + t('admin_system.all_admin', 'All (admin)') + '</span>'
+          : (u.cameras && u.cameras.length ? camChips(u.cameras) : '<span class="muted">' + t('admin_system.all_cameras', 'All cameras') + '</span>');
+        return '<tr' + (u.disabled ? ' class="us-off"' : '') + '><td class="us-name"><b>' + esc(u.username) + '</b>' + (me ? ' <span class="badge info">' + t('admin_system.you', 'you') + '</span>' : '') + (u.disabled ? ' <span class="badge off">' + t('admin_system.badge_disabled', 'Disabled') + '</span>' : '') + (u.two_step ? ' <span class="badge on" title="' + t('admin_system.two_step_title', 'Signing in also takes a code from an app') + '">' + t('admin_system.two_step_on', 'Two-step on') + '</span>' : '') + '</td>' +
+          '<td>' + (u.admin ? '<span class="badge on">' + t('admin_system.role_admin', 'Admin') + '</span>' : roleOf(u) === 'operator' ? '<span class="badge info" title="' + esc(permsText(u.perms)) + '">' + t('admin_system.role_operator', 'Operator') + '</span>' : '<span class="badge">' + t('admin_system.role_viewer', 'Viewer') + '</span>') + '</td>' +
           '<td class="asys-cams">' + cams + '</td>' +
-          '<td class="asys-act"><button class="btn" data-qr="' + i + '"' + (u.disabled ? ' disabled' : '') + ' title="Show a QR code to sign in on a phone" aria-label="Phone sign-in: show a QR code to sign in on a phone">' + ic('qr') + ' Phone sign-in</button> <button class="btn" data-ed="' + i + '">Edit</button> ' +
-          '<button class="btn" data-off="' + i + '"' + (me ? ' disabled title="You cannot disable your own account"' : '') + '>' + (u.disabled ? 'Enable' : 'Disable') + '</button>' +
-          '<button class="btn danger" data-del="' + i + '"' + (me ? ' disabled title="You cannot delete your own account"' : '') + '>Delete</button>' +
-          (me ? '<div class="hint us-why">You cannot disable or delete your own account</div>' : '') + '</td></tr>';
+          '<td class="asys-act"><button class="btn" data-qr="' + i + '"' + (u.disabled ? ' disabled' : '') + ' title="' + t('admin_system.qr_title', 'Show a QR code to sign in on a phone') + '" aria-label="' + t('admin_system.phone_signin_aria', 'Phone sign-in: show a QR code to sign in on a phone') + '">' + ic('qr') + ' ' + t('admin_system.phone_signin', 'Phone sign-in') + '</button> <button class="btn" data-ed="' + i + '">' + t('admin_system.edit', 'Edit') + '</button> ' +
+          '<button class="btn" data-off="' + i + '"' + (me ? ' disabled title="' + t('admin_system.cannot_disable_self', 'You cannot disable your own account') + '"' : '') + '>' + (u.disabled ? t('admin_system.enable', 'Enable') : t('admin_system.disable', 'Disable')) + '</button>' +
+          '<button class="btn danger" data-del="' + i + '"' + (me ? ' disabled title="' + t('admin_system.cannot_delete_self', 'You cannot delete your own account') + '"' : '') + '>' + t('admin_system.delete', 'Delete') + '</button>' +
+          (me ? '<div class="hint us-why">' + t('admin_system.cannot_self', 'You cannot disable or delete your own account') + '</div>' : '') + '</td></tr>';
       }).join('') + '</tbody></table>');
     body.querySelectorAll('[data-ed]').forEach(b => { b.onclick = () => edit(users[+b.dataset.ed]); });
     body.querySelectorAll('[data-qr]').forEach(b => { b.onclick = () => phoneQr(users[+b.dataset.qr]); });
@@ -105,20 +110,20 @@ function usersPage(el) {
     const lock = me || lastAdmin || !!first;
     const camNames = state.cams.map(c => c.name);
     for (const c of u.cameras || []) if (!camNames.includes(c)) camNames.push(c);
-    const d = openDlg(isNew ? 'Add user' : 'Edit ' + u.username,
-      '<label>Username<input id="ufName" autocomplete="off" value="' + esc(u.username) + '"' + (isNew ? '' : ' disabled') + '></label>' +
-      (me ? '<div class="hint">To change your own password, use Change password in the menu at the top.</div>'
-        : '<label>' + (isNew ? 'Password' : 'New password') + '<input id="ufPw" type="password" autocomplete="new-password" placeholder="' + (isNew ? 'at least 8 characters' : 'leave empty to keep the current one') + '"></label>') +
-      '<fieldset class="us-role"><legend class="sec">Role</legend>' + ROLES.map(([v, t, h]) =>
-        '<label class="asys-chk"><input type="radio" name="ufRole" value="' + v + '"' + (role0 === v ? ' checked' : '') + (lock ? ' disabled' : '') + '> <span><b>' + t + '</b> <span class="muted">' + h + '</span></span></label>').join('') + '</fieldset>' +
-      (lock && u.admin ? '<div class="hint">' + (first ? 'The first account is always an admin.' : me ? 'You cannot remove your own admin rights.' : 'This is the last admin; make another user an admin first.') + '</div>' : '') +
-      '<div id="ufPermsBox"><div class="sec">What this operator may do</div><div class="hint">Everything ticked by default. Saving presets, other settings, users and storage stay with admins.</div>' +
-      PERMS.map(([k, t]) => '<label class="asys-chk"><input type="checkbox" data-perm="' + k + '"' + (perms0[k] ? ' checked' : '') + '> ' + t + '</label>').join('') + '</div>' +
+    const d = openDlg(isNew ? t('admin_system.add_user', 'Add user') : t('admin_system.edit_user', 'Edit {username}', { username: u.username }),
+      '<label>' + t('admin_system.username', 'Username') + '<input id="ufName" autocomplete="off" value="' + esc(u.username) + '"' + (isNew ? '' : ' disabled') + '></label>' +
+      (me ? '<div class="hint">' + t('admin_system.change_own_password', 'To change your own password, use Change password in the menu at the top.') + '</div>'
+        : '<label>' + (isNew ? t('admin_system.password', 'Password') : t('admin_system.new_password', 'New password')) + '<input id="ufPw" type="password" autocomplete="new-password" placeholder="' + (isNew ? t('admin_system.pw_min', 'at least 8 characters') : t('admin_system.pw_keep', 'leave empty to keep the current one')) + '"></label>') +
+      '<fieldset class="us-role"><legend class="sec">' + t('admin_system.role', 'Role') + '</legend>' + ROLES.map(([v, label, h]) =>
+        '<label class="asys-chk"><input type="radio" name="ufRole" value="' + v + '"' + (role0 === v ? ' checked' : '') + (lock ? ' disabled' : '') + '> <span><b>' + label + '</b> <span class="muted">' + h + '</span></span></label>').join('') + '</fieldset>' +
+      (lock && u.admin ? '<div class="hint">' + (first ? t('admin_system.first_is_admin', 'The first account is always an admin.') : me ? t('admin_system.cannot_remove_own_admin', 'You cannot remove your own admin rights.') : t('admin_system.last_admin', 'This is the last admin; make another user an admin first.')) + '</div>' : '') +
+      '<div id="ufPermsBox"><div class="sec">' + t('admin_system.operator_may', 'What this operator may do') + '</div><div class="hint">' + t('admin_system.perms_default', 'Everything ticked by default. Saving presets, other settings, users and storage stay with admins.') + '</div>' +
+      PERMS.map(([k, label]) => '<label class="asys-chk"><input type="checkbox" data-perm="' + k + '"' + (perms0[k] ? ' checked' : '') + '> ' + label + '</label>').join('') + '</div>' +
       (!isNew ? '<div id="ufAcct"></div>' : '') +
-      '<div id="ufCamsBox"><div class="sec">Cameras this user may see</div><div class="hint">None ticked = all cameras. An operator controls only these too.</div>' +
-      '<div class="asys-camlist">' + (camNames.length ? camNames.map(n => '<label class="asys-chk"><input type="checkbox" data-cam="' + esc(n) + '"' + ((u.cameras || []).includes(n) ? ' checked' : '') + '> ' + esc(n) + '</label>').join('') : '<span class="muted">No cameras configured.</span>') + '</div></div>' +
+      '<div id="ufCamsBox"><div class="sec">' + t('admin_system.cams_may_see', 'Cameras this user may see') + '</div><div class="hint">' + t('admin_system.cams_none_all', 'None ticked = all cameras. An operator controls only these too.') + '</div>' +
+      '<div class="asys-camlist">' + (camNames.length ? camNames.map(n => '<label class="asys-chk"><input type="checkbox" data-cam="' + esc(n) + '"' + ((u.cameras || []).includes(n) ? ' checked' : '') + '> ' + esc(n) + '</label>').join('') : '<span class="muted">' + t('admin_system.no_cameras', 'No cameras configured.') + '</span>') + '</div></div>' +
       '<div class="asys-err" id="ufErr"></div>' +
-      '<div class="row"><button class="primary" id="ufSave">' + (isNew ? 'Add user' : 'Save') + '</button><button class="btn" id="ufCancel">Cancel</button></div>');
+      '<div class="row"><button class="primary" id="ufSave">' + (isNew ? t('admin_system.add_user', 'Add user') : t('admin_system.save', 'Save')) + '</button><button class="btn" id="ufCancel">' + t('admin_system.cancel', 'Cancel') + '</button></div>');
     const box = d.querySelector('#ufCamsBox'), pbox = d.querySelector('#ufPermsBox');
     const roleNow = () => { const r = d.querySelector('input[name="ufRole"]:checked'); return r ? r.value : role0; };
     const sync = () => { box.hidden = roleNow() === 'admin'; pbox.hidden = roleNow() !== 'operator'; };
@@ -132,8 +137,8 @@ function usersPage(el) {
       err.textContent = '';
       const name = d.querySelector('#ufName').value.trim();
       const pw = me ? '' : d.querySelector('#ufPw').value;
-      if (!name) { err.textContent = 'Enter a username.'; return; }
-      if (isNew && !pw) { err.textContent = 'Enter a password.'; return; }
+      if (!name) { err.textContent = t('admin_system.enter_username', 'Enter a username.'); return; }
+      if (isNew && !pw) { err.textContent = t('admin_system.enter_password', 'Enter a password.'); return; }
       const role = roleNow(), isAdm = role === 'admin';
       const perms = {};
       d.querySelectorAll('[data-perm]').forEach(x => { perms[x.dataset.perm] = x.checked; });
@@ -146,15 +151,15 @@ function usersPage(el) {
         await api('/api/users', { json: Object.assign({}, payload, proof) });
         d.__close();
         load();
-        if (isNew) toast('User added. Tap here to sign them in on their phone.', () => phoneQr({ username: name, admin: isAdm, role }));
-        else toast('User saved');
+        if (isNew) toast(t('admin_system.user_added', 'User added. Tap here to sign them in on their phone.'), () => phoneQr({ username: name, admin: isAdm, role }));
+        else toast(t('admin_system.user_saved', 'User saved'));
       };
       // Making an admin, or setting someone else's password, takes your own password.
-      const reason = users.length && isAdm && (isNew || !u.admin) ? 'Making ' + name + ' an admin gives them everything, so it takes your own password.'
-        : users.length && morePerms && !u.admin ? 'Giving ' + name + ' operator rights lets them disarm and control cameras, so it takes your own password.'
-        : !isNew && !me && pw ? 'Setting the password of ' + name + ' takes your own password.' : '';
+      const reason = users.length && isAdm && (isNew || !u.admin) ? t('admin_system.making_admin', 'Making {name} an admin gives them everything, so it takes your own password.', { name })
+        : users.length && morePerms && !u.admin ? t('admin_system.giving_operator', 'Giving {name} operator rights lets them disarm and control cameras, so it takes your own password.', { name })
+        : !isNew && !me && pw ? t('admin_system.setting_password', 'Setting the password of {name} takes your own password.', { name }) : '';
       if (reason) {
-        (await import('./account.js')).confirmWithPassword({ reason, ok: 'Confirm', call: save });
+        (await import('./account.js')).confirmWithPassword({ reason, ok: t('admin_system.confirm', 'Confirm'), call: save });
         return;
       }
       try { await save({}); } catch (e) { err.textContent = errText(e); }
@@ -167,15 +172,15 @@ function usersPage(el) {
   async function accountBox(box, u, me, changed) {
     let tokens = [];
     try { tokens = (await api('/api/users/' + enc(u.username) + '/tokens')).tokens || []; }
-    catch (e) { box.innerHTML = '<div class="hint">Could not load device tokens: ' + esc(errText(e)) + '</div>'; return; }
-    box.innerHTML = '<div class="sec">Two-step codes</div>' +
+    catch (e) { box.innerHTML = '<div class="hint">' + t('admin_system.tokens_failed', 'Could not load device tokens: {error}', { error: esc(errText(e)) }) + '</div>'; return; }
+    box.innerHTML = '<div class="sec">' + t('admin_system.two_step_codes', 'Two-step codes') + '</div>' +
       (u.two_step
-        ? (me ? '<div class="hint">On.</div><div class="row"><button class="btn" type="button" data-ts-acct>Manage in Your account</button></div>'
-          : '<div class="hint">On. If they lost their phone and their recovery codes, you can turn it off so they can sign in with their password.</div><div class="row"><button class="btn" type="button" data-ts-off>Turn off two-step codes</button></div>')
-        : me ? '<div class="hint">Off. Signing in would also take a 6-digit code from an app on your phone, so a stolen password alone will not get anyone in.</div><div class="row"><button class="btn" type="button" data-ts-on>Turn on two-step codes</button></div>'
-          : '<div class="hint">Off. Only ' + esc(u.username) + ' can turn it on (it needs their phone): in Your account, in the menu at the top.</div>') +
-      '<div class="sec">Device tokens</div>' +
-      (tokens.length ? '<ul class="us-tok-list">' + tokens.map(t => '<li><span>' + esc(t.name) + ' <span class="muted">' + (t.scope === 'admin' ? 'can control' : 'watch only') + ', last used ' + (t.last_used ? esc(new Date(t.last_used * 1000).toLocaleDateString()) : 'never') + '</span></span><button class="btn" type="button" data-tk="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Revoke</button></li>').join('') + '</ul>' : '<div class="hint">None.</div>');
+        ? (me ? '<div class="hint">' + t('admin_system.two_step_on_hint', 'On.') + '</div><div class="row"><button class="btn" type="button" data-ts-acct>' + t('admin_system.manage_account', 'Manage in Your account') + '</button></div>'
+          : '<div class="hint">' + t('admin_system.two_step_on_off', 'On. If they lost their phone and their recovery codes, you can turn it off so they can sign in with their password.') + '</div><div class="row"><button class="btn" type="button" data-ts-off>' + t('admin_system.turn_off_codes', 'Turn off two-step codes') + '</button></div>')
+        : me ? '<div class="hint">' + t('admin_system.two_step_off_on', 'Off. Signing in would also take a 6-digit code from an app on your phone, so a stolen password alone will not get anyone in.') + '</div><div class="row"><button class="btn" type="button" data-ts-on>' + t('admin_system.turn_on_codes', 'Turn on two-step codes') + '</button></div>'
+          : '<div class="hint">' + t('admin_system.two_step_off_only', 'Off. Only {username} can turn it on (it needs their phone): in Your account, in the menu at the top.', { username: esc(u.username) }) + '</div>') +
+      '<div class="sec">' + t('admin_system.device_tokens', 'Device tokens') + '</div>' +
+      (tokens.length ? '<ul class="us-tok-list">' + tokens.map(tk => '<li><span>' + esc(tk.name) + ' <span class="muted">' + t('admin_system.token_line', '{scope}, last used {when}', { scope: tk.scope === 'admin' ? t('admin_system.can_control', 'can control') : t('admin_system.watch_only', 'watch only'), when: tk.last_used ? esc(new Date(tk.last_used * 1000).toLocaleDateString()) : t('admin_system.never', 'never') }) + '</span></span><button class="btn" type="button" data-tk="' + esc(tk.id) + '" data-name="' + esc(tk.name) + '">' + t('admin_system.revoke', 'Revoke') + '</button></li>').join('') + '</ul>' : '<div class="hint">' + t('admin_system.none', 'None.') + '</div>');
     const on = box.querySelector('[data-ts-on]');
     if (on) on.onclick = async () => { (await import('./account.js')).startTwoStep(null); };
     const acct = box.querySelector('[data-ts-acct]');
@@ -183,18 +188,18 @@ function usersPage(el) {
     const off = box.querySelector('[data-ts-off]');
     if (off) off.onclick = async () => {
       (await import('./account.js')).confirmWithPassword({
-        reason: u.username + ' can then sign in with only their password, and is signed out everywhere now. This is in the audit log, and it takes your own password.',
-        ok: 'Turn off', danger: true,
+        reason: t('admin_system.turn_off_reason', '{username} can then sign in with only their password, and is signed out everywhere now. This is in the audit log, and it takes your own password.', { username: u.username }),
+        ok: t('admin_system.turn_off', 'Turn off'), danger: true,
         call: async (proof) => {
           await api('/api/users/' + enc(u.username) + '/two-step/off', { json: proof });
-          toast('Two-step codes are off for ' + u.username); u.two_step = false; accountBox(box, u, me, changed); changed();
+          toast(t('admin_system.two_step_off_for', 'Two-step codes are off for {username}', { username: u.username })); u.two_step = false; accountBox(box, u, me, changed); changed();
         },
       });
     };
     box.querySelectorAll('[data-tk]').forEach(b => {
       b.onclick = async () => {
-        if (!await confirmDialog({ title: 'Revoke ' + b.dataset.name + '?', body: 'It stops working now, and video it has open ends within seconds.', ok: 'Revoke', danger: true })) return;
-        try { await api('/api/users/' + enc(u.username) + '/tokens/' + enc(b.dataset.tk), { method: 'DELETE' }); toast('Token revoked'); accountBox(box, u, me, changed); changed(); }
+        if (!await confirmDialog({ title: t('admin_system.revoke_title', 'Revoke {name}?', { name: b.dataset.name }), body: t('admin_system.revoke_body', 'It stops working now, and video it has open ends within seconds.'), ok: t('admin_system.revoke', 'Revoke'), danger: true })) return;
+        try { await api('/api/users/' + enc(u.username) + '/tokens/' + enc(b.dataset.tk), { method: 'DELETE' }); toast(t('admin_system.token_revoked', 'Token revoked')); accountBox(box, u, me, changed); changed(); }
         catch (e) { toast(errText(e), { kind: 'err' }); }
       };
     });
@@ -208,8 +213,8 @@ function usersPage(el) {
     const origins = [];
     if (!loopback) origins.push(location.origin);
     try {
-      const t = await api('/api/tls');
-      for (const n of t.names || []) {
+      const tls = await api('/api/tls');
+      for (const n of tls.names || []) {
         if (/^(localhost|127\.|::1$)/.test(n)) continue;
         const o = 'https://' + (n.includes(':') ? '[' + n + ']' : n) + port;
         if (!origins.includes(o)) origins.push(o);
@@ -235,24 +240,24 @@ function usersPage(el) {
     const first = (o) => o === page ? -2 : o === primary ? -1 : rank(o);
     origins.sort((x, y) => first(x) - first(y));
     if (!origins.length) origins.push(location.origin);
-    const d = openDlg('Phone sign-in for ' + u.username,
-      '<div class="asys-qr"><div class="asys-qrimg" id="pqImg"><p class="muted">Making a code...</p></div>' +
+    const d = openDlg(t('admin_system.phone_signin_for', 'Phone sign-in for {username}', { username: u.username }),
+      '<div class="asys-qr"><div class="asys-qrimg" id="pqImg"><p class="muted">' + t('admin_system.qr_making_code', 'Making a code...') + '</p></div>' +
       '<div class="asys-qrside">' +
-      '<ol class="asys-qrsteps"><li>Open the camera app on ' + esc(u.username) + '\'s phone and point it at the code.</li>' +
-      '<li>Tap the link that appears. AmberSight opens already signed in as <b>' + esc(u.username) + '</b>.</li>' +
-      '<li>Add it to the home screen when asked, so it opens like an app.</li></ol>' +
-      (origins.length > 1 ? '<label>Address the phone will use<select id="pqOrigin">' + origins.map(o => '<option>' + esc(o) + '</option>').join('') + '</select></label>' : '') +
+      '<ol class="asys-qrsteps"><li>' + t('admin_system.qr_step1', "Open the camera app on {username}'s phone and point it at the code.", { username: esc(u.username) }) + '</li>' +
+      '<li>' + t('admin_system.qr_step2', 'Tap the link that appears. AmberSight opens already signed in as <b>{username}</b>.', { username: esc(u.username) }) + '</li>' +
+      '<li>' + t('admin_system.qr_step3', 'Add it to the home screen when asked, so it opens like an app.') + '</li></ol>' +
+      (origins.length > 1 ? '<label>' + t('admin_system.qr_address', 'Address the phone will use') + '<select id="pqOrigin">' + origins.map(o => '<option>' + esc(o) + '</option>').join('') + '</select></label>' : '') +
       '<div class="hint" id="pqLeft"></div>' +
-      '<div class="hint">The code works once, only for this account, and expires after 10 minutes. No password is in it.' +
-      '<span id="pqCert"> If the phone warns that the connection is not private, install the certificate first (account menu, Trust this server) or continue past the warning.</span></div>' +
+      '<div class="hint">' + t('admin_system.qr_hint', 'The code works once, only for this account, and expires after 10 minutes. No password is in it.') +
+      '<span id="pqCert"> ' + t('admin_system.qr_cert_warning', 'If the phone warns that the connection is not private, install the certificate first (account menu, Trust this server) or continue past the warning.') + '</span></div>' +
       '<div class="asys-err" id="pqErr"></div>' +
-      '<div class="row"><button class="btn" id="pqNew">New code</button><button class="primary" id="pqDone">Done</button></div></div></div>');
+      '<div class="row"><button class="btn" id="pqNew">' + t('admin_system.new_code', 'New code') + '</button><button class="primary" id="pqDone">' + t('admin_system.done', 'Done') + '</button></div></div></div>');
     const img = d.querySelector('#pqImg'), left = d.querySelector('#pqLeft'), err = d.querySelector('#pqErr');
     let until = 0, timer = null;
     const tickLeft = () => {
       if (!d.isConnected) { clearInterval(timer); return; }
       const s = Math.max(0, Math.round((until - Date.now()) / 1000));
-      left.textContent = s ? 'Expires in ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') : 'This code has expired. Make a new one.';
+      left.textContent = s ? t('admin_system.expires_in', 'Expires in {minutes}:{seconds}', { minutes: Math.floor(s / 60), seconds: String(s % 60).padStart(2, '0') }) : t('admin_system.expired', 'This code has expired. Make a new one.');
       if (!s) img.classList.add('expired');
     };
     async function make() {
@@ -275,7 +280,7 @@ function usersPage(el) {
         };
         // A code for an admin account signs in with all those rights, and no password.
         if (u.admin || roleOf(u) === 'operator' || u.two_step) {
-          (await import('./account.js')).confirmWithPassword({ reason: 'This QR code signs in as ' + u.username + (u.admin ? ', an admin,' : roleOf(u) === 'operator' ? ', an operator,' : '') + ' with no password or code, so it takes your own password.', ok: 'Make code', call: get });
+          (await import('./account.js')).confirmWithPassword({ reason: t('admin_system.qr_reason', 'This QR code signs in as {username}{role, select, admin {, an admin,} operator {, an operator,} other {}} with no password or code, so it takes your own password.', { username: u.username, role: u.admin ? 'admin' : roleOf(u) === 'operator' ? 'operator' : 'viewer' }), ok: t('admin_system.make_code', 'Make code'), call: get });
           return;
         }
         await get({});
@@ -291,17 +296,17 @@ function usersPage(el) {
   async function setDisabled(u) {
     const off = !u.disabled;
     const yes = await confirmDialog(off
-      ? { title: 'Disable ' + u.username + '?', body: u.username + ' is signed out everywhere within seconds, any video they are watching stops, and they cannot sign in or get notifications. Their device tokens are deleted; nothing else is, and only an admin can enable it. After that, each device has to sign in again. Alert services shared by everyone (email, ntfy and so on), linked servers and camera passwords they knew are separate: change those too if needed.', ok: 'Disable ' + u.username, danger: true }
-      : { title: 'Enable ' + u.username + '?', body: u.username + ' can sign in again with their password. Devices that were signed in must sign in again.', ok: 'Enable ' + u.username });
+      ? { title: t('admin_system.disable_title', 'Disable {username}?', { username: u.username }), body: t('admin_system.disable_body', '{username} is signed out everywhere within seconds, any video they are watching stops, and they cannot sign in or get notifications. Their device tokens are deleted; nothing else is, and only an admin can enable it. After that, each device has to sign in again. Alert services shared by everyone (email, ntfy and so on), linked servers and camera passwords they knew are separate: change those too if needed.', { username: u.username }), ok: t('admin_system.disable_ok', 'Disable {username}', { username: u.username }), danger: true }
+      : { title: t('admin_system.enable_title', 'Enable {username}?', { username: u.username }), body: t('admin_system.enable_body', '{username} can sign in again with their password. Devices that were signed in must sign in again.', { username: u.username }), ok: t('admin_system.enable_ok', 'Enable {username}', { username: u.username }) });
     if (!yes) return;
-    try { await api('/api/users', { json: { username: u.username, disabled: off } }); toast(off ? u.username + ' is disabled' : u.username + ' is enabled'); load(); }
+    try { await api('/api/users', { json: { username: u.username, disabled: off } }); toast(off ? t('admin_system.disabled', '{username} is disabled', { username: u.username }) : t('admin_system.enabled', '{username} is enabled', { username: u.username })); load(); }
     catch (e) { toast(errText(e), { kind: 'err' }); }
   }
 
   function del(u) {
-    confirmDialog({ title: 'Delete user ' + u.username + '?', body: u.username + ' is signed out on every device and cannot sign in again. Their phone app and device tokens stop working.', ok: 'Delete ' + u.username, danger: true }).then(async (yes) => {
+    confirmDialog({ title: t('admin_system.delete_title', 'Delete user {username}?', { username: u.username }), body: t('admin_system.delete_body', '{username} is signed out on every device and cannot sign in again. Their phone app and device tokens stop working.', { username: u.username }), ok: t('admin_system.delete_ok', 'Delete {username}', { username: u.username }), danger: true }).then(async (yes) => {
       if (!yes) return;
-      try { await api('/api/users/' + enc(u.username), { method: 'DELETE' }); toast('User deleted'); load(); }
+      try { await api('/api/users/' + enc(u.username), { method: 'DELETE' }); toast(t('admin_system.user_deleted', 'User deleted')); load(); }
       catch (e) { toast(errText(e), { kind: 'err' }); }
     });
   }
@@ -315,12 +320,12 @@ let logsTimer = null;
 function logsPage(el) {
   el.innerHTML = '<div class="asys"><div class="asys-head"><span class="hint" id="lgCount"></span></div>' +
     '<div class="asys-bar-row">' +
-    '<select id="lgLevel" title="Minimum level"><option value="error">Errors</option><option value="warn">Warnings+</option><option value="info" selected>Info+</option></select>' +
-    '<input id="lgText" type="search" placeholder="Filter text..." autocomplete="off">' +
-    '<select id="lgLimit" title="Lines to load"><option>300</option><option>1000</option><option>2000</option></select>' +
-    '<label class="asys-chk"><input type="checkbox" id="lgFollow" checked> Follow</label>' +
+    '<select id="lgLevel" title="' + t('admin_system.min_level', 'Minimum level') + '"><option value="error">' + t('admin_system.lvl_errors', 'Errors') + '</option><option value="warn">' + t('admin_system.lvl_warnings', 'Warnings+') + '</option><option value="info" selected>' + t('admin_system.lvl_info', 'Info+') + '</option></select>' +
+    '<input id="lgText" type="search" placeholder="' + t('admin_system.filter_placeholder', 'Filter text...') + '" autocomplete="off">' +
+    '<select id="lgLimit" title="' + t('admin_system.lines_to_load', 'Lines to load') + '"><option>300</option><option>1000</option><option>2000</option></select>' +
+    '<label class="asys-chk"><input type="checkbox" id="lgFollow" checked> ' + t('admin_system.follow', 'Follow') + '</label>' +
     '<span class="grow"></span>' +
-    '<button class="btn" id="lgCopy">Copy</button><button class="btn" id="lgDl">Download</button></div>' +
+    '<button class="btn" id="lgCopy">' + t('admin_system.copy', 'Copy') + '</button><button class="btn" id="lgDl">' + t('admin_system.download', 'Download') + '</button></div>' +
     '<pre class="asys-log" id="lgOut"></pre></div>';
   const out = el.querySelector('#lgOut'), $ = (s) => el.querySelector(s);
   let lines = [], busy = false, sig = '';
@@ -333,8 +338,8 @@ function logsPage(el) {
   const fmtLine = (l) => clock(l) + ' ' + String(l.level).padEnd(5) + ' ' + l.target + ': ' + l.message;
   function draw() {
     const v = vis();
-    $('#lgCount').textContent = v.length + ' of ' + lines.length + ' lines';
-    out.innerHTML = v.length ? v.map(l => '<div class="lv-' + esc(String(l.level).toLowerCase()) + '"><span class="t">' + esc(clock(l)) + '</span> <span class="l">' + esc(l.level) + '</span> <span class="g">' + esc(l.target) + '</span> ' + esc(l.message) + '</div>').join('') : '<div class="muted">No log lines.</div>';
+    $('#lgCount').textContent = t('admin_system.lines_count', '{shown} of {total} lines', { shown: v.length, total: lines.length });
+    out.innerHTML = v.length ? v.map(l => '<div class="lv-' + esc(String(l.level).toLowerCase()) + '"><span class="t">' + esc(clock(l)) + '</span> <span class="l">' + esc(l.level) + '</span> <span class="g">' + esc(l.target) + '</span> ' + esc(l.message) + '</div>').join('') : '<div class="muted">' + t('admin_system.no_log_lines', 'No log lines.') + '</div>';
     if ($('#lgFollow').checked) out.scrollTop = out.scrollHeight;
   }
   async function tick() {
@@ -345,7 +350,7 @@ function logsPage(el) {
       const nl = d.lines || [];
       const s = nl.length + ':' + (nl.length ? nl[nl.length - 1].ts + nl[nl.length - 1].message : '');
       if (s !== sig) { sig = s; lines = nl; draw(); }
-    } catch (e) { out.textContent = 'Could not load logs: ' + errText(e); }
+    } catch (e) { out.textContent = t('admin_system.logs_failed', 'Could not load logs: {error}', { error: errText(e) }); }
     busy = false;
   }
   $('#lgLevel').onchange = $('#lgLimit').onchange = () => { sig = ''; tick(); };
@@ -353,10 +358,10 @@ function logsPage(el) {
   $('#lgFollow').onchange = () => { if ($('#lgFollow').checked) out.scrollTop = out.scrollHeight; };
   const text = () => vis().map(fmtLine).join('\n') + '\n';
   $('#lgCopy').onclick = async () => {
-    try { await navigator.clipboard.writeText(text()); toast('Copied ' + vis().length + ' lines'); }
+    try { await navigator.clipboard.writeText(text()); toast(t('admin_system.copied_lines', 'Copied {n, plural, one {# line} other {# lines}}', { n: vis().length })); }
     catch (e) {
       const r = document.createRange(); r.selectNodeContents(out); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
-      toast('Selected: press Ctrl+C to copy');
+      toast(t('admin_system.selected_copy', 'Selected: press Ctrl+C to copy'));
     }
   };
   $('#lgDl').onclick = () => {
@@ -374,12 +379,12 @@ function logsLeave() { clearInterval(logsTimer); logsTimer = null; }
 function auditPage(el) {
   el.innerHTML = '<div class="asys"><div class="asys-head"><span class="hint" id="auCount"></span></div>' +
     '<div class="asys-bar-row">' +
-    '<select id="auUser" title="User"><option value="">All users</option></select>' +
-    '<select id="auKind" title="What"><option value="">Everything</option><option value="sign">Sign-ins</option><option value="chg">Changes</option><option value="fail">Failures</option></select>' +
-    '<input id="auText" type="search" placeholder="Filter text..." autocomplete="off">' +
-    '<select id="auLimit" title="Entries to load"><option>200</option><option>1000</option><option>5000</option></select>' +
-    '<span class="grow"></span><button class="btn" id="auNow">' + ic('swap') + ' Refresh</button></div>' +
-    '<div id="auBody"><p class="empty">Loading...</p></div><div class="asys-pager" id="auPager"></div></div>';
+    '<select id="auUser" title="' + t('admin_system.th_user', 'User') + '"><option value="">' + t('admin_system.all_users', 'All users') + '</option></select>' +
+    '<select id="auKind" title="' + t('admin_system.what', 'What') + '"><option value="">' + t('admin_system.k_everything', 'Everything') + '</option><option value="sign">' + t('admin_system.k_signins', 'Sign-ins') + '</option><option value="chg">' + t('admin_system.k_changes', 'Changes') + '</option><option value="fail">' + t('admin_system.k_failures', 'Failures') + '</option></select>' +
+    '<input id="auText" type="search" placeholder="' + t('admin_system.filter_placeholder', 'Filter text...') + '" autocomplete="off">' +
+    '<select id="auLimit" title="' + t('admin_system.entries_to_load', 'Entries to load') + '"><option>200</option><option>1000</option><option>5000</option></select>' +
+    '<span class="grow"></span><button class="btn" id="auNow">' + ic('swap') + ' ' + t('admin_system.refresh', 'Refresh') + '</button></div>' +
+    '<div id="auBody"><p class="empty">' + t('admin_system.loading', 'Loading...') + '</p></div><div class="asys-pager" id="auPager"></div></div>';
   const $ = (s) => el.querySelector(s);
   const PER = 50;
   let rows = [], page = 0;
@@ -399,12 +404,12 @@ function auditPage(el) {
     const f = filtered();
     const pages = Math.max(1, Math.ceil(f.length / PER));
     page = Math.min(page, pages - 1);
-    $('#auCount').textContent = f.length + ' of ' + rows.length + ' entries';
+    $('#auCount').textContent = t('admin_system.entries_count', '{shown} of {total} entries', { shown: f.length, total: rows.length });
     const slice = f.slice(page * PER, page * PER + PER);
-    $('#auBody').innerHTML = slice.length ? wrap('<table class="asys-tbl"><thead><tr><th>When</th><th>User</th><th>What</th><th>Result</th><th>From</th></tr></thead><tbody>' +
+    $('#auBody').innerHTML = slice.length ? wrap('<table class="asys-tbl"><thead><tr><th>' + t('admin_system.th_when', 'When') + '</th><th>' + t('admin_system.th_user', 'User') + '</th><th>' + t('admin_system.what', 'What') + '</th><th>' + t('admin_system.th_result', 'Result') + '</th><th>' + t('admin_system.th_from', 'From') + '</th></tr></thead><tbody>' +
       slice.map(r => '<tr><td class="nowrap">' + esc(fmtTime(r.ts)) + '</td><td>' + esc(r.user || '-') + '</td><td>' + what(r) + '</td>' +
-        '<td><span class="badge ' + (r.status >= 400 ? 'off' : 'on') + '">' + r.status + '</span></td><td class="muted">' + esc(r.ip) + '</td></tr>').join('') + '</tbody></table>') : '<p class="empty">No matching entries.</p>';
-    $('#auPager').innerHTML = pages > 1 ? '<button class="btn" id="auPrev"' + (page ? '' : ' disabled') + '>' + ic('left') + ' Newer</button><span class="muted">Page ' + (page + 1) + ' of ' + pages + '</span><button class="btn" id="auNext"' + (page < pages - 1 ? '' : ' disabled') + '>Older ' + ic('right') + '</button>' : '';
+        '<td><span class="badge ' + (r.status >= 400 ? 'off' : 'on') + '">' + r.status + '</span></td><td class="muted">' + esc(r.ip) + '</td></tr>').join('') + '</tbody></table>') : '<p class="empty">' + t('admin_system.no_entries', 'No matching entries.') + '</p>';
+    $('#auPager').innerHTML = pages > 1 ? '<button class="btn" id="auPrev"' + (page ? '' : ' disabled') + '>' + ic('left') + ' ' + t('admin_system.newer', 'Newer') + '</button><span class="muted">' + t('admin_system.page_of', 'Page {page} of {pages}', { page: page + 1, pages }) + '</span><button class="btn" id="auNext"' + (page < pages - 1 ? '' : ' disabled') + '>' + t('admin_system.older', 'Older') + ' ' + ic('right') + '</button>' : '';
     const p = $('#auPrev'), n = $('#auNext');
     if (p) p.onclick = () => { page--; draw(); };
     if (n) n.onclick = () => { page++; draw(); };
@@ -415,9 +420,9 @@ function auditPage(el) {
       rows = d.entries || [];
       const sel = $('#auUser'), cur = sel.value;
       const users = [...new Set(rows.map(r => r.user).filter(Boolean))].sort();
-      sel.innerHTML = '<option value="">All users</option>' + users.map(u => '<option' + (u === cur ? ' selected' : '') + ' value="' + esc(u) + '">' + esc(u) + '</option>').join('');
+      sel.innerHTML = '<option value="">' + t('admin_system.all_users','All users') + '</option>' + users.map(u => '<option' + (u === cur ? ' selected' : '') + ' value="' + esc(u) + '">' + esc(u) + '</option>').join('');
       draw();
-    } catch (e) { $('#auBody').innerHTML = '<p class="empty">Could not load the audit log: ' + esc(errText(e)) + '</p>'; }
+    } catch (e) { $('#auBody').innerHTML = '<p class="empty">' + t('admin_system.could_not_load_audit', 'Could not load the audit log: {error}', { error: esc(errText(e)) }) + '</p>'; }
   }
   const re = () => { page = 0; draw(); };
   $('#auUser').onchange = $('#auKind').onchange = re;
@@ -427,6 +432,6 @@ function auditPage(el) {
   load();
 }
 
-registerAdminPage({ id: 'users', title: 'Users', order: 10, render: usersPage });
-registerAdminPage({ id: 'logs', title: 'Logs', order: 30, render: logsPage, leave: logsLeave });
-registerAdminPage({ id: 'audit', title: 'Audit', order: 40, render: auditPage });
+registerAdminPage({ id: 'users', title: t('admin_system.title_users','Users'), order: 10, render: usersPage });
+registerAdminPage({ id: 'logs', title: t('admin_system.title_logs','Logs'), order: 30, render: logsPage, leave: logsLeave });
+registerAdminPage({ id: 'audit', title: t('admin_system.title_audit','Audit'), order: 40, render: auditPage });

@@ -27,6 +27,18 @@ pub mod client;
 pub mod pushx;
 pub mod registry;
 pub mod cardlist;
+pub mod transport;
+pub mod wired;
+pub mod ctl;
+pub mod talk;
+#[cfg(test)]
+mod lab_probe;
+#[cfg(test)]
+mod lab_ctl_probe;
+#[cfg(test)]
+mod fake_cam;
+#[cfg(test)]
+mod talk_probe;
 
 /// Scheme for a battery Argus camera: `baichuan://<host>?uid=<UID>`.
 pub const SCHEME: &str = "baichuan://";

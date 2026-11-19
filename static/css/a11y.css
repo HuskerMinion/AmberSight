@@ -46,6 +46,13 @@ input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color])
 .seg button { border: 0; border-radius: 0 !important; background: transparent; padding: 4px 12px; min-height: 30px; }
 .seg button + button { margin-left: 0; border-left: 1px solid var(--line); }
 .seg button.on { background: var(--accent-soft); color: var(--accent); }
+/* Word choices never clip (long or translated labels): a label wraps between words, and when even its longest
+   word cannot fit the buttons move onto more rows. The separators are shadows, so the edge ones fall under the
+   pill's own border (clipped) and only the lines between buttons and between rows show. The icon-only view
+   styles (.vstyle) stay one row. */
+.seg:not(.vstyle) { flex-wrap: wrap; border-radius: 18px; }
+.seg:not(.vstyle) button { white-space: normal; overflow-wrap: break-word; line-height: 1.25; max-width: 100%; box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); }
+.seg:not(.vstyle) button + button { border-left: 0; }
 .evview .chip { padding: 4px 14px; min-height: 30px; }
 .evview .chip.on { background: var(--accent-soft); color: var(--accent); }
 .vstyle button { padding: 4px 10px; }

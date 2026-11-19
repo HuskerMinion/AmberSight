@@ -96,7 +96,8 @@ fn next_magic(data: &[u8], from: usize) -> Option<usize> {
 /// magic held that frame back forever (main stream: 175 KB in, 0 frames out).
 /// The size field is sometimes wrong on these cameras, so a validated magic
 /// before the claimed end wins, and otherwise the next magic delimits the frame.
-fn video_end(data: &[u8], i: usize, start: usize) -> Option<(usize, usize)> {
+/// The third value says the size field was not the frame's real size.
+fn video_end(data: &[u8], i: usize, start: usize) -> Option<(usize, usize, bool)> {
     let nm = next_magic(data, start);
     if let Some(size) = u32le(data, i + 8) {
         let end = start.saturating_add(size as usize);
@@ -105,11 +106,11 @@ fn video_end(data: &[u8], i: usize, start: usize) -> Option<(usize, usize)> {
                 if nm.is_some_and(|m| m < next) {
                     break; // a real boundary inside the claimed size: the size is wrong
                 }
-                return Some((end, next));
+                return Some((end, next, false));
             }
         }
     }
-    nm.map(|m| (m, m))
+    nm.map(|m| (m, m, true))
 }
 
 #[cfg(test)]
@@ -177,7 +178,7 @@ pub fn extract(data: &[u8], video: &mut Vec<u8>) -> Result<Stats> {
             // neither proves where it ends, the capture or stream was cut
             // mid-frame: HOLD IT BACK rather than emit a truncated frame that
             // decodes to a gray/garbled tail (ffmpeg "bytestream -12").
-            let Some((end, next)) = video_end(data, i, start) else {
+            let Some((end, next, _)) = video_end(data, i, start) else {
                 st.incomplete_tail = data.len() - i;
                 break;
             };
@@ -210,11 +211,18 @@ pub fn extract(data: &[u8], video: &mut Vec<u8>) -> Result<Stats> {
 
 /// One demuxed video access unit: its raw Annex-B bytes (start codes included),
 /// whether it is a keyframe, and the BcMedia per-frame timestamp in microseconds.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Frame {
     pub annexb: Vec<u8>,
     pub key: bool,
     pub micros: u32,
+    /// Its size field said more than came before the next frame: it was
+    /// probably cut short (battery cameras' size fields are sometimes just
+    /// wrong, so only the live TCP path treats this as damage).
+    pub cut: bool,
+    /// Bytes were skipped (damaged or lost media) between the frame before
+    /// it and this one.
+    pub after_damage: bool,
 }
 
 /// A streaming BcMedia demuxer. Feed reassembled preview bytes with [`Demux::push`]
@@ -234,6 +242,20 @@ pub struct Demux {
     /// local time. For an SD-card recording that is when the clip began (its
     /// PIR trigger); for live preview, the moment preview started.
     pub clip_start: Option<chrono::NaiveDateTime>,
+    /// Keep AAC audio frames (see `take_audio`); off: audio is dropped.
+    pub keep_audio: bool,
+    audio: Vec<Vec<u8>>,
+    /// The camera sent ADPCM audio (not passed on yet).
+    pub adpcm_seen: bool,
+    /// Times bytes had to be skipped to find the next frame (damaged or cut
+    /// media): the picture is not to be trusted until the next keyframe.
+    pub damaged: u64,
+    /// Video frames whose size field did not match where the next frame
+    /// starts (battery cameras do this now and then; on an always-on
+    /// camera it means a frame was cut).
+    pub resized: u64,
+    /// Damage seen since the last frame went out (see `Frame::after_damage`).
+    damage_pending: bool,
 }
 
 /// The start time in an info header at `i` (bytes 18..24: years since 1900,
@@ -267,6 +289,12 @@ impl Demux {
         Self::default()
     }
 
+    /// The AAC frames (each one ADTS frame, header included) demuxed since
+    /// the last call, in order. Only with `keep_audio`.
+    pub fn take_audio(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.audio)
+    }
+
     /// Append freshly reassembled bytes and return any newly-complete frames.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Frame> {
         let mut data = std::mem::take(&mut self.buf);
@@ -277,6 +305,8 @@ impl Demux {
             if !valid_magic(&data, i) {
                 match next_magic(&data, i) {
                     Some(m) => {
+                        self.damaged += 1;
+                        self.damage_pending = true;
                         i = m;
                         continue;
                     }
@@ -287,6 +317,8 @@ impl Demux {
                 let Some(addl) = u32le(&data, i + 12) else { break };
                 if addl > MAX_ADDL {
                     // Not a real frame header (a size no camera sends): resync.
+                    self.damaged += 1;
+                        self.damage_pending = true;
                     match next_magic(&data, i) {
                         Some(m) => {
                             i = m;
@@ -305,12 +337,15 @@ impl Demux {
                 }
                 // Complete once its size (or the next magic) proves where it
                 // ends; until then keep the bytes for the next push.
-                let Some((end, next)) = video_end(&data, i, start) else { break };
+                let Some((end, next, wrong_size)) = video_end(&data, i, start) else { break };
+                if wrong_size {
+                    self.resized += 1;
+                }
                 if !self.codec_seen {
                     self.h265 = &data[i + 4..i + 8] == b"H265";
                     self.codec_seen = true;
                 }
-                out.push(Frame { annexb: data[start..end].to_vec(), key: is_i, micros });
+                out.push(Frame { annexb: data[start..end].to_vec(), key: is_i, micros, cut: wrong_size, after_damage: std::mem::take(&mut self.damage_pending) });
                 i = next;
             } else if &data[i..i + 4] == b"1001" || &data[i..i + 4] == b"1002" {
                 if i + 32 > data.len() {
@@ -334,9 +369,21 @@ impl Demux {
                 // Audio: advance by its size field, resyncing if it misses.
                 let Some(size) = u16le(&data, i + 4) else { break };
                 let nxt = i + 8 + size as usize + pad8(size as usize);
+                let aac = &data[i..i + 4] == b"05wb";
+                if !aac {
+                    self.adpcm_seen = true;
+                }
+                if i + 8 + size as usize > data.len() && data.len() - i < 64 * 1024 {
+                    break; // the rest of this audio frame comes with the next push
+                }
                 i = if nxt <= data.len() && (nxt == data.len() || valid_magic(&data, nxt)) {
+                    if aac && self.keep_audio {
+                        self.audio.push(data[i + 8..i + 8 + size as usize].to_vec());
+                    }
                     nxt
                 } else {
+                    self.damaged += 1;
+                        self.damage_pending = true;
                     match next_magic(&data, i) {
                         Some(m) => m,
                         None => break,
@@ -350,6 +397,8 @@ impl Demux {
         // Never hold more than one oversized frame's worth: data that will not
         // parse (a broken stream) is dropped instead of growing without end.
         if data.len() > MAX_HELD {
+            self.damaged += 1;
+                        self.damage_pending = true;
             data.clear();
         }
         self.buf = data;

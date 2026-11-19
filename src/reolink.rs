@@ -29,6 +29,9 @@ pub struct ReolinkClient {
     pass: String,
     token: Option<(String, Instant)>,
     agent: ureq::Agent,
+    /// After a refused sign-in: no new sign-in before this (cameras lock an
+    /// account after a few wrong ones, and refuse logins that come too often).
+    login_blocked_until: Option<Instant>,
     /// For recording downloads: no total time limit (a big file takes a
     /// while), but each wait for the camera is limited.
     dl_agent: ureq::Agent,
@@ -36,6 +39,10 @@ pub struct ReolinkClient {
 
 /// Tokens last an hour; renew a little early.
 const TOKEN_LIFE: Duration = Duration::from_secs(50 * 60);
+/// The largest answer to a command (a search listing is the biggest: well under this).
+const MAX_ANSWER: u64 = 2 << 20;
+/// How long a refused sign-in keeps the client from signing in again.
+pub const LOGIN_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 impl ReolinkClient {
     /// `host` is an IP or name; HTTPS on port 443 is used (as Reolink hubs
@@ -66,7 +73,7 @@ impl ReolinkClient {
             .http_status_as_error(false)
             .build()
             .new_agent();
-        ReolinkClient { base: format!("https://{host}"), user: user.into(), pass: pass.into(), token: None, agent, dl_agent }
+        ReolinkClient { base: format!("https://{host}"), user: user.into(), pass: pass.into(), token: None, agent, login_blocked_until: None, dl_agent }
     }
 
     /// A client for a full base address ("https://host:port"), e.g. when
@@ -102,7 +109,8 @@ impl ReolinkClient {
             url.push_str(&query_part(t));
         }
         let mut resp = self.agent.post(&url).send_json(body).map_err(|e| self.request_error(cmd, e))?;
-        let v: Value = resp.body_mut().read_json().map_err(|e| anyhow!("{cmd}: unexpected answer: {}", self.scrub(e.to_string())))?;
+        // (A command's answer is small: a camera sending megabytes is refused.)
+        let v: Value = resp.body_mut().with_config().limit(MAX_ANSWER).read_json().map_err(|e| anyhow!("{cmd}: unexpected answer: {}", self.scrub(e.to_string())))?;
         Ok(v)
     }
 
@@ -143,12 +151,22 @@ impl ReolinkClient {
                 return Ok(t.clone());
             }
         }
+        if let Some(until) = self.login_blocked_until {
+            if Instant::now() < until {
+                bail!("the camera refused the sign-in a moment ago; not trying again for a few minutes (so the account is not locked)");
+            }
+            self.login_blocked_until = None;
+        }
         let body = json!([{ "cmd": "Login", "param": { "User": { "Version": "0", "userName": self.user, "password": self.pass } } }]);
         let v = self.post("Login", None, &body)?;
-        let t = v[0]["value"]["Token"]["name"]
-            .as_str()
-            .ok_or_else(|| anyhow!("sign-in to the camera failed: {}", error_text(&v[0])))?
-            .to_string();
+        let Some(t) = v[0]["value"]["Token"]["name"].as_str().map(str::to_string) else {
+            // A wrong password, a locked account, too many logins: wait before
+            // the next one (each retry would count against the account).
+            if matches!(v[0]["error"]["rspCode"].as_i64(), Some(-7 | -105 | -502 | -503 | -506 | -507 | -5)) {
+                self.login_blocked_until = Some(Instant::now() + LOGIN_BACKOFF);
+            }
+            bail!("sign-in to the camera failed: {}", error_text(&v[0]));
+        };
         self.token = Some((t.clone(), Instant::now()));
         Ok(t)
     }
@@ -189,6 +207,40 @@ impl ReolinkClient {
     }
 }
 
+/// A command the camera answered with an error code.
+#[derive(Debug)]
+pub struct CamError {
+    pub cmd: String,
+    /// Reolink's `rspCode`: -9 "not support", -26 "ability error" (this
+    /// account may not), -6 "please login first", ...
+    pub code: i64,
+    pub detail: String,
+}
+
+impl CamError {
+    /// The camera does not have this (as opposed to a refusal or a failure).
+    pub fn unsupported(&self) -> bool {
+        self.code == -9
+    }
+    /// The camera's account may not do this.
+    pub fn not_allowed(&self) -> bool {
+        self.code == -26
+    }
+}
+
+impl std::fmt::Display for CamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: the camera answered {} ({})", self.cmd, self.code, self.detail)
+    }
+}
+
+impl std::error::Error for CamError {}
+
+/// The camera's own error in `e`, if it answered with one.
+pub fn cam_error(e: &anyhow::Error) -> Option<&CamError> {
+    e.chain().find_map(|c| c.downcast_ref::<CamError>())
+}
+
 /// A request that never reached the camera's web server at that address.
 #[derive(Debug)]
 pub struct Unreachable(String);
@@ -216,8 +268,15 @@ fn query_part(s: &str) -> String {
 /// hundred; far more is a camera answering nonsense.
 pub const MAX_SEARCH_FILES: usize = 2000;
 
+/// The camera's own words for an error, made safe for a log line, the
+/// audit and an API answer: no control characters (a line break would forge
+/// a log line), no markup, at most a short line.
 fn error_text(r: &Value) -> String {
-    r["error"]["detail"].as_str().map(|s| s.to_string()).unwrap_or_else(|| r.to_string())
+    let raw = match r["error"]["detail"].as_str() {
+        Some(d) => d.to_string(),
+        None => r.to_string().chars().take(4096).collect(),
+    };
+    crate::onvif::scrub_device_text(&raw)
 }
 
 /// One recording on the camera's own card, from `Search`. Times are the
@@ -284,6 +343,17 @@ impl ReolinkClient {
             return Ok(r);
         }
         bail!("the camera keeps rejecting the sign-in token")
+    }
+
+    /// One command (`action` 1 also asks for the allowed ranges); the
+    /// answer's object (`value`, and `range` when asked) on success, a
+    /// [`CamError`] when the camera refused it.
+    pub fn command(&mut self, cmd: &str, action: u32, param: Value) -> Result<Value> {
+        let r = self.call(cmd, action, param)?;
+        if r["code"].as_i64() == Some(0) {
+            return Ok(r);
+        }
+        Err(anyhow::Error::new(CamError { cmd: cmd.to_string(), code: r["error"]["rspCode"].as_i64().unwrap_or(0), detail: error_text(&r) }))
     }
 
     /// The camera's clock as it shows it (local time, no zone).
@@ -466,6 +536,25 @@ mod tests {
         assert!(c.scrub("token a b&c/d in text".into()).contains("***"));
         // The token goes into an address percent-encoded.
         assert_eq!(query_part("a b&c/d"), "a%20b%26c%2Fd");
+    }
+
+    #[test]
+    fn a_cameras_error_text_cannot_forge_log_lines_or_flood() {
+        let forged = "bad\n2026-11-18T03:00:00Z  INFO auth: admin signed in\r\u{1b}[31m";
+        let t = error_text(&json!({ "error": { "detail": forged, "rspCode": -1 } }));
+        assert!(!t.contains('\n') && !t.contains('\r') && !t.contains('\u{1b}'), "{t:?}");
+        let huge = "A".repeat(8 << 20);
+        let t = error_text(&json!({ "error": { "detail": huge, "rspCode": -1 } }));
+        assert!(t.chars().count() <= 200, "{}", t.len());
+        let t = error_text(&json!({ "no": "detail", "x": "y".repeat(100_000) }));
+        assert!(t.chars().count() <= 200);
+        // An answer of megabytes is refused, not read.
+        let body = format!("[{{\"cmd\":\"GetTime\",\"code\":1,\"error\":{{\"rspCode\":-1,\"detail\":\"{}\"}}}}]", "A".repeat(3 << 20));
+        let (cam, _) = serve(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
+        let mut c = ReolinkClient::with_base(&format!("http://127.0.0.1:{cam}"), "u", "p");
+        c.token = Some(("tok".into(), Instant::now()));
+        let e = format!("{:#}", c.camera_clock().unwrap_err());
+        assert!(e.len() < 1000, "{}", e.len());
     }
 
     #[test]

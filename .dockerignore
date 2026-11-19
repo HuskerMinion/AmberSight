@@ -2,6 +2,8 @@
 *
 !Cargo.toml
 !Cargo.lock
+!build.rs
+!lang
 !src
 !static
 !models
@@ -10,3 +12,4 @@
 !LICENSE
 !THIRD-PARTY-NOTICES.txt
 !docker/entrypoint.sh
+!scripts/package-openvino-addon.sh

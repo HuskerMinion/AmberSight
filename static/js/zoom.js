@@ -4,6 +4,7 @@
 // zooms in at a point (or back out), + - 0 from the keyboard. Purely a view transform:
 // nothing is sent to the camera (PTZ cameras keep their own controls in the dock).
 
+import { t } from './i18n.js';
 const MAX = 8;
 
 // Zoom for the pictures in `host` (all its video/img/canvas move together,
@@ -71,7 +72,7 @@ export function createZoom(host, opts) {
         badge = document.createElement('button');
         badge.type = 'button';
         badge.className = 'btn glass zoombadge';
-        badge.title = opts.badgeTitle || 'Zoomed in: click, double-click the picture or press 0 to reset';
+        badge.title = opts.badgeTitle || t('zoom.badge_title', 'Zoomed in: click, double-click the picture or press 0 to reset');
         badge.addEventListener('pointerdown', (e) => e.stopPropagation());
         badge.addEventListener('click', (e) => { e.stopPropagation(); reset(); });
         host.appendChild(badge);

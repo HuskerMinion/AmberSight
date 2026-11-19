@@ -15,6 +15,10 @@ Packager:       HuskerMinion <28571744+HuskerMinion@users.noreply.github.com>
 Requires:       ffmpeg
 Requires:       curl
 Requires(pre):  shadow-utils
+%ifarch x86_64
+# Intel's compute driver: the AI on Intel graphics (OpenVINO).
+Suggests:       intel-compute-runtime
+%endif
 
 %description
 AmberSight records IP cameras (RTSP, ONVIF, HTTP), USB cameras and capture

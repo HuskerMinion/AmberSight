@@ -5,7 +5,9 @@
 //! accurate, about five times the work) or `yolox_tiny.onnx` (416x416, faster). The model input size is read from the file. Runs on a
 //! graphics card where this build can use one (Windows: DirectML, any
 //! DirectX 12 card; 64-bit Linux PCs: an NVIDIA card with CUDA 13 and cuDNN 9,
-//! see gpu_addon.rs; Apple silicon Macs: Core ML), else on the CPU; detection
+//! else Intel graphics with OpenVINO, see gpu_addon.rs and openvino.rs; Apple
+//! silicon Macs: Core ML), else on the CPU. On a card the checks run on a
+//! thread of their own with a time limit (ai_card.rs); detection
 //! only runs while motion is happening, so a few hundred milliseconds per
 //! frame on the CPU is fine.
 
@@ -44,12 +46,23 @@ pub struct Detection {
 
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 pub struct AiDetector {
-    session: Mutex<Session>,
+    run: Runner,
     size: usize,
     /// The graphics card it runs on (None: the CPU).
     gpu: Option<String>,
     // Keeps the runtime environment alive for the session.
-    _env: ort::environment::Environment,
+    _env: Option<ort::environment::Environment>,
+}
+
+/// Where the checks run: here, on the caller's thread (the CPU), or on the
+/// graphics card's own thread with a time limit (see ai_card.rs).
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+enum Runner {
+    Here(Mutex<Session>),
+    Card(crate::ai_card::CardThread),
+    /// Tests: a processor detector with no model (`fake::cpu`).
+    #[cfg(test)]
+    Fake(Box<dyn Fn(crate::ai_card::Input) -> Result<crate::ai_card::Output, String> + Send + Sync>),
 }
 
 /// Why the last model load is not on the graphics card although one was
@@ -58,16 +71,18 @@ pub struct AiDetector {
 static GPU_NOTE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Why the AI is not on the graphics card (see `GPU_NOTE`); on Linux, a
-/// download of the NVIDIA add-on in progress or failed comes first.
+/// download of an add-on in progress or failed comes first.
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 pub fn gpu_note() -> Option<String> {
     let note = GPU_NOTE.lock().unwrap().clone();
     // (gpu_addon::note is None once a usable copy is there, so a stale
     // download failure never hides the real reason.)
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if note.is_some() {
-        if let Some(n) = crate::gpu_addon::note() {
-            return Some(n);
+    if note.is_some() && crate::ai_card::blocked().is_none() {
+        for a in [crate::gpu_addon::Addon::Cuda, crate::gpu_addon::Addon::OpenVino] {
+            if let Some(n) = crate::gpu_addon::note(a) {
+                return Some(n);
+            }
         }
     }
     note
@@ -101,6 +116,103 @@ pub(crate) fn runtime() -> Result<ort::environment::Environment> {
     Ok(e)
 }
 
+/// The model's input size ([1, 3, S, S]); 640 when it is dynamic.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn input_size_of(session: &Session) -> usize {
+    match session.inputs().first().map(|i| i.dtype()) {
+        Some(ort::value::ValueType::Tensor { shape, .. }) => shape.get(2).copied().filter(|d| *d > 0).unwrap_or(640) as usize,
+        _ => 640,
+    }
+}
+
+/// Run a session on one input: its first output (shape, values).
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn run_session(session: &mut Session, input: crate::ai_card::Input) -> Result<crate::ai_card::Output, String> {
+    let tensor = ort::value::Tensor::from_array(input).map_err(|e| format!("AI input: {e}"))?;
+    let outputs = session.run(ort::inputs![tensor]).map_err(|e| e.to_string())?;
+    let out = outputs[0].try_extract_array::<f32>().map_err(|e| format!("AI output: {e}"))?;
+    Ok((out.shape().to_vec(), out.iter().copied().collect()))
+}
+
+/// Not worth a warning: graphics built into an Intel processor without
+/// Intel's compute driver (most such computers never meant the AI to use
+/// them; Settings still says what to install).
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn quiet_reason(card: &crate::gpu::Gpu, why: &str) -> bool {
+    card.api == "OpenVINO" && crate::gpu::built_in(&card.bus) && crate::openvino::is_driver_missing(why)
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+fn quiet_reason(_card: &crate::gpu::Gpu, _why: &str) -> bool {
+    false
+}
+
+/// Whether an Intel card may stand in for `card` when it cannot be used: an
+/// NVIDIA card the AI picked itself, not one named in the settings.
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+fn may_fall_over(card: &crate::gpu::Gpu, gpu_name: Option<&str>) -> bool {
+    card.api == "CUDA" && !gpu_name.is_some_and(|n| n == card.name)
+}
+
+/// Fake detectors for tests of what the engine does with the card (no
+/// model, no card): the model path `MODEL` loads them.
+#[cfg(all(test, not(all(target_os = "macos", target_arch = "x86_64"))))]
+pub(crate) mod fake {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    pub const MODEL: &str = "/nowhere/fake-model-for-tests.onnx";
+
+    /// What a move onto the card gets (None: no card).
+    pub type MakeCard = Arc<dyn Fn() -> Option<AiDetector> + Send + Sync>;
+    pub static CARD: Mutex<Option<MakeCard>> = Mutex::new(None);
+    /// Checks done by fake processor detectors.
+    pub static CPU_CHECKS: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn is_fake(model: &Path) -> bool {
+        model == Path::new(MODEL)
+    }
+
+    /// An empty answer of the model's shape (nothing found).
+    pub fn nothing() -> crate::ai_card::Output {
+        (vec![1, 0, 85], Vec::new())
+    }
+
+    pub fn cpu() -> AiDetector {
+        let run = |_i: crate::ai_card::Input| {
+            CPU_CHECKS.fetch_add(1, Ordering::SeqCst);
+            Ok(nothing())
+        };
+        AiDetector { run: Runner::Fake(Box::new(run)), size: 32, gpu: None, _env: None }
+    }
+
+    /// A card ("OpenVINO") whose checks `run` does, with this time limit.
+    pub fn card(deadline: std::time::Duration, run: impl FnMut(crate::ai_card::Input) -> Result<crate::ai_card::Output, String> + Send + 'static) -> AiDetector {
+        let (t, _) = crate::ai_card::CardThread::start("OpenVINO", std::time::Duration::from_secs(5), move || Ok((run, ()))).unwrap();
+        AiDetector { run: Runner::Card(t.with_deadline(deadline)), size: 32, gpu: Some("Test card".into()), _env: None }
+    }
+}
+
+/// What `AiDetector::try_card` came to.
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+pub enum CardTry {
+    OnCard(AiDetector),
+    /// No card, or it cannot be used now, and what Settings' note should say
+    /// (None: nothing). The caller writes the note (`set_gpu_note`), once it
+    /// knows its result is the one in use.
+    NotUsed(Option<String>),
+}
+
+/// What a session made on a card says about itself.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+struct OnCard {
+    size: usize,
+    /// The card's name as shown ("Intel(R) Arc(TM) B580 Graphics").
+    name: String,
+}
+
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 impl AiDetector {
     /// On the graphics card where possible (see `load_on`).
@@ -109,41 +221,106 @@ impl AiDetector {
     }
 
     /// `gpu`: run on a graphics card where this build can (see the top of
-    /// this file): the one named `gpu_name`, else the one with the most
-    /// video memory; the CPU if none can be used. `gpu_memory_mb` caps the
-    /// memory pool on an NVIDIA card.
+    /// this file, and `try_card`), waiting for it; the CPU if none can be
+    /// used, or the cards are off for the AI until a restart
+    /// (`ai_card::blocked`). `gpu_memory_mb` caps the memory pool on an
+    /// NVIDIA card. (The engine does not wait: it starts on the CPU and
+    /// moves to the card in the background.)
     pub fn load_on(model: &Path, threads: usize, gpu: bool, gpu_name: Option<&str>, gpu_memory_mb: u32) -> Result<Self> {
-        let env = runtime()?;
-        let cpu = || -> Result<Session> {
-            Session::builder(&env)
-                .map_err(|e| anyhow!("AI runtime: {e}"))?
-                .with_intra_threads(threads.max(1))
-                .map_err(|e| anyhow!("AI runtime: {e}"))?
-                .commit_from_file(model)
-                .map_err(|e| anyhow!("could not load AI model {}: {e}", model.display()))
-        };
-        let card = if gpu { crate::gpu::pick(&crate::gpu::list(), gpu_name) } else { None };
-        // No card wanted (turned off, or none there): a download waiting to retry stops.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        if card.is_none() {
-            crate::gpu_addon::not_wanted();
+        if !gpu {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            crate::gpu_addon::none_wanted();
+            *GPU_NOTE.lock().unwrap() = None;
+            return Self::load_cpu(model, threads);
         }
-        let tried = card.as_ref().map(|c| (c, gpu_session(&env, model, c, threads.max(1), gpu_memory_mb)));
-        let (session, gpu, note) = match tried {
-            Some((c, Ok(s))) => (s, Some(c.name.clone()), None),
-            Some((c, Err(why))) => {
-                tracing::warn!("AI: the graphics card {} cannot be used ({why}); using the CPU", c.name);
-                (cpu()?, None, Some(why))
+        match Self::try_card(model, threads, gpu_name, gpu_memory_mb) {
+            CardTry::OnCard(d) => {
+                *GPU_NOTE.lock().unwrap() = None;
+                Ok(d)
             }
-            None => (cpu()?, None, None),
+            CardTry::NotUsed(note) => {
+                *GPU_NOTE.lock().unwrap() = note;
+                Self::load_cpu(model, threads)
+            }
+        }
+    }
+
+    /// On the processor only (Settings' note about the card is left as it is).
+    pub fn load_cpu(model: &Path, threads: usize) -> Result<Self> {
+        #[cfg(test)]
+        if fake::is_fake(model) {
+            return Ok(fake::cpu());
+        }
+        let env = runtime()?;
+        let session = Session::builder(&env)
+            .map_err(|e| anyhow!("AI runtime: {e}"))?
+            .with_intra_threads(threads.max(1))
+            .map_err(|e| anyhow!("AI runtime: {e}"))?
+            .commit_from_file(model)
+            .map_err(|e| anyhow!("could not load AI model {}: {e}", model.display()))?;
+        Ok(AiDetector { size: input_size_of(&session), run: Runner::Here(Mutex::new(session)), gpu: None, _env: Some(env) })
+    }
+
+    /// On a graphics card, waiting for its session and one first check: the
+    /// one named `gpu_name`, else the best one (`gpu::pick`); an NVIDIA card
+    /// that cannot be used gives way to an Intel one unless it was named.
+    /// Says why not when it is not used.
+    pub fn try_card(model: &Path, threads: usize, gpu_name: Option<&str>, gpu_memory_mb: u32) -> CardTry {
+        if let Some(b) = crate::ai_card::blocked() {
+            return CardTry::NotUsed(Some(b));
+        }
+        #[cfg(test)]
+        if fake::is_fake(model) {
+            let make = fake::CARD.lock().unwrap().clone();
+            return match make.and_then(|m| m()) {
+                Some(d) => CardTry::OnCard(d),
+                None => CardTry::NotUsed(Some("no test card".into())),
+            };
+        }
+        let env = match runtime() {
+            Ok(e) => e,
+            Err(e) => return CardTry::NotUsed(Some(format!("{e:#}"))),
         };
-        *GPU_NOTE.lock().unwrap() = note;
-        // Input is [1, 3, S, S]; fall back to 640 when the size is dynamic.
-        let size = match session.inputs().first().map(|i| i.dtype()) {
-            Some(ort::value::ValueType::Tensor { shape, .. }) => shape.get(2).copied().filter(|d| *d > 0).unwrap_or(640) as usize,
-            _ => 640,
+        let cards = crate::gpu::list();
+        let Some(card) = crate::gpu::pick(&cards, gpu_name) else {
+            // No card: a download waiting to retry stops.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            crate::gpu_addon::none_wanted();
+            return CardTry::NotUsed(None);
         };
-        Ok(AiDetector { session: Mutex::new(session), size, gpu, _env: env })
+        let mut tried = (card.clone(), on_card(&env, model, &card, &cards, gpu_name, threads.max(1), gpu_memory_mb));
+        // An NVIDIA card that cannot be used: an Intel one may do (not when
+        // the owner chose that NVIDIA card).
+        let instead = match &tried {
+            (c, Err(why)) if may_fall_over(c, gpu_name) && crate::ai_card::blocked().is_none() => {
+                let intel: Vec<crate::gpu::Gpu> = cards.iter().filter(|g| g.api == "OpenVINO").cloned().collect();
+                let i = crate::gpu::pick(&intel, gpu_name);
+                if let Some(i) = &i {
+                    tracing::warn!("AI: the graphics card {} cannot be used ({why}); trying {}", c.name, i.name);
+                }
+                i
+            }
+            _ => None,
+        };
+        if let Some(i) = instead {
+            let r = on_card(&env, model, &i, &cards, gpu_name, threads.max(1), gpu_memory_mb);
+            if r.is_ok() {
+                tried = (i, r);
+            }
+        }
+        match tried {
+            (_, Ok((thread, found))) => {
+                CardTry::OnCard(AiDetector { run: Runner::Card(thread), size: found.size, gpu: Some(found.name), _env: Some(env) })
+            }
+            (c, Err(why)) => {
+                if quiet_reason(&c, &why) {
+                    tracing::info!("AI: the graphics card {} cannot be used ({why}); using the CPU", c.name);
+                } else {
+                    tracing::warn!("AI: the graphics card {} cannot be used ({why}); using the CPU", c.name);
+                }
+                CardTry::NotUsed(Some(why))
+            }
+        }
     }
 
     pub fn input_size(&self) -> usize {
@@ -153,6 +330,33 @@ impl AiDetector {
     /// The graphics card it runs on (None: the CPU).
     pub fn gpu_name(&self) -> Option<&str> {
         self.gpu.as_deref()
+    }
+
+    /// What it runs the card with ("CUDA", "OpenVINO", "DirectML", "Core ML"; None: the CPU).
+    pub fn gpu_api(&self) -> Option<&'static str> {
+        match &self.run {
+            Runner::Card(t) => Some(t.api()),
+            Runner::Here(_) => None,
+            #[cfg(test)]
+            Runner::Fake(_) => None,
+        }
+    }
+
+    /// Its card thread is stuck in a check (or the card faulted).
+    pub fn card_stuck(&self) -> bool {
+        matches!(&self.run, Runner::Card(t) if t.stuck())
+    }
+
+    /// At shutdown: let a card's session go once its check in progress is
+    /// done (`ai_card::CardThread::finish`). False when the card is stuck or
+    /// faulted and its session is left alone.
+    pub fn finish(self, wait: std::time::Duration) -> bool {
+        match self.run {
+            Runner::Card(t) => t.finish(wait),
+            Runner::Here(_) => true,
+            #[cfg(test)]
+            Runner::Fake(_) => true,
+        }
     }
 
     /// Detect objects in a JPEG (or any image format the image crate reads).
@@ -189,7 +393,8 @@ impl AiDetector {
         Ok(merge_same(all))
     }
 
-    /// Detect objects in a decoded picture.
+    /// Detect objects in a decoded picture. On a card, a check that fails
+    /// there is an `ai_card::CardFailure` (the caller can tell it).
     pub fn detect_rgb(&self, img: &image::RgbImage, min_score: f32) -> Result<Vec<Detection>> {
         let (iw, ih) = (img.width() as f32, img.height() as f32);
         let s = self.size;
@@ -205,15 +410,21 @@ impl AiDetector {
             input[[0, 1, y, x]] = p[1] as f32;
             input[[0, 2, y, x]] = p[0] as f32;
         }
-        let tensor = ort::value::Tensor::from_array(input).map_err(|e| anyhow!("AI input: {e}"))?;
-        let mut session = self.session.lock().unwrap();
-        let outputs = session.run(ort::inputs![tensor]).map_err(|e| anyhow!("AI inference: {e}"))?;
-        let out = outputs[0].try_extract_array::<f32>().map_err(|e| anyhow!("AI output: {e}"))?;
-        let shape = out.shape().to_vec();
-        if shape.len() != 3 || shape[2] < 6 {
+        let (shape, flat) = match &self.run {
+            Runner::Here(session) => run_session(&mut session.lock().unwrap(), input).map_err(|e| anyhow!("AI inference: {e}"))?,
+            #[cfg(test)]
+            Runner::Fake(f) => f(input).map_err(|e| anyhow!("AI inference: {e}"))?,
+            Runner::Card(t) => {
+                // (Not a card error: the check is just not done.)
+                if crate::ai_card::stopping() {
+                    return Err(anyhow!("AmberSight is stopping, so no new AI checks start"));
+                }
+                t.run(input).map_err(anyhow::Error::new)?
+            }
+        };
+        if shape.len() != 3 || shape[2] < 6 || flat.len() < shape[1] * shape[2] {
             return Err(anyhow!("unexpected AI model output shape {shape:?}"));
         }
-        let flat: Vec<f32> = out.iter().copied().collect();
         let dets = decode_yolox(&flat, shape[1], shape[2], s, min_score);
         Ok(nms(dets, NMS_IOU)
             .into_iter()
@@ -258,11 +469,46 @@ fn merge_same(mut d: Vec<Detection>) -> Vec<Detection> {
     out
 }
 
+/// Make the session for `card` on a card thread of its own (ai_card.rs):
+/// the thread and what it found, or why not. A load that takes too long
+/// turns the cards off for the AI until a restart.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn on_card(
+    env: &ort::environment::Environment,
+    model: &Path,
+    card: &crate::gpu::Gpu,
+    cards: &[crate::gpu::Gpu],
+    want: Option<&str>,
+    threads: usize,
+    memory_mb: u32,
+) -> Result<(crate::ai_card::CardThread, OnCard), String> {
+    let (env, model, card, cards, want) = (env.clone(), model.to_path_buf(), card.clone(), cards.to_vec(), want.map(String::from));
+    let api = card.api;
+    let started = crate::ai_card::CardThread::start(api, crate::ai_card::LOAD_DEADLINE, move || {
+        let (mut session, name) = gpu_session(&env, &model, &card, &cards, want.as_deref(), threads, memory_mb)?;
+        let size = input_size_of(&session);
+        let run = move |input: crate::ai_card::Input| run_session(&mut session, input);
+        Ok((run, OnCard { size, name }))
+    });
+    match started {
+        Ok(t) => Ok(t),
+        Err(crate::ai_card::LoadError::Failed(why)) => Err(why),
+        Err(crate::ai_card::LoadError::Timeout(d)) => {
+            // (Often a card still wedged by an earlier process: the next
+            // start gets it back once the driver has reset it.)
+            let why = crate::ai_card::load_off_text(api, d);
+            tracing::warn!("AI: the graphics card did not load the model and run a first check within {} s ({api}): {why}", d.as_secs());
+            crate::ai_card::block(&why);
+            Err(why)
+        }
+    }
+}
+
 /// A session on the graphics card, or why not (no DirectX 12 GPU, a driver
 /// problem, missing libraries: the caller logs it and uses the CPU).
 #[cfg(windows)]
-fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::gpu::Gpu, _threads: usize, _memory_mb: u32) -> Result<Session, String> {
-    (|| -> Result<Session> {
+fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::gpu::Gpu, _cards: &[crate::gpu::Gpu], _want: Option<&str>, _threads: usize, _memory_mb: u32) -> Result<(Session, String), String> {
+    let mut session = (|| -> Result<Session> {
         Session::builder(env)
             .map_err(|e| anyhow!("{e}"))?
             // DirectML needs these two off.
@@ -275,7 +521,20 @@ fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::
             .commit_from_file(model)
             .map_err(|e| anyhow!("{e}"))
     })()
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    try_once(&mut session).map_err(|e| e.to_string())?;
+    Ok((session, card.name.clone()))
+}
+
+/// 64-bit Linux: the chosen card, NVIDIA (CUDA) or Intel (OpenVINO).
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::gpu::Gpu, cards: &[crate::gpu::Gpu], want: Option<&str>, threads: usize, memory_mb: u32) -> Result<(Session, String), String> {
+    // (A download of the other add-on is left to go on: an NVIDIA card whose
+    // add-on is still coming is used once it is in.)
+    if card.api == "OpenVINO" {
+        return openvino_session(env, model, cards, want, threads);
+    }
+    cuda_session(env, model, card, threads, memory_mb).map(|s| (s, card.name.clone()))
 }
 
 /// An NVIDIA card through CUDA: needs NVIDIA's CUDA 13 and cuDNN 9
@@ -284,15 +543,16 @@ fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::
 /// picture is run through it before it is used, so a card that cannot run
 /// the model is found now and not on every check.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::gpu::Gpu, threads: usize, memory_mb: u32) -> Result<Session, String> {
+fn cuda_session(env: &ort::environment::Environment, model: &Path, card: &crate::gpu::Gpu, threads: usize, memory_mb: u32) -> Result<Session, String> {
+    use crate::gpu_addon::Addon;
     if let Some(why) = crate::gpu_addon::missing_system_libs() {
         return Err(why);
     }
-    let dir = match crate::gpu_addon::find()? {
+    let dir = match crate::gpu_addon::find(Addon::Cuda)? {
         Some(d) => d,
         None => {
-            crate::gpu_addon::start_download();
-            return Err(crate::gpu_addon::note().unwrap_or_else(|| "the NVIDIA add-on for the AI is not installed".into()));
+            crate::gpu_addon::start_download(Addon::Cuda);
+            return Err(crate::gpu_addon::note(Addon::Cuda).unwrap_or_else(|| "the NVIDIA add-on for the AI is not installed".into()));
         }
     };
     let device = if card.bus.is_empty() { card.index as i32 } else { crate::gpu_addon::cuda_device(&card.bus)? };
@@ -324,10 +584,63 @@ fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::
     Ok(session)
 }
 
+/// Intel graphics through OpenVINO: needs Intel's compute driver (checked
+/// first: nothing is downloaded without it) and the Intel add-on
+/// (downloaded when missing; the AI is reloaded once it is in). OpenVINO
+/// is asked which cards it sees, and the one named `want` (else the best)
+/// is used by OpenVINO's own number for it. One picture is run through it
+/// before it is used. Default precision; compiled models are kept in the
+/// data folder's cache (openvino.rs).
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn openvino_session(env: &ort::environment::Environment, model: &Path, cards: &[crate::gpu::Gpu], want: Option<&str>, threads: usize) -> Result<(Session, String), String> {
+    use crate::gpu_addon::Addon;
+    let intel: Vec<crate::gpu::Gpu> = cards.iter().filter(|g| g.api == "OpenVINO").cloned().collect();
+    let render: Vec<String> = intel.iter().map(|g| g.render.clone()).filter(|r| !r.is_empty()).collect();
+    if let Some(why) = crate::openvino::missing_driver(&render) {
+        return Err(why);
+    }
+    let dir = match crate::gpu_addon::find(Addon::OpenVino)? {
+        Some(d) => d,
+        None => {
+            crate::gpu_addon::start_download(Addon::OpenVino);
+            return Err(crate::gpu_addon::note(Addon::OpenVino).unwrap_or_else(|| "the Intel graphics add-on for the AI is not installed".into()));
+        }
+    };
+    crate::openvino::preload(&dir)?;
+    let found = crate::openvino::cards()?;
+    crate::openvino::remember(&found);
+    // The chosen card again, now with OpenVINO's names (Settings shows those).
+    let named: Vec<crate::gpu::Gpu> = intel
+        .iter()
+        .map(|g| match found.iter().find(|f| f.bus.eq_ignore_ascii_case(&g.bus)) {
+            Some(f) => crate::gpu::Gpu { name: f.name.clone(), memory_mb: f.memory_mb, ..g.clone() },
+            None => g.clone(),
+        })
+        .collect();
+    let mut named = named;
+    crate::gpu::number_same_names(&mut named);
+    let chosen = crate::gpu::pick(&named, want).ok_or("no Intel card")?;
+    let ov = found
+        .iter()
+        .find(|f| f.bus.eq_ignore_ascii_case(&chosen.bus))
+        .or_else(|| (found.len() == 1).then(|| &found[0]))
+        .ok_or_else(|| format!("OpenVINO does not see the card at {} (it sees {})", chosen.bus, found.iter().map(|f| f.bus.as_str()).collect::<Vec<_>>().join(", ")))?;
+    let options = crate::openvino::provider_options(&ov.id);
+    let mut session = crate::gpu_addon::with_runtime_dir(&dir, || -> Result<Session, String> {
+        let mut b = Session::builder(env).map_err(|e| e.to_string())?.with_intra_threads(threads).map_err(|e| e.to_string())?;
+        crate::openvino::append_provider(&mut b, &options)?;
+        b.commit_from_file(model).map_err(|e| e.to_string())
+    })?
+    .map_err(|e| short_ort_error(&e))?;
+    try_once(&mut session).map_err(|e| short_ort_error(&e.to_string()))?;
+    tracing::info!("AI: OpenVINO runs the model on {} ({})", chosen.name, ov.id);
+    Ok((session, chosen.name))
+}
+
 /// Apple silicon: Core ML (Neural Engine and GPU). Parts of a model Core ML
 /// cannot run stay on the CPU by themselves.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn gpu_session(env: &ort::environment::Environment, model: &Path, _card: &crate::gpu::Gpu, threads: usize, _memory_mb: u32) -> Result<Session, String> {
+fn gpu_session(env: &ort::environment::Environment, model: &Path, card: &crate::gpu::Gpu, _cards: &[crate::gpu::Gpu], _want: Option<&str>, threads: usize, _memory_mb: u32) -> Result<(Session, String), String> {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
     let coreml = ort::ep::CoreML::default().with_model_format(ModelFormat::MLProgram).with_compute_units(ComputeUnits::All).build().error_on_failure();
     let mut session = (|| -> Result<Session> {
@@ -342,24 +655,21 @@ fn gpu_session(env: &ort::environment::Environment, model: &Path, _card: &crate:
     })()
     .map_err(|e| short_ort_error(&e.to_string()))?;
     try_once(&mut session).map_err(|e| short_ort_error(&e.to_string()))?;
-    Ok(session)
+    Ok((session, card.name.clone()))
 }
 
 #[cfg(not(any(windows, all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), target_os = "macos")))]
-fn gpu_session(_env: &ort::environment::Environment, _model: &Path, _card: &crate::gpu::Gpu, _threads: usize, _memory_mb: u32) -> Result<Session, String> {
+fn gpu_session(_env: &ort::environment::Environment, _model: &Path, _card: &crate::gpu::Gpu, _cards: &[crate::gpu::Gpu], _want: Option<&str>, _threads: usize, _memory_mb: u32) -> Result<(Session, String), String> {
     Err("this build has no graphics card support".into())
 }
 
 /// Run one blank picture through a new session.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+#[cfg_attr(not(any(windows, all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))), allow(dead_code))]
 fn try_once(session: &mut Session) -> Result<()> {
-    let s = match session.inputs().first().map(|i| i.dtype()) {
-        Some(ort::value::ValueType::Tensor { shape, .. }) => shape.get(2).copied().filter(|d| *d > 0).unwrap_or(640) as usize,
-        _ => 640,
-    };
+    let s = input_size_of(session);
     let input = ndarray::Array4::<f32>::from_elem((1, 3, s, s), 114.0);
-    let tensor = ort::value::Tensor::from_array(input).map_err(|e| anyhow!("{e}"))?;
-    session.run(ort::inputs![tensor]).map_err(|e| anyhow!("{e}"))?;
+    run_session(session, input).map_err(|e| anyhow!("{e}"))?;
     Ok(())
 }
 
@@ -396,6 +706,14 @@ impl AiDetector {
         Self::load(model, threads)
     }
 
+    pub fn load_cpu(model: &Path, threads: usize) -> Result<Self> {
+        Self::load(model, threads)
+    }
+
+    pub fn try_card(_model: &Path, _threads: usize, _gpu_name: Option<&str>, _gpu_memory_mb: u32) -> CardTry {
+        CardTry::NotUsed(None)
+    }
+
     pub fn input_size(&self) -> usize {
         0
     }
@@ -404,11 +722,27 @@ impl AiDetector {
         None
     }
 
+    pub fn gpu_api(&self) -> Option<&'static str> {
+        None
+    }
+
+    pub fn card_stuck(&self) -> bool {
+        false
+    }
+
+    pub fn finish(self, _wait: std::time::Duration) -> bool {
+        true
+    }
+
     pub fn detect(&self, _image_bytes: &[u8], _min_score: f32) -> Result<Vec<Detection>> {
         Err(anyhow!("built-in AI detection is not available in this build"))
     }
 
     pub fn detect_tiled(&self, _img: &image::RgbImage, _min_score: f32) -> Result<Vec<Detection>> {
+        Err(anyhow!("built-in AI detection is not available in this build"))
+    }
+
+    pub fn detect_rgb(&self, _img: &image::RgbImage, _min_score: f32) -> Result<Vec<Detection>> {
         Err(anyhow!("built-in AI detection is not available in this build"))
     }
 }
@@ -488,6 +822,17 @@ mod tests {
         assert_eq!(merged.len(), 3);
         assert_eq!(merged.iter().filter(|x| x.label == "person").count(), 2);
         assert!(merged.iter().any(|x| x.label == "person" && x.score == 0.9));
+    }
+
+    #[test]
+    fn a_chosen_nvidia_card_is_not_swapped_for_an_intel_one() {
+        let g = |api: &'static str, name: &str| crate::gpu::Gpu { index: 0, name: name.into(), memory_mb: 0, bus: String::new(), api, render: String::new() };
+        let rtx = g("CUDA", "NVIDIA GeForce RTX 3060");
+        assert!(may_fall_over(&rtx, None), "picked by the AI");
+        assert!(may_fall_over(&rtx, Some("")), "Automatic");
+        assert!(may_fall_over(&rtx, Some("a card no longer there")));
+        assert!(!may_fall_over(&rtx, Some("NVIDIA GeForce RTX 3060")), "the owner's choice");
+        assert!(!may_fall_over(&g("OpenVINO", "Intel graphics card"), None));
     }
 
     #[test]

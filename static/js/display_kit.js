@@ -2,6 +2,7 @@
 // shows, how the grid fits the screen, the night-dimming window, what makes a camera go big, and
 // which cameras are big now. No DOM, no imports: scripts/test-display.mjs tests them in node.
 
+import { t } from './i18n.js';
 export const MAX_TILES = 16;
 
 export const DEFAULTS = {
@@ -115,8 +116,8 @@ export function triggerOf(c, trigger, now, rxAge) {
       return { cls: AI_CLASS[label] || 'package', text: label.charAt(0).toUpperCase() + label.slice(1) };
     }
   }
-  if (typeof c.manual_until === 'number' && c.manual_until * 1000 > now) return { cls: 'clip', text: 'Recording' };
-  if ((trigger === 'motion' || c.ai_active === false) && (c.motion || c.push_motion)) return { cls: 'motion', text: 'Motion' };
+  if (typeof c.manual_until === 'number' && c.manual_until * 1000 > now) return { cls: 'clip', text: t('display_kit.recording', 'Recording') };
+  if ((trigger === 'motion' || c.ai_active === false) && (c.motion || c.push_motion)) return { cls: 'motion', text: t('display_kit.motion', 'Motion') };
   return null;
 }
 

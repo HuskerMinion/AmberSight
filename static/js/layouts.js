@@ -9,6 +9,7 @@
 // viewStyles { viewKey: 'fit' | 'focus' | 'focus2' } (missing = 'grid').
 // Older versions kept these in localStorage; they are moved to the server once.
 
+import { t } from './i18n.js';
 import { state, bus, openDlg, esc, msgDlg, raiseDlg, toast } from './core.js';
 import { setGroup } from './groups.js';
 import * as Prefs from './prefs.js';
@@ -16,7 +17,7 @@ import * as Prefs from './prefs.js';
 const KEY = 'ambs.layouts.v1';
 const PREF_KEY = 'ambs.liveprefs.v1';
 
-export const ALL = { id: '', name: 'All', per: 'auto', cams: [] };
+export const ALL = { id: '', name: t('layouts.all_name', 'All'), per: 'auto', cams: [] };
 
 let data = { list: [], active: '' };
 let prefs = { cycle: false, sec: 10, quality: 'light', boxes: 'off' };
@@ -151,25 +152,25 @@ function deleteLayout(id) {
 let editorDlg = null;
 export function openEditor() {
   if (raiseDlg(editorDlg)) return;
-  const d = editorDlg = openDlg('Live layouts',
-    '<div class="hint">Layouts are saved to your account. Pick how many tiles per page and which cameras appear, in which order.</div>' +
-    '<label>Layout <select id="lyPick"></select></label>' +
-    '<label>Name <input id="lyName" maxlength="40" placeholder="Front of house"></label>' +
-    '<label>Tiles per page <select id="lyPer"><option value="auto">Auto (all on one page)</option><option value="1">1</option><option value="4">4 (2 x 2)</option><option value="9">9 (3 x 3)</option><option value="16">16 (4 x 4)</option></select></label>' +
-    '<div class="sec">Cameras (tick to show, arrows to reorder; none ticked = all cameras)</div>' +
+  const d = editorDlg = openDlg(t('layouts.live_layouts', 'Live layouts'),
+    '<div class="hint">' + t('layouts.hint_save', 'Layouts are saved to your account. Pick how many tiles per page and which cameras appear, in which order.') + '</div>' +
+    '<label>' + t('layouts.lbl_layout', 'Layout') + ' <select id="lyPick"></select></label>' +
+    '<label>' + t('layouts.lbl_name', 'Name') + ' <input id="lyName" maxlength="40" placeholder="' + esc(t('layouts.name_placeholder', 'Front of house')) + '"></label>' +
+    '<label>' + t('layouts.lbl_tiles_per_page', 'Tiles per page') + ' <select id="lyPer"><option value="auto">' + esc(t('layouts.per_auto', 'Auto (all on one page)')) + '</option><option value="1">1</option><option value="4">4 (2 x 2)</option><option value="9">9 (3 x 3)</option><option value="16">16 (4 x 4)</option></select></label>' +
+    '<div class="sec">' + t('layouts.sec_cameras', 'Cameras (tick to show, arrows to reorder; none ticked = all cameras)') + '</div>' +
     '<div id="lyFollows" class="hint" hidden></div>' +
     '<div id="lyCams" class="lycams"></div>' +
-    (state.isAdmin ? '<div class="lygroup"><label class="asys-chk"><input type="checkbox" id="lyMkGroup"> Also make a group from these cameras</label>' +
-      '<label class="lygname">Group name <input id="lyGroup" maxlength="40" disabled></label>' +
-      '<div class="hint">Groups filter the live view and can be used by other settings. Making one never turns on recording or triggering. If a group with this name already exists, its cameras become these.</div></div>' : '') +
-    '<div class="row"><button class="primary" id="lySave">Save layout</button> <button id="lyDel">Delete</button></div>');
+    (state.isAdmin ? '<div class="lygroup"><label class="asys-chk"><input type="checkbox" id="lyMkGroup"> ' + t('layouts.chk_also_make_group', 'Also make a group from these cameras') + '</label>' +
+      '<label class="lygname">' + t('layouts.lbl_group_name', 'Group name') + ' <input id="lyGroup" maxlength="40" disabled></label>' +
+      '<div class="hint">' + t('layouts.hint_group', 'Groups filter the live view and can be used by other settings. Making one never turns on recording or triggering. If a group with this name already exists, its cameras become these.') + '</div></div>' : '') +
+    '<div class="row"><button class="primary" id="lySave">' + t('layouts.save_layout', 'Save layout') + '</button> <button id="lyDel">' + t('layouts.delete', 'Delete') + '</button></div>');
   const $d = (s) => d.querySelector(s);
   let cur = null;      // layout being edited (copy)
   let order = [];      // [{name, on}]
 
   function fillPick(selectId) {
     const pick = $d('#lyPick');
-    pick.innerHTML = '<option value="__new">+ New layout</option>' +
+    pick.innerHTML = '<option value="__new">' + esc(t('layouts.new_layout', '+ New layout')) + '</option>' +
       data.list.map(l => '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>').join('');
     pick.value = selectId;
   }
@@ -184,7 +185,7 @@ export function openEditor() {
     cur.follows = follows;
     const note = $d('#lyFollows');
     note.hidden = !follows;
-    note.textContent = follows ? 'This layout shows the cameras of the group ' + follows + ': cameras added to that group appear here by themselves.' + (state.isAdmin ? ' Ticking cameras here changes the group too.' : '') : '';
+    note.textContent = follows ? (state.isAdmin ? t('layouts.note_follows_admin', 'This layout shows the cameras of the group {group}: cameras added to that group appear here by themselves. Ticking cameras here changes the group too.', { group: follows }) : t('layouts.note_follows', 'This layout shows the cameras of the group {group}: cameras added to that group appear here by themselves.', { group: follows })) : '';
     order = chosen.map(n => ({ name: n, on: true })).concat(names.filter(n => !chosen.includes(n)).map(n => ({ name: n, on: false })));
     $d('#lyDel').hidden = !l;
     drawCams();
@@ -196,14 +197,14 @@ export function openEditor() {
       const row = document.createElement('div');
       row.className = 'lycam';
       row.innerHTML = '<label><input type="checkbox"' + (o.on ? ' checked' : '') + '> ' + esc(o.name) + '</label>' +
-        '<button title="up" aria-label="move up">&#9650;</button><button title="down" aria-label="move down">&#9660;</button>';
+        '<button title="' + esc(t('layouts.up', 'up')) + '" aria-label="' + esc(t('layouts.move_up', 'move up')) + '">&#9650;</button><button title="' + esc(t('layouts.down', 'down')) + '" aria-label="' + esc(t('layouts.move_down', 'move down')) + '">&#9660;</button>';
       const [up, down] = row.querySelectorAll('button');
       row.querySelector('input').onchange = (ev) => { o.on = ev.target.checked; };
       up.onclick = () => { if (i > 0) { [order[i - 1], order[i]] = [order[i], order[i - 1]]; drawCams(); } };
       down.onclick = () => { if (i < order.length - 1) { [order[i + 1], order[i]] = [order[i], order[i + 1]]; drawCams(); } };
       box.appendChild(row);
     });
-    if (!order.length) box.innerHTML = '<div class="empty">No cameras yet.</div>';
+    if (!order.length) box.innerHTML = '<div class="empty">' + t('layouts.empty_no_cameras', 'No cameras yet.') + '</div>';
   }
 
   // Group from layout: the name follows the layout name until edited.
@@ -217,7 +218,7 @@ export function openEditor() {
   $d('#lyPick').onchange = (ev) => load(ev.target.value === '__new' ? '' : ev.target.value);
   $d('#lySave').onclick = () => {
     const name = $d('#lyName').value.trim();
-    if (!name) { msgDlg('Give the layout a name'); return; }
+    if (!name) { msgDlg(t('layouts.msg_give_name', 'Give the layout a name')); return; }
     const per = $d('#lyPer').value === 'auto' ? 'auto' : parseInt($d('#lyPer').value, 10);
     const cams = order.filter(o => o.on).map(o => o.name);
     // Cameras this page does not list (in a split-view pane: the other
@@ -233,12 +234,12 @@ export function openEditor() {
     // None ticked means "all cameras" for the layout: never empty the group.
     if (follows && state.isAdmin && !(mk && mk.checked) && cams.length) {
       const ids = cams.map(n => (state.cams.find(c => c.name === n) || {}).id).filter(x => x != null);
-      setGroup(follows, ids).catch(e => msgDlg('The layout was saved, but the group was not: ' + (e.body || e.message)));
+      setGroup(follows, ids).catch(e => msgDlg(t('layouts.err_group_not_saved', 'The layout was saved, but the group was not: {msg}', { msg: e.body || e.message })));
     }
     if (mk && mk.checked) {
       const g = gname.value.trim() || name;
       const ids = (cams.length ? cams : state.cams.map(c => c.name)).map(n => (state.cams.find(c => c.name === n) || {}).id).filter(x => x != null);
-      setGroup(g, ids).then(() => toast('Layout saved and group ' + g + ' made')).catch(e => msgDlg('The layout was saved, but the group was not: ' + (e.body || e.message)));
+      setGroup(g, ids).then(() => toast(t('layouts.toast_saved_group', 'Layout saved and group {g} made', { g }))).catch(e => msgDlg(t('layouts.err_group_not_saved', 'The layout was saved, but the group was not: {msg}', { msg: e.body || e.message })));
       mk.checked = false; gname.disabled = true;
     }
     cur.isNew = false;

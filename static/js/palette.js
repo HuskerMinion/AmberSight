@@ -1,6 +1,7 @@
 // palette.js - command palette. Ctrl/Cmd+K opens it (or call open()). Self-installing on import.
 // Modules are imported on first use of a command so the palette itself stays light.
-import { state, $, ic, api, toast, setTheme, backLayer, overlaysChanged, afterOverlayClose, can } from './core.js';
+import { t } from './i18n.js';
+import { state, $, ic, api, toast, setTheme, backLayer, overlaysChanged, afterOverlayClose, can, esc } from './core.js';
 import { savedFilters } from './events.js';
 
 const RECENT_KEY = 'ambersight.palette.recent';
@@ -15,37 +16,44 @@ const goTab = async (id) => (await imp.nav()).goTab(id);
 
 // Every settings page: [route, name, section, plain-word synonyms people might type].
 const SETTINGS = [
-  ['cameras/list', 'Cameras', 'Cameras', 'add camera remove camera rename camera stream address rtsp ip'],
-  ['cameras/find', 'Find cameras', 'Cameras', 'discover scan network onvif add camera automatically new camera'],
-  ['cameras/groups', 'Camera groups', 'Cameras', 'group rooms outside inside organize'],
-  ['recording/retention', 'Storage & retention', 'Recording', 'how long to keep video delete old recordings disk space full storage limit days keep forever protect'],
-  ['recording/drives', 'Drives & folders', 'Recording', 'where recordings are saved external drive nas network folder move recordings usb'],
-  ['detection/motion', 'Motion sensitivity', 'Detection & alerts', 'too many alerts false alarms shadows sensitive missed motion low medium high'],
-  ['detection/objects', 'Objects (AI)', 'Detection & alerts', 'person vehicle animal package ai object detection what to look for'],
-  ['detection/alerts', 'Alerts', 'Detection & alerts', 'phone alerts notifications notify ntfy pushover telegram push email webhook home assistant messages'],
-  ['detection/limits', 'Alert limits & priority', 'Detection & alerts', 'too many notifications quiet snooze priority rate limit'],
-  ['detection/rules', 'Alert rules', 'Detection & alerts', 'only alert when quiet hours delivery truck conditions'],
-  ['detection/summary', 'Morning summary', 'Detection & alerts', 'daily digest recap overnight report'],
-  ['smart/review', 'AI review', 'Smart features', 'why no alert missing alerts false alarms'],
-  ['smart/faces', 'Faces', 'Smart features', 'face recognition known people names strangers'],
-  ['smart/plates', 'License plates', 'Smart features', 'number plate lpr anpr car registration'],
-  ['smart/sounds', 'Sounds', 'Smart features', 'audio glass break bark loud noise scream'],
-  ['smart/search', 'Smart search', 'Smart features', 'describe find red truck search by description'],
-  ['schedules/profiles', 'Profiles & schedule', 'Schedules & presence', 'home away night schedule when to arm sunrise sunset'],
-  ['schedules/presence', 'Presence', 'Schedules & presence', 'phone at home away geofence arrive leave'],
-  ['users/users', 'Users', 'Users & security', 'password add user accounts sign in viewer admin family pair code invite'],
-  ['users/https', 'HTTPS', 'Users & security', 'secure certificate tls ssl remote access tailscale padlock'],
-  ['users/displays', 'Displays', 'Users & security', 'wall tv tablet kiosk display mode pair code monitor'],
-  ['connections/share', 'Share streams', 'Connections', 'rtsp restream home assistant vlc frigate scrypted'],
-  ['connections/servers', 'Servers', 'Connections', 'other site link servers second location cabin'],
-  ['connections/detector', 'External detector', 'Connections', 'custom detector hook codeproject'],
-  ['connections/watchdog', 'Watchdog', 'Connections', 'reboot camera power cycle frozen camera smart plug offline'],
-  ['system/status', 'Status & updates', 'System', 'health problems warnings update version upgrade uptime'],
-  ['system/logs', 'Logs', 'System', 'errors warnings debug'],
-  ['system/audit', 'Audit log', 'System', 'who changed sign in history'],
-  ['system/backup', 'Backup', 'System', 'restore export settings save settings'],
-  ['system/hardware', 'Hardware decoding', 'System', 'gpu graphics card nvidia nvdec intel quick sync vaapi amd decode processor cpu'],
+  ['cameras/list', t('palette.set_cameras', 'Cameras'), t('palette.sec_cameras', 'Cameras'), 'add camera remove camera rename camera stream address rtsp ip'],
+  ['cameras/find', t('palette.set_find_cameras', 'Find cameras'), t('palette.sec_cameras', 'Cameras'), 'discover scan network onvif add camera automatically new camera'],
+  ['cameras/groups', t('palette.set_camera_groups', 'Camera groups'), t('palette.sec_cameras', 'Cameras'), 'group rooms outside inside organize'],
+  ['recording/retention', t('palette.set_storage_retention', 'Storage & retention'), t('palette.sec_recording', 'Recording'), 'how long to keep video delete old recordings disk space full storage limit days keep forever protect'],
+  ['recording/drives', t('palette.set_drives_folders', 'Drives & folders'), t('palette.sec_recording', 'Recording'), 'where recordings are saved external drive nas network folder move recordings usb'],
+  ['detection/motion', t('palette.set_motion_sensitivity', 'Motion sensitivity'), t('palette.sec_detection_alerts', 'Detection & alerts'), 'too many alerts false alarms shadows sensitive missed motion low medium high'],
+  ['detection/objects', t('palette.set_objects_ai', 'Objects (AI)'), t('palette.sec_detection_alerts', 'Detection & alerts'), 'person vehicle animal package ai object detection what to look for'],
+  ['detection/alerts', t('palette.set_alerts', 'Alerts'), t('palette.sec_detection_alerts', 'Detection & alerts'), 'phone alerts notifications notify ntfy pushover telegram push email webhook home assistant messages'],
+  ['detection/limits', t('palette.set_alert_limits_priority', 'Alert limits & priority'), t('palette.sec_detection_alerts', 'Detection & alerts'), 'too many notifications quiet snooze priority rate limit'],
+  ['detection/rules', t('palette.set_alert_rules', 'Alert rules'), t('palette.sec_detection_alerts', 'Detection & alerts'), 'only alert when quiet hours delivery truck conditions'],
+  ['detection/summary', t('palette.set_morning_summary', 'Morning summary'), t('palette.sec_detection_alerts', 'Detection & alerts'), 'daily digest recap overnight report'],
+  ['smart/review', t('palette.set_ai_review', 'AI review'), t('palette.sec_smart_features', 'Smart features'), 'why no alert missing alerts false alarms'],
+  ['smart/faces', t('palette.set_faces', 'Faces'), t('palette.sec_smart_features', 'Smart features'), 'face recognition known people names strangers'],
+  ['smart/plates', t('palette.set_license_plates', 'License plates'), t('palette.sec_smart_features', 'Smart features'), 'number plate lpr anpr car registration'],
+  ['smart/sounds', t('palette.set_sounds', 'Sounds'), t('palette.sec_smart_features', 'Smart features'), 'audio glass break bark loud noise scream'],
+  ['smart/search', t('palette.set_smart_search', 'Smart search'), t('palette.sec_smart_features', 'Smart features'), 'describe find red truck search by description'],
+  ['schedules/profiles', t('palette.set_profiles_schedule', 'Profiles & schedule'), t('palette.sec_schedules_presence', 'Schedules & presence'), 'home away night schedule when to arm sunrise sunset'],
+  ['schedules/presence', t('palette.set_presence', 'Presence'), t('palette.sec_schedules_presence', 'Schedules & presence'), 'phone at home away geofence arrive leave'],
+  ['users/users', t('palette.set_users', 'Users'), t('palette.sec_users_security', 'Users & security'), 'password add user accounts sign in viewer admin family pair code invite'],
+  ['users/https', t('palette.set_https', 'HTTPS'), t('palette.sec_users_security', 'Users & security'), 'secure certificate tls ssl remote access tailscale padlock'],
+  ['users/displays', t('palette.set_displays', 'Displays'), t('palette.sec_users_security', 'Users & security'), 'wall tv tablet kiosk display mode pair code monitor'],
+  ['connections/share', t('palette.set_share_streams', 'Share streams'), t('palette.sec_connections', 'Connections'), 'rtsp restream home assistant vlc frigate scrypted'],
+  ['connections/servers', t('palette.set_servers', 'Servers'), t('palette.sec_connections', 'Connections'), 'other site link servers second location cabin'],
+  ['connections/detector', t('palette.set_external_detector', 'External detector'), t('palette.sec_connections', 'Connections'), 'custom detector hook codeproject'],
+  ['connections/watchdog', t('palette.set_watchdog', 'Watchdog'), t('palette.sec_connections', 'Connections'), 'reboot camera power cycle frozen camera smart plug offline'],
+  ['system/status', t('palette.set_status_updates', 'Status & updates'), t('palette.sec_system', 'System'), 'health problems warnings update version upgrade uptime'],
+  ['system/logs', t('palette.set_logs', 'Logs'), t('palette.sec_system', 'System'), 'errors warnings debug'],
+  ['system/audit', t('palette.set_audit_log', 'Audit log'), t('palette.sec_system', 'System'), 'who changed sign in history'],
+  ['system/backup', t('palette.set_backup', 'Backup'), t('palette.sec_system', 'System'), 'restore export settings save settings'],
+  ['system/hardware', t('palette.set_hardware_decoding', 'Hardware decoding'), t('palette.sec_system', 'System'), 'gpu graphics card nvidia nvdec intel quick sync vaapi amd decode processor cpu'],
 ];
+
+// Groups are compared by their English name in the code; this is what the list shows.
+const groupName = (g) => ({
+  'Go to': t('palette.group_go_to', 'Go to'), Settings: t('palette.group_settings', 'Settings'), Cameras: t('palette.group_cameras', 'Cameras'),
+  Actions: t('palette.group_actions', 'Actions'), Events: t('palette.group_events', 'Events'), Recent: t('palette.group_recent', 'Recent'),
+  'Saved filters': t('palette.group_saved_filters', 'Saved filters'),
+}[g] || g);
 
 function link(h) { return () => { if (location.hash !== h) location.hash = h; }; }
 
@@ -55,39 +63,39 @@ function build() {
   const may = (perm) => admin || can(perm);
   const add = (id, group, icon, label, hint, run, keys, adminOnly, kw) => { if (adminOnly && !admin) return; out.push({ id, group, icon, label, hint: hint || '', run, keys: keys || [], kw: (kw || '').toLowerCase() }); };
 
-  add('go:live', 'Go to', 'live', 'Go to Live', 'Camera grid', () => goTab('live'), ['G', 'L']);
-  add('go:events', 'Go to', 'alert', 'Go to Events', 'Alerts and detections', () => goTab('events'), ['G', 'E']);
-  add('go:grid', 'Go to', 'grid', 'Events grid', 'Event clips as pictures', link('#events?view=grid'), ['G', 'V'], false, 'clips grid thumbnails');
-  add('go:timelapse', 'Go to', 'timeline', 'Go to Time-lapse', 'A day in a minute', () => goTab('timelapse'), [], false, 'timelapse day fast summary');
-  add('go:settings', 'Go to', 'gear', 'Go to Settings', '', () => goTab('settings'), ['G', 'S'], true);
-  for (const [route, name, sec, kw] of SETTINGS) add('set:' + route, 'Settings', 'gear', 'Settings: ' + name, sec, link('#settings/' + route), [], true, kw);
-  add('go:display', 'Go to', 'expand', 'Display mode', 'Full-screen cameras for a wall TV or tablet', () => { location.href = '/display'; }, [], false, 'wall tv tablet kiosk monitor always on dashboard');
-  add('go:help', 'Go to', 'help', 'Go to Help', 'Guides and answers', () => goTab('help'), ['G', 'H'], false, 'how do i guide manual support');
+  add('go:live', 'Go to', 'live', t('palette.go_to_live', 'Go to Live'), t('palette.camera_grid', 'Camera grid'), () => goTab('live'), ['G', 'L']);
+  add('go:events', 'Go to', 'alert', t('palette.go_to_events', 'Go to Events'), t('palette.alerts_and_detections', 'Alerts and detections'), () => goTab('events'), ['G', 'E']);
+  add('go:grid', 'Go to', 'grid', t('palette.events_grid', 'Events grid'), t('palette.event_clips_as_pictures', 'Event clips as pictures'), link('#events?view=grid'), ['G', 'V'], false, 'clips grid thumbnails');
+  add('go:timelapse', 'Go to', 'timeline', t('palette.go_to_timelapse', 'Go to Time-lapse'), t('palette.a_day_in_a_minute', 'A day in a minute'), () => goTab('timelapse'), [], false, 'timelapse day fast summary');
+  add('go:settings', 'Go to', 'gear', t('palette.go_to_settings', 'Go to Settings'), '', () => goTab('settings'), ['G', 'S'], true);
+  for (const [route, name, sec, kw] of SETTINGS) add('set:' + route, 'Settings', 'gear', t('palette.settings_name', 'Settings: {name}', { name }), sec, link('#settings/' + route), [], true, kw);
+  add('go:display', 'Go to', 'expand', t('palette.display_mode', 'Display mode'), t('palette.full_screen_cameras_for_a_wall_tv_or_tablet', 'Full-screen cameras for a wall TV or tablet'), () => { location.href = '/display'; }, [], false, 'wall tv tablet kiosk monitor always on dashboard');
+  add('go:help', 'Go to', 'help', t('palette.go_to_help', 'Go to Help'), t('palette.guides_and_answers', 'Guides and answers'), () => goTab('help'), ['G', 'H'], false, 'how do i guide manual support');
 
   for (const c of state.cams || []) {
     const id = c.id, n = c.name;
-    add('cam:full:' + id, 'Cameras', 'expand', n, 'Open full screen on Live', async () => { await goTab('live'); (await imp.live()).openFullCam(id); }, [], false, 'camera full screen live view');
-    add('cam:play:' + id, 'Cameras', 'timeline', 'Play back ' + n, 'Recordings', async () => { await goTab('live'); (await imp.tl()).openAt(id, Date.now() - 60000); }, [], false, 'recordings rewind history');
-    add('cam:snap:' + id, 'Cameras', 'camera', 'Snapshot ' + n, n, async () => (await imp.live()).snapshot(id));
-    add('cam:set:' + id, 'Cameras', 'gear', n + ' settings', 'Camera settings', async () => (await imp.cams()).openCameraDialog(id), [], !may('camera_detection'));
-    add('cam:zones:' + id, 'Cameras', 'zone', 'Zones for ' + n, 'Motion and ignore zones', async () => (await imp.zones()).openZoneEditor(id), [], !may('camera_detection'));
+    add('cam:full:' + id, 'Cameras', 'expand', n, t('palette.open_full_screen_on_live', 'Open full screen on Live'), async () => { await goTab('live'); (await imp.live()).openFullCam(id); }, [], false, 'camera full screen live view');
+    add('cam:play:' + id, 'Cameras', 'timeline', t('palette.play_back', 'Play back {name}', { name: n }), t('palette.recordings', 'Recordings'), async () => { await goTab('live'); (await imp.tl()).openAt(id, Date.now() - 60000); }, [], false, 'recordings rewind history');
+    add('cam:snap:' + id, 'Cameras', 'camera', t('palette.snapshot', 'Snapshot {name}', { name: n }), n, async () => (await imp.live()).snapshot(id));
+    add('cam:set:' + id, 'Cameras', 'gear', t('palette.cam_settings', '{name} settings', { name: n }), t('palette.camera_settings', 'Camera settings'), async () => (await imp.cams()).openCameraDialog(id), [], !may('camera_detection'));
+    add('cam:zones:' + id, 'Cameras', 'zone', t('palette.zones_for', 'Zones for {name}', { name: n }), t('palette.motion_and_ignore_zones', 'Motion and ignore zones'), async () => (await imp.zones()).openZoneEditor(id), [], !may('camera_detection'));
   }
 
-  add('act:shield', 'Actions', 'shield', 'Arm / disarm', 'Turn motion detection on or off for all cameras', async () => (await imp.status()).toggleShield(true), ['S'], !may('arm'), 'armed disarmed shield detection on off');
-  for (const p of profileNames) add('act:profile:' + p, 'Actions', 'user', 'Switch profile to ' + p, profileActive === p ? 'Active now' : 'Profile', async () => {
-    try { await api('/api/profile', { json: { name: p, minutes: null } }); toast('Profile: ' + p); } catch (e) { toast(e.message, { kind: 'err' }); }
+  add('act:shield', 'Actions', 'shield', t('palette.arm_disarm', 'Arm / disarm'), t('palette.turn_motion_detection_on_or_off_for_all_cameras', 'Turn motion detection on or off for all cameras'), async () => (await imp.status()).toggleShield(true), ['S'], !may('arm'), 'armed disarmed shield detection on off');
+  for (const p of profileNames) add('act:profile:' + p, 'Actions', 'user', t('palette.switch_profile_to', 'Switch profile to {p}', { p }), profileActive === p ? t('palette.active_now', 'Active now') : t('palette.profile_hint', 'Profile'), async () => {
+    try { await api('/api/profile', { json: { name: p, minutes: null } }); toast(t('palette.profile', 'Profile: {p}', { p })); } catch (e) { toast(e.message, { kind: 'err' }); }
   }, [], !may('arm'));
-  add('act:timeline', 'Actions', 'timeline', 'Timeline on / off', 'Live timeline mode', async () => { await goTab('live'); (await imp.tl()).toggle(); }, ['T']);
-  add('act:bookmarks', 'Actions', 'timeline', 'Bookmarks', 'Moments marked with a note on the timeline', async () => (await import('./bookmarks.js')).openList(), [], false, 'bookmark bookmarks note notes mark moment flag keep');
-  add('act:view', 'Actions', 'v-grid', 'Change layout', 'Grid, Fit, Focus, Focus 2', async () => { await goTab('live'); (await imp.live()).cycleViewStyle(); }, ['V'], false, 'view style tiles');
-  for (const [m, label] of [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']]) add('act:theme:' + m, 'Actions', m === 'light' ? 'sun' : m === 'dark' ? 'moon' : 'auto', 'Theme: ' + label, m === 'auto' ? 'Follow this device' : '', () => setTheme(m), [], false, 'dark mode light mode appearance');
-  add('act:keys', 'Actions', 'help', 'Show keyboard shortcuts', '', () => { const b = $('keysBtn'); if (b) b.click(); }, ['?']);
+  add('act:timeline', 'Actions', 'timeline', t('palette.timeline_on_off', 'Timeline on / off'), t('palette.live_timeline_mode', 'Live timeline mode'), async () => { await goTab('live'); (await imp.tl()).toggle(); }, ['T']);
+  add('act:bookmarks', 'Actions', 'timeline', t('palette.bookmarks', 'Bookmarks'), t('palette.moments_marked_with_a_note_on_the_timeline', 'Moments marked with a note on the timeline'), async () => (await import('./bookmarks.js')).openList(), [], false, 'bookmark bookmarks note notes mark moment flag keep');
+  add('act:view', 'Actions', 'v-grid', t('palette.change_layout', 'Change layout'), t('palette.grid_fit_focus_focus_2', 'Grid, Fit, Focus, Focus 2'), async () => { await goTab('live'); (await imp.live()).cycleViewStyle(); }, ['V'], false, 'view style tiles');
+  for (const [m, label] of [['auto', t('palette.theme_auto', 'Auto')], ['light', t('palette.theme_light', 'Light')], ['dark', t('palette.theme_dark', 'Dark')]]) add('act:theme:' + m, 'Actions', m === 'light' ? 'sun' : m === 'dark' ? 'moon' : 'auto', t('palette.theme', 'Theme: {label}', { label }), m === 'auto' ? t('palette.follow_this_device', 'Follow this device') : '', () => setTheme(m), [], false, 'dark mode light mode appearance');
+  add('act:keys', 'Actions', 'help', t('palette.show_keyboard_shortcuts', 'Show keyboard shortcuts'), '', () => { const b = $('keysBtn'); if (b) b.click(); }, ['?']);
 
-  for (const [o, label] of [['person', 'People'], ['vehicle', 'Vehicles'], ['animal', 'Animals'], ['package', 'Packages'], ['face', 'Faces']])
-    add('ev:' + o, 'Events', o === 'face' ? 'face' : o === 'vehicle' ? 'car' : o === 'animal' ? 'paw' : o === 'package' ? 'pkg' : 'person', 'Events: ' + label, 'Filter to ' + o, link('#events?obj=' + o));
-  add('ev:prot', 'Events', 'lock', 'Events: protected only', 'Filter', link('#events?prot=1'));
+  for (const [o, label] of [['person', t('palette.obj_people', 'People')], ['vehicle', t('palette.obj_vehicles', 'Vehicles')], ['animal', t('palette.obj_animals', 'Animals')], ['package', t('palette.obj_packages', 'Packages')], ['face', t('palette.obj_faces', 'Faces')]])
+    add('ev:' + o, 'Events', o === 'face' ? 'face' : o === 'vehicle' ? 'car' : o === 'animal' ? 'paw' : o === 'package' ? 'pkg' : 'person', t('palette.events_label', 'Events: {label}', { label }), t('palette.filter_to', 'Filter to {obj, select, person {person} vehicle {vehicle} animal {animal} package {package} face {face} other {object}}', { obj: o }), link('#events?obj=' + o));
+  add('ev:prot', 'Events', 'lock', t('palette.events_protected_only', 'Events: protected only'), t('palette.filter', 'Filter'), link('#events?prot=1'));
   // The named filter sets saved on the Events page (this browser).
-  for (const f of savedFilters()) add('saved:' + f.name, 'Saved filters', 'search', f.name, 'Saved filter on Events', link(f.hash), [], false, 'saved filter events');
+  for (const f of savedFilters()) add('saved:' + f.name, 'Saved filters', 'search', f.name, t('palette.saved_filter_on_events', 'Saved filter on Events'), link(f.hash), [], false, 'saved filter events');
   return out;
 }
 
@@ -115,7 +123,6 @@ function fuzzy(q, s) {
 const recents = () => { try { const v = JSON.parse(localStorage.getItem(RECENT_KEY)); return Array.isArray(v) ? v.filter(x => typeof x === 'string') : []; } catch (e) { return []; } };
 function remember(id) { if (id.startsWith('search:')) return; try { localStorage.setItem(RECENT_KEY, JSON.stringify([id, ...recents().filter(x => x !== id)].slice(0, 6))); } catch (e) { /* not remembered */ } }
 
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function mark(label, idx) {
   if (!idx || !idx.length) return esc(label);
   const set = new Set(idx);
@@ -127,14 +134,14 @@ function fuzzyMulti(q, s) {
   const toks = q.split(/\s+/).filter(Boolean);
   if (toks.length < 2) return fuzzy(q, s);
   let score = 0; const idx = [];
-  for (const t of toks) { const f = fuzzy(t, s); if (!f) return null; score += f.score; idx.push(...f.idx); }
+  for (const tok of toks) { const f = fuzzy(tok, s); if (!f) return null; score += f.score; idx.push(...f.idx); }
   return { score, idx };
 }
 
 // Plain-word synonyms: every word typed must start a word of the keywords (or be inside one, from 4 letters).
 function kwMatch(q, kw) {
   const words = kw.split(/\s+/);
-  return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => words.some(w => w.startsWith(t)) || (t.length >= 4 && kw.includes(t)));
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every(w0 => words.some(w => w.startsWith(w0)) || (w0.length >= 4 && kw.includes(w0)));
 }
 
 function filter(q) {
@@ -155,7 +162,7 @@ function filter(q) {
   res.sort((a, b) => b.score - a.score);
   const top = res.slice(0, 40);
   const weak = !top.length || top[0].score < q.length * 3;
-  top[weak ? 'unshift' : 'push']({ id: 'search:' + q, group: 'Events', icon: 'search', label: 'Search events for "' + q + '"', hint: 'Smart search', keys: [], run: () => searchEvents(q), score: 0 });
+  top[weak ? 'unshift' : 'push']({ id: 'search:' + q, group: 'Events', icon: 'search', label: t('palette.search_events', 'Search events for "{q}"', { q }), hint: t('palette.smart_search', 'Smart search'), keys: [], run: () => searchEvents(q), score: 0 });
   return top;
 }
 
@@ -164,7 +171,7 @@ async function searchEvents(q) {
   setTimeout(() => {
     const f = $('fSmart');
     if (f && !f.closest('[hidden]')) { f.value = q; f.focus(); f.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); }
-    else toast('Smart search is not turned on (Settings > Smart features > Smart search)');
+    else toast(t('palette.smart_search_off', 'Smart search is not turned on (Settings > Smart features > Smart search)'));
   }, 150);
 }
 
@@ -172,10 +179,10 @@ const coarse = () => { try { return matchMedia('(pointer: coarse)').matches; } c
 function paint() {
   shown = filter(input.value);
   sel = Math.min(sel, Math.max(0, shown.length - 1));
-  if (!shown.length) { list.innerHTML = '<div class="cp-empty">No matching commands</div>'; return; }
+  if (!shown.length) { list.innerHTML = '<div class="cp-empty">' + t('palette.no_matching_commands', 'No matching commands') + '</div>'; return; }
   let g = '', h = '';
   shown.forEach((it, i) => {
-    if (it.group !== g) { g = it.group; h += '<div class="cp-h">' + esc(g) + '</div>'; }
+    if (it.group !== g) { g = it.group; h += '<div class="cp-h">' + esc(groupName(g)) + '</div>'; }
     h += '<div class="cp-row' + (i === sel ? ' on' : '') + '" role="option" data-i="' + i + '" id="cpo' + i + '">' + ic(it.icon) +
       '<span class="cp-lab">' + mark(it.label, it.idx) + '</span><span class="cp-hint">' + esc(it.hint) + '</span>' +
       (it.keys.length && !coarse() ? '<span class="cp-key">' + it.keys.map(k => '<kbd>' + esc(k) + '</kbd>').join('') + '</span>' : '') + '</div>';
@@ -207,8 +214,8 @@ function ensure() {
   }
   root = document.createElement('div');
   root.className = 'cp-scrim'; root.hidden = true;
-  root.innerHTML = '<div class="cp" role="dialog" aria-modal="true" aria-label="Command palette"><div class="cp-in">' + ic('search') +
-    '<input type="text" role="combobox" aria-expanded="true" aria-controls="cpList" autocomplete="off" spellcheck="false" placeholder="Type a command or search..." aria-label="Command"><kbd>Esc</kbd></div><div class="cp-list" id="cpList" role="listbox"></div></div>';
+  root.innerHTML = '<div class="cp" role="dialog" aria-modal="true" aria-label="' + t('palette.command_palette', 'Command palette') + '"><div class="cp-in">' + ic('search') +
+    '<input type="text" role="combobox" aria-expanded="true" aria-controls="cpList" autocomplete="off" spellcheck="false" placeholder="' + t('palette.type_a_command_or_search', 'Type a command or search...') + '" aria-label="' + t('palette.command', 'Command') + '"><kbd>Esc</kbd></div><div class="cp-list" id="cpList" role="listbox"></div></div>';
   document.body.appendChild(root);
   input = root.querySelector('input'); list = root.querySelector('.cp-list');
   input.addEventListener('input', () => { sel = 0; paint(); });

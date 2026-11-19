@@ -7,6 +7,8 @@
 // go; then optional: Use HTTPS, Turn on smart detection (AI). A test or demo camera never
 // counts. "Don't show again" is kept on the server with the other interface prefs.
 
+import { t } from './i18n.js';
+import { mountLangStep } from './lang_ui.js';
 import { $, state, api, esc, openDlg, toast, afterOverlayClose } from './core.js';
 import * as Prefs from './prefs.js';
 
@@ -41,17 +43,17 @@ async function context() {
 }
 
 const STEPS = [
-  { id: 'cameras', title: 'Add a camera', why: 'Find the cameras on your network, or add one by its address.', where: '#settings/cameras/find', label: 'Find cameras',
+  { id: 'cameras', title: t('gettingstarted.add_camera', 'Add a camera'), why: t('gettingstarted.camera_why', 'Find the cameras on your network, or add one by its address.'), where: '#settings/cameras/find', label: t('gettingstarted.find_cameras', 'Find cameras'),
     done: (x) => x.cams.length > 0 },
-  { id: 'alerts', title: 'Get alerts on your phone', why: 'A message with a picture when something moves at your door.', where: '#settings/detection/alerts', label: 'Set up', special: 'alerts',
+  { id: 'alerts', title: t('gettingstarted.get_alerts','Get alerts on your phone'), why: t('gettingstarted.alerts_why','A message with a picture when something moves at your door.'), where: '#settings/detection/alerts', label: t('gettingstarted.set_up','Set up'), special: 'alerts',
     done: (x) => (x.s.alert_channels || []).some(c => c.configured) || x.pushDevs > 0 },
-  { id: 'accounts', title: 'Add a password', why: 'Without a sign-in account, anyone who can reach this computer can watch and change everything.', where: '#settings/users/users', label: 'Add account',
+  { id: 'accounts', title: t('gettingstarted.add_password','Add a password'), why: t('gettingstarted.password_why','Without a sign-in account, anyone who can reach this computer can watch and change everything.'), where: '#settings/users/users', label: t('gettingstarted.add_account','Add account'),
     done: (x) => x.users.length > 0 },
-  { id: 'storage', title: 'Choose where recordings go', why: 'Pick the drive for recordings and how much of it they may use. The default uses what the drive can spare.', where: '#settings/recording/drives', label: 'Choose',
+  { id: 'storage', title: t('gettingstarted.choose_recordings','Choose where recordings go'), why: t('gettingstarted.recordings_why','Pick the drive for recordings and how much of it they may use. The default uses what the drive can spare.'), where: '#settings/recording/drives', label: t('gettingstarted.choose','Choose'),
     done: (x) => (x.s.storage.folders || []).length > 0 || x.s.storage.max_mb !== OLD_DEFAULT_MAX_MB },
-  { id: 'https', title: 'Use HTTPS', why: 'Keeps the connection private, and phones and browsers only allow notifications and some other features over it.', where: 'trust', label: 'Set up', optional: true,
+  { id: 'https', title: t('gettingstarted.use_https','Use HTTPS'), why: t('gettingstarted.https_why','Keeps the connection private, and phones and browsers only allow notifications and some other features over it.'), where: 'trust', label: t('gettingstarted.set_up_https','Set up'), optional: true,
     done: () => location.protocol === 'https:' },
-  { id: 'ai', title: 'Turn on smart detection (AI)', why: 'Alerts only when a person, car or animal is seen: far fewer false alarms from shadows, rain and bugs.', where: '#settings/detection/objects', label: 'Turn on', optional: true,
+  { id: 'ai', title: t('gettingstarted.turn_on_ai','Turn on smart detection (AI)'), why: t('gettingstarted.ai_why','Alerts only when a person, car or animal is seen: far fewer false alarms from shadows, rain and bugs.'), where: '#settings/detection/objects', label: t('gettingstarted.turn_on','Turn on'), optional: true,
     done: (x) => !!x.s.ai.enabled && (!!x.s.ai_status.builtin_loaded || !!(x.s.ai.url || '').trim()) },
 ];
 
@@ -62,9 +64,9 @@ async function results() {
 
 // ---------- the alerts step: one recommended path ----------
 function alertsExtra(host, done) {
-  host.innerHTML = '<div class="gs-sub"><button class="btn primary" data-pon>Turn on notifications on this device</button>' +
-    '<button class="btn" data-ptest hidden>Send a test</button>' +
-    '<a href="#settings/detection/alerts" data-other>Other ways (Telegram, email, ntfy…)</a></div>' +
+  host.innerHTML = '<div class="gs-sub"><button class="btn primary" data-pon>' + t('gettingstarted.turn_on_notif', 'Turn on notifications on this device') + '</button>' +
+    '<button class="btn" data-ptest hidden>' + t('gettingstarted.send_test', 'Send a test') + '</button>' +
+    '<a href="#settings/detection/alerts" data-other>' + t('gettingstarted.other_ways', 'Other ways (Telegram, email, ntfy…)') + '</a></div>' +
     '<div class="hint" data-pmsg></div>';
   const on = host.querySelector('[data-pon]'), test = host.querySelector('[data-ptest]'), msg = host.querySelector('[data-pmsg]');
   const sync = async () => {
@@ -80,18 +82,18 @@ function alertsExtra(host, done) {
     try {
       const push = await import('./push.js');
       await push.enableThisDevice();
-      toast('Notifications are on for this device', { kind: 'ok' });
-      msg.textContent = 'Done. Send a test to see how it looks.';
+      toast(t('gettingstarted.notif_on','Notifications are on for this device'), { kind: 'ok' });
+      msg.textContent = t('gettingstarted.done_test','Done. Send a test to see how it looks.');
     } catch (e) { msg.classList.add('warn'); msg.textContent = e.message; }
     on.disabled = false;
     sync();
     refreshGettingStarted();
   };
   test.onclick = async () => {
-    test.disabled = true; msg.classList.remove('warn'); msg.textContent = 'Sending...';
+    test.disabled = true; msg.classList.remove('warn'); msg.textContent = t('gettingstarted.sending','Sending...');
     try {
       const r = await (await import('./push.js')).sendTestPush();
-      msg.textContent = r.sent ? 'Sent. It should pop up in a few seconds.' : 'Nothing was sent. Turn on notifications on this device first.';
+      msg.textContent = r.sent ? t('gettingstarted.sent','Sent. It should pop up in a few seconds.') : t('gettingstarted.nothing_sent','Nothing was sent. Turn on notifications on this device first.');
     } catch (e) { msg.classList.add('warn'); msg.textContent = e.message; }
     test.disabled = false;
   };
@@ -111,17 +113,18 @@ export async function openGettingStarted() {
   try { r = await results(); } catch (e) { return; }
   const core = r.filter(x => !x.optional), opt = r.filter(x => x.optional);
   const n = core.filter(x => x.done).length;
-  const li = (x) => '<li class="' + (x.done ? 'done' : '') + (x.optional ? ' opt' : '') + '" data-step="' + x.id + '"><span class="gs-mark" aria-label="' + (x.done ? 'done' : 'to do') + '">' + (x.done ? '&#10003;' : '') + '</span>' +
-    '<div class="gs-text"><b>' + esc(x.title) + '</b>' + (x.optional ? '<span class="gs-opt">Optional</span>' : '') + '<div class="hint">' + esc(x.why) + '</div>' +
+  const li = (x) => '<li class="' + (x.done ? 'done' : '') + (x.optional ? ' opt' : '') + '" data-step="' + x.id + '"><span class="gs-mark" aria-label="' + (x.done ? t('gettingstarted.done', 'done') : t('gettingstarted.to_do', 'to do')) + '">' + (x.done ? '&#10003;' : '') + '</span>' +
+    '<div class="gs-text"><b>' + esc(x.title) + '</b>' + (x.optional ? '<span class="gs-opt">' + t('gettingstarted.optional','Optional') + '</span>' : '') + '<div class="hint">' + esc(x.why) + '</div>' +
     (x.special ? '<div data-extra></div>' : '') + '</div>' +
-    (x.special ? '' : '<button class="btn' + (x.done || x.optional ? '' : ' primary') + '" data-go="' + esc(x.where) + '">' + (x.done ? 'Change' : esc(x.label)) + '</button>') + '</li>';
-  const html = '<div class="hint">' + n + ' of ' + core.length + ' done. Each step is checked against the real setup.</div>' +
+    (x.special ? '' : '<button class="btn' + (x.done || x.optional ? '' : ' primary') + '" data-go="' + esc(x.where) + '">' + (x.done ? t('gettingstarted.change','Change') : esc(x.label)) + '</button>') + '</li>';
+  const html = '<div data-langstep></div><div class="hint">' + t('gettingstarted.n_done', '{n} of {total} done. Each step is checked against the real setup.', { n, total: core.length }) + '</div>' +
     '<ol class="gs-list">' + core.map(li).join('') + '</ol>' +
-    '<div class="hint">Optional</div><ol class="gs-list">' + opt.map(li).join('') + '</ol>' +
-    '<div class="gs-foot"><label class="sw"><input type="checkbox" role="switch" data-hide' + (hidden() ? ' checked' : '') + '><span class="sw-track" aria-hidden="true"></span><span class="sw-text">Don\'t show the reminder on Live again</span></label></div>';
+    '<div class="hint">' + t('gettingstarted.optional', 'Optional') + '</div><ol class="gs-list">' + opt.map(li).join('') + '</ol>' +
+    '<div class="gs-foot"><label class="sw"><input type="checkbox" role="switch" data-hide' + (hidden() ? ' checked' : '') + '><span class="sw-track" aria-hidden="true"></span><span class="sw-text">' + t('gettingstarted.dont_show','Don\'t show the reminder on Live again') + '</span></label></div>';
   if (dlg && dlg.isConnected) dlg.__close();
-  const d = dlg = openDlg('Getting started', html, true);
+  const d = dlg = openDlg(t('gettingstarted.title', 'Getting started'), html, true);
   d.classList.add('gsdlg');
+  mountLangStep(d.querySelector('[data-langstep]'));
   d.querySelectorAll('[data-go]').forEach(b => { b.onclick = () => { afterOverlayClose(() => d.__close()).then(() => go(b.dataset.go)); }; });
   const al = r.find(x => x.special === 'alerts');
   const host = d.querySelector('[data-step="alerts"] [data-extra]');
@@ -164,9 +167,9 @@ export async function refreshGettingStarted() {
   const fold = folded();
   b.dataset.fold = fold ? '1' : '0';
   const next = left[0];
-  b.innerHTML = '<span class="gs-sum"><b>Getting started</b>: ' + (core.length - left.length) + ' of ' + core.length + ' done' + (next ? '. Next: ' + esc(next.title) : '') + '</span>' +
-    (fold ? '' : '<button class="btn primary" data-gs-open>Show steps</button><button class="btn" data-gs-hide title="Hide this reminder (the steps stay in Help)">Don\'t show again</button>') +
-    '<button class="btn icon" data-gs-fold aria-expanded="' + (fold ? 'false' : 'true') + '" title="' + (fold ? 'Show more' : 'Fold to one line') + '" aria-label="' + (fold ? 'Show more' : 'Fold to one line') + '">' + (fold ? '▾' : '▴') + '</button>';
+  b.innerHTML = '<span class="gs-sum">' + (next ? t('gettingstarted.sum_next', '<b>Getting started</b>: {completed} of {total} done. Next: {next}', { completed: core.length - left.length, total: core.length, next: esc(next.title) }) : t('gettingstarted.sum', '<b>Getting started</b>: {completed} of {total} done', { completed: core.length - left.length, total: core.length })) + '</span>' +
+    (fold ? '' : '<button class="btn primary" data-gs-open>' + t('gettingstarted.show_steps', 'Show steps') + '</button><button class="btn" data-gs-hide title="' + esc(t('gettingstarted.hide_reminder', 'Hide this reminder (the steps stay in Help)')) + '">' + t('gettingstarted.dont_show_again', 'Don\'t show again') + '</button>') +
+    '<button class="btn icon" data-gs-fold aria-expanded="' + (fold ? 'false' : 'true') + '" title="' + (fold ? t('gettingstarted.show_more', 'Show more') : t('gettingstarted.fold', 'Fold to one line')) + '" aria-label="' + (fold ? t('gettingstarted.show_more', 'Show more') : t('gettingstarted.fold', 'Fold to one line')) + '">' + (fold ? '▾' : '▴') + '</button>';
   const open = b.querySelector('[data-gs-open]');
   if (open) open.onclick = openGettingStarted;
   const hide = b.querySelector('[data-gs-hide]');

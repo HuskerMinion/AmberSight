@@ -14,7 +14,8 @@ mod copy_fs;
 pub mod event_copy;
 mod creds;
 pub(crate) mod export;
-mod native;
+pub(crate) mod native;
+pub mod connect_way;
 pub mod profiles;
 pub(crate) mod playback;
 pub(crate) mod storage;
@@ -135,6 +136,12 @@ pub struct CameraState {
     /// Which pipeline receives the camera: "native", "ffmpeg", or
     /// "ffmpeg (fallback)" when native could not play it.
     pub ingest: &'static str,
+    /// The way the built-in reader is connected (`connect` setting): "RTSP"
+    /// or "Baichuan"; None before the first session.
+    pub via: Option<&'static str>,
+    /// Why that way is in use, when Auto moved it ("RTSP failed 3 times:
+    /// ...; using Baichuan"), or a note on it (not AES-encrypted).
+    pub via_note: Option<String>,
     /// Moving objects in the latest analysed frame (normalized boxes).
     pub blobs: Vec<crate::motion::Blob>,
     /// What the camera's own detection currently reports (ONVIF events).
@@ -234,6 +241,9 @@ pub struct Engine {
     /// Built-in AI object detector, when [ai] has a model.
     /// The built-in detector; replaced while running (Settings > Detection & alerts > Objects (AI)).
     pub ai: RwLock<Option<Arc<crate::ai::AiDetector>>>,
+    /// This engine (set once it is made), for work it starts in the
+    /// background (the AI moving onto the graphics card).
+    pub(crate) me: std::sync::OnceLock<std::sync::Weak<Engine>>,
     /// Active profile and the manual override (name, until epoch seconds).
     pub profile: RwLock<profiles::ActiveProfile>,
     /// Camera stream sessions currently running (for graceful shutdown).
@@ -277,6 +287,8 @@ pub struct Engine {
     /// in the background), by the slug of the camera's name: a rename waits
     /// for them (see [`Engine::writing_into`]).
     writers: Mutex<std::collections::HashMap<String, usize>>,
+    /// Camera controls: what each camera has, lights on for a while, sirens (controls/).
+    pub controls: crate::controls::Board,
 }
 
 /// A recording file being written into a camera's folder outside its worker
@@ -417,10 +429,12 @@ impl Engine {
                 }
             });
         }
+        // On the processor first (quick): recording never waits for a graphics
+        // card, which takes over in the background once it works (move_to_card).
         let ai = timed_step("loading the AI", || match (&config.ai.enabled, &config.ai.model) {
-            (true, Some(model)) => match crate::ai::AiDetector::load_on(model, config.ai.threads, config.ai.gpu, config.ai.gpu_name.as_deref(), config.ai.gpu_memory_mb) {
+            (true, Some(model)) => match crate::ai::AiDetector::load_cpu(model, config.ai.threads) {
                 Ok(d) => {
-                    info!("AI: loaded {} ({}x{} input, on {})", model.display(), d.input_size(), d.input_size(), d.gpu_name().unwrap_or("CPU"));
+                    info!("AI: loaded {} ({}x{} input, on CPU)", model.display(), d.input_size(), d.input_size());
                     Some(Arc::new(d))
                 }
                 Err(e) => {
@@ -436,6 +450,7 @@ impl Engine {
             cameras: RwLock::new(Vec::new()),
             db,
             ai: RwLock::new(ai),
+            me: std::sync::OnceLock::new(),
             profile: RwLock::new(profiles::ActiveProfile::default()),
             live_sessions: std::sync::atomic::AtomicUsize::new(0),
             manual_profile: Mutex::new(manual),
@@ -456,8 +471,13 @@ impl Engine {
             tamper: Mutex::new(std::collections::HashMap::new()),
             overlay_vars: Mutex::new(std::collections::HashMap::new()),
             writers: Mutex::new(std::collections::HashMap::new()),
+            controls: crate::controls::Board::default(),
         });
+        let _ = engine.me.set(Arc::downgrade(&engine));
+        engine.move_to_card();
         timed_step("loading alert pauses", || engine.load_alert_pauses());
+        // Armed or disarmed as when it stopped (nothing saved yet: armed).
+        engine.load_shield();
         // Once the NVIDIA add-on is downloaded, load the AI again onto the card.
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let _ = engine_slot.set(Arc::downgrade(&engine));
@@ -574,6 +594,8 @@ impl Engine {
         crate::missing::start(engine.clone());
         crate::offsite::start(engine.clone());
         if let Some(h) = crate::mqtt::start(&engine) { let _ = engine.mqtt.set(h); }
+        // Camera controls: lights given back and sirens stopped on time, what cameras have.
+        crate::controls::start(engine.clone());
         crate::ingest::baichuan::pushx::start(engine.clone());
         {
             // A battery camera's "<camera> motion" marker left on by a restart
@@ -622,6 +644,7 @@ impl Engine {
             cameras: RwLock::new(Vec::new()),
             db: Arc::new(crate::db::Db::open_in_memory().unwrap()),
             ai: RwLock::new(None),
+            me: std::sync::OnceLock::new(),
             profile: RwLock::new(profiles::ActiveProfile::default()),
             live_sessions: std::sync::atomic::AtomicUsize::new(0),
             manual_profile: Mutex::new(None),
@@ -642,6 +665,7 @@ impl Engine {
             tamper: Mutex::new(std::collections::HashMap::new()),
             overlay_vars: Mutex::new(std::collections::HashMap::new()),
             writers: Mutex::new(std::collections::HashMap::new()),
+            controls: crate::controls::Board::default(),
         })
     }
 
@@ -659,6 +683,9 @@ impl Engine {
             let _g = pause::ARMING.lock().unwrap();
             let pending = self.arm_at.swap(0, Ordering::Relaxed) != 0;
             let was = self.shield.swap(armed, Ordering::Relaxed);
+            if was != armed || pending {
+                self.save_shield();
+            }
             was != armed || pending
         };
         if changed {
@@ -803,26 +830,53 @@ impl Engine {
         self.ai.read().unwrap().clone()
     }
 
-    /// Load (or drop) the built-in detector to match the AI settings now.
-    /// One reload at a time, each reading the settings itself: a reload
-    /// started earlier (the NVIDIA add-on arriving) never stores a model
-    /// loaded with settings older than a later one's.
+    /// Load (or drop) the built-in detector to match the AI settings now:
+    /// on the processor at once, then on the graphics card in the background
+    /// (`move_to_card`). One reload at a time, each reading the settings
+    /// itself: a reload started earlier (the NVIDIA add-on arriving) never
+    /// stores a model loaded with settings older than a later one's.
     pub fn reload_ai(&self) -> anyhow::Result<()> {
+        self.reload_ai_cpu()?;
+        self.move_to_card();
+        Ok(())
+    }
+
+    /// Switch the built-in AI to `model` and turn it on. The model must load
+    /// (on the processor) before it goes into the settings; then it is
+    /// loaded like any reload (`reload_ai`: the processor first, the card
+    /// in the background), so it takes the same locked path.
+    pub fn use_model(&self, model: &std::path::Path) -> anyhow::Result<()> {
+        let threads = self.config.lock().unwrap().ai.threads;
+        crate::ai::AiDetector::load_cpu(model, threads)?;
+        {
+            let mut c = self.config.lock().unwrap();
+            c.ai.enabled = true;
+            c.ai.model = Some(std::path::PathBuf::from(crate::ai_setup::clean_path(model)));
+            c.save(&self.config_path)?;
+        }
+        self.reload_ai()
+    }
+
+    fn reload_ai_cpu(&self) -> anyhow::Result<()> {
         let _one = AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let (enabled, model, threads, gpu, gpu_name, gpu_mb) = {
+        // Never once AmberSight is stopping (stop_ai took the detector).
+        if crate::ai_card::stopping() {
+            return Ok(());
+        }
+        let (enabled, model, threads) = {
             let c = self.config.lock().unwrap();
-            (c.ai.enabled, c.ai.model.clone(), c.ai.threads, c.ai.gpu, c.ai.gpu_name.clone(), c.ai.gpu_memory_mb)
+            (c.ai.enabled, c.ai.model.clone(), c.ai.threads)
         };
         let new = match (enabled, model) {
             (true, Some(m)) => {
-                let d = crate::ai::AiDetector::load_on(&m, threads, gpu, gpu_name.as_deref(), gpu_mb)?;
-                info!("AI: loaded {} ({}x{} input, on {})", m.display(), d.input_size(), d.input_size(), d.gpu_name().unwrap_or("CPU"));
+                let d = crate::ai::AiDetector::load_cpu(&m, threads)?;
+                info!("AI: loaded {} ({}x{} input, on CPU)", m.display(), d.input_size(), d.input_size());
                 Some(Arc::new(d))
             }
             _ => {
                 // The AI is off: no card wanted.
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-                crate::gpu_addon::not_wanted();
+                crate::gpu_addon::none_wanted();
                 None
             }
         };
@@ -1339,6 +1393,8 @@ impl Engine {
     /// config.toml (cameras keep their enabled setting).
     pub fn shutdown(&self, wait: std::time::Duration) {
         card_fill::begin_stop();
+        // Lights AmberSight turned on get back their own setting, sirens stop.
+        crate::controls::shutdown(self, std::time::Duration::from_secs(5));
         let cams: Vec<Arc<CameraHandle>> = self.cameras.read().unwrap().iter().flatten().cloned().collect();
         // Cameras on the ffmpeg pipeline are indexed by the 15 s scan, which leaves out a file
         // still being written: note their folders now, scan them once more when they have closed.
@@ -1368,6 +1424,9 @@ impl Engine {
         if !card_fill::stop_and_wait(std::time::Duration::from_secs(5)) {
             warn!("shutdown: filling a hole from a camera's card did not stop in time (it adds nothing now)");
         }
+        // The cameras' shared web sessions (hub state, controls): signed out
+        // now that nothing uses them (each holds one of a camera's few slots).
+        crate::controls::session::logout_all();
         if !card_catchup::stop_and_wait(std::time::Duration::from_secs(5)) {
             warn!("shutdown: importing a battery camera's events from its card did not stop in time");
         }
@@ -1543,8 +1602,11 @@ pub(crate) static CAMERA_NAMING: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 /// The longest a rename waits for the camera's recorder to stop (see
 /// Engine::rename_and_update_camera): a camera that does not answer must
-/// not hold the request, or a removal, for long.
-pub const RENAME_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 3 } else { 10 });
+/// not hold the request, or a removal, for long. Always longer than an ffmpeg
+/// recorder's own stop (worker::stop_recorder: up to 3 s after asking it to
+/// quit, then killed), or a recorder that is slow to quit (seen on Windows)
+/// would not count as stopped.
+pub const RENAME_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 5 } else { 10 });
 
 /// Settings that only matter when a notification is decided (or how the
 /// camera is listed): changing them does not touch the stream. Everything not
@@ -1570,6 +1632,8 @@ fn copy_light_fields(to: &mut CameraConfig, from: &CameraConfig) {
     to.catch_up_every = from.catch_up_every;
     // Only Status reads it.
     to.no_sub_ok = from.no_sub_ok;
+    // Camera controls (controls/) and their actions read it from the handle when used.
+    to.controls = from.controls.clone();
 }
 
 /// True when `new` differs from `old` in anything but the light fields.
@@ -1622,6 +1686,8 @@ fn make_handle(id: usize, cfg: CameraConfig) -> Arc<CameraHandle> {
             triggered_until: 0,
             fanout_at: 0,
             ingest: "starting",
+            via: None,
+            via_note: None,
             blobs: Vec::new(),
             camera_detections: Default::default(),
             online_since: None,

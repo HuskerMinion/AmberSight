@@ -20,6 +20,7 @@
 use super::avcc::AvccBridge;
 use super::bc::{self, Header, Msg};
 use super::media::Demux;
+use super::transport::Transport;
 use super::udp::UdpTransport;
 use crate::ingest::recorder::{MediaItem, VideoParams};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -674,7 +675,7 @@ fn dispatch(
 /// microsecond step (its counter is a u32 that wraps every ~71 minutes, so
 /// steps, not absolute values, are used). The first frame is 0; a step of
 /// zero or over 2 s (a stalled or reset counter) counts as one ~15 fps frame.
-fn next_ticks(last_ticks: i64, last_micros: Option<u32>, micros: u32) -> i64 {
+pub(super) fn next_ticks(last_ticks: i64, last_micros: Option<u32>, micros: u32) -> i64 {
     match last_micros {
         None => 0,
         Some(p) => {
@@ -687,7 +688,7 @@ fn next_ticks(last_ticks: i64, last_micros: Option<u32>, micros: u32) -> i64 {
 /// The encryption a camera chose in its reply to the login upgrade: the
 /// response code is 0xddXX with XX = 0x12 full AES, 0x01 BC (XOR), 0x00 none.
 /// Some(true) = AES, Some(false) = not AES, None = not that reply.
-fn session_uses_aes(status: u16) -> Option<bool> {
+pub(super) fn session_uses_aes(status: u16) -> Option<bool> {
     (status >> 8 == 0xdd).then_some(status & 0xff == 0x12)
 }
 
@@ -696,7 +697,7 @@ fn session_uses_aes(status: u16) -> Option<bool> {
 /// encrypted and the rest is sent as-is; without it the payload is plain.
 /// (Decrypting all of it and cutting at n dropped everything past n: on an SD
 /// download the first message of every frame lost ~8 KB and nothing decoded.)
-fn decode_payload(ext: &[u8], pay_enc: &[u8], dec: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+pub(super) fn decode_payload(ext: &[u8], pay_enc: &[u8], dec: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
     match bc::xml_tag(&String::from_utf8_lossy(ext), "encryptLen").and_then(|s| s.trim().parse::<usize>().ok()) {
         Some(n) => {
             let n = n.min(pay_enc.len());
@@ -708,7 +709,27 @@ fn decode_payload(ext: &[u8], pay_enc: &[u8], dec: impl Fn(&[u8]) -> Vec<u8>) ->
     }
 }
 
-fn is_wouldblock(e: &std::io::Error) -> bool {
+/// The first non-AES session to `host` since AmberSight started (the
+/// warning about it is given once).
+fn first_plain_session(host: &str) -> bool {
+    static SEEN: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+    SEEN.lock().unwrap().get_or_insert_with(Default::default).insert(host.to_string())
+}
+
+/// `raw` holds only whole BC messages (none cut short at its end).
+fn whole_messages(raw: &[u8]) -> bool {
+    let mut at = 0;
+    while at < raw.len() {
+        match bc::parse_msg(&raw[at..]) {
+            Ok(Some((used, _))) => at += used,
+            Ok(None) => return false,
+            Err(_) => return true, // not ours to wait for: let the caller see it
+        }
+    }
+    true
+}
+
+pub(super) fn is_wouldblock(e: &std::io::Error) -> bool {
     matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
 }
 
@@ -745,24 +766,50 @@ fn parse_battery(xml: &str) -> Option<Battery> {
 /// One signed-in BC session over the UDP transport. The protocol steps are the
 /// ones proven in the `argus-probe` lab tool; see `super::bc` for the wire
 /// format and crypto.
-struct Session {
-    sock: UdpTransport,
+pub(super) struct Session {
+    sock: Box<dyn Transport>,
     aes: Option<bc::Aes>,
     msg_num: u16,
     battery: Option<Battery>,
+    /// The camera chose AES for this session (else BC/XOR or nothing).
+    pub(super) uses_aes: bool,
+    /// The sign-in reply's XML (DeviceInfo and friends), for the report.
+    pub(super) login_xml: String,
+}
+
+/// The camera answered the sign-in and refused it: a wrong user name or
+/// password. Never asked again on its own (Reolink locks an account out
+/// after a few failed sign-ins).
+#[derive(Debug)]
+pub struct SignInRefused(pub u16);
+
+impl std::fmt::Display for SignInRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sign-in refused: the camera did not accept the user name or password (Baichuan status {})", self.0)
+    }
+}
+
+impl std::error::Error for SignInRefused {}
+
+/// The camera answered the sign-in itself and did not accept it. Any such
+/// answer counts as a refusal, whatever its status (400 is the usual one;
+/// not every firmware's is known): asking again could lock the account out.
+/// Only no answer at all (a network failure) is worth another try.
+fn is_refusal_status(status: u16) -> bool {
+    status != 200
 }
 
 impl Session {
-    fn next_num(&mut self) -> u16 {
+    pub(super) fn next_num(&mut self) -> u16 {
         self.msg_num = self.msg_num.wrapping_add(1);
         self.msg_num
     }
 
-    fn set_read_timeout(&mut self, d: Duration) {
+    pub(super) fn set_read_timeout(&mut self, d: Duration) {
         self.sock.set_read_timeout(d);
     }
 
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    pub(super) fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use std::io::Read;
         self.sock.read(buf)
     }
@@ -770,10 +817,18 @@ impl Session {
     /// Discover/wake the camera, sign in (AES), and capture the battery state
     /// the camera pushes at login.
     fn login(host: &str, uid: &str, user: &str, pass: &str) -> anyhow::Result<Session> {
-        use anyhow::{anyhow, bail, Context};
+        use anyhow::Context;
         let sock = UdpTransport::connect(host, uid, Duration::from_secs(15))
             .with_context(|| format!("UDP discovery to {host} (uid {uid})"))?;
-        let mut s = Session { sock, aes: None, msg_num: 0, battery: None };
+        Session::sign_in(Box::new(sock), host, user, pass)
+    }
+
+    /// Sign in over an already-connected transport (UDP after discovery, or
+    /// TCP): the login upgrade, the hashed sign-in, then the encryption the
+    /// camera chose. A refusal of the credentials is a [`SignInRefused`].
+    pub(super) fn sign_in(sock: Box<dyn Transport>, host: &str, user: &str, pass: &str) -> anyhow::Result<Session> {
+        use anyhow::{anyhow, bail, Context};
+        let mut s = Session { sock, aes: None, msg_num: 0, battery: None, uses_aes: false, login_xml: String::new() };
 
         // Step 1: empty "login upgrade" requesting AES; the camera returns an
         // <Encryption> nonce. No credentials sent, so this cannot lock out.
@@ -782,7 +837,7 @@ impl Session {
             msg_num: s.next_num(), status: 0xdc12, class: bc::CLASS_LEGACY, payload_offset: None,
         };
         bc::write_msg(&mut s.sock, &h, &[]).context("sending login-upgrade")?;
-        let raw = s.drain(Duration::from_secs(6))?;
+        let raw = s.collect(Duration::from_secs(6))?;
         if raw.is_empty() {
             bail!("camera accepted the connection but sent nothing (the app may hold its single session)");
         }
@@ -812,11 +867,21 @@ impl Session {
             msg_num: s.next_num(), status: 0, class: bc::CLASS_MODERN_OFS, payload_offset: Some(0),
         };
         bc::write_msg(&mut s.sock, &h, &enc).context("sending sign-in")?;
-        let raw = s.drain(Duration::from_secs(6))?;
+        let raw = s.collect(Duration::from_secs(6))?;
         let aes = bc::Aes::new(&nonce, pass);
         let mut ok = false;
+        let mut login_status = None;
+        // The sign-in's own answer said no (whatever else came with it).
+        let mut login_refused = None;
         let mut cur = std::io::Cursor::new(raw);
         while let Ok(reply) = bc::read_msg(&mut cur) {
+            if reply.header.msg_id == bc::MSG_LOGIN {
+                login_status = Some(reply.header.status);
+                // (0xddXX is the login upgrade's encryption answer, not a verdict.)
+                if is_refusal_status(reply.header.status) && reply.header.status >> 8 != 0xdd {
+                    login_refused = Some(reply.header.status);
+                }
+            }
             let off = reply.header.payload_offset.unwrap_or(0) as usize;
             let (e, p): (&[u8], &[u8]) = if off > 0 && off <= reply.body.len() {
                 (&reply.body[..off], &reply.body[off..])
@@ -828,37 +893,59 @@ impl Session {
                 if x.contains('<') { x } else { String::from_utf8_lossy(&aes.decrypt(d)).to_string() }
             };
             let txt = format!("{}{}", dec(e), dec(p));
-            if reply.header.status == 200 || txt.contains("DeviceInfo") {
+            if reply.header.msg_id == bc::MSG_LOGIN && (reply.header.status == 200 || txt.contains("DeviceInfo")) {
+                ok = true;
+                if s.login_xml.is_empty() {
+                    s.login_xml = txt.chars().take(16 * 1024).collect();
+                }
+            } else if reply.header.status == 200 || txt.contains("DeviceInfo") {
                 ok = true;
             }
             if txt.contains("batteryPercent") {
                 s.battery = parse_battery(&txt);
             }
         }
+        if let Some(st) = login_refused {
+            return Err(SignInRefused(st).into());
+        }
         if !ok {
-            bail!("sign-in not accepted (no 200 / DeviceInfo)");
+            bail!("sign-in not accepted (no 200 / DeviceInfo{})", login_status.map(|st| format!("; status {st}")).unwrap_or_default());
         }
         // Encrypt from now on the way the camera chose: AES only if it said so.
         // Older firmware (Argus 2 0112) picks BC/XOR and cannot read AES requests
         // (it answered Preview 400 or not at all).
         s.aes = uses_aes.then_some(aes);
-        info!("baichuan '{host}': signed in ({})", if uses_aes { "AES" } else { "BC/XOR" });
+        s.uses_aes = uses_aes;
+        let kind = s.sock.kind();
+        if uses_aes {
+            info!("baichuan '{host}': signed in over {kind} (AES)");
+        } else {
+            // Accepted (older firmware such as the Argus 2's 0112 needs it).
+            // Warned once per camera while AmberSight runs (a battery camera
+            // wakes many times a day); the camera report says it every time.
+            if first_plain_session(host) {
+                tracing::warn!("baichuan '{host}': signed in over {kind}; the camera chose BC/XOR, so its sessions are not AES-encrypted (use it on a trusted network only)");
+            } else {
+                debug!("baichuan '{host}': signed in over {kind} (BC/XOR, not AES)");
+            }
+        }
         Ok(s)
     }
 
-    /// Read bytes until the socket is quiet for a moment or closes.
-    fn drain(&mut self, total: Duration) -> anyhow::Result<Vec<u8>> {
-        use std::io::Read;
+    /// Read bytes until the transport is quiet for a moment (with every
+    /// message in them whole) or closes. Reads are not capped at any size: a
+    /// sign-in reply can be several KB (7.3 KB seen) and may come in pieces.
+    fn collect(&mut self, total: Duration) -> anyhow::Result<Vec<u8>> {
         self.sock.set_read_timeout(Duration::from_millis(600));
         let mut raw = Vec::new();
-        let mut buf = [0u8; 4096];
+        let mut buf = vec![0u8; 16384];
         let deadline = Instant::now() + total;
         while Instant::now() < deadline && raw.len() < 1 << 20 {
-            match self.sock.read(&mut buf) {
+            match self.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => raw.extend_from_slice(&buf[..n]),
                 Err(e) if is_wouldblock(&e) => {
-                    if !raw.is_empty() {
+                    if !raw.is_empty() && whole_messages(&raw) {
                         break;
                     }
                 }
@@ -871,7 +958,7 @@ impl Session {
     /// Split a message body into (decrypted extension, payload); see the probe
     /// for the AES/BC rules. `off == 0` means no extension, the whole body is
     /// payload (a mid-frame video continuation).
-    fn decode_msg(&self, header: &Header, body: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    pub(super) fn decode_msg(&self, header: &Header, body: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let off = header.payload_offset.unwrap_or(0) as usize;
         let (ext_enc, pay_enc): (&[u8], &[u8]) = if off <= body.len() {
             (&body[..off], &body[off..])
@@ -902,7 +989,7 @@ impl Session {
         self.send_xml(bc::MSG_PREVIEW_STOP, 0, xml)
     }
 
-    fn logout(&mut self) -> anyhow::Result<()> {
+    pub(super) fn logout(&mut self) -> anyhow::Result<()> {
         let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<LoginUser version=\"1.1\"/>\n</body>\n";
         self.send_xml(bc::MSG_LOGOUT, 0, xml)
     }
@@ -1142,7 +1229,7 @@ impl Session {
         None
     }
 
-    fn ack_keepalive(&mut self, channel: u8, msg_num: u16) -> anyhow::Result<()> {
+    pub(super) fn ack_keepalive(&mut self, channel: u8, msg_num: u16) -> anyhow::Result<()> {
         let h = Header {
             msg_id: bc::MSG_KEEPALIVE, body_len: 0, channel, stream: 0, msg_num,
             status: 200, class: bc::CLASS_MODERN_OFS, payload_offset: Some(0),
@@ -1150,7 +1237,7 @@ impl Session {
         bc::write_msg(&mut self.sock, &h, &[])
     }
 
-    fn send_modern(&mut self, msg_id: u32, ext_xml: &str, pay_xml: &str) -> anyhow::Result<()> {
+    pub(super) fn send_modern(&mut self, msg_id: u32, ext_xml: &str, pay_xml: &str) -> anyhow::Result<()> {
         let enc = |s: &str, aes: &Option<bc::Aes>| -> Vec<u8> {
             if s.is_empty() {
                 return Vec::new();
@@ -1172,7 +1259,7 @@ impl Session {
         bc::write_msg(&mut self.sock, &h, &body)
     }
 
-    fn send_xml(&mut self, msg_id: u32, stream_code: u8, xml: &str) -> anyhow::Result<()> {
+    pub(super) fn send_xml(&mut self, msg_id: u32, stream_code: u8, xml: &str) -> anyhow::Result<()> {
         let body = match &self.aes {
             Some(a) => a.encrypt(xml.as_bytes()),
             None => bc::xor_crypt(0, xml.as_bytes()),
@@ -1183,6 +1270,110 @@ impl Session {
             status: 0, class: bc::CLASS_MODERN_OFS, payload_offset: Some(0),
         };
         bc::write_msg(&mut self.sock, &h, &body)
+    }
+
+    /// As `send_xml`, with the header's channel byte set (a hub's or
+    /// recorder's channel; the XOR cipher is keyed by it too). Returns the
+    /// message number: the camera answers with the same one.
+    pub(super) fn send_xml_on(&mut self, msg_id: u32, channel: u8, stream_code: u8, xml: &str) -> anyhow::Result<u16> {
+        let body = match &self.aes {
+            Some(a) => a.encrypt(xml.as_bytes()),
+            None => bc::xor_crypt(channel as u32, xml.as_bytes()),
+        };
+        let num = self.next_num();
+        let h = Header {
+            msg_id, body_len: 0, channel, stream: stream_code, msg_num: num,
+            status: 0, class: bc::CLASS_MODERN_OFS, payload_offset: Some(0),
+        };
+        bc::write_msg(&mut self.sock, &h, &body)?;
+        Ok(num)
+    }
+
+    /// An extension XML and a payload on `channel`, both after one header
+    /// (payload offset = the extension's length). The payload is encrypted
+    /// like the extension when `encrypt_payload` (XML), else sent as is
+    /// (binary media). `num`: reuse a message number (a talk's audio), else
+    /// a new one. Returns the message number.
+    pub(super) fn send_ext_on(&mut self, msg_id: u32, channel: u8, num: Option<u16>, ext_xml: &str, payload: &[u8], encrypt_payload: bool) -> anyhow::Result<u16> {
+        let enc = |d: &[u8]| -> Vec<u8> {
+            match &self.aes {
+                Some(a) => a.encrypt(d),
+                None => bc::xor_crypt(channel as u32, d),
+            }
+        };
+        let mut body = enc(ext_xml.as_bytes());
+        let ext_len = body.len() as u32;
+        if encrypt_payload && !payload.is_empty() {
+            body.extend_from_slice(&enc(payload));
+        } else {
+            body.extend_from_slice(payload);
+        }
+        let num = num.unwrap_or_else(|| self.next_num());
+        let h = Header {
+            msg_id, body_len: 0, channel, stream: 0, msg_num: num,
+            status: 0, class: bc::CLASS_MODERN_OFS, payload_offset: Some(ext_len),
+        };
+        bc::write_msg(&mut self.sock, &h, &body)?;
+        Ok(num)
+    }
+
+    /// A keep-alive of our own (the camera answers it): keeps a quiet TCP
+    /// session from being dropped, and shows the camera is still there.
+    pub(super) fn send_keepalive(&mut self) -> anyhow::Result<()> {
+        let num = self.next_num();
+        let h = Header {
+            msg_id: bc::MSG_KEEPALIVE, body_len: 0, channel: 0, stream: 0, msg_num: num,
+            status: 0, class: bc::CLASS_MODERN_OFS, payload_offset: Some(0),
+        };
+        bc::write_msg(&mut self.sock, &h, &[])
+    }
+
+    /// A command with an extension and an XML body (each encrypted on its
+    /// own, as the camera chose), on `channel`. `write`: one of the camera
+    /// controls' writes (`bc::CONTROL_WRITES`), else a read-only message.
+    /// Returns the message number (the camera answers with the same one).
+    pub(super) fn send_parts(&mut self, msg_id: u32, channel: u8, ext_xml: &str, pay_xml: &str, write: bool) -> anyhow::Result<u16> {
+        let enc = |s: &str| -> Vec<u8> {
+            if s.is_empty() {
+                return Vec::new();
+            }
+            match &self.aes {
+                Some(a) => a.encrypt(s.as_bytes()),
+                None => bc::xor_crypt(channel as u32, s.as_bytes()),
+            }
+        };
+        let ext = enc(ext_xml);
+        let body = [ext.clone(), enc(pay_xml)].concat();
+        let num = self.next_num();
+        let h = Header { msg_id, body_len: 0, channel, stream: 0, msg_num: num, status: 0, class: bc::CLASS_MODERN_OFS, payload_offset: Some(ext.len() as u32) };
+        if write {
+            bc::write_control_msg(&mut self.sock, &h, &body)?;
+        } else {
+            bc::write_msg(&mut self.sock, &h, &body)?;
+        }
+        Ok(num)
+    }
+
+    /// An XML reply in the clear: its extension and its body (each encrypted on its own).
+    pub(super) fn reply_xml(&self, header: &Header, body: &[u8]) -> String {
+        let dec = |d: &[u8]| -> Vec<u8> {
+            if d.is_empty() {
+                return Vec::new();
+            }
+            match &self.aes {
+                Some(a) => a.decrypt(d),
+                None => bc::xor_crypt(header.channel as u32, d),
+            }
+        };
+        let off = (header.payload_offset.unwrap_or(0) as usize).min(body.len());
+        let mut x = dec(&body[..off]);
+        x.extend_from_slice(&dec(&body[off..]));
+        String::from_utf8_lossy(&x).into_owned()
+    }
+
+    /// The camera told of a battery while signing in (battery cameras do).
+    pub(super) fn has_battery(&self) -> bool {
+        self.battery.is_some() || self.login_xml.contains("batteryPercent")
     }
 }
 
@@ -1259,6 +1450,14 @@ mod encryption_tests {
         assert_eq!(session_uses_aes(0xdd01), Some(false), "Argus 2 0112: BC/XOR, no AES");
         assert_eq!(session_uses_aes(0xdd00), Some(false), "no encryption");
         assert_eq!(session_uses_aes(200), None, "not the login-upgrade reply");
+    }
+
+    #[test]
+    fn the_not_aes_warning_is_given_once_per_camera() {
+        use super::first_plain_session;
+        assert!(first_plain_session("192.0.2.77"));
+        assert!(!first_plain_session("192.0.2.77"), "a later wake of the same camera");
+        assert!(first_plain_session("192.0.2.78"), "another camera");
     }
 }
 

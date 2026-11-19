@@ -240,8 +240,18 @@ impl Engine {
             } else {
                 info!("profile: {shown} ({})", next.source);
             }
-            if let Some(armed) = self.profile_config(&next.name).and_then(|p| p.armed) {
-                self.set_shield(armed, &by, &format!("profile {shown}"));
+            // Starting with the profile that was active when it stopped: the
+            // arm state (and a running arm delay) came back as saved, so the
+            // profile does not set it again. Only a profile the schedule moved
+            // to while stopped sets it.
+            let same_as_before = first && self.db.ui_get(MANUAL_SCOPE, LAST_PROFILE_KEY).ok().flatten().as_deref() == Some(next.name.as_str());
+            if let Err(e) = self.db.ui_put(MANUAL_SCOPE, LAST_PROFILE_KEY, &next.name) {
+                tracing::warn!("could not save the active profile: {e:#}");
+            }
+            if !same_as_before {
+                if let Some(armed) = self.profile_config(&next.name).and_then(|p| p.armed) {
+                    self.set_shield(armed, &by, &format!("profile {shown}"));
+                }
             }
         }
         // Restart cameras whose recording mode changes under the new profile.
@@ -288,6 +298,10 @@ pub(super) fn profiles_json(
 }
 
 const MANUAL_SCOPE: &str = "server";
+
+/// ui_kv key of the profile last active (kept beside the arm state, so a
+/// restart can tell whether the profile changed while stopped).
+const LAST_PROFILE_KEY: &str = "profile_last";
 
 /// Taken while a profile is worked out and applied (and, choosing one by
 /// hand, while the choice is stored): before manual_profile, the config,
@@ -398,6 +412,41 @@ mod tests {
         assert_ne!(since(&e), "");
         e.set_manual_profile(None, None, "ann", "").unwrap();
         assert_eq!(since(&e), "");
+    }
+
+    #[test]
+    fn a_restart_keeps_the_arm_state_under_the_same_profile() {
+        use std::sync::atomic::Ordering;
+        let cfg: crate::config::Config = toml::from_str(
+            "[automation]\ndefault_profile = \"Home\"\n[[automation.profiles]]\nname = \"Home\"\narmed = true\n[[automation.profiles]]\nname = \"Away\"\narmed = true\n",
+        )
+        .unwrap();
+        let e = Engine::for_test(cfg);
+        let restart = |e: &Arc<Engine>| {
+            // A new engine on the same database: armed, nothing applied, then
+            // the saved arm state, then the profile.
+            *e.profile.write().unwrap() = ActiveProfile::default();
+            e.shield.store(true, Ordering::Relaxed);
+            e.arm_at.store(0, Ordering::Relaxed);
+            e.load_shield();
+            e.apply_profile();
+        };
+        e.shield.store(false, Ordering::Relaxed);
+        e.apply_profile();
+        assert!(e.armed_now(), "the profile arms on a first start");
+        // Disarmed by hand, then restarted under the same profile: still disarmed.
+        e.set_shield(false, "tester", "");
+        restart(&e);
+        assert!(!e.armed_now(), "a restart must not undo a disarm");
+        // A running arm delay goes on too.
+        let at = e.arm_after(3600, "tester");
+        restart(&e);
+        assert_eq!(e.arming_until(), Some(at), "a restart must not cancel the arm delay");
+        // The schedule moved to another profile while stopped: that one sets it.
+        e.set_shield(false, "tester", "");
+        e.db.ui_put(MANUAL_SCOPE, LAST_PROFILE_KEY, "Away").unwrap();
+        restart(&e);
+        assert!(e.armed_now(), "a profile changed while stopped applies its arm state");
     }
 
     #[test]

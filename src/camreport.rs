@@ -470,7 +470,7 @@ fn source(url: &str, cfg: &CameraConfig) -> crate::ingest::StreamSource {
         }
         None => url.to_string(),
     };
-    crate::ingest::StreamSource { url: bare, username: user, password: pw, group: None, transport: cfg.transport.clone() }
+    crate::ingest::StreamSource { url: bare, username: user, password: pw, group: None, transport: cfg.transport.clone(), baichuan: None }
 }
 
 /// The address with sign-in, for ffmpeg.
@@ -889,6 +889,7 @@ pub async fn make(cfg: CameraConfig, live: Live) -> (String, String) {
         "onvif": onvif_part,
         "log": log_lines(&cfg.name),
     });
+    report["baichuan"] = baichuan_part(&cfg);
     secrets.scrub_json(&mut report);
     let text = format!(
         "{}\n=== JSON (the same, for tools) ===\n{}\n",
@@ -900,6 +901,34 @@ pub async fn make(cfg: CameraConfig, live: Live) -> (String, String) {
     let slug: String = cfg.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
     let file = format!("ambersight-camera-report-{}-{}.txt", slug.trim_matches('-'), chrono::Local::now().format("%Y%m%d-%H%M"));
     (file, text)
+}
+
+/// The camera's Baichuan TCP session (cameras set to connect with Baichuan
+/// or Auto): its state as the shared session sees it; null otherwise.
+fn baichuan_part(cfg: &CameraConfig) -> Value {
+    if crate::engine::connect_way::mode_of(cfg) == crate::engine::connect_way::Mode::Rtsp {
+        return Value::Null;
+    }
+    let port = cfg.baichuan_port.unwrap_or(crate::ingest::baichuan::transport::TCP_PORT);
+    let channel = cfg.baichuan_channel.or(cfg.reolink_channel.and_then(|c| u8::try_from(c).ok()));
+    let Some(t) = crate::ingest::baichuan::wired::target_for(&cfg.url, port, channel, crate::ingest::baichuan::wired::StreamKind::Main) else {
+        return json!({ "connect": cfg.connect, "target": null });
+    };
+    let st = crate::ingest::baichuan::wired::status(&t.host, t.port);
+    json!({
+        "connect": cfg.connect,
+        "target": t.describe(),
+        "signed_in": st.as_ref().map(|s| s.signed_in),
+        "aes": st.as_ref().and_then(|s| s.aes),
+        "device_type": st.as_ref().and_then(|s| s.device_type.clone()),
+        "channels": st.as_ref().and_then(|s| s.channels),
+        "firmware": st.as_ref().and_then(|s| s.firmware.clone()),
+        "sessions": st.as_ref().map(|s| s.sessions),
+        "damaged": st.as_ref().map(|s| s.damaged),
+        "unmatched": st.as_ref().map(|s| s.unmatched),
+        "refused": st.as_ref().and_then(|s| s.refused.clone()),
+        "last_error": st.as_ref().and_then(|s| s.last_error.clone()),
+    })
 }
 
 /// The readable part, from the (already scrubbed) JSON.
@@ -943,6 +972,13 @@ fn summary(r: &Value) -> String {
     let _ = writeln!(t, "Read by: {}{}", s(&st["ingest"]), if st["fallback_reason"].is_null() { String::new() } else { format!(" (fallback since {}: {})", s(&st["fallback_at"]), s(&st["fallback_reason"])) });
     let _ = writeln!(t, "Online: {}  sleeping: {}  reconnects: {}  frames: {}", s(&st["online"]), s(&st["sleeping"]), s(&st["reconnects"]), s(&st["frames"]));
     let _ = writeln!(t, "Last error: {} ({})", s(&st["last_error"]), s(&st["last_error_at"]));
+    let b = &r["baichuan"];
+    if !b.is_null() {
+        let _ = writeln!(t, "Connect with: {}  session: {}  signed in: {}  AES: {}{}", s(&b["connect"]), s(&b["target"]), s(&b["signed_in"]), s(&b["aes"]),
+            if b["aes"] == Value::Bool(false) { " (NOT AES-encrypted: the camera chose BC/XOR)" } else { "" });
+        let _ = writeln!(t, "Baichuan: device {} with {} channel(s), firmware {}; damaged-media holds {}, stray packets {}; refused: {}; last error: {}",
+            s(&b["device_type"]), s(&b["channels"]), s(&b["firmware"]), s(&b["damaged"]), s(&b["unmatched"]), s(&b["refused"]), s(&b["last_error"]));
+    }
     if let Some(e) = r["stream_ends"].as_array().filter(|e| !e.is_empty()) {
         let _ = writeln!(t, "\n== Recent stream ends ==");
         for x in e {
@@ -1183,6 +1219,25 @@ mod tests {
         let json_part = text.split("=== JSON (the same, for tools) ===\n").nth(1).unwrap();
         let v: Value = serde_json::from_str(json_part).expect("the JSON part reads");
         assert_eq!(v["state"]["frames"], 1234);
+    }
+
+    /// A camera whose ONVIF answers echo the WS-Security header (digest, nonce,
+    /// user name, time): the report's ONVIF part holds none of it, before the
+    /// report's own last pass over the sign-in, and the whole report neither.
+    #[tokio::test]
+    async fn onvif_answers_echoing_the_security_header_stay_out_of_the_report() {
+        use crate::onvif::echo_device;
+        for status in ["400 Bad Request", "500 Internal Server Error"] {
+            let (port, sent) = echo_device::start(status);
+            let mut c = cfg(&format!("rtsp://{}:{}@127.0.0.1:9/main", echo_device::USER, echo_device::PASS));
+            c.onvif_port = Some(port);
+            let part = onvif(&c).await;
+            assert_eq!(part["status"], "failed", "{part}");
+            assert!(part["note"].as_str().unwrap().contains("SOAP fault: Sender not Authorized"), "{part}");
+            echo_device::assert_clean(&part.to_string(), &sent);
+            let (_, text) = make(c, live()).await;
+            echo_device::assert_clean(&text, &sent);
+        }
     }
 
     /// A hub camera gets no extra DESCRIBE or probe: the running session's

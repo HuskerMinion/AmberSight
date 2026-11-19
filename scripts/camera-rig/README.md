@@ -107,6 +107,37 @@ through `PUT /api/cameras/:id` and the camera must play and record. ONVIF:
 onvif-go), PTZ caps, moves and presets reach the camera, and camera motion
 (trigger = "camera") makes events. Finally: no panics, AmberSight still runs.
 
+Camera controls: two cameras whose web API is `reolink_sim.py` (ports 18680, and 18681 that
+answers "done" and changes nothing). The rig checks that their abilities are found, a timed
+spotlight comes on and gets its own state, mode and brightness back, the siren plays, is
+limited (a second one within 10 s is refused) and is stopped when its time is up, the camera
+that changes nothing is reported, and the actions are in the audit log. Over Reolink port 9000:
+one camera whose Baichuan TCP side is `bc_sim.py` (port 18682, its state on 18683). The rig
+checks that its siren, infrared and status light are found over port 9000, the infrared lights
+change and read back, the siren plays as rounds and is stopped when its time is up, and that it
+was signed in to once.
+
+## Baichuan talk (run by hand)
+
+`baichuan_talk_sim.py` is a fake Reolink on Baichuan TCP for two-way audio. It
+signs the client in, answers TalkAbility and TalkConfig (or refuses it with
+`--refuse`, as a camera does while the Reolink app talks), and records the
+talk audio. When the client goes, it decodes the ADPCM it got, checks every
+block header, writes the audio as a 16 kHz WAV, and prints the sign-ins, the
+talk messages, how far ahead of real time the audio came, and the SNR of the
+tone part. Nothing plays anywhere.
+
+```sh
+python3 scripts/camera-rig/baichuan_talk_sim.py --make-tone /tmp/tone.wav
+python3 scripts/camera-rig/baichuan_talk_sim.py --port 19077 --out /tmp/bctalk --seconds 20 &
+# a config with one camera: url = "rtsp://127.0.0.1:18554/Preview_01_main",
+# connect = "baichuan", baichuan_port = 19077
+ambersight talk-test --config cfg.toml --camera Fake --baichuan --wav /tmp/tone.wav --seconds 5
+```
+
+The same path is also tested by `cargo test` (`ingest::baichuan::fake_cam`),
+with video on the same session.
+
 ## Limits
 
 - **Firmware quirks are only simulated where we know them** (Kuna ADTS, the
@@ -123,8 +154,8 @@ onvif-go), PTZ caps, moves and presets reach the camera, and camera motion
 - **UDP:** the UDP-only server case checks `transport = "auto"` (TCP, then UDP
   after the server's 461) on the built-in reader, on one machine with no
   packet loss; UDP over a real network (loss, reordering, NAT) is not tested.
-- **Battery cameras, Reolink Baichuan, HTTP-FLV, RTMP push, two-way audio and
-  hardware decoding** are not covered.
+- **Battery cameras, Reolink Baichuan video, HTTP-FLV, RTMP push, RTSP two-way
+  audio and hardware decoding** are not covered (Baichuan talk: see above, by hand).
 - The G.711 1.875x clock and ADTS cases are the rig's own re-creations of what
   those cameras send, not captures.
 
@@ -149,6 +180,9 @@ The rig is a test tool and is not shipped with AmberSight.
 - `profiles.toml`: profiles, cases and logins
 - `rtsp_stub.py`: RTSP server for quirks and faults
 - `onvif_sim.py`: virtual ONVIF cameras and WS-Discovery
+- `reolink_sim.py`: a fake Reolink web API (camera controls: abilities, spotlight, siren, IR, status light)
+- `bc_sim.py`: a fake Reolink on Baichuan TCP, port 9000 (camera controls: what it supports, siren, IR, status light)
 - `gst_server.py`: GStreamer RTSP server
+- `baichuan_talk_sim.py`: a fake Reolink on Baichuan TCP for talk (records and decodes the audio)
 - `image/Dockerfile`: helper image (GStreamer + Python, Ubuntu packages only)
 - `fetch.sh`: downloads (MediaMTX image, onvif-go, optionally the latest release)

@@ -1,0 +1,37 @@
+/* i18n.css — language-specific layout tweaks.
+   Only :lang(zh) rules for now; other languages get their own blocks later.
+   Every override is prefixed with :lang(zh), which adds one pseudo-class of
+   specificity, so it beats the original single-source rules listed in
+   tools/i18n/css-case-report.txt without needing !important. */
+
+/* 1. CJK font stack ahead of the existing --font (system fonts only). */
+:lang(zh) {
+  --font: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC",
+    Inter, "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+:lang(zh) body, body:lang(zh) {
+  font-family: var(--font);
+  line-height: 1.6; /* body/font shorthand is 1.45; CJK glyphs read better with more leading */
+}
+
+/* 2. Line breaking for text blocks. */
+:lang(zh) :is(p, li, td, th, dd, dt, h1, h2, h3, h4, h5, h6, label, summary, small, span, div, button) {
+  line-break: strict;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+:lang(zh) :is(p, li, dd, td) { line-height: 1.6; }
+
+/* 3. Uppercase labels: CJK has no case, and letter-spacing breaks up ideographs. */
+:lang(zh) :is(
+  .logo, th, .keys h4, .sm-lbl, .sm-sec h4, .tlnow span, .dk-sec h4, .dk-lbl,
+  .livewrap[data-collapsed="1"] .dock::after, .sm.indock .sm-title, .ctxmenu .ctxhead,
+  .st-ct, .asys-tile .k, .ac-sub, .ac-ovr-h, .ac-tbl th,
+  .tlnone, .calwd, .caltitle, .ze-sub, .pf-ttl, .cp-h, .evh, .sp-group, .pbl, .ptr .dchip,
+  .dsp-name, .dsp-badge, .dsp-plabel, .dsp-chip, .dsp-clock, .dsp-sec h3,
+  .dk-status .dk-fold > summary
+) {
+  letter-spacing: normal;
+  text-transform: none;
+}
+/* Monospace code/pairing fields keep their spacing and casing: #credCode, .lk-code, .dsp-code, .lp-text, .dsa-code input. */

@@ -72,6 +72,7 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET | `/api/stats` | viewer | Live machine, camera, storage, AI, network and GPU figures |
 | GET | `/api/cameras/:id/ptz/caps`, `/ptz/presets` | viewer | PTZ capabilities and presets |
 | POST | `/api/cameras/:id/ptz`, `/ptz/aim` | **admin**, operator (`ptz`) | Move / zoom / go to presets / tours (saving and deleting presets: admin) |
+| GET / POST | `/api/cameras/:id/controls` | viewer / **admin**, operator (`lights`, `siren`) | A camera's spotlight, siren, infrared and status light: what it has and its state / an action (the siren never from a device token) |
 | POST | `/api/shield` | **admin**, operator (`arm`) | Arm / disarm |
 | GET / POST | `/api/profiles` / `/api/profile` | viewer / **admin**, operator (`arm`) | List / switch profiles |
 | GET / POST | `/api/overlay` / `/api/overlay/:name` | viewer / **admin** | Named overlay variables shown in the camera text overlay as `{v:NAME}` (weather, a temperature, …). POST body is the plain value, or `{"value":"…","ttl":<seconds>}` to blank it after ttl; an empty body clears it. Also settable over MQTT (`<prefix>/overlay/<name>/set`), like the shield and profile. Live view only; not burned into recordings. Values live in memory: a restart clears them (a retained MQTT message sets them again) |
@@ -102,6 +103,10 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET | `/api/tls` | viewer | HTTPS mode, certificate names, CA fingerprint, expiry |
 | GET / POST | `/api/settings` (`server` section) | **admin** | HTTPS on/off, extra certificate names, own certificate files |
 | POST | `/api/system/restart` | **admin** | Restart AmberSight (only when it runs as a service) |
+| GET | `/api/lang` | viewer | Languages: server default, your choice, installed packs, what can be installed, download state |
+| GET | `/api/lang/server-default` | anyone (no auth) | The server's default language code |
+| GET | `/api/lang/:code` | anyone (no auth) | A language pack (JSON); 404 when not installed |
+| POST | `/api/lang/default`, `/api/lang/install`, `/api/lang/upload` | **admin** | Set the default language; install a pack from the release; install a pack from a file |
 
 "viewer" means any signed-in account (or anyone, when the server has no accounts). "admin" means
 an admin account. "operator (`x`)" means an operator account whose right `x` is on (see "Roles and
@@ -749,8 +754,8 @@ with a valid session cookie is never blocked.
 | **Operator** | What a viewer can, plus the day-to-day control their rights allow (below). Never settings, accounts, storage, automations or the rest of admin. |
 | **Viewer** (non-admin) | All `GET` endpoints in this guide. The only writes allowed are waking a camera (`POST /api/cameras/:id/wake`), opening a linked server (`POST /api/links/:id/open`), reporting and removing their own phones' presence (`POST /api/presence`, `DELETE /api/presence/:device_id`), turning notifications on and off for their own devices and sending them a test (`POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `POST /api/push/test`), sending a signal (`POST /api/signals`), and a few personal-settings endpoints. Every other `POST`/`PUT`/`DELETE`, including PTZ moves, arm/disarm, profile switching, alert pause and manual record, returns **403** `admin access required for changes`. Admin-only reads (settings, logs, health, users, faces, ...) return **403** `admin access required`. Talk (two-way audio) is for admins and operators. |
 
-**Operators.** An operator account is a viewer with rights, each on unless an admin turns it off
-(`GET /api/whoami` `perms`):
+**Operators.** An operator account is a viewer with rights, each on unless an admin turns it off,
+except `siren`, which is off unless an admin turns it on (`GET /api/whoami` `perms`):
 
 | Right | Allows |
 |---|---|
@@ -758,6 +763,8 @@ with a valid session cookie is never blocked.
 | `talk_clip` | Talk (`GET /api/cameras/:id/talk`, not with a device token) and `POST /api/clips/record` (also with an `"admin"`-scope device token, although `perms.talk_clip` is then `false`) |
 | `arm` | `POST /api/cameras/:id/pause` (for a day at most: a pause with no `minutes`, or more than 1440, lasts a day, as with a device token); and `POST /api/shield`, `POST /api/profile` unless the account is limited to some cameras (they change every camera: **403** `an account limited to some cameras cannot arm, disarm or switch profiles ...`) |
 | `events` | `POST /api/events/:id/protect` and `POST /api/events/:id/review`; adding bookmarks (`POST /api/bookmarks`) and changing or deleting their own |
+| `lights` | `POST /api/cameras/:id/controls` `light_on`, `light_off`, `siren_stop` |
+| `siren` | `POST /api/cameras/:id/controls` `siren` and `siren_stop`. **Off** unless an admin turns it on; never with a device token (`perms.siren` is then `false`) |
 | `camera_detection` | `PUT /api/cameras/:id` changing only these fields: `motion`, `sensitivity`, `min_object`, `max_object`, `contrast`, `min_travel`, `min_frames`, `break_time`, `motion_algorithm`, `schedule`, `zones`, `ignore_zones`, `zone_polys`, `ignore_polys`, `named_zones`, `alerts`, `alert_interval`, `alert_schedule`, `alert_labels`, `alert_ignore_polys`, `alert_priority`, `no_motion_minutes`, `no_motion_schedule`, `audio_trigger`, `audio_margin_db`, `audio_min_db`, `audio_sounds`, `ai`, `ai_labels`, `ai_min_score`, `ai_ignore_parked`, `ai_strict`, `ai_hide_unconfirmed`, `ai_confirm_camera`. Any other field sent with a different value than it has gets **403** `{"error": "only an admin can change these settings of a camera: url, ...", "fields": [...]}` and nothing is saved (the same value sent back is fine, but **send only the fields you change**: some values `GET /api/cameras` shows, such as `url` or the live `motion` flag, are not the stored ones). Also refused: turning `motion` off on a camera that records only on motion (**403**); a change that would restart the camera when operators' changes restarted it 3 times in the last 10 minutes (**429**, with `retry_after` in seconds; admins are told once); and **409** when the camera's settings changed while the request was checked (load and send again). A camera of a linked server: **403**. Every operator change is reported to admins (one message per camera every few minutes, naming the changed settings in plain words), as is marking an event "not a <object>"; the audit log names the fields. |
 
 A change a right does not cover gets **403** `this account may not do that: an admin can allow it in
@@ -845,6 +852,8 @@ a viewer app can ignore. The fields useful to a viewer:
 | `ai_last` | object or null | The last wanted object the AI saw live: `{"label": "person", "score": 0.87, "age_ms": 1200}` (`age_ms` = how long ago). `null` until one is seen. |
 | `zone_polys`, `ignore_polys` | arrays | Detection zones and ignore areas drawn as polygons (`{"points": [[x, y], ...]}`). Coordinates are fractions of the picture (0 to 1). A viewer app can ignore them. |
 | `ffmpeg_why` | admin only; string or null | Why the camera is read by ffmpeg rather than the built-in reader, naming the setting to change where there is one (burned-in text, `ingest = "ffmpeg"`, a local device, or the built-in reader's automatic switch with its reason). `null` on the built-in reader. |
+| `via` | string or null | How the built-in reader is connected when the camera's `connect` setting is `"baichuan"` or `"auto"`: `"RTSP"` or `"Baichuan"`. `null` on the default setting. |
+| `via_note` | admin only; string or null | Why that way is in use (Auto's last switch, e.g. `"Baichuan failed 3 times: ...; using RTSP"`), a stop (a refused password), or that the Baichuan session is not AES-encrypted. |
 
 Next to `cameras`, the reply has `overlay_vars`: the current overlay variables as `{"NAME": "value"}` (the same as `GET /api/overlay`).
 
@@ -948,7 +957,9 @@ warning; disk warnings come when free space is below what the drive should keep 
 only when it cannot be freed, or under 2% free). Besides camera and disk problems, `warnings` may contain `AI object detection
 is stalled: no check has worked for the last two minutes` (problem key `ai`), `curl is not installed, so AmberSight
 cannot use these: webhook, the AI server. Install curl and this warning clears within a minute` (problem key `curl`, only while
-something that sends with curl is set up and curl cannot be run), and a camera whose
+something that sends with curl is set up and curl cannot be run), `the Intel graphics card
+stopped responding to the AI; using the processor until AmberSight restarts` (problem key
+`ai-card`, while the AI is on), and a camera whose
 recording is re-encoded on the processor after it fell back to ffmpeg by itself. `notes` are
 information, not problems (`ok` stays true): graphics cards that cannot decode (`Hardware
 decoding unavailable on /dev/dri/renderD128 (…); /dev/dri/renderD129 is used instead`), hardware
@@ -1395,6 +1406,99 @@ once every 10 seconds: sooner is **429** with `Retry-After: 10` (the camera is a
 - Grids of many cameras: use `/jpeg` or `q=sub` per tile, and `q=main` only for the enlarged
   view.
 
+### Camera controls: `/api/cameras/:id/controls` (spotlight, siren, infrared, status light)
+
+A camera's own spotlight (white light), siren, infrared lights and status light. Reolink cameras,
+hubs and recorders so far (their documented web API, which needs HTTP or HTTPS on at the
+camera), and Reolink cameras whose web interface is off over Reolink port 9000 (see below);
+other brands may follow. What a camera has is asked of the camera and kept for a while:
+only what it has is listed. Linked servers' cameras have no controls here.
+
+`GET /api/cameras/:id/controls` (any account that sees the camera, also a device token):
+
+```json
+{ "supported": true, "brand": "reolink", "via": "web", "battery": false, "asleep": false,
+  "light_unswitched": false,
+  "probed_ms": 1795000000000, "error": null,
+  "light": { "brightness": {"min": 0, "max": 100}, "modes": [], "smart": true, "keep_on": false,
+             "schedule": true, "max_seconds": 3600, "default_seconds": 300 },
+  "siren": { "max_seconds": 30, "default_seconds": 5 },
+  "ir": { "states": ["Auto", "Off"] }, "status_led": { "states": ["On", "Off"] }, "doorbell_led": null,
+  "state": { "light": "off", "brightness": 85, "mode": 1, "mode_label": null,
+             "forced_until_ms": null, "siren": "unknown", "siren_until_ms": null,
+             "ir": "Auto", "status_led": "On", "doorbell_led": "unknown", "read_error": null },
+  "may": { "light": true, "siren": false, "settings": false } }
+```
+
+- `supported: false` comes with `why` (not a Reolink camera, controls turned off, no user name...).
+- Any part the camera lacks is `null`. `light.brightness` is `null` when it cannot be set.
+- `state.light` is `on`, `off` or `unknown`; `unknown` also for `ir` and `status_led` when they
+  cannot be read. The siren's state cannot be read: `playing` while a siren started from
+  AmberSight is in its time, otherwise `unknown`.
+- `state.mode` is the camera's own light mode number as the camera reports it. Cameras do not
+  name their modes, so `mode_label` is `null`: show it as "Camera's own setting". `light.modes`
+  lists modes that may be picked (empty for the Reolink cameras seen so far).
+- `forced_until_ms`: the spotlight is on from AmberSight until then, after which the camera gets
+  back exactly the state, mode and brightness it had.
+- `may` says what this caller may do (show only those buttons).
+- One sign-in (a session or a device token) reads this at most 30 times in 10 seconds (**429**
+  after that); others, of the same account too, are not held up by it, up to 120 reads in 10 seconds
+  for all of one account's sign-ins together.
+- Battery cameras are never woken and never asked for their state on a timer: `asleep: true`
+  (and `why` until they have been asked once) while they sleep; actions answer **409**.
+- `error`: what went wrong asking the camera ("Controls aren't available for this camera yet (it
+  doesn't offer the web interface AmberSight uses)", a refused sign-in...). Controls connect over
+  HTTPS; plain HTTP only when the admin picks `scheme = "http"` (the camera's password then
+  crosses the network unencrypted).
+- `via`: `web` (the camera's web API) or `port9000` (Reolink's own protocol on TCP port 9000).
+  Port 9000 is used when the admin picks `scheme = "baichuan"`, when the camera's `connect` is
+  `baichuan`, or, with `connect = "auto"`, when nothing answers on HTTPS. It shares the one
+  session live video over port 9000 uses (Reolink cameras allow about two, and the Reolink app
+  needs one). Over port 9000: the siren, the infrared lights (`Auto`, `Off`) and the status light
+  (`On`, `Off`), as the camera says it has them. Not over port 9000 (yet): the spotlight
+  (`light` is `null`; `light_unswitched: true` says the camera has one), the doorbell light,
+  battery cameras (never woken: `supported: false`) and cameras behind a hub or recorder.
+  Over port 9000 the siren is asked for rounds of up to 10 s each (at most 3), so it ends by
+  itself even if its stop never arrives.
+- A siren whose start got no clear answer (lost or late) may be sounding: the action answers
+  **502** with "The siren may be sounding...", `state.siren` stays `playing` until its time is
+  up, and it is stopped then like any other. A clear refusal from the camera clears it at once.
+
+`POST /api/cameras/:id/controls` with one action (answers the same JSON as `GET`):
+
+| Body | Who | What |
+|---|---|---|
+| `{"action": "light_on", "seconds": 300, "brightness": 80}` | admin, operator (`lights`), `"admin"`-scope device token | Spotlight on for `seconds` (default 300, 1 to 3600), then back to what it had. Again while on: the new time from now (and brightness) |
+| `{"action": "light_off"}` | same | A light on from AmberSight gets its own setting back now; otherwise off |
+| `{"action": "siren", "seconds": 5}` | admin, operator with `siren` (off unless an admin allows it); **never a device token** | Siren for `seconds` (default 5, 1 to 30). The camera stops it by itself; AmberSight also stops it when the time is up |
+| `{"action": "siren_stop"}` | anyone allowed `lights` or `siren` | Stop now |
+| `{"action": "ir", "state": "Off"}` | admin (password sign-in) | One of `ir.states` |
+| `{"action": "status_led", "state": "Off"}` | admin (password sign-in) | One of `status_led.states` |
+| `{"action": "doorbell_led", "state": "KeepOff"}` | admin (password sign-in) | A doorbell's light around the button: one of `doorbell_led.states` (as the doorbell lists them, for example `On`, `Off`, `KeepOn`, `KeepOff`; `null` when it has none to set) |
+| `{"action": "light_mode", "mode": 1}` | admin (password sign-in) | Only modes the camera names (none so far: **400**) |
+| `{"action": "redetect"}` | admin (password sign-in) | Ask the camera again what it has |
+
+The spotlight is switched at most once a second per camera: a `light_on` or `light_off` within
+that second answers at once with `"queued": true` and the state as it is, and the latest one asked
+for is done when the second is over (a switch flipped on and off, or a slider dragged, ends where it
+was left). A waiting one replaced by a later one is in the audit log of whoever asked for it, and in
+`state.note` for a minute. Every change is read back from the camera; a camera that answers "done" and changes nothing gets
+**502** `{"error": "... the camera answered that it was done, but nothing changed."}`. Other
+answers: **403** (not allowed, with why), **404** (no such camera, or one the account may not
+see), **409** (the camera has no such part, or a battery camera is asleep), **429** (the siren:
+one camera's at most once per 10 seconds, one account's at most 6 in 10 minutes), **502** (the
+camera did not answer or refused). The usual Origin rule applies. Every action (and its result)
+is in the audit log as `camera control`, naming who: an account, `(mqtt)`, or `(action on person)`
+for the actions next to alerts.
+
+**Actions next to alerts** (admins set them per camera in `controls` of `PUT /api/cameras/:id`,
+off by default): when the AI itself confirms a person (or `labels`) in a live look, turn the
+spotlight on for `light_minutes` (default 2, at most 30; only at night unless `light_night_only`
+is `false`; each new sighting pushes the end out), and/or sound the siren for `siren_seconds`
+while armed (at most once per `siren_cooldown_minutes`, default 10, and 3 times an hour;
+`siren_night_only` to limit it to the night). Night: between sunset and sunrise at the location
+set for profiles, else 19:00 to 07:00.
+
 ### Two-way talk: `GET /api/cameras/:id/talk?rate=48000` (WebSocket, admins and operators)
 
 The client sends **binary messages of raw PCM, 16-bit little-endian, mono**, at `rate` Hz
@@ -1402,6 +1506,13 @@ The client sends **binary messages of raw PCM, 16-bit little-endian, mono**, at 
 it through the camera's ONVIF RTSP audio backchannel. Only one talker per camera is allowed;
 others are closed with code **4409**. Camera errors close with **1011** and a reason. Viewers, and
 operators without the `talk_clip` right, get 403; device tokens too. Whether a camera supports a backchannel is only discovered when the session opens.
+
+Reolink cameras can also be talked to over their Baichuan session (TCP 9000): when the camera's
+video comes that way (`connect = "baichuan"`, or `"auto"` while on Baichuan), or when a Reolink has
+no RTSP backchannel. The client side is the same. The server then sends 16 kHz ADPCM, opens the
+camera's talk on the first sound (silence opens nothing), and lets it go 2 s after the last sound.
+A camera that refuses talk (its own app is talking) does not close the socket: the server tries
+again every 5 s. Battery cameras only ever use the RTSP backchannel.
 
 ---
 
@@ -1662,7 +1773,8 @@ what is sent and answers the bookmark. `DELETE /api/bookmarks/:id` answers `{"id
 `fixed_spot`, `camera_only`, `near_miss`, `other_object`, `nothing`. Other values may exist for cases not traced here. The
 frames the AI checked are at `/api/events/:id/ai/:n` (JPEG). `summary` and `review` are `null`
 for events without an AI check. The full `review` structure is internal and may change.
-A check that failed has `error`, one plain line ("the graphics card gave an error (CUDA)", or the
+A check that failed has `error`, one plain line ("the graphics card gave an error (CUDA)", "the
+graphics card stopped responding (OpenVINO)", or the
 first line of another error, cut short), and may have `error_detail`, the longer text; both have file
 paths cut to the file name and no host name, also for reviews saved before.
 
@@ -2373,6 +2485,8 @@ and its `url` is `/#digest?id=7`, the web app's page for the full summary; its `
 | `<prefix>/<cam>/zone/<zone>/state` | `ON` while someone is loitering in the area (one per alert area) | yes |
 | `<prefix>/<cam>/zone/<zone>`, `<prefix>/<cam>/zone` | A zone event as JSON: `{"event_type": "loitering" \| "in" \| "out", "camera", "zone", "label", "event_id", "at"}` (the second topic carries every zone of the camera) | no |
 | `<prefix>/<cam>/plates`, `/plate`, `<prefix>/plates`, `<prefix>/plates/event` | License plate readings (JSON: `state` = first plate with the known name if any, `plates` [{text, confidence, name, known}], `known`, `unknown`, `camera`, `event_id`, `time`; the `/plate` event types are `known` / `unknown`) | mixed |
+| `<prefix>/<cam>/light/state`, `/light/brightness` | The spotlight: `ON` / `OFF` / `None` (unknown), its brightness (cameras with a spotlight) | yes |
+| `<prefix>/<cam>/siren/state` | `ON` while a siren started from AmberSight is in its time, else `OFF` (only when sirens are offered over MQTT) | yes |
 | `<prefix>/shield/state` | `ON` / `OFF` (armed) | yes |
 | `<prefix>/profile/state`, `<prefix>/profile/active` | Manual profile (or `Auto`) / active profile | yes |
 | `<prefix>/problems`, `<prefix>/problems/list` | `ON`/`OFF`, `{"problems": [...]}` | yes |
@@ -2386,6 +2500,9 @@ MQTT commands the server accepts:
 | `<prefix>/<cam>/wake` | Wake an on-demand camera |
 | `<prefix>/profile/set` | Profile name, or `Auto` |
 | `<prefix>/signal/<name>/set` | `ON`/`OFF` |
+| `<prefix>/<cam>/light/set` | `ON` (the spotlight on for 5 minutes, then back to the camera's own setting) / `OFF` |
+| `<prefix>/<cam>/light/brightness/set` | A brightness in the camera's range (the light on at it for 5 minutes); `0` = off |
+| `<prefix>/<cam>/siren/set` | `ON`, `OFF`, or `{"state": "ON", "duration": 10}`. Only when the admin turned on `alerts.mqtt_siren` (off by default: anyone who can publish to the broker could sound it); otherwise ignored |
 
 Notes:
 
@@ -2393,7 +2510,13 @@ Notes:
   AI confirmed it (or AI is off) and the active profile allows alerts. It is published even
   while the camera's notifications are paused or throttled. Events that are kept but not
   alerted on are not published.
-- Home Assistant discovery messages go under `homeassistant/...` when enabled.
+- Home Assistant discovery messages go under `homeassistant/...` when enabled. Cameras with a
+  spotlight get a `light` entity "Spotlight"; with `alerts.mqtt_siren` on, cameras with a siren
+  get a `siren` entity. Entities a camera lacks are removed (an empty retained config).
+- Camera controls over MQTT go through the same checks, limits and audit log (`(mqtt)`) as the API.
+- Commands are acted on only when sent: a **retained** command message (shield, profile, signal,
+  trigger, wake, light, siren) is ignored (it would be done again at every reconnect). Overlay
+  values are the exception: a retained one sets the value again after a restart.
 - Only plain `mqtt://` brokers are supported (no TLS).
 
 **Server-side alert channels** are configured by the admin, not through this API: email,
@@ -2768,6 +2891,95 @@ returns **200** with `{"error": "camera not found"}`.
 
 ---
 
+### Languages: `/api/lang`
+
+The web app can show its screens in ten languages besides English (`de`, `es`, `fr`, `nl`, `it`,
+`zh-CN`, `pl`, `pt-BR`, `sv`, `ru`). A language is a small **language pack** that AmberSight
+downloads the first time someone picks it. English is built in and fills any gap. Phone apps
+may ignore all of this; the Android app has its own language setting. The translations are
+machine translated (`machine: true`); see `docs/translations.md` for how to send a fix.
+
+A pack is accepted only if its SHA-256 is the one fixed into that release of AmberSight. A pack
+therefore works only with the release it was built for, and a fix to a translation ships with
+the next release, never on its own. A download is also checked against the release's signed
+`SHA256SUMS`. After an update, the packs that no longer match are fetched again in the background.
+
+**Which language is used.** The web app takes the user's own choice first, then the browser's
+languages, then the server default, then English.
+
+`GET /api/lang` (any signed-in user):
+
+```json
+{
+  "default": "de",
+  "user": null,
+  "installed": ["de"],
+  "available": [
+    { "code": "de", "name": "German", "native": "Deutsch", "machine": true, "size": 81234 }
+  ],
+  "downloads": { "es": { "busy": false, "error": "Download failed" } },
+  "can_download": true
+}
+```
+
+- `default`: the server default code, or `null` (English).
+- `user`: this account's own choice, or `null`.
+- `installed`: codes whose pack is on the server and valid; the only ones `GET /api/lang/:code` serves.
+- `available`: the languages this version can install (`name` in English, `native` in the language's
+  own name, `size` in bytes).
+- `downloads`: only languages with a download running (`busy`) or a failure (`error`). Admins see
+  the detail of the failure; other accounts see the fixed text `Download failed`. After a
+  failed download the same language is not tried again for 60 seconds: `POST /api/lang/install`
+  (and the download a new default starts, in `note`) answers **409** `{"error": "the last download of this language failed; it can be tried again in N seconds"}`.
+- `can_download`: `false` when downloads are turned off (`[update] check = false`); packs can
+  then only be installed from a file.
+
+`GET /api/lang/server-default` (no sign-in, for the sign-in page): `{"code": "de"}`, or
+`{"code": null}`.
+
+`GET /api/lang/:code` (no sign-in): the pack, `application/json`, `Cache-Control: no-cache`. The
+`ETag` is the pack's SHA-256 in quotes; a matching `If-None-Match` (or `*`) is answered **304** with no body. **404** when the code is
+unknown, the pack is not installed, or the file is not the one pinned for this release.
+
+`POST /api/lang/default` (admin). Body `{"code": "de"}`, or `{"code": null}` for English.
+Answer: `{"ok": true, "default": "de", "note": null}`. The choice is saved even when the pack
+cannot be fetched now; `note` then says why (for example that downloads are turned off), and
+the pages show English until the pack is there. Otherwise the download starts in the background.
+
+`POST /api/lang/install` (admin). Body `{"code": "de"}`. Starts the download and answers at
+once: `{"code": "de", "installed": false, "busy": true, "error": null}`. Follow the progress in
+`downloads` of `GET /api/lang`.
+
+`POST /api/lang/upload` (admin), for offline installs. The body is the raw pack file (up to
+4 MB). The file says which language it is by being exactly one of the packs of this release.
+Answer: `{"ok": true, "code": "de"}`.
+
+```bash
+curl -sS -b cookies.txt -X POST https://nvr.example:8090/api/lang/install \
+     -H 'Content-Type: application/json' -d '{"code":"de"}'
+
+curl -sS -b cookies.txt -X POST https://nvr.example:8090/api/lang/upload \
+     --data-binary @de.json
+```
+
+Errors (JSON `{"error": "…"}`):
+
+| Status | When |
+|---|---|
+| 400 | `unknown language` (a `code` that is not one of the ten); on upload, a file that is not a pack of this release |
+| 403 | `admin access required` |
+| 409 | `/api/lang/install`: the install is refused (for example downloads turned off, or this version has no pack for the language) or there is no data folder |
+| 413 | `/api/lang/upload`: `the pack is bigger than 4 MB` |
+
+**Your own language.** Each account keeps its choice in the preference `lang`: send
+`PATCH /api/ui/prefs` with `{"lang": "de"}`, or leave it out for no choice. Anything that is
+not one of the ten codes reads back as `user: null`.
+
+**Your own clock.** The preference `clock` is `"12"` or `"24"` (12-hour or 24-hour times), or left out
+for the language's usual one. Dates and times in the web app follow the language either way.
+
+---
+
 ## 8. Presence (geofencing)
 
 A phone app can tell the server whether the phone is at home. When every phone is away, the
@@ -3069,6 +3281,56 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.12.0**
+
+- Languages: the web app can be shown in German, French, Dutch, Spanish, Italian, Chinese
+  (Simplified), Polish, Portuguese (Brazil), Swedish and Russian. New `GET /api/lang`,
+  `GET /api/lang/server-default`, `GET /api/lang/:code` and, for admins, `POST /api/lang/default`,
+  `/api/lang/install` and `/api/lang/upload`; the per-user choice is the preference `lang`
+  (see "Languages"), and the per-user 12/24-hour choice is the preference `clock`.
+
+- Cameras can connect with Reolink's own protocol (Baichuan, TCP port 9000). New camera settings
+  `connect` (`"rtsp"` default, `"baichuan"`, `"auto"`), `baichuan_port` and `baichuan_channel`
+  (admins only, like `transport`; a PUT with another `connect` value is refused, and so is
+  `"baichuan"`/`"auto"` on a battery camera). `GET /api/cameras` has `via` (`"RTSP"`,
+  `"Baichuan"`, or `null` for a camera on the default setting) and, for admins, `via_note` (why
+  Auto moved, or that the session is not AES-encrypted). The camera report has a `baichuan`
+  part. Auto is Baichuan first, RTSP as the backup. `POST /api/discover/autologin` suggests
+  `"connect": "auto"` for a single-channel Reolink that answers on port 9000.
+- RTSP: a refused sign-in (401 after the digest/basic answer, or 403) is not asked again until
+  the camera's settings are saved; `last_error` says so. Timeouts, refused connections and 5xx
+  still retry as before.
+
+- The built-in AI runs on Intel graphics on 64-bit Linux (OpenVINO; an NVIDIA card is still
+  preferred). `GET /api/settings` `ai_status.gpus` lists Intel cards too; each card has `api`
+  (`"CUDA"`, `"OpenVINO"`, `"DirectML"` or `"Core ML"`). New `ai_status.running_api` (what the card
+  the AI runs on is used with, `null` on the processor) and `ai_status.auto_gpu` (the card
+  "Automatic" picks, `null` when there is none).
+- A graphics card that does not answer an AI check in time (20 times its usual time, 2 to 10
+  seconds) moves the built-in AI to the processor for 5 minutes (`ai_status.gpu_note` says so);
+  the check is done again on the processor. If that check has not come back by then, or on any
+  OpenVINO error, the AI stays on the processor until AmberSight restarts: `GET /api/health` then
+  warns (problem key
+  `ai-card`: "the Intel graphics card stopped responding to the AI; using the processor until
+  AmberSight restarts") and `ai_status.gpu_note` says the same. An AI review check that failed
+  that way has `error` "the graphics card stopped responding (OpenVINO)" or "the graphics card
+  gave an error (OpenVINO)".
+- MQTT: retained command messages are ignored (overlay values excepted). The arm state is kept across restarts by the server itself (it used to come back only from a retained `shield/set`), and `<prefix>/shield/state` is published retained as before. A profile with an arm setting does not change it at start when that profile was also the active one when AmberSight stopped (a disarm or a running arm delay stays); it sets it when the schedule moved to it while AmberSight was stopped.
+- Camera controls: `GET`/`POST /api/cameras/:id/controls` (a camera's spotlight, siren, infrared
+  lights and status light; Reolink so far). See "Camera controls".
+- Operator rights `lights` (on by default) and `siren` (off by default); both in `GET /api/whoami`
+  `perms` (`siren` is `false` with a device token).
+- `GET /api/cameras`: `controls` per camera (`null`, or `{light, brightness, siren, light_on,
+  forced_until_ms, siren_until_ms, battery}` as last known; it asks the camera nothing) and, for
+  admins, `controls_cfg` (the camera's `controls` settings).
+- Camera controls over Reolink port 9000 (`scheme = "baichuan"`, or the camera's `connect`
+  setting): `via` and `light_unswitched` in `GET /api/cameras/:id/controls`.
+- Camera settings: `controls` (`kind`, `http_port`, `scheme` (`https`, `http`, `baichuan`), and the actions next to alerts:
+  `light_on_detect`, `light_minutes`, `light_night_only`, `siren_on_detect`, `siren_seconds`,
+  `siren_cooldown_minutes`, `siren_night_only`, `labels`).
+- MQTT: `<prefix>/<cam>/light/...` and (opt-in `alerts.mqtt_siren`, which takes the admin's own
+  password to turn on) `<prefix>/<cam>/siren/...`, with Home Assistant `light` and `siren` entities.
 
 **New in 0.11.3**
 

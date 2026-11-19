@@ -18,7 +18,9 @@ down, under each system's name.
   processing power, but AI object detection is faster with a graphics card: on Windows any
   DirectX 12 card is used automatically, on Apple silicon Macs the chip's Neural Engine and
   GPU, and on 64-bit Linux an NVIDIA card once NVIDIA's CUDA libraries are installed (see
-  [Linux: an NVIDIA card for the AI](#linux-an-nvidia-card-for-the-ai)).
+  [Linux: an NVIDIA card for the AI](#linux-an-nvidia-card-for-the-ai)), or Intel graphics once
+  Intel's compute driver is installed (see
+  [Linux: Intel graphics for the AI](#linux-intel-graphics-for-the-ai)).
 - Enough disk space. A typical camera records 10–30 GB a day. A separate large drive for
   recordings is best.
 - Cameras that send video over the network: RTSP (most IP cameras, ONVIF cameras, Reolink,
@@ -32,9 +34,9 @@ down, under each system's name.
 | Windows 10 / 11, 64-bit | `ambersight-<version>-windows-x86_64-setup.exe` (installer) or `ambersight-<version>-windows-x86_64.zip` | Built-in AI runs on the graphics card (DirectML) |
 | macOS on Apple silicon (M1 and later) | `ambersight-<version>-darwin-arm64.tar.gz` | Built-in AI runs on the Neural Engine and GPU (Core ML) |
 | macOS on Intel | `ambersight-<version>-darwin-x86_64.tar.gz` | Everything works except built-in AI detection. To check events for people and vehicles, connect your own detector program (Settings > Connections > External detector) |
-| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer. Built-in AI runs on the processor, or on an NVIDIA card (CUDA) when NVIDIA's libraries are installed |
+| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer. Built-in AI runs on the processor, on an NVIDIA card (CUDA) when NVIDIA's libraries are installed, or on Intel graphics (OpenVINO) when Intel's compute driver is installed |
 | Raspberry Pi 4 / 5 (and other 64-bit ARM Linux) | `ambersight_<version>_arm64.deb`, `ambersight-<version>-1.aarch64.rpm` or `ambersight-<version>-linux-aarch64.tar.gz` | Needs the **64-bit** Raspberry Pi OS, trixie (2025) or newer. Built-in AI runs on the processor. See [Raspberry Pi](#raspberry-pi). |
-| Docker (and Unraid) | `ghcr.io/huskerminion/ambersight:latest` (`amd64` and `arm64`), `:cuda` for AI on an NVIDIA card | See the [Docker guide](docker.md); on Unraid, the AmberSight template ([Unraid guide](../unraid/README.md)) |
+| Docker (and Unraid) | `ghcr.io/huskerminion/ambersight:latest` (`amd64` and `arm64`), `:cuda` for AI on an NVIDIA card, `:openvino` for AI on Intel graphics (`amd64`) | See the [Docker guide](docker.md); on Unraid, the AmberSight template ([Unraid guide](../unraid/README.md)) |
 
 **Built-in AI costs nothing and needs nothing downloaded in advance.** The packages above are
 all you install. When you turn AI on (Settings > Detection & alerts > Objects (AI)), AmberSight
@@ -652,6 +654,73 @@ models do not.
 The AI's memory pool on the card is capped at 1.5 GB so other programs on the same card keep
 theirs (CUDA adds a few hundred MB on top: the Small model uses about 400 MB in all, the Large
 one about 750 MB). Change it with `gpu_memory_mb` in `[ai]` in the settings file.
+
+### Linux: Intel graphics for the AI
+
+On a 64-bit Intel/AMD Linux computer with Intel graphics (an Arc card, or the graphics built
+into a recent Intel processor), the built-in AI runs on the graphics through Intel's OpenVINO:
+on an Arc card a check takes a few milliseconds instead of tens to hundreds on the processor.
+An NVIDIA card, when there is one, is used first. No setting turns it on: **Use a graphics
+card** in Settings (on by default) covers it.
+
+It needs two things:
+
+1. **Intel's compute driver** (OpenCL), which AmberSight does not install for you. The graphics
+   driver itself (`i915` or `xe`) is part of the Linux kernel already.
+
+   ```sh
+   # Ubuntu 25.04 or newer:
+   sudo apt install intel-opencl-icd
+   # Fedora:
+   sudo dnf install intel-compute-runtime
+   ```
+
+   Debian has no package of it: install the `.deb` packages of Intel's compute runtime from
+   [its releases](https://github.com/intel/compute-runtime/releases) (they list the files to
+   download for each version), or run AmberSight in Docker with the `:openvino` image.
+
+   AmberSight runs as its own user, which must be in the `render` group to use the card (the
+   packages add it; for an install of your own: `sudo usermod -aG render ambersight`, then restart
+   AmberSight).
+2. **AmberSight's Intel graphics add-on**: ONNX Runtime's OpenVINO part with Intel's OpenVINO
+   runtime and its GPU plugin (about 26 MB to download). Like the NVIDIA add-on, the packages
+   leave it out. When AmberSight finds Intel graphics and the compute driver (step 1) it
+   downloads the add-on of its own version from the release, checks it against the release's
+   signed checksums like an update, and keeps it in `<data folder>/tools/openvino-<version>/`.
+   With `[update] check = false`, or without internet, put the seven `.so` files from that
+   version's `ambersight-openvino-<version>-linux-x86_64.tar.gz` in that folder yourself (real
+   files, owned by the user AmberSight runs as, not writable by others, as for the NVIDIA
+   add-on).
+
+The AI starts on the processor and moves to the card in the background once the model is
+loaded there and has passed one check, so recording never waits for the card. The first start
+compiles the model for the card (a second or so on an Arc card, longer on small built-in
+graphics); the result is kept in `<data folder>/cache/openvino-<version>/`, so later starts load
+it. Then **Settings > Detection &
+alerts > Objects (AI)** shows *Running on: Intel(R) Arc(TM) ... (OpenVINO)*, or why it is not on
+the card (for example *Intel's compute driver is not installed*), and lets you choose the card
+when there are several.
+
+If a check on the card takes too long (over 20 times its usual time, at least 2 and at most 10
+seconds; 10 seconds for the first check after the card has been idle), that check is done again
+on the processor at once and the AI stays there for 5 minutes. If the slow check has come back by
+then, the card was only slow and is used again; if not, the card is taken to be stuck. Three slow checks within an
+hour keep the AI on the processor until AmberSight restarts too. A stuck
+card, or an error from OpenVINO, keeps the AI on the processor until AmberSight restarts; the
+Status page and Settings say *The Intel graphics card stopped responding to the AI; using the
+processor until AmberSight restarts*. A card that stopped responding is never waited for, also
+not when AmberSight stops.
+A card that does not load the model and run one check within 3 minutes (for example one still
+stuck from before) is left the same way, and the processor goes on; the next start uses it again
+once the graphics driver has reset it.
+
+AmberSight runs Intel's compute driver with its "direct submission" off (it sets
+`NEOReadDebugKeys=1` and `EnableDirectSubmission=0` for itself unless you set
+`EnableDirectSubmission`): with it on, an Arc card can fault when a program using it is killed
+in the middle of a check. It costs about 0.3 ms per check.
+
+In Docker use the `:openvino` image with `--device /dev/dri` (see the
+[Docker guide](docker.md)): it has the compute driver and the add-on built in.
 
 ---
 

@@ -20,6 +20,7 @@
 <link rel="stylesheet" href="/static/css/review.css">
 <link rel="stylesheet" href="/static/css/follow.css">
 <link rel="stylesheet" href="/static/css/a11y.css">
+<link rel="stylesheet" href="/static/css/i18n.css">
 <script src="/static/js/prepaint.js"></script>
 </head>
 <body>
@@ -77,84 +78,85 @@
   <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h14l-3-3M20 16H6l3 3"/></symbol>
 </defs></svg>
 <header>
-  <div class="logo" role="link" tabindex="0" title="Go to your start page"><svg class="ic mark"><use href="#i-logo"/></svg><span class="lt"><b>Amber</b>Sight</span></div>
-  <nav id="nav" aria-label="Sections"></nav>
+  <div class="logo" role="link" tabindex="0" title="Go to your start page" data-i18n-attr="title:index.start_page_tip"><svg class="ic mark"><use href="#i-logo"/></svg><span class="lt"><b>Amber</b>Sight</span></div>
+  <nav id="nav" aria-label="Sections" data-i18n-attr="aria-label:index.sections"></nav>
   <div class="hdr-right">
     <div id="status"><span class="lamp" id="lamp"></span><button type="button" id="healthChip" class="healthchip" hidden><svg class="ic"><use href="#i-alert"/></svg><span class="hctext"></span></button><span id="statusText">connecting...</span><span class="clock" id="clock"></span></div>
-    <button id="hdrShield" class="btn shieldbtn" title="Arm or disarm motion detection on all cameras (S)"><svg class="ic"><use href="#i-shield"/></svg><span id="shieldLbl">&hellip;</span></button>
-    <button id="themeBtn" class="btn icon" title="Theme: Auto" aria-label="Change theme"><svg class="ic"><use id="themeUse" href="#i-sun"/></svg></button>
-    <button id="keysBtn" class="btn icon" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><svg class="ic"><use href="#i-keys"/></svg></button>
+    <button id="hdrShield" class="btn shieldbtn" title="Arm or disarm motion detection on all cameras (S)" data-i18n-attr="title:index.shield_tip"><svg class="ic"><use href="#i-shield"/></svg><span id="shieldLbl">&hellip;</span></button>
+    <button id="themeBtn" class="btn icon" title="Theme: Auto" aria-label="Change theme" data-i18n-attr="aria-label:index.change_theme"><svg class="ic"><use id="themeUse" href="#i-sun"/></svg></button>
+    <button id="keysBtn" class="btn icon" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" data-i18n-attr="title:index.keys_tip,aria-label:index.keyboard_shortcuts"><svg class="ic"><use href="#i-keys"/></svg></button>
     <div id="userMenu" class="usermenu">
-      <button id="userBtn" class="btn" aria-haspopup="true" aria-expanded="false" aria-label="Menu" title="Menu"><svg class="ic ic-user"><use href="#i-user"/></svg><span id="userName"></span><svg class="ic ic-dots"><use href="#i-dots"/></svg></button>
+      <button id="userBtn" class="btn" aria-haspopup="true" aria-expanded="false" aria-label="Menu" title="Menu" data-i18n-attr="title:index.menu,aria-label:index.menu"><svg class="ic ic-user"><use href="#i-user"/></svg><span id="userName"></span><svg class="ic ic-dots"><use href="#i-dots"/></svg></button>
       <div id="userDrop" class="userdrop" hidden>
         <div id="acctInfo" class="acctinfo"></div>
-        <div class="themeseg" role="group" aria-label="Theme"><span>Theme</span><button type="button" data-mode="auto">Auto</button><button type="button" data-mode="light">Light</button><button type="button" data-mode="dark">Dark</button></div>
+        <div class="themeseg" role="group" aria-label="Theme" data-i18n-attr="aria-label:index.theme"><span data-i18n="index.theme">Theme</span><button type="button" data-mode="auto" data-i18n="index.auto">Auto</button><button type="button" data-mode="light" data-i18n="index.light">Light</button><button type="button" data-mode="dark" data-i18n="index.dark">Dark</button></div>
         <div class="phoneonly">
-          <button id="menuTl" role="menuitem">Time-lapse</button>
-          <button id="menuHelp" role="menuitem">Help</button>
-          <button id="menuKeys" role="menuitem">Keyboard shortcuts</button>
+          <button id="menuTl" role="menuitem" data-i18n="index.time_lapse">Time-lapse</button>
+          <button id="menuHelp" role="menuitem" data-i18n="index.help">Help</button>
+          <button id="menuKeys" role="menuitem" data-i18n="index.keyboard_shortcuts">Keyboard shortcuts</button>
           <hr>
         </div>
         <button id="menuPopups" role="menuitemcheckbox" aria-checked="false">Alert pop-ups: Off</button>
-        <button id="menuAwake" role="menuitemcheckbox" aria-checked="true" title="While AmberSight is open and showing, this computer's screen stays on and it does not go to sleep">Keep screen awake: On</button>
-        <button id="menuText" role="menuitem" title="Make all text in AmberSight larger on this device">Text size: Normal</button>
-        <button id="menuTlCtl" role="menuitem" title="Docked: the timeline controls sit under the cameras. Auto-hide: they float over the cameras and fade out while playing; tap to bring them back">Timeline controls: Docked</button>
-        <button id="menuData" role="menuitem" title="Use less data on this device: smaller live and playback video (the cameras' sub streams)">Data saver: Auto</button>
-        <button id="menuStart">Start page…</button>
-        <button id="menuDbl">Double-click opens…</button>
-        <button id="menuPush">Notifications on this device…</button>
-        <button id="menuAcct">Your account…</button>
-        <button id="menuPw">Change password</button>
-        <button id="menuTrust">Trust this server (HTTPS)…</button>
-        <button id="menuOut">Sign out</button>
+        <button id="menuAwake" role="menuitemcheckbox" aria-checked="true" title="While AmberSight is open and showing, this computer's screen stays on and it does not go to sleep" data-i18n-attr="title:index.awake_tip">Keep screen awake: On</button>
+        <button id="menuText" role="menuitem" title="Make all text in AmberSight larger on this device" data-i18n-attr="title:index.text_size_tip">Text size: Normal</button>
+        <button id="menuTlCtl" role="menuitem" title="Docked: the timeline controls sit under the cameras. Auto-hide: they float over the cameras and fade out while playing; tap to bring them back" data-i18n-attr="title:index.tl_controls_tip">Timeline controls: Docked</button>
+        <button id="menuData" role="menuitem" title="Use less data on this device: smaller live and playback video (the cameras' sub streams)" data-i18n-attr="title:index.data_saver_tip">Data saver: Auto</button>
+        <button id="menuStart" data-i18n="index.start_page">Start page…</button>
+        <button id="menuDbl" data-i18n="index.dbl_click">Double-click opens…</button>
+        <button id="menuPush" data-i18n="index.notifications">Notifications on this device…</button>
+        <button id="menuAcct" data-i18n="index.your_account">Your account…</button>
+        <button id="menuPw" data-i18n="index.change_password">Change password</button>
+        <button id="menuTrust" data-i18n="index.trust_server">Trust this server (HTTPS)…</button>
+        <button id="menuOut" data-i18n="index.sign_out">Sign out</button>
       </div>
     </div>
   </div>
 </header>
 
-<div id="loginGate" role="dialog" aria-label="Sign in">
+<div id="loginGate" role="dialog" aria-label="Sign in" data-i18n-attr="aria-label:index.sign_in">
   <form id="loginForm" class="gcard" autocomplete="on" novalidate>
     <h2><span>Amber</span>Sight</h2>
-    <p class="hint">Sign in first. Your access level controls which settings you can see and change.</p>
+    <p class="hint" data-i18n="index.gate_intro">Sign in first. Your access level controls which settings you can see and change.</p>
     <div id="credStep1">
-      <label>Username <input id="credUser" name="username" autocomplete="username" autocapitalize="none" spellcheck="false"></label>
-      <label>Password <input id="credPass" name="password" type="password" autocomplete="current-password"></label>
+      <label><span data-i18n="index.username">Username</span> <input id="credUser" name="username" autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+      <label><span data-i18n="index.password">Password</span> <input id="credPass" name="password" type="password" autocomplete="current-password"></label>
     </div>
     <div id="credStep2" hidden>
-      <label id="credCodeBox">Code from your authenticator app <input id="credCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" pattern="[0-9 ]*"></label>
-      <label id="credRecBox" hidden>Recovery code <input id="credRec" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+      <label id="credCodeBox"><span data-i18n="index.code_label">Code from your authenticator app</span> <input id="credCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" pattern="[0-9 ]*"></label>
+      <label id="credRecBox" hidden><span data-i18n="index.recovery_label">Recovery code</span> <input id="credRec" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
     </div>
     <button class="primary" id="credGo" type="submit">Sign in</button>
     <div id="credLinks" class="gate-links" hidden>
       <button type="button" class="gate-link" id="credUseRec">Use a recovery code</button>
-      <button type="button" class="gate-link" id="credBack">Start over</button>
+      <button type="button" class="gate-link" id="credBack" data-i18n="index.start_over">Start over</button>
     </div>
+    <div id="signInLang"></div>
     <p class="hint" id="credMsg" role="alert"></p>
   </form>
 </div>
 
 <div class="livewrap" id="liveWrap" data-side="left">
-<aside id="dock" class="dock" aria-label="View"></aside>
+<aside id="dock" class="dock" aria-label="View" data-i18n-attr="aria-label:index.view"></aside>
 <main>
   <section id="tab-live">
       <div class="livemain">
         <div class="livebar">
-          <button id="dockOpen" class="btn dockopen" title="Open the sidebar: profile, picture, camera controls" aria-label="View"><svg class="ic"><use href="#i-panel"/></svg><span>View</span></button>
-          <div id="layoutChips" class="chips" aria-label="Saved layouts"></div>
-          <button id="layoutEdit" class="btn" data-menu="1" aria-haspopup="menu" title="Saved layouts: edit them, or arrange the cameras"><svg class="ic"><use href="#i-grid"/></svg><span>Layouts</span><svg class="ic lm-caret"><use href="#i-down"/></svg></button>
-          <div id="viewStyle" class="seg vstyle" role="group" aria-label="View style (V)">
-            <button type="button" data-style="grid" title="Grid: equal tiles, scroll for more (V cycles the styles)"><svg class="ic"><use href="#i-v-grid"/></svg><span>Grid</span></button>
-            <button type="button" data-style="fit" title="Fit: every camera fills the window, no scrolling"><svg class="ic"><use href="#i-v-fit"/></svg><span>Fit</span></button>
-            <button type="button" data-style="focus" title="Focus: the first camera large, the rest around it (Arrange picks which)"><svg class="ic"><use href="#i-v-focus"/></svg><span>Focus</span></button>
-            <button type="button" data-style="focus2" title="Focus 2: the first two cameras large, the rest below"><svg class="ic"><use href="#i-v-focus2"/></svg><span>Focus 2</span></button>
+          <button id="dockOpen" class="btn dockopen" title="Open the sidebar: profile, picture, camera controls" aria-label="View" data-i18n-attr="title:index.dock_open_tip,aria-label:index.view"><svg class="ic"><use href="#i-panel"/></svg><span data-i18n="index.view">View</span></button>
+          <div id="layoutChips" class="chips" aria-label="Saved layouts" data-i18n-attr="aria-label:index.saved_layouts"></div>
+          <button id="layoutEdit" class="btn" data-menu="1" aria-haspopup="menu" title="Saved layouts: edit them, or arrange the cameras" data-i18n-attr="title:index.layouts_tip"><svg class="ic"><use href="#i-grid"/></svg><span data-i18n="index.layouts">Layouts</span><svg class="ic lm-caret"><use href="#i-down"/></svg></button>
+          <div id="viewStyle" class="seg vstyle" role="group" aria-label="View style (V)" data-i18n-attr="aria-label:index.view_style">
+            <button type="button" data-style="grid" title="Grid: equal tiles, scroll for more (V cycles the styles)" data-i18n-attr="title:index.style_grid_tip"><svg class="ic"><use href="#i-v-grid"/></svg><span data-i18n="index.grid">Grid</span></button>
+            <button type="button" data-style="fit" title="Fit: every camera fills the window, no scrolling" data-i18n-attr="title:index.style_fit_tip"><svg class="ic"><use href="#i-v-fit"/></svg><span data-i18n="index.fit">Fit</span></button>
+            <button type="button" data-style="focus" title="Focus: the first camera large, the rest around it (Arrange picks which)" data-i18n-attr="title:index.style_focus_tip"><svg class="ic"><use href="#i-v-focus"/></svg><span data-i18n="index.focus">Focus</span></button>
+            <button type="button" data-style="focus2" title="Focus 2: the first two cameras large, the rest below" data-i18n-attr="title:index.style_focus2_tip"><svg class="ic"><use href="#i-v-focus2"/></svg><span data-i18n="index.focus_2">Focus 2</span></button>
           </div>
-          <div id="pager" class="pager" hidden><button id="pagePrev" class="btn icon" aria-label="Previous page"><svg class="ic"><use href="#i-left"/></svg></button><span id="pageLbl">1 / 1</span><button id="pageNext" class="btn icon" aria-label="Next page"><svg class="ic"><use href="#i-right"/></svg></button></div>
-          <button id="fsBtn" class="btn" title="Full screen: the cameras fill the screen (F)"><svg class="ic"><use href="#i-expand"/></svg><span>Full screen</span></button>
-          <button id="tlToggle" class="btn" aria-pressed="false" title="Timeline: play back recordings with alerts (T)"><svg class="ic"><use href="#i-timeline"/></svg><span>Timeline</span></button>
-          <button id="arrangeBtn" class="btn" hidden aria-pressed="false" title="Drag the tiles into the order you want"><svg class="ic"><use href="#i-arrange"/></svg><span>Done</span></button>
-          <button id="splitBtn" class="btn" hidden title="Two servers side by side (or one above the other)"><svg class="ic"><use href="#i-v-focus2"/></svg><span>Split view</span></button>
-          <button id="arrangeCancel" class="btn" hidden title="Discard the new order (Esc)"><span>Cancel</span></button>
-          <span class="cyc"><label class="sw" title="Step through the pages of cameras by itself"><input type="checkbox" role="switch" id="cycleOn"><span class="sw-track" aria-hidden="true"></span><span class="sw-text">Cycle</span></label> <select id="cycleSec" aria-label="Seconds per page" hidden><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></span>
+          <div id="pager" class="pager" hidden><button id="pagePrev" class="btn icon" aria-label="Previous page" data-i18n-attr="aria-label:index.prev_page"><svg class="ic"><use href="#i-left"/></svg></button><span id="pageLbl">1 / 1</span><button id="pageNext" class="btn icon" aria-label="Next page" data-i18n-attr="aria-label:index.next_page"><svg class="ic"><use href="#i-right"/></svg></button></div>
+          <button id="fsBtn" class="btn" title="Full screen: the cameras fill the screen (F)" data-i18n-attr="title:index.full_screen_tip"><svg class="ic"><use href="#i-expand"/></svg><span data-i18n="index.full_screen">Full screen</span></button>
+          <button id="tlToggle" class="btn" aria-pressed="false" title="Timeline: play back recordings with alerts (T)" data-i18n-attr="title:index.timeline_tip"><svg class="ic"><use href="#i-timeline"/></svg><span data-i18n="index.timeline">Timeline</span></button>
+          <button id="arrangeBtn" class="btn" hidden aria-pressed="false" title="Drag the tiles into the order you want" data-i18n-attr="title:index.arrange_tip"><svg class="ic"><use href="#i-arrange"/></svg><span>Done</span></button>
+          <button id="splitBtn" class="btn" hidden title="Two servers side by side (or one above the other)" data-i18n-attr="title:index.split_tip"><svg class="ic"><use href="#i-v-focus2"/></svg><span data-i18n="index.split_view">Split view</span></button>
+          <button id="arrangeCancel" class="btn" hidden title="Discard the new order (Esc)" data-i18n-attr="title:index.arrange_cancel_tip"><span data-i18n="index.cancel">Cancel</span></button>
+          <span class="cyc"><label class="sw" title="Step through the pages of cameras by itself" data-i18n-attr="title:index.cycle_tip"><input type="checkbox" role="switch" id="cycleOn"><span class="sw-track" aria-hidden="true"></span><span class="sw-text" data-i18n="index.cycle">Cycle</span></label> <select id="cycleSec" aria-label="Seconds per page" hidden data-i18n-attr="aria-label:index.seconds_per_page"><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></span>
         </div>
         <div class="grid" id="camGrid"></div>
         <div id="tlDock" class="tldock" hidden></div>
@@ -174,38 +176,38 @@
     </defs></svg>
     <div id="searchBar" class="evbar">
       <div class="evchips" id="evChips">
-        <button type="button" id="fCam" class="chip evchip" aria-haspopup="true" title="Choose cameras"><span>All cameras</span> <svg class="ic"><use href="#i-down"/></svg></button>
+        <button type="button" id="fCam" class="chip evchip" aria-haspopup="true" title="Choose cameras" data-i18n-attr="title:index.choose_cameras_tip"><span>All cameras</span> <svg class="ic"><use href="#i-down"/></svg></button>
         <span class="evsep" aria-hidden="true"></span>
-        <button type="button" class="chip evchip" data-obj="person" style="--c:var(--person)"><svg class="ic"><use href="#i-person"/></svg>Person</button>
-        <button type="button" class="chip evchip" data-obj="vehicle" style="--c:var(--vehicle)"><svg class="ic"><use href="#i-car"/></svg>Vehicle</button>
-        <button type="button" class="chip evchip" data-obj="animal" style="--c:var(--animal)"><svg class="ic"><use href="#i-paw"/></svg>Animal</button>
-        <button type="button" class="chip evchip" data-obj="package" style="--c:var(--package)"><svg class="ic"><use href="#i-pkg"/></svg>Package</button>
-        <button type="button" class="chip evchip" data-obj="face" style="--c:var(--face)"><svg class="ic"><use href="#i-face"/></svg>Face</button>
-        <button type="button" class="chip evchip" data-obj="unusual" style="--c:var(--warn)" title="Events out of this camera's usual pattern"><svg class="ic"><use href="#i-alert"/></svg>Unusual</button>
-        <button type="button" class="chip evchip" data-obj="other" style="--c:var(--muted)">Other</button>
+        <button type="button" class="chip evchip" data-obj="person" style="--c:var(--person)"><svg class="ic"><use href="#i-person"/></svg><span data-i18n="index.person">Person</span></button>
+        <button type="button" class="chip evchip" data-obj="vehicle" style="--c:var(--vehicle)"><svg class="ic"><use href="#i-car"/></svg><span data-i18n="index.vehicle">Vehicle</span></button>
+        <button type="button" class="chip evchip" data-obj="animal" style="--c:var(--animal)"><svg class="ic"><use href="#i-paw"/></svg><span data-i18n="index.animal">Animal</span></button>
+        <button type="button" class="chip evchip" data-obj="package" style="--c:var(--package)"><svg class="ic"><use href="#i-pkg"/></svg><span data-i18n="index.package">Package</span></button>
+        <button type="button" class="chip evchip" data-obj="face" style="--c:var(--face)"><svg class="ic"><use href="#i-face"/></svg><span data-i18n="index.face">Face</span></button>
+        <button type="button" class="chip evchip" data-obj="unusual" style="--c:var(--warn)" title="Events out of this camera's usual pattern" data-i18n-attr="title:index.unusual_tip"><svg class="ic"><use href="#i-alert"/></svg><span data-i18n="index.unusual">Unusual</span></button>
+        <button type="button" class="chip evchip" data-obj="other" style="--c:var(--muted)" data-i18n="index.other">Other</button>
         <span class="evsep" aria-hidden="true"></span>
-        <button type="button" class="chip evchip" data-range="all">Any time</button>
-        <button type="button" class="chip evchip" data-range="today">Today</button>
-        <button type="button" class="chip evchip" data-range="7d">7 days</button>
-        <button type="button" class="chip evchip" data-range="30d">30 days</button>
+        <button type="button" class="chip evchip" data-range="all" data-i18n="index.any_time">Any time</button>
+        <button type="button" class="chip evchip" data-range="today" data-i18n="index.today">Today</button>
+        <button type="button" class="chip evchip" data-range="7d" data-i18n="index.range_7d">7 days</button>
+        <button type="button" class="chip evchip" data-range="30d" data-i18n="index.range_30d">30 days</button>
         <button type="button" class="chip evchip" data-range="custom" id="evCustom"><span>Custom</span></button>
         <span class="evsep" aria-hidden="true"></span>
-        <button type="button" class="chip evchip" id="evProt" aria-pressed="false" title="Only events you chose to keep forever"><svg class="ic"><use href="#i-lock"/></svg>Kept</button>
-        <label class="sw evhfa" title="Leave out events marked as not a real alert (X marks one)"><input type="checkbox" role="switch" id="evHideFA"><span class="sw-track" aria-hidden="true"></span><span class="sw-text"><b>Hide false alarms</b></span></label>
+        <button type="button" class="chip evchip" id="evProt" aria-pressed="false" title="Only events you chose to keep forever" data-i18n-attr="title:index.kept_tip"><svg class="ic"><use href="#i-lock"/></svg><span data-i18n="index.kept">Kept</span></button>
+        <label class="sw evhfa" title="Leave out events marked as not a real alert (X marks one)" data-i18n-attr="title:index.hide_false_tip"><input type="checkbox" role="switch" id="evHideFA"><span class="sw-track" aria-hidden="true"></span><span class="sw-text"><b data-i18n="index.hide_false">Hide false alarms</b></span></label>
       </div>
-      <label id="fSmartL" class="evsmart" hidden title="Smart search: describe what you are looking for, then press Enter"><svg class="ic"><use href="#i-search"/></svg><input id="fSmart" type="search" placeholder="Describe..." enterkeyhint="search" maxlength="200" aria-label="Describe what to find"></label>
-      <button type="button" id="clearFilter" class="btn" hidden>Clear</button>
-      <div class="evview" id="evView" role="group" aria-label="View"><button type="button" class="chip" data-view="list" aria-pressed="true">List</button><button type="button" class="chip" data-view="grid" aria-pressed="false">Grid</button></div>
-      <button type="button" id="evMore" class="btn icon" aria-haspopup="true" aria-label="More" title="More"><svg class="ic"><use href="#i-more"/></svg></button>
+      <label id="fSmartL" class="evsmart" hidden title="Smart search: describe what you are looking for, then press Enter" data-i18n-attr="title:index.smart_tip"><svg class="ic"><use href="#i-search"/></svg><input id="fSmart" type="search" placeholder="Describe..." enterkeyhint="search" maxlength="200" aria-label="Describe what to find" data-i18n-attr="aria-label:index.smart_aria,placeholder:index.smart_ph"></label>
+      <button type="button" id="clearFilter" class="btn" hidden data-i18n="index.clear">Clear</button>
+      <div class="evview" id="evView" role="group" aria-label="View" data-i18n-attr="aria-label:index.view"><button type="button" class="chip" data-view="list" aria-pressed="true" data-i18n="index.list">List</button><button type="button" class="chip" data-view="grid" aria-pressed="false" data-i18n="index.grid">Grid</button></div>
+      <button type="button" id="evMore" class="btn icon" aria-haspopup="true" aria-label="More" title="More" data-i18n-attr="title:index.more,aria-label:index.more"><svg class="ic"><use href="#i-more"/></svg></button>
     </div>
     <div id="smartResults" class="smq-res" hidden></div>
     <div id="eventTable" class="evsplit">
       <div class="evlist" id="evListWrap">
-        <div class="evnote" id="evAiOff" hidden><span>Smart alerts are off, so every motion is listed.</span><a class="btn" href="#settings/detection/objects">Turn on</a></div>
+        <div class="evnote" id="evAiOff" hidden><span data-i18n="index.ai_off_note">Smart alerts are off, so every motion is listed.</span><a class="btn" href="#settings/detection/objects" data-i18n="index.turn_on">Turn on</a></div>
         <div class="evbulk" id="evBulk" hidden></div>
-        <div class="evscroll" id="evList" tabindex="-1"><div id="eventRows" role="listbox" aria-label="Events"></div><div id="evMoreRow" class="evmorerow" hidden><button type="button" class="btn" id="evLoadMore">Load more</button></div></div>
+        <div class="evscroll" id="evList" tabindex="-1"><div id="eventRows" role="listbox" aria-label="Events" data-i18n-attr="aria-label:index.events"></div><div id="evMoreRow" class="evmorerow" hidden><button type="button" class="btn" id="evLoadMore">Load more</button></div></div>
       </div>
-      <div class="evplayer" id="evPlayer"><p class="empty evnone">Select an event to see it here.</p></div>
+      <div class="evplayer" id="evPlayer"><p class="empty evnone" data-i18n="index.select_event">Select an event to see it here.</p></div>
     </div>
   </section>
   <section id="tab-admin" hidden>
@@ -219,20 +221,21 @@
 <div class="big" id="lightbox">
   <div class="lbtop">
     <span id="fullName" class="fullname" hidden></span>
-    <span id="fullSub" class="fullsub" hidden title="Showing the smaller sub stream: this browser cannot play the main stream's video (usually H.265)."><span class="fs-long">Sub stream</span><span class="fs-short">Sub</span></span>
+    <span id="fullSub" class="fullsub" hidden title="Showing the smaller sub stream: this browser cannot play the main stream's video (usually H.265)." data-i18n-attr="title:index.sub_stream_tip"><span class="fs-long" data-i18n="index.sub_stream">Sub stream</span><span class="fs-short">Sub</span></span>
     <div class="lbtools" id="fullTools">
-      <button class="btn glass" id="fullSnap" title="Save snapshot (P)"><svg class="ic"><use href="#i-camera"/></svg><span>Snapshot</span></button>
-      <button class="btn glass" id="fullTl" title="Play back this camera's recordings (L)"><svg class="ic"><use href="#i-timeline"/></svg><span>Timeline</span></button>
-      <button class="btn glass" id="fullClips" title="Clips from this camera"><svg class="ic"><use href="#i-play"/></svg><span>Clips</span></button>
-      <button class="btn glass" id="fullClip" title="Record a 20 s clip now (C)"><svg class="ic"><use href="#i-rec"/></svg><span>Clip</span></button>
-      <button class="btn glass" id="fullFs" title="Full screen: only this camera, nothing else on the screen (F)"><svg class="ic"><use href="#i-expand"/></svg><span>Full screen</span></button>
-      <button class="btn glass" id="fullMenu" title="More for this camera (or right-click the picture)"><svg class="ic"><use href="#i-gear"/></svg><span>Camera</span></button>
-      <button class="btn glass fullpanel" id="fullPanel" title="Camera controls: PTZ, talk, profile" aria-label="View"><svg class="ic"><use href="#i-panel"/></svg><span>View</span></button>
+      <button class="btn glass" id="fullSnap" title="Save snapshot (P)" data-i18n-attr="title:index.snapshot_tip"><svg class="ic"><use href="#i-camera"/></svg><span data-i18n="index.snapshot">Snapshot</span></button>
+      <button class="btn glass" id="fullTl" title="Play back this camera's recordings (L)" data-i18n-attr="title:index.cam_timeline_tip"><svg class="ic"><use href="#i-timeline"/></svg><span data-i18n="index.timeline">Timeline</span></button>
+      <button class="btn glass" id="fullClips" title="Clips from this camera" data-i18n-attr="title:index.cam_clips_tip"><svg class="ic"><use href="#i-play"/></svg><span data-i18n="index.clips">Clips</span></button>
+      <button class="btn glass" id="fullClip" title="Record a 20 s clip now (C)" data-i18n-attr="title:index.clip_tip"><svg class="ic"><use href="#i-rec"/></svg><span data-i18n="index.clip">Clip</span></button>
+      <button class="btn glass" id="fullCtl" title="Lights and siren" hidden data-i18n-attr="title:index.lights_tip"><svg class="ic"><use href="#i-sun"/></svg><span data-i18n="index.lights">Lights</span></button>
+      <button class="btn glass" id="fullFs" title="Full screen: only this camera, nothing else on the screen (F)" data-i18n-attr="title:index.cam_full_screen_tip"><svg class="ic"><use href="#i-expand"/></svg><span data-i18n="index.full_screen">Full screen</span></button>
+      <button class="btn glass" id="fullMenu" title="More for this camera (or right-click the picture)" data-i18n-attr="title:index.cam_menu_tip"><svg class="ic"><use href="#i-gear"/></svg><span data-i18n="index.camera">Camera</span></button>
+      <button class="btn glass fullpanel" id="fullPanel" title="Camera controls: PTZ, talk, profile" aria-label="View" data-i18n-attr="title:index.cam_controls_tip,aria-label:index.view"><svg class="ic"><use href="#i-panel"/></svg><span data-i18n="index.view">View</span></button>
     </div>
-    <button id="closeLight" class="btn glass lbclose" title="Close (Esc)"><svg class="ic"><use href="#i-x"/></svg><span>Close</span></button>
+    <button id="closeLight" class="btn glass lbclose" title="Close (Esc)" data-i18n-attr="title:index.close_tip"><svg class="ic"><use href="#i-x"/></svg><span data-i18n="index.close">Close</span></button>
   </div>
-  <button id="fullPrev" class="btn glass lbnav prev" aria-label="Previous camera"><svg class="ic"><use href="#i-left"/></svg></button>
-  <button id="fullNext" class="btn glass lbnav next" aria-label="Next camera"><svg class="ic"><use href="#i-right"/></svg></button>
+  <button id="fullPrev" class="btn glass lbnav prev" aria-label="Previous camera" data-i18n-attr="aria-label:index.prev_camera"><svg class="ic"><use href="#i-left"/></svg></button>
+  <button id="fullNext" class="btn glass lbnav next" aria-label="Next camera" data-i18n-attr="aria-label:index.next_camera"><svg class="ic"><use href="#i-right"/></svg></button>
   <div id="lightContent"></div>
 </div>
 <noscript><p style="padding:20px">AmberSight needs JavaScript.</p></noscript>

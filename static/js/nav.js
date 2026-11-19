@@ -14,6 +14,7 @@
 //
 // The URL hash (#health) follows the active tab so reload and back/forward work.
 
+import { t } from './i18n.js';
 import { state, api, backLayer, overlaysChanged, afterOverlayClose, trapSheet, hasUnsaved, confirmLeave } from './core.js';
 
 // Go-to keys (G then letter) per page; shortcuts.js reads this too.
@@ -48,8 +49,8 @@ function section(t) {
 }
 
 // The phone's fixed bottom bar: [tab id, label, icon]. "More" opens the sheet below.
-const BAR = [['live', 'Live', 'live'], ['events', 'Events', 'alert'], ['settings', 'Settings', 'gear']];
-const MORE = [['timelapse', 'Time-lapse', 'timeline'], ['help', 'Help', 'help']];
+const BAR = [['live', t('nav.live','Live'), 'live'], ['events', t('nav.events','Events'), 'alert'], ['settings', t('nav.settings','Settings'), 'gear']];
+const MORE = [['timelapse', t('nav.time_lapse','Time-lapse'), 'timeline'], ['help', t('nav.help','Help'), 'help']];
 const svgUse = (n) => '<svg class="ic" aria-hidden="true"><use href="#i-' + n + '"/></svg>';
 
 export function buildNav() {
@@ -57,16 +58,16 @@ export function buildNav() {
   wireNavFade();
   nav.innerHTML = '';
   const coarse = touchDevice();
-  for (const t of tabs) {
-    if (t.noNav) continue;
+  for (const tab of tabs) {
+    if (tab.noNav) continue;
     const b = document.createElement('button');
-    b.dataset.tab = t.id;
-    b.textContent = t.label;
-    const g = GO_KEYS[t.id];
-    if (g && !coarse) b.title = t.label + ' (G then ' + g.toUpperCase() + ')';
-    b.hidden = t.admin && !state.isAdmin;
-    if (t.id === 'events') b.insertAdjacentHTML('beforeend', '<span class="nbadge" hidden></span>');
-    b.onclick = () => showTab(t.id);
+    b.dataset.tab = tab.id;
+    b.textContent = tab.label;
+    const g = GO_KEYS[tab.id];
+    if (g && !coarse) b.title = t('nav.go_key_title', '{page} (G then {key})', { page: tab.label, key: g.toUpperCase() });
+    b.hidden = tab.admin && !state.isAdmin;
+    if (tab.id === 'events') b.insertAdjacentHTML('beforeend', '<span class="nbadge" hidden></span>');
+    b.onclick = () => showTab(tab.id);
     nav.appendChild(b);
   }
   navFade();
@@ -79,12 +80,12 @@ function buildTabBar() {
   if (!bar) {
     bar = document.createElement('nav');
     bar.id = 'tabbar';
-    bar.setAttribute('aria-label', 'Main');
+    bar.setAttribute('aria-label', t('nav.main','Main'));
     document.body.appendChild(bar);
   }
   bar.innerHTML = BAR.map(([id, label, icon]) =>
     '<button type="button" data-tab="' + id + '">' + svgUse(icon) + (id === 'events' ? '<span class="nbadge" hidden></span>' : '') + '<span>' + label + '</span></button>').join('') +
-    '<button type="button" data-more aria-haspopup="true" aria-expanded="false">' + svgUse('dots') + '<span>More</span></button>';
+    '<button type="button" data-more aria-haspopup="true" aria-expanded="false">' + svgUse('dots') + '<span>' + t('nav.more','More') + '</span></button>';
   bar.onclick = (ev) => {
     const b = ev.target.closest('button');
     if (!b) return;
@@ -106,9 +107,9 @@ function buildMore() {
   more = document.createElement('div');
   more.id = 'moreSheet';
   more.hidden = true;
-  more.innerHTML = '<div class="msscrim" data-close></div><div class="mssheet" role="menu" aria-label="More">' +
+  more.innerHTML = '<div class="msscrim" data-close></div><div class="mssheet" role="menu" aria-label="' + t('nav.more', 'More') + '">' +
     MORE.map(([id, label, icon]) => '<button type="button" role="menuitem" data-tab="' + id + '">' + svgUse(icon) + '<span>' + label + '</span></button>').join('') +
-    '<button type="button" role="menuitem" data-keys>' + svgUse('keys') + '<span>Keyboard shortcuts</span></button></div>';
+    '<button type="button" role="menuitem" data-keys>' + svgUse('keys') + '<span>' + t('nav.keyboard_shortcuts', 'Keyboard shortcuts') + '</span></button></div>';
   more.onclick = (ev) => {
     const b = ev.target.closest('button,[data-close]');
     if (!b) return;
@@ -173,8 +174,8 @@ function paintBadge() {
     b.hidden = !unseen;
     b.textContent = !unseen ? '' : unseen > 99 ? '99+' : String(unseen);
   }
-  const lab = unseen ? ' (' + unseen + ' new)' : '';
-  for (const b of document.querySelectorAll('#tabbar button[data-tab="events"]')) b.setAttribute('aria-label', 'Events' + lab);
+  const lab = unseen ? t('nav.events_unseen', 'Events ({n} new)', { n: unseen }) : t('nav.events', 'Events');
+  for (const b of document.querySelectorAll('#tabbar button[data-tab="events"]')) b.setAttribute('aria-label', lab);
 }
 async function pollBadge() {
   if (!state.signedIn || document.hidden || current === 'events') return;

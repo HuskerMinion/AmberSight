@@ -1,0 +1,399 @@
+{
+ "camera": {
+  "nl": "camera",
+  "it": "telecamera",
+  "zh-CN": "摄像头",
+  "pl": "kamera",
+  "pt-BR": "câmera",
+  "sv": "kamera",
+  "ru": "камера"
+ },
+ "alert": {
+  "nl": "melding",
+  "it": "avviso",
+  "zh-CN": "警报",
+  "pl": "alert",
+  "pt-BR": "alerta",
+  "sv": "avisering",
+  "ru": "оповещение"
+ },
+ "alerts (tab)": {
+  "nl": "Meldingen",
+  "it": "Avvisi",
+  "zh-CN": "警报",
+  "pl": "Alerty",
+  "pt-BR": "Alertas",
+  "sv": "Aviseringar",
+  "ru": "Оповещения"
+ },
+ "recording": {
+  "nl": "opname",
+  "it": "registrazione",
+  "zh-CN": "录像",
+  "pl": "nagranie",
+  "pt-BR": "gravação",
+  "sv": "inspelning",
+  "ru": "запись"
+ },
+ "recordings (tab)": {
+  "nl": "Opnames",
+  "it": "Registrazioni",
+  "zh-CN": "录像",
+  "pl": "Nagrania",
+  "pt-BR": "Gravações",
+  "sv": "Inspelningar",
+  "ru": "Записи"
+ },
+ "clip": {
+  "nl": "clip",
+  "it": "clip",
+  "zh-CN": "片段",
+  "pl": "klip",
+  "pt-BR": "clipe",
+  "sv": "klipp",
+  "ru": "клип"
+ },
+ "live": {
+  "nl": "live",
+  "it": "live",
+  "zh-CN": "实时",
+  "pl": "na żywo",
+  "pt-BR": "ao vivo",
+  "sv": "live",
+  "ru": "в прямом эфире"
+ },
+ "timeline": {
+  "nl": "tijdlijn",
+  "it": "timeline",
+  "zh-CN": "时间轴",
+  "pl": "oś czasu",
+  "pt-BR": "linha do tempo",
+  "sv": "tidslinje",
+  "ru": "шкала времени"
+ },
+ "wall (camera wall)": {
+  "nl": "videowall",
+  "it": "videowall",
+  "zh-CN": "监控墙",
+  "pl": "ściana wideo",
+  "pt-BR": "mosaico",
+  "sv": "kameravägg",
+  "ru": "видеостена"
+ },
+ "group": {
+  "nl": "groep",
+  "it": "gruppo",
+  "zh-CN": "分组",
+  "pl": "grupa",
+  "pt-BR": "grupo",
+  "sv": "grupp",
+  "ru": "группа"
+ },
+ "snooze (alerts)": {
+  "nl": "sluimeren",
+  "it": "posticipa",
+  "zh-CN": "暂停提醒",
+  "pl": "odłóż",
+  "pt-BR": "silenciar",
+  "sv": "snooza",
+  "ru": "отложить"
+ },
+ "snoozed": {
+  "nl": "gesluimerd",
+  "it": "posticipato",
+  "zh-CN": "已暂停",
+  "pl": "odłożone",
+  "pt-BR": "silenciado",
+  "sv": "snoozad",
+  "ru": "отложено"
+ },
+ "armed / disarmed": {
+  "nl": "ingeschakeld / uitgeschakeld",
+  "it": "inserito / disinserito",
+  "zh-CN": "已布防 / 已撤防",
+  "pl": "uzbrojony / rozbrojony",
+  "pt-BR": "armado / desarmado",
+  "sv": "aktiverad / avaktiverad",
+  "ru": "на охране / снято с охраны"
+ },
+ "arm / disarm": {
+  "nl": "inschakelen / uitschakelen",
+  "it": "inserisci / disinserisci",
+  "zh-CN": "布防 / 撤防",
+  "pl": "uzbrój / rozbrój",
+  "pt-BR": "armar / desarmar",
+  "sv": "aktivera / avaktivera",
+  "ru": "поставить на охрану / снять с охраны"
+ },
+ "server": {
+  "nl": "server",
+  "it": "server",
+  "zh-CN": "服务器",
+  "pl": "serwer",
+  "pt-BR": "servidor",
+  "sv": "server",
+  "ru": "сервер"
+ },
+ "sign in / sign out": {
+  "nl": "inloggen / uitloggen",
+  "it": "accedi / esci",
+  "zh-CN": "登录 / 退出登录",
+  "pl": "zaloguj się / wyloguj się",
+  "pt-BR": "entrar / sair",
+  "sv": "logga in / logga ut",
+  "ru": "войти / выйти"
+ },
+ "account": {
+  "nl": "account",
+  "it": "account",
+  "zh-CN": "账户",
+  "pl": "konto",
+  "pt-BR": "conta",
+  "sv": "konto",
+  "ru": "аккаунт"
+ },
+ "password": {
+  "nl": "wachtwoord",
+  "it": "password",
+  "zh-CN": "密码",
+  "pl": "hasło",
+  "pt-BR": "senha",
+  "sv": "lösenord",
+  "ru": "пароль"
+ },
+ "two-step code": {
+  "nl": "tweestapscode",
+  "it": "codice a due passaggi",
+  "zh-CN": "两步验证码",
+  "pl": "kod dwuetapowy",
+  "pt-BR": "código de verificação em duas etapas",
+  "sv": "tvåstegskod",
+  "ru": "код двухэтапной аутентификации"
+ },
+ "invite": {
+  "nl": "uitnodiging",
+  "it": "invito",
+  "zh-CN": "邀请",
+  "pl": "zaproszenie",
+  "pt-BR": "convite",
+  "sv": "inbjudan",
+  "ru": "приглашение"
+ },
+ "zone": {
+  "nl": "zone",
+  "it": "zona",
+  "zh-CN": "区域",
+  "pl": "strefa",
+  "pt-BR": "zona",
+  "sv": "zon",
+  "ru": "зона"
+ },
+ "motion": {
+  "nl": "beweging",
+  "it": "movimento",
+  "zh-CN": "移动侦测",
+  "pl": "ruch",
+  "pt-BR": "movimento",
+  "sv": "rörelse",
+  "ru": "движение"
+ },
+ "person / vehicle / animal": {
+  "nl": "persoon / voertuig / dier",
+  "it": "persona / veicolo / animale",
+  "zh-CN": "人 / 车辆 / 动物",
+  "pl": "osoba / pojazd / zwierzę",
+  "pt-BR": "pessoa / veículo / animal",
+  "sv": "person / fordon / djur",
+  "ru": "человек / транспорт / животное"
+ },
+ "snapshot (picture)": {
+  "nl": "afbeelding",
+  "it": "immagine",
+  "zh-CN": "图片",
+  "pl": "zdjęcie",
+  "pt-BR": "imagem",
+  "sv": "bild",
+  "ru": "снимок"
+ },
+ "stream (main / sub)": {
+  "nl": "hoofd- / substream",
+  "it": "stream principale / secondario",
+  "zh-CN": "主码流 / 子码流",
+  "pl": "strumień główny / dodatkowy",
+  "pt-BR": "stream principal / secundário",
+  "sv": "huvud- / delström",
+  "ru": "основной / дополнительный поток"
+ },
+ "pan, tilt and zoom (PTZ)": {
+  "nl": "draaien, kantelen en zoomen",
+  "it": "panoramica, inclinazione e zoom",
+  "zh-CN": "水平、垂直和变焦",
+  "pl": "obrót, pochylenie i zoom",
+  "pt-BR": "panorâmica, inclinação e zoom",
+  "sv": "panorera, luta och zooma",
+  "ru": "поворот, наклон и зум"
+ },
+ "preset (PTZ)": {
+  "nl": "preset",
+  "it": "preset",
+  "zh-CN": "预置位",
+  "pl": "wstępnie ustawiony punkt",
+  "pt-BR": "posição predefinida",
+  "sv": "förinställning",
+  "ru": "пресет"
+ },
+ "talk (two-way audio)": {
+  "nl": "praten",
+  "it": "parla",
+  "zh-CN": "对讲",
+  "pl": "mów",
+  "pt-BR": "falar",
+  "sv": "prata",
+  "ru": "говорить"
+ },
+ "low data": {
+  "nl": "databesparing",
+  "it": "risparmio dati",
+  "zh-CN": "省流量",
+  "pl": "oszczędzanie danych",
+  "pt-BR": "economia de dados",
+  "sv": "databesparing",
+  "ru": "экономия трафика"
+ },
+ "picture-in-picture": {
+  "nl": "beeld-in-beeld",
+  "it": "picture-in-picture",
+  "zh-CN": "画中画",
+  "pl": "obraz w obrazie",
+  "pt-BR": "picture-in-picture",
+  "sv": "bild-i-bild",
+  "ru": "картинка в картинке"
+ },
+ "presence (home / away)": {
+  "nl": "aanwezigheid (thuis / weg)",
+  "it": "presenza (a casa / fuori)",
+  "zh-CN": "在家状态（在家 / 外出）",
+  "pl": "obecność (w domu / poza domem)",
+  "pt-BR": "presença (em casa / fora)",
+  "sv": "närvaro (hemma / borta)",
+  "ru": "присутствие (дома / не дома)"
+ },
+ "battery camera": {
+  "nl": "accucamera",
+  "it": "telecamera a batteria",
+  "zh-CN": "电池摄像头",
+  "pl": "kamera bateryjna",
+  "pt-BR": "câmera a bateria",
+  "sv": "batterikamera",
+  "ru": "камера на батарее"
+ },
+ "app lock": {
+  "nl": "appvergrendeling",
+  "it": "blocco app",
+  "zh-CN": "应用锁",
+  "pl": "blokada aplikacji",
+  "pt-BR": "bloqueio do app",
+  "sv": "applås",
+  "ru": "блокировка приложения"
+ },
+ "home screen (start view)": {
+  "nl": "startscherm",
+  "it": "schermata iniziale",
+  "zh-CN": "主屏幕",
+  "pl": "ekran główny",
+  "pt-BR": "tela inicial",
+  "sv": "startvy",
+  "ru": "главный экран"
+ },
+ "home-screen widget": {
+  "nl": "widget",
+  "it": "widget",
+  "zh-CN": "小组件",
+  "pl": "widżet",
+  "pt-BR": "widget",
+  "sv": "widget",
+  "ru": "виджет"
+ },
+ "Quick Settings tile": {
+  "nl": "tegel Snelle instellingen",
+  "it": "riquadro Impostazioni rapide",
+  "zh-CN": "快捷设置图块",
+  "pl": "kafelek szybkich ustawień",
+  "pt-BR": "bloco de Configurações rápidas",
+  "sv": "ruta i snabbinställningar",
+  "ru": "плитка быстрых настроек"
+ },
+ "feedback": {
+  "nl": "feedback",
+  "it": "feedback",
+  "zh-CN": "反馈",
+  "pl": "opinia",
+  "pt-BR": "feedback",
+  "sv": "feedback",
+  "ru": "отзыв"
+ },
+ "settings": {
+  "nl": "Instellingen",
+  "it": "Impostazioni",
+  "zh-CN": "设置",
+  "pl": "Ustawienia",
+  "pt-BR": "Configurações",
+  "sv": "Inställningar",
+  "ru": "Настройки"
+ },
+ "retry": {
+  "nl": "Opnieuw proberen",
+  "it": "Riprova",
+  "zh-CN": "重试",
+  "pl": "Spróbuj ponownie",
+  "pt-BR": "Tentar novamente",
+  "sv": "Försök igen",
+  "ru": "Повторить"
+ },
+ "demo": {
+  "nl": "demo",
+  "it": "demo",
+  "zh-CN": "演示",
+  "pl": "demo",
+  "pt-BR": "demo",
+  "sv": "demo",
+  "ru": "демо"
+ },
+ "language": {
+  "nl": "taal",
+  "it": "lingua",
+  "zh-CN": "语言",
+  "pl": "język",
+  "pt-BR": "idioma",
+  "sv": "språk",
+  "ru": "язык"
+ },
+ "follow the phone": {
+  "nl": "zoals de telefoon",
+  "it": "come il telefono",
+  "zh-CN": "跟随系统",
+  "pl": "jak w telefonie",
+  "pt-BR": "como o telefone",
+  "sv": "som telefonen",
+  "ru": "как на телефоне"
+ },
+ "event": {
+  "nl": "gebeurtenis",
+  "it": "evento",
+  "zh-CN": "事件",
+  "pl": "zdarzenie",
+  "pt-BR": "evento",
+  "sv": "händelse",
+  "ru": "событие"
+ },
+ "Settings > System (menu path)": {
+  "nl": "Instellingen > Systeem",
+  "it": "Impostazioni > Sistema",
+  "zh-CN": "设置 > 系统",
+  "pl": "Ustawienia > System",
+  "pt-BR": "Configurações > Sistema",
+  "sv": "Inställningar > System",
+  "ru": "Настройки > Система"
+ },
+ "_unsure": []
+}
