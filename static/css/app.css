@@ -567,7 +567,8 @@ kbd { font: 600 var(--fs-s) var(--mono); background: var(--surface2); border: 1p
 .tldock.atlive #tlClock { color: var(--bad); font-weight: 600; }
 .tlnow { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px dashed var(--bad); z-index: 2; pointer-events: none; }
 .tlnow.flip span { left: auto; right: 4px; padding: 0 3px; border-radius: 3px; background: var(--surface); }
-.tlnow span { position: absolute; top: 22px; left: 4px; font-size: var(--fs-s); font-weight: 700; color: var(--bad); text-transform: uppercase; letter-spacing: .05em; }
+/* (One line: the line it hangs off is 0 px wide, so a label free to wrap broke at every space, or every character in Chinese.) */
+.tlnow span { position: absolute; top: 22px; left: 4px; font-size: var(--fs-s); font-weight: 700; color: var(--bad); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
 .tltip { position: fixed; z-index: 120; overflow: hidden; background: var(--raised); color: var(--text); border: 1px solid var(--line2); border-radius: var(--r2); box-shadow: var(--shadow); padding: var(--s2) var(--s3); max-width: 260px; font-size: var(--fs-s); pointer-events: none; }
 .tltip[hidden] { display: none; }
 .tltip img { display: block; width: 100%; aspect-ratio: 16 / 9; min-height: 0; object-fit: cover; border-radius: var(--r1); margin-bottom: var(--s2); background: var(--surface2); }

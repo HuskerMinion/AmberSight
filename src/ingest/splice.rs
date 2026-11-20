@@ -897,6 +897,15 @@ impl Piece {
     }
 }
 
+/// The shape of a planned clip: what it covers, which stream, how many bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub sub: bool,
+    pub len: u64,
+}
+
 /// A playable MP4 assembled on request from recorded segments.
 #[derive(Clone)]
 pub struct VirtualClip {
@@ -909,6 +918,9 @@ pub struct VirtualClip {
     pub end_ms: i64,
     /// Fast-playback clips: the wall-clock time of each picture, in order.
     pub frame_times: Vec<i64>,
+    /// Fast-playback clips that end where a recording with another header
+    /// (codec settings) takes over: when (ms). The next clip starts there.
+    pub handover_ms: Option<i64>,
     /// The clip is the sub stream.
     pub sub: bool,
     /// Wall-clock span (ms) of each fragment piece, in order (plan() clips).
@@ -1064,24 +1076,57 @@ impl VirtualClip {
         }
         let total = pieces.iter().map(|p| p.len()).sum();
         let sub = segments[base_seg].sub;
-        Ok(Some(VirtualClip { pieces, total, start_ms: clip_start.round() as i64, end_ms: end_ms.round() as i64, frame_times: Vec::new(), sub, frag_wall, first_cto }))
+        Ok(Some(VirtualClip { pieces, total, start_ms: clip_start.round() as i64, end_ms: end_ms.round() as i64, frame_times: Vec::new(), handover_ms: None, sub, frag_wall, first_cto }))
     }
 
-    /// As `plan`, for a window planned before whose clip then ended at
-    /// `earlier_end_ms`: the same pieces again, so byte positions the
-    /// browser already holds still mean the same thing. (While the window is
-    /// still being recorded, every new piece makes the clip's table of
-    /// contents at the front longer, which would move all later bytes.) The
-    /// browser asks for the rest from the clip's end, as usual.
-    pub fn plan_like(segments: &[SourceSegment], from_ms: i64, to_ms: i64, earlier_end_ms: Option<i64>) -> Result<Option<VirtualClip>> {
-        if let Some(end) = earlier_end_ms.filter(|e| *e - 1 > from_ms && *e - 1 < to_ms) {
-            // (Up to just before the old end: the next piece starts at that
-            // end, and the end was rounded to the millisecond.)
-            if let Some(c) = Self::plan(segments, from_ms, end - 1)? {
+    /// What this clip looks like, to plan its window the same way again
+    /// (see `plan_like`).
+    pub fn layout(&self) -> Layout {
+        Layout { start_ms: self.start_ms, end_ms: self.end_ms, sub: self.sub, len: self.total }
+    }
+
+    /// As `plan`, for a window planned before as `earlier`: the same pieces
+    /// again, so byte positions the browser already holds still mean the same
+    /// thing. Two things can have changed since:
+    /// - the window is still being recorded: every new piece would make the
+    ///   clip's table of contents at the front longer, moving all later
+    ///   bytes. Planned only up to the old end; the browser asks for the rest
+    ///   from the clip's end, as usual.
+    /// - the other stream's recording of the start has arrived (main and sub
+    ///   are written separately, so at the live edge one can be there before
+    ///   the other) and would now be preferred: a different clip, often a
+    ///   smaller one, whose end a byte range the browser asks for next lies
+    ///   past (416). Planned from the stream it was made from.
+    /// When it cannot be made again (its recordings were removed), the
+    /// window is planned plainly.
+    #[cfg(test)]
+    pub fn plan_like(segments: &[SourceSegment], from_ms: i64, to_ms: i64, earlier: Option<Layout>) -> Result<Option<VirtualClip>> {
+        if let Some(e) = earlier {
+            if let Some(c) = Self::plan_again(segments, from_ms, to_ms, e)? {
                 return Ok(Some(c));
             }
         }
         Self::plan(segments, from_ms, to_ms)
+    }
+
+    /// The window's clip exactly as `earlier` (see `plan_like`), or None
+    /// when that can no longer be made.
+    pub fn plan_again(segments: &[SourceSegment], from_ms: i64, to_ms: i64, earlier: Layout) -> Result<Option<VirtualClip>> {
+        let e = earlier;
+        if e.end_ms - 1 <= from_ms {
+            return Ok(None);
+        }
+        // (Up to just before the old end: the next piece starts at that
+        // end, and the end was rounded to the millisecond.)
+        let to = to_ms.min(e.end_ms - 1);
+        if let Some(c) = Self::plan(segments, from_ms, to)?.filter(|c| c.layout() == e) {
+            return Ok(Some(c));
+        }
+        let same: Vec<SourceSegment> = segments.iter().filter(|s| s.sub == e.sub).map(|s| SourceSegment { low: false, ..s.clone() }).collect();
+        if same.is_empty() {
+            return Ok(None);
+        }
+        Ok(Self::plan(&same, from_ms, to)?.filter(|c| c.layout() == e))
     }
 
     /// Fast-playback ("trick play") clip: only keyframes, about one per
@@ -1287,7 +1332,7 @@ impl VirtualClip {
         let end_ms = switch_at.map_or(last + step, |w| w.max(last + 1.0));
         let frame_times = picks.iter().map(|p| p.3.round() as i64).collect();
         let sub = segments.iter().any(|s| s.path == keys[first].path && s.sub);
-        Ok(Some(VirtualClip { pieces, total, start_ms: t0.round() as i64, end_ms: end_ms.round() as i64, frame_times, sub, frag_wall: Vec::new(), first_cto: 0 }))
+        Ok(Some(VirtualClip { pieces, total, start_ms: t0.round() as i64, end_ms: end_ms.round() as i64, frame_times, handover_ms: switch_at.map(|w| w.round() as i64), sub, frag_wall: Vec::new(), first_cto: 0 }))
     }
 
     pub fn len(&self) -> u64 {
@@ -1297,7 +1342,7 @@ impl VirtualClip {
     /// A clip made elsewhere (a reversed copy), served like the others.
     pub fn from_bytes(bytes: Vec<u8>, start_ms: i64, end_ms: i64, sub: bool) -> VirtualClip {
         let total = bytes.len() as u64;
-        VirtualClip { pieces: vec![Piece::Bytes(bytes)], total, start_ms, end_ms, frame_times: Vec::new(), sub, frag_wall: Vec::new(), first_cto: 0 }
+        VirtualClip { pieces: vec![Piece::Bytes(bytes)], total, start_ms, end_ms, frame_times: Vec::new(), handover_ms: None, sub, frag_wall: Vec::new(), first_cto: 0 }
     }
 
     /// Bytes [start, end) of the clip.
@@ -1984,7 +2029,7 @@ mod tests {
         assert!(grown.end_ms > first.end_ms);
         assert_ne!(grown.read_range(0, before.len() as u64).unwrap(), before);
         // Planned like before: the very same bytes, ending where it did.
-        let again = VirtualClip::plan_like(&segs, from, to, Some(first.end_ms)).unwrap().unwrap();
+        let again = VirtualClip::plan_like(&segs, from, to, Some(first.layout())).unwrap().unwrap();
         assert_eq!((again.start_ms, again.end_ms, again.len()), (first.start_ms, first.end_ms, first.len()));
         assert_eq!(again.read_range(0, again.len()).unwrap(), before);
         // The rest comes from the old end, as usual.
@@ -1992,7 +2037,49 @@ mod tests {
         assert_eq!((rest.start_ms - t0, rest.end_ms - t0), (6000, 10_000));
         // Nothing remembered (or a remembered end outside the window): plain.
         assert_eq!(VirtualClip::plan_like(&segs, from, to, None).unwrap().unwrap().len(), grown.len());
-        assert_eq!(VirtualClip::plan_like(&segs, from, to, Some(t0)).unwrap().unwrap().len(), grown.len());
+        assert_eq!(VirtualClip::plan_like(&segs, from, to, Some(Layout { end_ms: t0, ..first.layout() })).unwrap().unwrap().len(), grown.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_planned_again_keeps_its_stream_when_the_other_one_catches_up() {
+        // The timeline asks for the sub stream (quality=low) at the live edge.
+        // The first time, only the main stream had been written there, so
+        // the clip was made from it. Moments later the sub stream's
+        // recording of that time is there too, and is preferred: planned
+        // again (the clip cache is small and short), the window must still
+        // be the same bytes, or the browser's next byte range lands past
+        // the (smaller) sub-stream clip's end: 416, and a black tile.
+        let dir = std::env::temp_dir().join(format!("amber-replan-sub-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let main: Vec<SourceSegment> = record(&dir).into_iter().map(|s| SourceSegment { low: true, ..s }).collect();
+        let t0 = main[0].start_ms;
+        let mut small = video_track();
+        small.sample_entry[8] = 1;
+        let mut w = SegmentWriter::new(&dir, "cam-sub", vec![small], 3).unwrap();
+        for i in 0..100i64 {
+            w.push_video(i * 9000, vec![7; 10], i % 10 == 0).unwrap();
+        }
+        w.finish().unwrap();
+        let s0 = w.take_closed();
+        let sub0 = s0[0].start_ms;
+        let subs: Vec<SourceSegment> = s0.into_iter().map(|s| SourceSegment { path: s.path, start_ms: t0 + s.start_ms - sub0, end_ms: t0 + s.end_ms - sub0, low: false, sub: true }).collect();
+        let (from, to) = (t0 + 6500, t0 + 60_000);
+        // First: the main stream's 6..9 s recording only.
+        let first = VirtualClip::plan(&main[2..3], from, to).unwrap().unwrap();
+        assert!(!first.sub);
+        let before = first.read_range(0, first.len()).unwrap();
+        // Now the sub stream's recordings are there as well (and more main).
+        let mut all = main.clone();
+        all.extend(subs.iter().cloned());
+        let plain = VirtualClip::plan(&all, from, to).unwrap().unwrap();
+        assert!(plain.sub && plain.len() < first.len(), "the sub stream is preferred now, and smaller");
+        let again = VirtualClip::plan_like(&all, from, to, Some(first.layout())).unwrap().unwrap();
+        assert_eq!(again.layout(), first.layout());
+        assert_eq!(again.read_range(0, again.len()).unwrap(), before);
+        // A layout that cannot be made again (its recordings are gone): planned plainly.
+        let gone = VirtualClip::plan_like(&subs, from, to, Some(first.layout())).unwrap().unwrap();
+        assert_eq!(gone.len(), VirtualClip::plan(&subs, from, to).unwrap().unwrap().len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -13666,6 +13666,10 @@
 "Aucun enregistrement : {names}",
 "96fd9033"
 ],
+"livetl.not_saved_yet": [
+"Enregistrement en cours, pas encore sauvegardé",
+"57074470"
+],
 "livetl.obj_animal": [
 "animal",
 "c238e05d"

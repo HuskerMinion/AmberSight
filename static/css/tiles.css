@@ -229,9 +229,15 @@ a.btn.primary:hover { filter: brightness(1.07); }
 /* Narrow phones: the Timeline button must stay in view, so View is an icon and the layout chips scroll between the fixed buttons. */
 @media (max-width: 430px) {
   .livebar #dockOpen > span { display: none; }
+}
+/* Up to the one-row width: the layout chips scroll between the fixed buttons, so many saved layouts never push the row wider (fitBar then only looks at the words). */
+@media (max-width: 560px), (max-height: 500px) and (pointer: coarse) {
   .livebar > #layoutChips { flex: 0 1 auto; min-width: 56px; overflow-x: auto; scrollbar-width: none; }
   .livebar > #layoutChips::-webkit-scrollbar { display: none; }
+  .livebar > #layoutChips > .chip { flex: none; white-space: nowrap; }
 }
+/* Still too wide with the words (long ones in some languages): icons only, Layouts first (live.js fitBar). */
+.livebar.fit1 #layoutEdit > span, .livebar.fit2 #tlToggle > span { display: none; }
 .cyc { display: inline-flex; align-items: center; gap: var(--s2); }
 .cyc .sw { padding: 0; }
 /* Server figures: one tidy section that looks like the others (same heading style and padding). */

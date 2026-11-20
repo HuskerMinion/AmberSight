@@ -13666,6 +13666,10 @@
 "Brak nagrania: {names}",
 "96fd9033"
 ],
+"livetl.not_saved_yet": [
+"Trwa nagrywanie, jeszcze nie zapisano",
+"57074470"
+],
 "livetl.obj_animal": [
 "zwierzę",
 "c238e05d"

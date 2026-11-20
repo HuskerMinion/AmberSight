@@ -124,6 +124,18 @@ function spansOf(name) {
 function spanAt(name, ms) { return spansOf(name).find(s => ms >= s[0] - 1500 && ms <= s[1] + 1500) || null; }
 // The next stretch of recording starting after `ms`, if any.
 function spanAfter(name, ms) { return spansOf(name).filter(s => s[0] > ms).sort((a, b) => a[0] - b[0])[0] || null; }
+// Off live, a moment after a camera's last saved recording while that camera
+// records now: the recording being written, listed once it closes.
+function unsaved(name, ms) {
+  const sp = D.spans[name] || [], now = Date.now();
+  if (!sp.length || ms > now) return false;
+  const end = sp[sp.length - 1][1];
+  return ms > end && recordingNow(name, end, now);
+}
+// A tile's text for a moment with nothing to play.
+function noRecText(name, ms) {
+  return unsaved(name, ms) ? t('livetl.not_saved_yet', 'Recording, not saved yet') : t('livetl.no_recording', 'No recording');
+}
 function recorded(name, ms) {
   const r = D.range;
   if (!r || ms < r[0] || ms > r[1]) return true;       // unknown: try
@@ -211,7 +223,7 @@ function scheduleFetch(force) {
 // moment at once: in the bubble and on the tiles while the video catches up.
 const STRIP_STEPS = [2e3, 5e3, 10e3, 15e3, 30e3, 60e3, 120e3, 300e3, 600e3, 900e3, 1800e3, 3600e3, 7200e3];
 const STRIP_MAX = 160;
-const strips = new Map();   // camera name -> { key, step, times, img, cols, w, h }
+const strips = new Map();   // camera name -> { key, step, times, img, cols, w, h, made, to }
 const stripBusy = new Set();
 const stripWant = new Map();   // camera name -> the key the view wants now
 const stripFailed = new Map(); // camera name + key -> retry after (ms)
@@ -226,15 +238,25 @@ function loadStrips() {
   // Whole blocks of pictures (so small moves of the strip reuse what is
   // there), covering the view with a margin each side.
   const block = step * 40;
-  const from = Math.floor((S.view.from - span * 0.25) / block) * block;
+  const now = Date.now();
+  let from = Math.floor((S.view.from - span * 0.25) / block) * block;
+  // (STRIP_MAX pictures from a start rounded down to a block can end minutes
+  // before the view's right edge, before now: no pictures for the latest
+  // minutes. A block later then, while that still covers the view's left edge.)
+  const need = Math.min(S.view.to, now);
+  while (from + STRIP_MAX * step < need && from + block <= S.view.from) from += block;
   const n = Math.min(STRIP_MAX, Math.ceil((S.view.to + span * 0.25 - from) / step));
+  // A block reaching the last minutes was made before what has been recorded
+  // since: made again (at most every 20 s) while the strip is dragged, or
+  // dragging near the live edge finds no pictures there.
+  const fresh = (s) => !(S.scrubbing && s.to > s.made - 120000 && now - s.made > 20000);
   for (const name of shownNames()) {
     const c = state.cams.find(x => x.name === name);
     if (!c || c.remote) continue;
     const key = from + '/' + step + '/' + n;
     stripWant.set(name, key);
     const cur = strips.get(name);
-    if ((cur && cur.key === key) || stripBusy.has(name + key) || (stripFailed.get(name + key) || 0) > Date.now()) continue;
+    if ((cur && cur.key === key && fresh(cur)) || stripBusy.has(name + key) || (stripFailed.get(name + key) || 0) > now) continue;
     fetchStrip(name, key, from, step, n);
   }
 }
@@ -242,7 +264,10 @@ async function fetchStrip(name, key, from, step, n) {
   stripBusy.add(name + key);
   let objUrl = null;
   try {
-    const url = '/api/filmstrip?camera=' + enc(name) + '&from=' + from + '&step=' + step + '&n=' + n + '&w=' + (dataSaver() ? 112 : 160) + '&quiet=1';
+    const made = Date.now(), to = from + step * n;
+    // (A block still being recorded: not the browser's copy from a minute ago.)
+    const v = to > made - 120000 ? '&v=' + Math.floor(made / 20000) : '';
+    const url = '/api/filmstrip?camera=' + enc(name) + '&from=' + from + '&step=' + step + '&n=' + n + '&w=' + (dataSaver() ? 112 : 160) + '&quiet=1' + v;
     const r = await fetch(url, { credentials: 'same-origin' });
     // None (nothing recorded) or busy: do not ask again for a while.
     if (!r.ok || r.status === 204) { stripFailed.set(name + key, Date.now() + (r.status === 503 ? 5000 : 30000)); return; }
@@ -256,7 +281,7 @@ async function fetchStrip(name, key, from, step, n) {
     if (!S.on || stripWant.get(name) !== key) return;
     const old = strips.get(name);
     if (old && old.img) URL.revokeObjectURL(old.img.src);
-    strips.set(name, { key, step, times, img, cols, w, h });
+    strips.set(name, { key, step, times, img, cols, w, h, made, to });
     objUrl = null;
     players.forEach(p => { if (p.cam.name === name) tickPlayer(p); });
   } catch (e) {
@@ -277,14 +302,26 @@ function stripFrame(name, ms) {
 }
 // Show the filmstrip picture on a tile (true if there was one).
 function drawStrip(p, t) {
+  // A moment with no recording (a break): no picture, not one from before it.
+  if (!recorded(p.cam.name, t)) { p.cv.hidden = true; return false; }
   const f = stripFrame(p.cam.name, t);
-  if (!f) { p.cv.hidden = true; return false; }
-  const key = p.cam.name + '|' + strips.get(p.cam.name).key + '|' + f.i;
+  // Dragging past where the strip has no picture: the last one stays (never
+  // a black "Buffering" tile under the pointer).
+  // Only for a recorded moment within a few minutes of that picture (the
+  // newest minutes before the strip has them), never one from elsewhere.
+  if (!f) {
+    const keep = S.scrubbing && !!p.cvKey && p.cvT != null && Math.abs(t - p.cvT) < 180000 && recorded(p.cam.name, t);
+    p.cv.hidden = !keep;
+    return keep;
+  }
+  const sb = strips.get(p.cam.name);
+  const key = p.cam.name + '|' + sb.key + '|' + sb.made + '|' + f.i;
   if (p.cvKey !== key) {
     if (p.cv.width !== f.w || p.cv.height !== f.h) { p.cv.width = f.w; p.cv.height = f.h; }
     p.cv.getContext('2d').drawImage(f.img, f.sx, f.sy, f.w, f.h, 0, 0, f.w, f.h);
     p.cvKey = key;
   }
+  p.cvT = f.t;
   p.cv.hidden = false;
   return true;
 }
@@ -580,12 +617,14 @@ function picGap() {
   return Math.min(400, Math.max(66, 25 * n));
 }
 
-async function askPic(p, at) {
+// (scrub: asked while dragging the strip; its failures and sizes do not
+// count against fast pictures.)
+async function askPic(p, at, scrub = false) {
   const pc = p.pic;
-  pc.busy = true; pc.lastAsk = Date.now(); pc.askedAt = at;
+  pc.busy = true; pc.lastAsk = Date.now(); pc.askedAt = at; pc.fromScrub = scrub;
   const ac = pc.ac = new AbortController();
   const t0 = performance.now();
-  const low = S.solo === null || dataSaver();
+  const low = dataSaver() || (S.solo === null && [...players].filter(x => !x.cam.remote).length > 1);
   const url = '/api/playback/picture?camera=' + enc(p.cam.name) + '&at=' + Math.floor(at) + (low ? '&quality=low' : '') + (pc.have !== null ? '&have=' + pc.have : '') + '&quiet=1';
   // A failed ask (the server restarting after an update, the network gone):
   // try again after 1 s, then 2, 4, up to 8 s. Fast pictures stay on.
@@ -609,9 +648,9 @@ async function askPic(p, at) {
     if (p.pic !== pc || pc.ac !== ac) return;
     pc.netFails = 0;
     const cq = camQ(p.cam.name), psub = r.headers.get('x-pic-sub') === '1';
-    if (low || psub) cq.hasSub = psub;
+    if (!scrub && (low || psub)) cq.hasSub = psub;
     const kq = cq[psub ? 'sub' : 'main'];
-    kq.keyBits = 0.7 * kq.keyBits + 0.3 * data.byteLength * 8;
+    if (!scrub) kq.keyBits = 0.7 * kq.keyBits + 0.3 * data.byteLength * 8;
     decoding = true;
     const cfg = codec + '|' + desc;
     if (cfg !== pc.cfg || !pc.dec || pc.dec.state === 'closed') {
@@ -620,7 +659,7 @@ async function askPic(p, at) {
       if (p.pic !== pc) return;
       // The browser cannot decode this camera's pictures by itself (e.g.
       // H.265 without the codec): fast clips it is, for this tile.
-      if (!sup.supported) { p.picFail = true; stopPic(p); tickPlayer(p); return; }
+      if (!sup.supported) { if (scrub) p.scrubFail = true; else p.picFail = true; stopPic(p); tickPlayer(p); return; }
       if (pc.dec) { try { pc.dec.close(); } catch (e) { /* ignore */ } }
       pc.dec = new VideoDecoder({
         output: (frame) => {
@@ -668,7 +707,7 @@ async function askPic(p, at) {
     pc.cfg = '';
     // The browser keeps failing to decode this camera's pictures: fast
     // clips it is, for this tile.
-    if (++pc.decFails >= 5) { p.picFail = true; stopPic(p); }
+    if (++pc.decFails >= 5) { if (scrub) p.scrubFail = true; else p.picFail = true; stopPic(p); }
   } finally {
     if (p.pic === pc && pc.ac === ac) {
       pc.ac = null;
@@ -700,20 +739,54 @@ function tickPic(p) {
   // Ask ahead by the time a picture takes to arrive.
   const at = playing ? ts + S.speed * pc.lat : ts;
   const rec = recorded(p.cam.name, at);
-  if (!pc.busy && rec && now >= pc.retryAt && now - pc.lastAsk >= (playing ? keyGap(p) : 0) && (playing || pc.askedAt !== at)) askPic(p, at);
+  // (While dragging the strip: only once the pointer rests, as on other
+  // tiles; asked on every move, each picture came too late for its moment.)
+  const resting = !S.scrubbing || performance.now() - (S.scrubMoved || 0) >= SCRUB_REST_MS;
+  if (resting && !pc.busy && rec && now >= pc.retryAt && now - pc.lastAsk >= (playing ? keyGap(p) : 0) && (playing || pc.askedAt !== at)) askPic(p, at);
   // The last picture stays while the next comes, and through short breaks
   // in the recording: up to about 5 s of watching from the moment it was
   // asked for (at 128x pictures come a couple of times a second).
-  const hold = 5000 * Math.max(1, Math.abs(S.speed));
+  // (While dragging the strip, only a picture of about that moment.)
+  const hold = S.scrubbing ? 1000 : 5000 * Math.max(1, Math.abs(S.speed));
   const show = pc.drawn && pc.shownFor !== null && !pc.none && Math.abs(pc.shownFor - ts) < hold;
   pc.cv.hidden = !show;
   if (show) { p.cv.hidden = true; p.msg.hidden = true; p.waitSince = 0; return; }
   let pic = false;
   if (rec) pic = drawStrip(p, ts); else p.cv.hidden = true;
-  const text = rec && !pc.none ? waitText(p) : (p.waitSince = 0, t('livetl.no_recording', 'No recording'));
+  const none = !(rec && !pc.none);
+  const text = none ? (p.waitSince = 0, noRecText(p.cam.name, ts)) : waitText(p);
   if (p.msg.textContent !== text) p.msg.textContent = text;
-  p.msg.classList.toggle('wait', text !== t('livetl.no_recording', 'No recording'));
+  p.msg.classList.toggle('wait', !none);
   p.msg.hidden = pic;
+}
+
+// Dragging along the strip: the filmstrip picture shows each moment at once
+// (small, so blurry on a big tile); when the pointer rests a moment, a sharp
+// picture of that moment replaces it. One ask at a time per tile, paced as
+// fast pictures are; a picture already on screen is not sent again (have=).
+const SCRUB_REST_MS = 200;
+// The video on the tile shows a frame about as near the playhead as the
+// strip's own pictures are (they are a step apart: 10 s at an hour's view),
+// and at least within 1.5 s: then it stays rather than the blurry picture.
+function sharpMs(p) {
+  const sb = strips.get(p.cam.name);
+  return Math.max(1500, sb ? sb.step : 0);
+}
+function sharpNow(p) {
+  const s = p.shownIdx >= 0 ? p.slots[p.shownIdx] : null;
+  return !!s && s.shownMs != null && Math.abs(s.shownMs - S.playhead) < sharpMs(p);
+}
+function scrubSharp(p, ts, rec) {
+  if (!PIC_OK || p.picFail || p.scrubFail) return false;
+  if (rec && performance.now() - (S.scrubMoved || 0) >= SCRUB_REST_MS) {
+    const q = picState(p), now = Date.now();
+    if (!q.busy && now >= q.retryAt && q.askedAt !== ts && now - q.lastAsk >= picGap()) askPic(p, ts, true);
+  }
+  const q = p.pic;
+  const show = !!q && q.drawn && q.shownFor !== null && !q.none && Math.abs(q.shownFor - ts) < 1000;
+  if (q) q.cv.hidden = !show;
+  if (show) { p.cv.hidden = true; p.msg.hidden = true; p.waitSince = 0; }
+  return show;
 }
 
 // A tile waiting for its picture: "Loading…", and after about a second the
@@ -729,7 +802,7 @@ function waitText(p) {
 function resetSlot(s) {
   // A request still on its way is dropped (the server then stops making it).
   if (s.abort) { try { s.abort.abort(); } catch (e) { /* ignore */ } s.abort = null; }
-  s.gen++; s.ready = false; s.loading = false; s.start = s.end = 0; s.up = false; s.sub = false;
+  s.gen++; s.ready = false; s.loading = false; s.start = s.end = 0; s.up = false; s.sub = false; s.shownMs = null;
   s.v.pause(); s.v.removeAttribute('src'); try { s.v.load(); } catch (e) { /* ignore */ }
 }
 
@@ -762,8 +835,10 @@ function mountPlayer(frame, cam) {
 
 // q: 'low' = the sub stream where it was recorded (starts fast), 'full' =
 // the best recording. up: a full-quality copy loading behind the one playing.
-// twall (fast playback): ms of watching the clip covers.
-async function load(p, si, fromMs, q, up, win, twall) {
+// twall (fast playback): ms of watching the clip covers. again: this is
+// the one retry after the video could not read the clip.
+async function load(p, si, fromMs, q, up, win, twall, again) {
+  const asked = fromMs;
   fromMs = Math.floor(fromMs);
   const s = p.slots[si];
   const gen = ++s.gen;
@@ -843,7 +918,11 @@ async function load(p, si, fromMs, q, up, win, twall) {
     v.src = url;
   });
   if (gen !== s.gen) return;
-  if (v.error) return fail();
+  // (The clip changed between the probe and the video's own requests, e.g.
+  // a byte range past its new end: asked for once more at once, instead of
+  // a black tile for the wait after a failure.)
+  // (Not for a clip this browser cannot play at all: code 4.)
+  if (v.error) return again || v.error.code === 4 ? fail() : load(p, si, asked, q, up, win, twall, true);
   if (v.videoWidth && v.videoHeight) { st.w = v.videoWidth; st.h = v.videoHeight; }
   s.ready = true; s.loading = false;
   tickPlayer(p);
@@ -871,6 +950,17 @@ function tickVideo(p) {
   const ts = S.playhead, now = Date.now();
   let cs = p.slots[p.cur], os = p.slots[1 - p.cur];
   for (const s of p.slots) if (s.loading && now - s.since > 20000) resetSlot(s);   // stuck request
+  // A clip the video could not read on (a later byte range refused): dropped
+  // now, so the moment loads again at once rather than the tile staying dark
+  // (the usual wait after a failure when it keeps happening).
+  for (const s of p.slots) if (s.ready && s.v.error) {
+    if (now - (p.errAt || 0) < 10000) p.failUntil = now + 3000;
+    p.errAt = now;
+    // (A copy loading behind the one playing: not that quality again for a
+    // minute, or it would be fetched again at once, over and over.)
+    if (s.up) { if (s.sub) p.noDownTo = S.playhead + 60000; else p.noUpTo = S.playhead + 60000; }
+    resetSlot(s);
+  }
   if (!p.tier) p.tier = 'sub';
   const k = tileK(p);
   const back = rev();
@@ -918,14 +1008,23 @@ function tickVideo(p) {
     const into = near ? p.slots.indexOf(shown) === 0 ? 1 : 0 : p.cur;
     const target = p.slots[into];
     // Start on the sub stream (small, starts at once); the full picture follows.
-    if (!waiting && !target.loading && !S.scrubbing && now >= p.failUntil && recorded(p.cam.name, ts)) { p.noUpTo = 0; p.cur = into; load(p, into, back ? ts + 500 : ts, 'low', false, FIRST_WIN); }
+    if (!waiting && !target.loading && !S.scrubbing && now >= p.failUntil && recorded(p.cam.name, ts)) { p.noUpTo = 0; p.noDownTo = 0; p.cur = into; load(p, into, back ? ts + 500 : ts, 'low', false, FIRST_WIN); }
     const busy = cs.loading || os.loading;
     const rec = recorded(p.cam.name, ts);
+    if (S.scrubbing && scrubSharp(p, ts, rec)) {
+      for (const s of p.slots) s.v.hidden = true;
+      p.shownIdx = -1;
+      return;
+    }
     // Just back from fast pictures: the last one stays until the video is there.
-    if (!near && p.pic && p.pic.drawn && p.pic.shownFor !== null && Math.abs(p.pic.shownFor - ts) < 5000 * Math.max(1, Math.abs(S.speed))) {
+    // (A sharp picture from dragging the strip: only of about this moment.)
+    const picHold = p.pic && p.pic.fromScrub ? 1000 : 5000 * Math.max(1, Math.abs(S.speed));
+    if (!near && !S.scrubbing && p.pic && p.pic.drawn && p.pic.shownFor !== null && Math.abs(p.pic.shownFor - ts) < picHold) {
       p.pic.cv.hidden = false; p.cv.hidden = true; p.msg.hidden = true;
       return;
     }
+    // Otherwise a picture of another moment never stays over this one.
+    if (p.pic && !S.scrubbing) p.pic.cv.hidden = true;
     if (near) {
       if (!shown.v.paused) shown.v.pause();
       shown.v.hidden = false; shown.v.classList.remove('tlup');
@@ -937,9 +1036,10 @@ function tickVideo(p) {
     // the filmstrip picture of a recorded moment stands in for it.
     let pic = false;
     if (rec) pic = drawStrip(p, ts); else p.cv.hidden = true;
-    const text = (!busy && (now < p.failUntil || !rec)) ? (p.waitSince = 0, t('livetl.no_recording','No recording')) : waitText(p);
+    const none = !busy && (now < p.failUntil || !rec);
+    const text = none ? (p.waitSince = 0, rec ? t('livetl.no_recording', 'No recording') : noRecText(p.cam.name, ts)) : waitText(p);
     if (p.msg.textContent !== text) p.msg.textContent = text;
-    p.msg.classList.toggle('wait', text !== t('livetl.no_recording','No recording'));
+    p.msg.classList.toggle('wait', !none);
     p.msg.hidden = pic;
     for (const s of p.slots) s.v.hidden = true;
     p.shownIdx = -1;
@@ -969,9 +1069,14 @@ function tickVideo(p) {
   keep(cs, true);
   if (os.up && os.ready && covers(os)) keep(os, false);
   watchHealth(p, cs, cs.v.seeking ? 0 : Math.abs(cs.v.currentTime - wantOf(cs)), cs.k > 1 ? 0.6 : 0.6 + 0.25 * Math.abs(S.speed));
-  // Scrubbing: the filmstrip shows the moment at once; the video takes over
-  // when the pointer lets go and it has caught up.
-  if (!(S.scrubbing && drawStrip(p, ts)) && !(cs.v.seeking && !p.cv.hidden)) p.cv.hidden = true;
+  // Scrubbing: the filmstrip shows the moment at once; the video (sharp)
+  // takes over as soon as the picture it shows is within a second or so of
+  // the pointer, while dragging too.
+  if (!cs.v.seeking && cs.v.readyState >= 2) cs.shownMs = back ? cs.end - cs.v.currentTime * 1000 : cs.start + cs.v.currentTime * 1000 * cs.k;
+  // (After letting go the video goes to the exact moment: meanwhile the strip
+  // picture stays unless its frame is already within 1.5 s.)
+  const sharp = cs.shownMs != null && Math.abs(cs.shownMs - ts) < (S.scrubbing ? sharpMs(p) : 1500);
+  if (!(S.scrubbing && !sharp && drawStrip(p, ts)) && !(cs.v.seeking && !p.cv.hidden && !sharp)) p.cv.hidden = true;
   // Backwards: the piece before this one, early.
   if (back) {
     if (S.playing && !os.ready && !os.loading && now >= p.failUntil && ts - cs.start < 4000 * Math.abs(S.speed) && recorded(p.cam.name, cs.start - 200)) load(p, 1 - p.cur, cs.start, 'low');
@@ -1504,8 +1609,13 @@ function drawNow() {
   const nl = $('tlNow');
   nl.hidden = nowX < 0 || nowX > W;
   nl.style.left = nowX + 'px';
-  // Near the right end of the strip the word goes to the left of the line, so it is never cut off.
-  nl.classList.toggle('flip', nowX > W - 56);
+  // Near the right end of the strip the word goes to the left of the line, so it is never cut off
+  // (how near: the word's width, which differs between languages).
+  // (Measured once per word, not on every redraw: it forces a layout.)
+  // (Keyed by the Text size too: it changes the word's width without a reload.)
+  const word = (nl.firstChild ? nl.firstChild.textContent : '') + '|' + (document.documentElement.dataset.text || '');
+  if (nl.dataset.w === undefined || nl.dataset.word !== word || nl.dataset.w === '0') { nl.dataset.word = word; nl.dataset.w = String((nl.firstChild && nl.firstChild.offsetWidth) || 0); }
+  nl.classList.toggle('flip', nowX > W - (+nl.dataset.w || 40) - 16);
   updateRange();
   markChips();
   updateHead();
@@ -1619,11 +1729,26 @@ function initPointer() {
     g = { mode: 'pinch', d0: Math.max(20, Math.abs(a.x - b.x)), view0: { ...S.view }, moved: true };
   };
   // Scrubbing: the playhead follows at once, the videos a few times a second.
+  let restTimer = 0, lastStripLook = 0;
   const scrubTo = (x, force) => {
     setPlayhead(msAt(x));
     updateHead();
     previewAt(x);
-    players.forEach(p => { if (drawStrip(p, S.playhead)) p.msg.hidden = true; });
+    S.scrubMoved = performance.now();
+    players.forEach(p => {
+      // The video already showing about this moment stays (sharp).
+      if (!picMode(p) && sharpNow(p)) { p.cv.hidden = true; return; }
+      // A sharp picture of another moment gives way to the strip at once.
+      if (p.pic && p.pic.shownFor !== null && Math.abs(p.pic.shownFor - S.playhead) >= 1000) p.pic.cv.hidden = true;
+      if (drawStrip(p, S.playhead)) p.msg.hidden = true;
+      // Nothing to show here (a gap, no strip yet): the tile says so now.
+      else if (p.shownIdx < 0 && (!p.pic || p.pic.cv.hidden) && p.msg.hidden) tickPlayer(p);
+    });
+    // Dragging near the live edge: the strip's newest block is made again
+    // (loadStrips allows it every 20 s), looked at about once a second.
+    if (S.playhead >= Date.now() - 180000 && performance.now() - lastStripLook > 1000) { lastStripLook = performance.now(); loadStrips(); }
+    clearTimeout(restTimer);
+    restTimer = setTimeout(() => { if (S.scrubbing) syncAll(); }, SCRUB_REST_MS + 20);
     const now = performance.now();
     if (force || now - lastSync > 150) { lastSync = now; syncAll(); }
   };

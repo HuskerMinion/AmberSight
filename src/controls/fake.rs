@@ -30,6 +30,9 @@ pub struct FakeState {
     pub fail_sets_after_first: bool,
     /// The siren's stop (`manu`, switch 0) fails.
     pub fail_siren_stop: bool,
+    /// Like a Duo Floodlight PoE: a "manu" stop is refused with -4 (param
+    /// error); "manul" or 0 rounds stop it.
+    pub refuse_manu_stop: bool,
     pub sets: usize,
     /// Every answer waits this long (ms).
     pub slow_ms: u64,
@@ -60,6 +63,7 @@ impl Default for FakeState {
             fail_reads_after_set: false,
             fail_sets_after_first: false,
             fail_siren_stop: false,
+            refuse_manu_stop: false,
             sets: 0,
             slow_ms: 0,
             reqs: 0,
@@ -211,12 +215,13 @@ fn answer(st: &Mutex<FakeState>, line: &str, body: &[u8]) -> Value {
                 }
             },
             "AudioAlarmPlay" if s.fail_siren_stop && p["alarm_mode"] == "manu" => fail(&cmd, -1, "busy"),
+            "AudioAlarmPlay" if s.siren && s.refuse_manu_stop && p["alarm_mode"] == "manu" && p["manual_switch"].as_i64() == Some(0) => fail(&cmd, -4, "param error"),
             "AudioAlarmPlay" => {
                 if !s.siren {
                     fail(&cmd, -9, "not support")
                 } else {
                     if !noop {
-                        s.siren_playing = p["alarm_mode"] == "times" || p["manual_switch"].as_i64() == Some(1);
+                        s.siren_playing = (p["alarm_mode"] == "times" && p["times"].as_i64().is_none_or(|n| n > 0)) || p["manual_switch"].as_i64() == Some(1);
                     }
                     ok(&cmd, json!({ "rspCode": 200 }))
                 }

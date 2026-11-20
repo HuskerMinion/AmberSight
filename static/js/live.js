@@ -1024,7 +1024,29 @@ function wireFirstCameraCard(grid) {
   if (b) b.onclick = async () => { (await import('./cameras.js')).openCameraDialog(null); };
 }
 
+// Phones: the toolbar is one row. When its buttons do not fit with their
+// words (some languages' words are long), the Layouts button and then the
+// Timeline button show only their icon (their tips still name them), so the
+// row never runs past the edge of the screen.
+let barWatch = null;
+function fitBar(bar) {
+  bar.classList.remove('fit1', 'fit2');
+  if (bar.scrollWidth <= bar.clientWidth + 1) return;
+  bar.classList.add('fit1');
+  if (bar.scrollWidth > bar.clientWidth + 1) bar.classList.add('fit2');
+}
+function watchBar() {
+  const bar = document.querySelector('.livebar');
+  if (barWatch || !bar || !window.ResizeObserver) return;
+  // (The row and each of its parts: a new language or layout name changes
+  // their widths, the screen turning changes the row's.)
+  barWatch = new ResizeObserver(() => fitBar(bar));
+  barWatch.observe(bar);
+  for (const el of bar.children) barWatch.observe(el);
+}
+
 function renderBar(pages, per) {
+  watchBar();
   const chips = $('layoutChips');
   const sig = Layouts.list().map(l => l.id + ':' + l.name).join('|') + '#' + Layouts.active().id;
   if (chips.dataset.sig !== sig) {

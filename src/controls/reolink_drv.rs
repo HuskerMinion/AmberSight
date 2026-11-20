@@ -69,6 +69,13 @@ fn usable(obj: &Value, k: &str) -> bool {
     has(obj, k) && obj[k]["permit"].as_i64().is_none_or(|p| p != 0)
 }
 
+/// The ways a siren is stopped, in the order tried (see `siren_stop`).
+const SIREN_STOPS: [fn() -> Value; 3] = [
+    || json!({ "alarm_mode": "manu", "manual_switch": 0 }),
+    || json!({ "alarm_mode": "manul", "manual_switch": 0 }),
+    || json!({ "alarm_mode": "times", "times": 0, "manual_switch": 0 }),
+];
+
 /// Plain words for what went wrong with a command.
 fn plain(e: anyhow::Error, what: &str) -> anyhow::Error {
     if let Some(c) = cam_error(&e) {
@@ -299,8 +306,25 @@ impl Driver for ReolinkDriver {
     }
 
     fn siren_stop(&self) -> Result<()> {
-        let p = json!({ "channel": self.channel, "alarm_mode": "manu", "manual_switch": 0 });
-        self.cmd("AudioAlarmPlay", 0, p).map(|_| ()).map_err(|e| plain(e, "stop its siren"))
+        // Reolink's guide spells the manual mode "manu". Some cameras (a Duo
+        // Floodlight PoE) refuse that with -4 "param error" while a timed siren
+        // plays, and stop it on "manul" (the spelling their own software uses)
+        // or on 0 rounds: those are tried after a -4 (tested 2026-11-19 on
+        // that camera only; 0 rounds is reached only after two -4 answers).
+        let mut first = None;
+        for form in SIREN_STOPS {
+            let mut p = form();
+            p["channel"] = json!(self.channel);
+            match self.cmd("AudioAlarmPlay", 0, p) {
+                Ok(_) => return Ok(()),
+                Err(e) if cam_error(&e).is_some_and(|c| c.code == -4) => {
+                    first.get_or_insert(e);
+                }
+                // Another failure (unreachable, busy) is the one to tell.
+                Err(e) => return Err(plain(e, "stop its siren")),
+            }
+        }
+        Err(plain(first.unwrap_or_else(|| anyhow!("no siren stop to try")), "stop its siren"))
     }
 
     fn set_ir(&self, state: &str) -> Result<()> {

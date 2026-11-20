@@ -56,7 +56,12 @@ fn restart(e: &Engine) {
 
 /// Run the timer until `f` holds (at most 5 s).
 fn tick_until(e: &Arc<Engine>, f: impl Fn() -> bool) {
-    let until = Instant::now() + Duration::from_secs(5);
+    tick_until_within(e, Duration::from_secs(5), f)
+}
+
+/// Run the timer until `f` holds (at most `limit`).
+fn tick_until_within(e: &Arc<Engine>, limit: Duration, f: impl Fn() -> bool) {
+    let until = Instant::now() + limit;
     while Instant::now() < until {
         tick(e);
         if f() {
@@ -409,6 +414,22 @@ fn the_siren_stops_when_its_time_is_up_and_after_a_restart() {
 }
 
 #[test]
+fn a_camera_refusing_the_manu_stop_is_stopped_with_manul() {
+    // As the lab Duo Floodlight PoE: -4 to "manu" while a timed siren plays.
+    let fake = Fake::start(FakeState { refuse_manu_stop: true, ..Default::default() });
+    let (e, id) = engine_with(&fake, "");
+    act(&e, id, &me(), Action::Siren { seconds: Some(5) }, false).unwrap();
+    assert!(fake.state().siren_playing);
+    act(&e, id, &me(), Action::SirenStop, false).unwrap();
+    assert!(!fake.state().siren_playing);
+    let w = fake.writes();
+    let stops: Vec<&String> = w.iter().filter(|l| l.contains("AudioAlarmPlay") && l.contains("\"manual_switch\":0") && !l.contains("\"times\":2")).collect();
+    assert!(stops.iter().any(|l| l.contains("\"manul\"")), "{w:?}");
+    let audit: Vec<String> = e.db.recent_audit(10).unwrap().into_iter().map(|r| r.4).collect();
+    assert!(audit.iter().any(|a| a == "Yard: siren stopped, ok"), "{audit:?}");
+}
+
+#[test]
 fn a_stop_that_keeps_failing_backs_off_and_is_given_up() {
     let fake = Fake::start(FakeState { fail_siren_stop: true, ..Default::default() });
     let (e, id) = engine_with(&fake, "");
@@ -422,8 +443,10 @@ fn a_stop_that_keeps_failing_backs_off_and_is_given_up() {
     // At 1 s, then 1, 2 s later: a handful, not one every quarter second.
     let n = stops();
     assert!((2..=4).contains(&n), "{n} stops tried");
-    // Given up (the camera stops it by itself): the record goes.
-    tick_until(&e, || e.controls.with("Yard", |c| c.siren_until_ms.is_none()));
+    // Given up (the camera stops it by itself): the record goes. (At the try
+    // 8 s in, the first one at least 4 s (SIREN_STOP_GIVE_UP) after the first
+    // failure: about 4.5 s from here, more on a slow machine.)
+    tick_until_within(&e, Duration::from_secs(15), || e.controls.with("Yard", |c| c.siren_until_ms.is_none()));
     assert!(e.db.ui_get(SCOPE, "siren|Yard").unwrap().is_none());
     let n = stops();
     std::thread::sleep(Duration::from_millis(1500));

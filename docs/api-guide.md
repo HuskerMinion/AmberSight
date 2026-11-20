@@ -3282,6 +3282,14 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.12.2**
+
+- `GET /api/playback`: a window asked for again (a browser's later byte ranges) is the same clip as
+  before, also when the other stream's recording of it has arrived since; a byte range past its end
+  no longer gets 416 for that reason.
+- Camera controls, siren stop: cameras that refuse the usual stop while a timed siren plays are
+  stopped another way. Requests and answers are unchanged.
+
 **New in 0.12.1**
 
 - `POST /api/cameras/:id/ptz` with `move`: a camera that refuses the usual ContinuousMove is tried

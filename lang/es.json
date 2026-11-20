@@ -13666,6 +13666,10 @@
 "Sin grabación: {names}",
 "96fd9033"
 ],
+"livetl.not_saved_yet": [
+"Grabando, aún no guardado",
+"57074470"
+],
 "livetl.obj_animal": [
 "animal",
 "c238e05d"

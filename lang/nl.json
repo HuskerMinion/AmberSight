@@ -13666,6 +13666,10 @@
 "Geen opname: {names}",
 "96fd9033"
 ],
+"livetl.not_saved_yet": [
+"Wordt opgenomen, nog niet opgeslagen",
+"57074470"
+],
 "livetl.obj_animal": [
 "dier",
 "c238e05d"

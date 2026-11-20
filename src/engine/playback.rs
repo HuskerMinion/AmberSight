@@ -343,6 +343,37 @@ pub fn window_clip(
     VirtualClip::plan(&sources(db, &slug(camera), from_ms, to_ms, resolve)?, from_ms, to_ms)
 }
 
+/// A normal-speed playback window's clip (`small`: the sub stream preferred),
+/// exactly as `earlier` when it was planned before and that can still be
+/// made (see `VirtualClip::plan_like`). Also: how many recordings were looked at.
+pub fn window_clip_like(
+    db: &Db,
+    camera_slug: &str,
+    from_ms: i64,
+    to_ms: i64,
+    small: bool,
+    earlier: Option<crate::ingest::splice::Layout>,
+    resolve: impl Fn(&SegmentRow) -> PathBuf,
+) -> anyhow::Result<(Option<VirtualClip>, usize)> {
+    let segs = sources_q(db, camera_slug, from_ms, to_ms, small, &resolve)?;
+    let again = match earlier {
+        // Made from the other stream than the one preferred (it was all there
+        // was then): its recordings are looked up as the preferred ones, or
+        // they could be left out now that both are there.
+        Some(e) if e.sub != (small && segs.iter().any(|s| s.sub)) => {
+            let theirs = sources_q(db, camera_slug, from_ms, to_ms, e.sub, &resolve)?;
+            VirtualClip::plan_again(&theirs, from_ms, to_ms, e)?
+        }
+        Some(e) => VirtualClip::plan_again(&segs, from_ms, to_ms, e)?,
+        None => None,
+    };
+    let clip = match again {
+        Some(c) => Some(c),
+        None => VirtualClip::plan(&segs, from_ms, to_ms)?,
+    };
+    Ok((clip, segs.len()))
+}
+
 /// Decode one frame of `clip` at `offset_s` seconds into a JPEG with ffmpeg,
 /// optionally scaled to `width` pixels wide. `pre`: filters on the picture
 /// as recorded, before the scaling (the camera's text; empty: none).
@@ -432,6 +463,8 @@ fn yield_to_playback() {
     }
 }
 pub const MAX_FILMSTRIP_FRAMES: u32 = 240;
+/// A filmstrip goes on over at most this many changes of codec settings.
+const MAX_FILMSTRIP_CLIPS: usize = 16;
 const MAX_FILMSTRIP_STEP_MS: i64 = 2 * 3600 * 1000;
 
 /// One picture every `step_ms` (keyframes only, the sub stream when there
@@ -476,17 +509,82 @@ pub fn filmstrip(
     let segs = one_per_step(&all, from_ms, step_ms, n);
     const FRAME_MS: u32 = 100;
     let speed = ((step_ms as f64) / FRAME_MS as f64).round().max(1.0) as u32;
-    let Some(clip) = VirtualClip::plan_trick(&segs, from_ms, to_ms, speed, FRAME_MS)? else { return Ok(None) };
-    let times = clip.frame_times.clone();
+    // A clip ends where a recording with other codec settings takes over (a
+    // camera whose stream settings changed, by day and night or by hand):
+    // the strip goes on with the next clip from there, as playback does, or
+    // it would stop there and leave the rest of a long view without pictures.
+    let mut clips: Vec<VirtualClip> = Vec::new();
+    let mut start = from_ms;
+    while clips.len() < MAX_FILMSTRIP_CLIPS {
+        // (After a hand-over, only the recordings from there on.)
+        let rest: Vec<SourceSegment> = if clips.is_empty() { segs.clone() } else { segs.iter().filter(|s| s.end_ms > start).cloned().collect() };
+        let Some(clip) = VirtualClip::plan_trick(&rest, start, to_ms, speed, FRAME_MS)? else { break };
+        // (Never a moment already in the strip, nor going back.)
+        let last = clips.last().and_then(|c| c.frame_times.last().copied());
+        if clip.frame_times.first().is_none_or(|&t| last.is_some_and(|l| t <= l)) {
+            break;
+        }
+        let next = clip.handover_ms.filter(|&t| t > start && t < to_ms);
+        clips.push(clip);
+        match next {
+            Some(t) if clips.len() == MAX_FILMSTRIP_CLIPS => tracing::info!("filmstrip: {camera}: stream settings changed more than {MAX_FILMSTRIP_CLIPS} times; no pictures after {}", chrono::DateTime::from_timestamp_millis(t).map(|d| d.to_rfc3339()).unwrap_or_default()),
+            Some(t) => start = t,
+            None => break,
+        }
+    }
+    if clips.is_empty() {
+        return Ok(None);
+    }
+    yield_to_playback();
+    let cell = format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2");
+    let tile = |k: u32| {
+        let cols = k.min(12);
+        (cols, format!("tile={cols}x{}", k.div_ceil(cols)))
+    };
+    let (times, cols, jpeg) = if clips.len() == 1 {
+        let clip = clips.pop().unwrap();
+        let times = clip.frame_times.clone();
+        let (cols, t) = tile(times.len() as u32);
+        let jpeg = run_ffmpeg_jpeg(clip, &format!("{cell},{t}"))?;
+        (times, cols, jpeg)
+    } else {
+        // Each clip's pictures one by one (a clip's codec settings are its
+        // own), all in one pixel format (a grid of mixed ones comes out black
+        // after the change), then all of them in one grid.
+        let cell = format!("{cell},format=yuvj420p");
+        let mut times = Vec::new();
+        let mut cells: Vec<Vec<u8>> = Vec::new();
+        for clip in clips {
+            let want = clip.frame_times.clone();
+            // A clip whose pictures cannot be made: the strip keeps those
+            // before it (as it did when it stopped at the change).
+            let out = match run_ffmpeg_pictures(clip, &cell) {
+                Ok(out) => out,
+                Err(e) if !cells.is_empty() => {
+                    tracing::info!("filmstrip: {camera}: no pictures after a change of stream settings: {e:#}");
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
+            let (pics, _) = whole_jpegs(&out);
+            // (One picture per keyframe; should ffmpeg give fewer, the times
+            // stay with the pictures there are.)
+            let k = pics.len().min(want.len());
+            times.extend_from_slice(&want[..k]);
+            cells.extend(pics[..k].iter().map(|p| p.to_vec()));
+        }
+        if cells.is_empty() {
+            return Ok(None);
+        }
+        let k = (cells.len() as u32).min(MAX_FILMSTRIP_FRAMES);
+        times.truncate(k as usize);
+        cells.truncate(k as usize);
+        let (cols, t) = tile(k);
+        (times, cols, tile_jpegs(&cells, &t)?)
+    };
     if times.is_empty() {
         return Ok(None);
     }
-    let k = times.len() as u32;
-    let cols = k.min(12);
-    let rows = k.div_ceil(cols);
-    yield_to_playback();
-    let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={cols}x{rows}");
-    let jpeg = run_ffmpeg_jpeg(clip, &vf)?;
     let f = Filmstrip { jpeg, times, cols, w, h };
     if settled {
         let mut c = cache.lock().unwrap();
@@ -573,9 +671,33 @@ impl Gate {
 
 /// Feed `clip` to ffmpeg with filter `vf` and return the single JPEG it makes.
 fn run_ffmpeg_jpeg(clip: VirtualClip, vf: &str) -> anyhow::Result<Vec<u8>> {
+    run_ffmpeg_out(clip, &[], &["-vf", vf, "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "6", "-"])
+}
+
+/// Feed `clip` to ffmpeg with filter `vf` and return a JPEG of every picture,
+/// one after another (split with [`whole_jpegs`]).
+/// (Each frame once, never dropped or doubled: one picture per time.)
+fn run_ffmpeg_pictures(clip: VirtualClip, vf: &str) -> anyhow::Result<Vec<u8>> {
+    let [m, pass] = crate::ffmpeg_bin::passthrough_args();
+    run_ffmpeg_out(clip, &[], &["-an", "-vf", vf, m, pass, "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "3", "-"])
+}
+
+/// Pictures of one size (JPEGs) through filter `vf` (a tile), into one JPEG.
+fn tile_jpegs(pics: &[Vec<u8>], vf: &str) -> anyhow::Result<Vec<u8>> {
+    let bytes: Vec<u8> = pics.concat();
+    run_ffmpeg_out(VirtualClip::from_bytes(bytes, 0, 0, false), &["-f", "jpeg_pipe"], &["-vf", vf, "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "6", "-"])
+        .map_err(|e| anyhow::anyhow!("filmstrip grid: {e}"))
+}
+
+/// Feed `clip` to ffmpeg (`input`: the input's format, if it must be named;
+/// `out`: the arguments after the input) and return what it writes.
+fn run_ffmpeg_out(clip: VirtualClip, input: &[&str], out: &[&str]) -> anyhow::Result<Vec<u8>> {
     use std::process::Stdio;
     let mut child = crate::child::ffmpeg()
-        .args(["-hide_banner", "-loglevel", "error", "-i", "-", "-vf", vf, "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "6", "-"])
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(input)
+        .args(["-i", "-"])
+        .args(out)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -911,25 +1033,27 @@ impl Engine {
         }
         PLAYBACK_BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _busy = Busy;
-        // Where this window's clip ended when it was last planned (kept
-        // for half an hour after its last use): a browser still playing it
-        // asks for more byte ranges, and a window still being recorded has
-        // grown since. Planning it to the old end gives the very same
-        // bytes; the browser asks for what came after from that end.
-        type Layouts = Mutex<std::collections::VecDeque<(Key, i64, std::time::Instant)>>;
+        // How this window's clip was laid out when it was last planned (its
+        // end, stream and size; kept for half an hour after its last use): a
+        // browser still playing it asks for more byte ranges, and since then
+        // the window may have grown (still being recorded) or the other
+        // stream's recording of it may have arrived. Planned like before, it
+        // is the very same bytes; the browser asks for what came after from
+        // its end. (The clip cache below is short and small: with many
+        // cameras on the timeline a window is often planned again.)
+        type Layouts = Mutex<std::collections::VecDeque<(Key, crate::ingest::splice::Layout, std::time::Instant)>>;
         static LAYOUTS: OnceLock<Layouts> = OnceLock::new();
         const LAYOUT_KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
         let layouts = LAYOUTS.get_or_init(Default::default);
-        let earlier_end = {
+        let earlier = {
             let mut l = layouts.lock().unwrap();
             l.retain(|(_, _, at)| at.elapsed() < LAYOUT_KEEP);
-            l.iter().find(|(k, _, _)| *k == key).map(|(_, end, _)| *end)
+            l.iter().find(|(k, _, _)| *k == key).map(|(_, lay, _)| *lay)
         };
-        let segs = sources_q(&self.db, &slug(camera), from_ms, to_ms, small, |r| self.segment_path(r))?;
-        let clip = VirtualClip::plan_like(&segs, from_ms, to_ms, earlier_end)?;
+        let (clip, segs) = window_clip_like(&self.db, &slug(camera), from_ms, to_ms, small, earlier, |r| self.segment_path(r))?;
         let took = t0.elapsed();
         if took > std::time::Duration::from_secs(1) {
-            info!("playback: {camera}: {} recordings took {} ms to open", segs.len(), took.as_millis());
+            info!("playback: {camera}: {} recordings took {} ms to open", segs, took.as_millis());
         }
         if let Some(c) = &clip {
             {
@@ -938,7 +1062,7 @@ impl Engine {
                 if l.len() >= 256 {
                     l.pop_front();
                 }
-                l.push_back((key.clone(), c.end_ms, std::time::Instant::now()));
+                l.push_back((key.clone(), c.layout(), std::time::Instant::now()));
             }
             let mut cc = cache.lock().unwrap();
             if cc.len() >= 32 {
@@ -1336,6 +1460,75 @@ mod tests {
             .collect()
     }
 
+    /// The timeline at the live edge asks for the sub stream (quality=low). The first time only
+    /// the main stream had been written for the window; moments later the sub stream's
+    /// recording of it is there too. The browser's next byte range of the same window (the clip
+    /// cache had dropped it) must find the same clip: planned plainly it is now the smaller
+    /// sub-stream clip, the range starts past its end, and the answer was 416 (a black tile).
+    #[test]
+    fn a_window_planned_again_keeps_its_bytes_when_the_other_stream_arrives() {
+        let dir = std::env::temp_dir().join(format!("amber-replan-db-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let main = write_recordings(&dir, "main", "continuous");
+        // The sub stream: the same times, smaller pictures.
+        let mut entry = vec![0, 0, 0, 16];
+        entry.extend_from_slice(b"avc1");
+        entry.extend_from_slice(&[0; 8]);
+        entry[8] = 1;
+        let track = TrackInfo { kind: TrackKind::Video, timescale: 90000, sample_entry: entry, width: 32, height: 24 };
+        let mut w = SegmentWriter::new(&dir.join("sub"), "front_door-sub", vec![track], 3).unwrap();
+        for i in 0..100i64 {
+            w.push_video(i * 9000, vec![3; 10], i % 10 == 0).unwrap();
+        }
+        w.finish().unwrap();
+        let (t0, s0) = (main[0].start_ms, w.take_closed());
+        let subs: Vec<SegmentRow> = s0
+            .iter()
+            .map(|s| SegmentRow {
+                path: format!("sub/{}", s.path.file_name().unwrap().to_string_lossy()),
+                start_ms: t0 + s.start_ms - s0[0].start_ms,
+                end_ms: t0 + s.end_ms - s0[0].start_ms,
+                bytes: 1,
+                video_frames: 0,
+                kind: "sub".into(),
+                folder: String::new(),
+            })
+            .collect();
+        let resolve = |r: &SegmentRow| dir.join(&r.path);
+        let (from, to) = (t0 + 6500, t0 + 9800);
+        // So far the main stream only (up to 9 s), and the sub stream up to 6 s.
+        for r in main.iter().take(3).chain(subs.iter().take(2)) {
+            db.insert_segment("front_door", r).unwrap();
+        }
+        let (first, _) = window_clip_like(&db, "front_door", from, to, true, None, resolve).unwrap();
+        let first = first.unwrap();
+        assert!(!first.sub, "only the main stream covers the window yet");
+        let before = first.read_range(0, first.len()).unwrap();
+        // The sub stream's 6..9 s recording arrives (and more of both).
+        for r in main.iter().skip(3).chain(subs.iter().skip(2)) {
+            db.insert_segment("front_door", r).unwrap();
+        }
+        let (plain, _) = window_clip_like(&db, "front_door", from, to, true, None, resolve).unwrap();
+        let plain = plain.unwrap();
+        assert!(plain.sub && plain.len() < first.len(), "planned plainly: the smaller sub-stream clip");
+        // The browser's next range, from where it had read to: past the plain clip's end.
+        let at = plain.len() + 10;
+        assert!(at < first.len());
+        let (again, _) = window_clip_like(&db, "front_door", from, to, true, Some(first.layout()), resolve).unwrap();
+        let again = again.unwrap();
+        assert_eq!(again.layout(), first.layout());
+        assert_eq!(again.read_range(at, again.len()).unwrap(), before[at as usize..].to_vec());
+        // Its recordings gone: the window is planned as it is now.
+        for r in main.iter() {
+            db.delete_segment(&r.path).unwrap();
+        }
+        let (gone, _) = window_clip_like(&db, "front_door", from, to, true, Some(first.layout()), resolve).unwrap();
+        assert!(gone.unwrap().sub);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A day of short main-stream recordings of the ffmpeg pipeline (a filmstrip or time-lapse
     /// asks for that): with no sub stream recorded, no file is looked at; with one, only the
     /// files from before the database's fragmented mark (and tiny ones) are. Timing note: before,
@@ -1539,6 +1732,85 @@ mod tests {
         }
         let clip = window_clip(&db, "Cam", t0 + 3_000, t0 + 60_000, resolve).unwrap().unwrap();
         assert_eq!((clip.start_ms - t0, clip.end_ms - t0), (2_000, 12_000));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A camera whose stream settings changed (here its picture size) part
+    /// way through a filmstrip's window: the strip goes on past the change
+    /// with the new recordings' pictures (it ended there, and a day's view of
+    /// the timeline had no pictures after it: a black tile while dragging).
+    #[test]
+    fn a_filmstrip_goes_on_past_a_change_of_stream_settings() {
+        if !crate::child::ffmpeg().arg("-version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no ffmpeg here: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("amber-fshand-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("seg")).unwrap();
+        // Two 6 s files at 320x240, then two at 640x360 in 4:4:4 (another
+        // header, and pictures of another pixel format).
+        for (part, size, pix) in [("a", "320x240", "yuv420p"), ("b", "640x360", "yuv444p")] {
+            let out = crate::child::ffmpeg()
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("testsrc=size={size}:rate=10"), "-t", "12"])
+                .args(["-c:v", "libx264", "-g", "20", "-pix_fmt", pix, "-f", "segment", "-segment_time", "6", "-reset_timestamps", "1"])
+                .args(["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"])
+                .arg(dir.join(format!("seg/{part}-seg%06d.mp4")))
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let t0 = 1_700_000_000_000i64;
+        for (i, path) in ["seg/a-seg000000.mp4", "seg/a-seg000001.mp4", "seg/b-seg000000.mp4", "seg/b-seg000001.mp4"].into_iter().enumerate() {
+            let i = i as i64;
+            let bytes = std::fs::metadata(dir.join(path)).unwrap().len() as i64;
+            db.insert_scanned_segment("handover", &SegmentRow { path: path.into(), start_ms: t0 + i * 6000, end_ms: t0 + (i + 1) * 6000, bytes, video_frames: 0, kind: "legacy".into(), folder: String::new() }).unwrap();
+        }
+        let resolve = |r: &SegmentRow| dir.join(&r.path);
+        // ffmpeg gives each clip's pictures one per time (none dropped or doubled).
+        let segs = sources_q(&db, "handover", t0, t0 + 24_000, true, resolve).unwrap();
+        let mut from = t0;
+        while let Some(c) = VirtualClip::plan_trick(&segs, from, t0 + 24_000, 30, 100).unwrap() {
+            let want = c.frame_times.len();
+            let next = c.handover_ms;
+            let out = run_ffmpeg_pictures(c, "scale=160:90").unwrap();
+            assert_eq!(whole_jpegs(&out).0.len(), want, "one picture per time from {}", from - t0);
+            match next {
+                Some(t) => from = t,
+                None => break,
+            }
+        }
+        assert!(from > t0, "the clips hand over at the change");
+        let f = filmstrip(&db, "Handover", t0, 3000, 8, 160, resolve).unwrap().expect("a filmstrip");
+        let at: Vec<i64> = f.times.iter().map(|t| t - t0).collect();
+        assert!(at.iter().any(|&t| t < 12_000), "pictures before the change: {at:?}");
+        assert!(at.iter().any(|&t| t >= 18_000), "pictures after the change, to the end: {at:?}");
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "in order, none twice: {at:?}");
+        // One cell per picture in the grid (12 to a row).
+        let (pics, _) = whole_jpegs(&f.jpeg);
+        assert_eq!(pics.len(), 1, "one JPEG");
+        assert_eq!(f.cols, at.len().min(12) as u32);
+        // Its size (from the frame header, FF C0): the whole grid.
+        let j = &f.jpeg;
+        let sof = j.windows(2).position(|b| b == [0xFF, 0xC0]).expect("a frame header");
+        let (h, w) = (u16::from_be_bytes([j[sof + 5], j[sof + 6]]) as u32, u16::from_be_bytes([j[sof + 7], j[sof + 8]]) as u32);
+        assert_eq!((w, h), (f.w * f.cols, f.h * (at.len() as u32).div_ceil(f.cols)));
+        // The last cell (after the change) has its picture, not black.
+        let i = at.len() as u32 - 1;
+        let crop = format!("crop={}:{}:{}:{},signalstats,metadata=print:key=lavfi.signalstats.YAVG", f.w, f.h, (i % f.cols) * f.w, (i / f.cols) * f.h);
+        let mut child = crate::child::ffmpeg()
+            .args(["-v", "info", "-f", "jpeg_pipe", "-i", "-", "-vf", &crop, "-f", "null", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&f.jpeg).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let log = String::from_utf8_lossy(&out.stderr);
+        let yavg: f64 = log.split("YAVG=").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("no YAVG: {log}"));
+        assert!(yavg > 40.0, "the last cell is not black (YAVG {yavg})");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

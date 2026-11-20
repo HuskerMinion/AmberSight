@@ -13666,6 +13666,10 @@
 "无录像：{names}",
 "96fd9033"
 ],
+"livetl.not_saved_yet": [
+"正在录像，尚未保存",
+"57074470"
+],
 "livetl.obj_animal": [
 "动物",
 "c238e05d"

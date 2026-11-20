@@ -13666,6 +13666,10 @@
 "Keine Aufnahme: {names}",
 "96fd9033"
 ],
+"livetl.not_saved_yet": [
+"Wird aufgenommen, noch nicht gespeichert",
+"57074470"
+],
 "livetl.obj_animal": [
 "Tier",
 "c238e05d"
