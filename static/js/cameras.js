@@ -1,7 +1,7 @@
 // cameras.js - camera settings: the per-camera settings side panel (opened from a tile's
 // gear or right-click menu, or from Settings > Cameras), the camera list in Settings,
 // and adding a camera. PUT /api/cameras/:id merges, so fields this window does not
-// show (zones, ONVIF port, folder ...) keep their stored values.
+// show (zones, ONVIF port ...) keep their stored values.
 
 import { t } from './i18n.js';
 import { state, bus, api, esc, ic, msgDlg, toast, openDlg, raiseDlg, refreshCameras, camFromId, backLayer, overlaysChanged, topDlgOpen, paletteOpen, can, objName } from './core.js';
@@ -46,7 +46,7 @@ import { tamperHtml, readTamper, wireTamper, unusualHtml, readUnusual, wireUnusu
 import { controlsHtml, readControls, wireControls, summary as controlsSummary } from './cam_controls.js';
 
 
-const sel = (k, opts, val) => '<select data-k="' + k + '">' + opts.map(([v, t]) => '<option value="' + v + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>';
+const sel = (k, opts, val) => '<select data-k="' + k + '">' + opts.map(([v, t]) => '<option value="' + esc(String(v)) + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>';
 const onoff = (k, val) => sel(k, [['1', t('cameras.on_lc', 'on')], ['0', t('cameras.off_lc', 'off')]], val ? '1' : '0');
 const field = (label, input, hint) => '<label class="cs-f"><span>' + label + '</span>' + input + '</label>' + (hint ? '<div class="hint">' + hint + '</div>' : '');
 const text = (k, val, extra) => '<input data-k="' + k + '" value="' + esc(val == null ? '' : val) + '" ' + (extra || '') + '>';
@@ -896,6 +896,7 @@ function readForm(d, c, isNew) {
     copy_events_to: v('copy_events_to') || null, copy_events_keep_days: Math.min(3650, Math.max(0, Math.round(num('copy_events_keep_days', 0)) || 0)),
     copy_events_only_confirmed: v('copy_events_only_confirmed') === '1',
   }, o.motion, o.recording, o.alerts, o.ai);
+  if (d.querySelector('[data-k="folder"]')) body.folder = v('folder') || null;
   if (v('transport')) body.transport = v('transport');
   if (v('connect')) body.connect = v('connect');
   const stg = readStrangers(d);
@@ -1121,6 +1122,21 @@ function wireCopy(d) {
 }
 
 // ---------- the sections ----------
+// Which [[storage.folders]] entry the camera records into (admins; archive folders are
+// where old recordings are moved, so they are not offered unless already chosen).
+function folderHtml(c) {
+  const fl = (D && D.storage && D.storage.folders) || [];
+  const cur = c.folder || '';
+  const opts = [['', t('cameras.folder_data', 'Data folder')]];
+  for (const f of fl) {
+    if (f.archive && f.name !== cur) continue;
+    opts.push([f.name, f.name + ' (' + f.path + ')' + (f.archive ? ' - ' + t('cameras.folder_archive', 'archive') : '')]);
+  }
+  if (cur && !opts.some(o => o[0] === cur)) opts.push([cur, cur + ' (' + t('cameras.folder_missing', 'not set up') + ')']);
+  return field(t('cameras.rec_folder', 'Recording folder'), sel('folder', opts, cur),
+    t('cameras.rec_folder_hint', 'Where this camera records. Changing it affects new recordings only; existing recordings stay where they are. Folders are set up under Settings, Storage.'));
+}
+
 const SECTIONS = [['general', t('cameras.section_general', 'General')], ['stream', t('cameras.section_stream', 'Stream')], ['network', t('cameras.section_network', 'Network')], ['recording', t('cameras.section_recording', 'Recording')], ['motion', t('cameras.section_motion', 'Motion')], ['alerts', t('cameras.section_alerts', 'Alerts')], ['ai', t('cameras.section_ai', 'AI')], ['av', t('cameras.section_av', 'Audio & text')], ['controls', t('cameras.section_controls', 'Lights & siren')], ['tamper', t('cameras.section_tamper', 'Tamper')], ['unusual', t('cameras.section_unusual', 'Unusual activity')], ['watchdog', t('cameras.section_watchdog', 'Watchdog')]];
 const MORE_KEY = 'ambs.cs.more';
 const moreState = () => { try { return JSON.parse(localStorage.getItem(MORE_KEY) || '{}') || {}; } catch (e) { return {}; } };
@@ -1148,6 +1164,7 @@ function sectionsOf(c, isNew, multi) {
       field(t('cameras.record', 'Record'), onoff('record', c.record !== false)) +
       field(t('cameras.record_mode', 'Record mode'), sel('record_mode', [['0', t('cameras.rm_continuous', 'continuous')], ['2', t('cameras.rm_sub_main', 'continuous: sub stream, main stream around events')], ['1', t('cameras.rm_motion_only', 'motion only')]], c.record_motion_only ? '1' : (c.record_sub ? '2' : '0')),
         t('cameras.record_mode_hint', 'The middle choice keeps the full picture only around events and the sub stream the rest of the time, using far less space. It needs a sub stream URL; without one the camera records continuously.')) +
+      (multi || OP ? '' : folderHtml(c)) +
       (isNew || multi || OP ? '' : c.catch_up_from_card != null ? catchUpHtml(c) : cardFillHtml(c)) +
       copyHtml(c, multi),
       ovNum('pre_roll', t('cameras.pre_roll', 'Pre-roll (s)'), c.pre_roll, m.pre_roll != null ? m.pre_roll + ' s' : '', 'type="number" min="0"', t('cameras.pre_roll_hint', 'Video kept from before an event starts.')) +
@@ -1689,7 +1706,7 @@ function wirePreview(d, id) {
     st.textContent = mo ? t('cameras.motion_now', 'Motion now') : t('cameras.quiet', 'Quiet');
     st.classList.toggle('now', mo);
     if (!d.__inView || !d.__inView('motion') || (c && c.enabled === false)) { timer = setTimeout(tick, 1000); return; }
-    // A battery camera asleep has no picture (the server answers 503): say so, and look again once it wakes.
+    // A battery camera asleep: no picture is asked (the server would answer with the last one taken, or 503): say so, and look again once it wakes.
     if (c && c.sleeping && !c.online) {
       img.hidden = true; none.hidden = false; none.textContent = t('cameras.asleep', 'Asleep (a battery camera saving power)');
       timer = setTimeout(tick, 2000); return;

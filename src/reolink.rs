@@ -199,6 +199,15 @@ impl ReolinkClient {
         Ok(parse_state(&r, channel))
     }
 
+    /// A battery camera's charge (`GetBatteryInfo`; through a hub, per
+    /// channel). Ok(None): the device does not say (not a battery camera, or
+    /// no such command). Asked only while the camera is awake anyway.
+    /// The device's `GetBatteryInfo` answer as it is (see [`parse_battery`]).
+    pub fn battery_raw(&mut self, channel: u32) -> Result<Option<Value>> {
+        let r = self.batch(&json!([{ "cmd": "GetBatteryInfo", "action": 0, "param": { "channel": channel } }]))?;
+        Ok(r.into_iter().next())
+    }
+
     /// Best-effort sign-out (devices allow only a few sessions).
     pub fn logout(&mut self) {
         if let Some((t, _)) = self.token.take() {
@@ -466,9 +475,86 @@ pub fn parse_state(answers: &[Value], channel: u32) -> ChannelState {
     st
 }
 
+/// The answer's charging and power fields as the device words them (for the log).
+pub fn battery_fields(answer: &Value) -> String {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(m) => {
+                for (k, x) in m {
+                    if out.len() >= 8 {
+                        return;
+                    }
+                    if matches!(k.as_str(), "chargeStatus" | "adapterStatus" | "lowPower" | "voltage" | "temperature") {
+                        // (Bounded: what the device says goes into the log.)
+                        out.push(format!("{k}={}", x.to_string().chars().take(40).collect::<String>()));
+                    } else {
+                        walk(x, out);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&answer["value"], &mut out);
+    out.join(", ")
+}
+
+/// A `GetBatteryInfo` answer: (percent 0-100, charging). The level is looked
+/// for anywhere in the answer's value (`Battery.batteryPercent` as Reolink
+/// devices send it, or a list of them).
+pub fn parse_battery(answer: &Value) -> Option<(u8, bool)> {
+    fn find<'a>(v: &'a Value) -> Option<&'a Value> {
+        match v {
+            Value::Object(m) if m.contains_key("batteryPercent") => Some(v),
+            Value::Object(m) => m.values().find_map(find),
+            Value::Array(a) => a.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let b = find(&answer["value"])?;
+    let pct = b["batteryPercent"].as_i64().filter(|p| (0..=100).contains(p))?;
+    // Charging: the word, or 1 as a hub says it (a camera on its solar panel
+    // read chargeStatus 1, adapterStatus 1 while the Reolink app said charging;
+    // 2, charged, is not charging).
+    let charging = match &b["chargeStatus"] {
+        Value::String(c) => c.eq_ignore_ascii_case("charging"),
+        Value::Number(n) => n.as_i64() == Some(1),
+        _ => false,
+    };
+    Some((pct as u8, charging))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battery_log_fields_are_bounded() {
+        let a = json!({ "value": { "Battery": { "batteryPercent": 5, "chargeStatus": "x".repeat(500), "voltage": 3700 } } });
+        let f = battery_fields(&a);
+        assert!(f.len() < 120 && f.contains("voltage=3700"), "{f}");
+    }
+
+    #[test]
+    fn battery_answers_give_the_level_or_nothing() {
+        let a = json!({ "cmd": "GetBatteryInfo", "code": 0, "value": { "Battery": { "batteryPercent": 64, "chargeStatus": "none", "adapterStatus": "none", "channel": 0 } } });
+        assert_eq!(parse_battery(&a), Some((64, false)));
+        let a = json!({ "cmd": "GetBatteryInfo", "code": 0, "value": { "Battery": [{ "batteryPercent": 100, "chargeStatus": "charging" }] } });
+        assert_eq!(parse_battery(&a), Some((100, true)));
+        // A wired camera (or a device without the command): no level.
+        let a = json!({ "cmd": "GetBatteryInfo", "code": 1, "error": { "rspCode": -9, "detail": "not support" } });
+        assert_eq!(parse_battery(&a), None);
+        // As the Home Hub says it for a camera charging from its solar panel.
+        let a = json!({ "cmd": "GetBatteryInfo", "code": 0, "value": { "Battery": { "adapterStatus": 1, "batteryPercent": 47, "chargeStatus": 1, "temperature": 31, "voltage": 3731 } } });
+        assert_eq!(parse_battery(&a), Some((47, true)));
+        assert_eq!(battery_fields(&a), "adapterStatus=1, chargeStatus=1, temperature=31, voltage=3731");
+        let a = json!({ "cmd": "GetBatteryInfo", "code": 0, "value": { "Battery": { "batteryPercent": 100, "chargeStatus": 2 } } });
+        assert_eq!(parse_battery(&a), Some((100, false)));
+        let a = json!({ "cmd": "GetBatteryInfo", "code": 0, "value": { "Battery": { "batteryPercent": -1 } } });
+        assert_eq!(parse_battery(&a), None);
+    }
 
     #[test]
     fn parses_hub_answers_per_channel() {

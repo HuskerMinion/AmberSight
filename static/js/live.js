@@ -455,14 +455,30 @@ function ago(ms) {
   return s < 60 ? t('live.ago_s', '{n} s', { n: s }) : (s < 3600 ? t('live.ago_min', '{n} min', { n: Math.floor(s / 60) }) : t('live.ago_h_min', '{h} h {m} min', { h: Math.floor(s / 3600), m: Math.floor(s / 60) % 60 }));
 }
 
+// A battery camera's charge as it last reported it (read while it is awake),
+// with when that was: "64%" on the tile, the rest in its tip.
+function paintBattery(el, c, now) {
+  const b = c.battery;
+  if (!el) return;
+  if (!b || typeof b.percent !== 'number') { if (!el.hidden) el.hidden = true; return; }
+  const key = b.percent + ':' + b.charging + ':' + Math.floor((now - b.at_ms) / 60000);
+  if (el.dataset.k === key) return;
+  el.dataset.k = key;
+  el.hidden = false;
+  el.classList.toggle('low', b.percent <= 20 && !b.charging);
+  el.innerHTML = ic(b.charging ? 'battcharge' : 'battery') + '<span>' + b.percent + '%</span>';
+  el.title = (b.charging ? t('live.battery_charging_tip', 'Battery {pct}%, charging', { pct: b.percent }) : t('live.battery_tip', 'Battery {pct}%', { pct: b.percent })) +
+    '\n' + t('live.battery_read', 'Read {ago} ago (while the camera was awake)', { ago: ago(now - b.at_ms) });
+}
+
 // Build the pills inside `host` (a tile's frame or the full view's content). `root` carries
 // data-edge / data-cls. o.actions: the hover buttons; o.retry(): the reconnect action.
 function buildPills(host, root, c, o) {
   const mk = (cls, html, into) => { const e = document.createElement('div'); e.className = cls; if (html) e.innerHTML = html; (into || host).appendChild(e); return e; };
   const p = { root, c, retry: o.retry || null, chipKey: null };
   const top = mk('ptop'), bot = mk('pbot');
-  p.tl = o.name === false ? null : mk('pill ptl', '<i class="sdot"></i><span class="nm"></span><span class="pz" hidden>' + ic('belloff') + '<span class="pzt">' + esc(t('live.notifications_paused', 'Notifications paused')) + '</span></span>', top);
-  if (p.tl) { p.dot = p.tl.querySelector('.sdot'); p.nm = p.tl.querySelector('.nm'); p.pz = p.tl.querySelector('.pz'); }
+  p.tl = o.name === false ? null : mk('pill ptl', '<i class="sdot"></i><span class="nm"></span><span class="bat" hidden></span><span class="pz" hidden>' + ic('belloff') + '<span class="pzt">' + esc(t('live.notifications_paused', 'Notifications paused')) + '</span></span>', top);
+  if (p.tl) { p.dot = p.tl.querySelector('.sdot'); p.nm = p.tl.querySelector('.nm'); p.pz = p.tl.querySelector('.pz'); p.bat = p.tl.querySelector('.bat'); }
   p.tr = mk('ptr', '', top);
   p.chip = document.createElement('span'); p.chip.className = 'pill dchip'; p.chip.hidden = true;
   p.tr.appendChild(p.chip);
@@ -490,6 +506,7 @@ function paintPills(p, c, now) {
     const tip = label + (groups.length ? '\n' + groups.join(', ') : '') + (c.enabled === false ? '\n' + t('live.disabled_word', 'Disabled') : '') + (c.alerts_paused ? '\n' + t('live.paused_tip', 'Notifications paused {text} (still recording)', { text: pausedText(c) }) : '');
     if (p.tl.title !== tip) p.tl.title = tip;
     p.pz.hidden = !c.alerts_paused;
+    paintBattery(p.bat, c, now);
   }
   // Detection chip (class icon + name) while an AI result is recent; the hover buttons otherwise.
   const showScore = hud === 'detailed' && st.ai && typeof st.ai.score === 'number';

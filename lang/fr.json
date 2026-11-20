@@ -6970,6 +6970,18 @@
 "premier qui fonctionne",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"archive",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"Dossier de données",
+"90610aab"
+],
+"cameras.folder_missing": [
+"non configuré",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "Dossier, par exemple un dossier OneDrive ou Google Drive",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "Redémarrer la caméra",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"Dossier d'enregistrement",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"Où cette caméra enregistre. Le changement ne concerne que les nouveaux enregistrements ; les existants restent où ils sont. Les dossiers se configurent dans Paramètres, Stockage.",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "Réception : {ingest}",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "En veille",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"Batterie {pct} %, en charge",
+"c6ee40a7"
+],
+"live.battery_read": [
+"Lu il y a {ago} (caméra réveillée)",
+"9ac82569"
+],
+"live.battery_tip": [
+"Batterie {pct} %",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "Le navigateur a bloqué la nouvelle fenêtre : autorisez les fenêtres contextuelles pour ce site",

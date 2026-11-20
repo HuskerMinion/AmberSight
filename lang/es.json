@@ -6970,6 +6970,18 @@
 "el primero que funcione",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"archivo",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"Carpeta de datos",
+"90610aab"
+],
+"cameras.folder_missing": [
+"no configurada",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "Carpeta, p. ej. una carpeta de OneDrive o Google Drive",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "Reiniciar cámara",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"Carpeta de grabación",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"Dónde graba esta cámara. El cambio afecta solo a las grabaciones nuevas; las existentes se quedan donde están. Las carpetas se configuran en Ajustes, Almacenamiento.",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "Recibiendo: {ingest}",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "Dormida",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"Batería {pct}%, cargando",
+"c6ee40a7"
+],
+"live.battery_read": [
+"Leído hace {ago} (con la cámara despierta)",
+"9ac82569"
+],
+"live.battery_tip": [
+"Batería {pct}%",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "El navegador bloqueó la nueva ventana: permite las ventanas emergentes en este sitio",

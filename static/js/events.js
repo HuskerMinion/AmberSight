@@ -23,6 +23,11 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) setF
 window.addEventListener('focus', () => setFavicon(false));
 export function alertPopups() { try { return localStorage.getItem(POPUP_KEY) === '1'; } catch (e) { return false; } }
 export function setAlertPopups(on) { try { localStorage.setItem(POPUP_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ } }
+// The alert player starts muted, unless its sound was turned on here before
+// (kept per browser: turning it off again keeps it off).
+const SOUND_KEY = 'as-ev-sound';
+function clipSound() { try { return localStorage.getItem(SOUND_KEY) === '1'; } catch (e) { return false; } }
+function keepClipSound(on) { try { localStorage.setItem(SOUND_KEY, on ? '1' : '0'); } catch (e) { /* not remembered */ } }
 
 // ---------- classes (what an event is about) ----------
 const VEH = ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'vehicle', 'van', 'bike', 'motorbike', 'suv', 'train', 'boat'];
@@ -570,6 +575,9 @@ function paintPlayer(e) {
   const v = box.querySelector('video');
   if (v) {
     curVideo = v;
+    v.muted = !clipSound();
+    // (The user's own mute button; a muted start is not a choice.)
+    v.addEventListener('volumechange', () => keepClipSound(!v.muted && v.volume > 0));
     v.defaultPlaybackRate = safeRate(state.speed);
     const cam = camOf(e);
     v.src = '/api/clips/' + enc(e.id) + lowQ(true);

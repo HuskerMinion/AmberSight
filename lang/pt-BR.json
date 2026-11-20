@@ -6970,6 +6970,18 @@
 "o primeiro que funcionar",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"arquivo",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"Pasta de dados",
+"90610aab"
+],
+"cameras.folder_missing": [
+"não configurada",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "Pasta, por exemplo, uma pasta do OneDrive ou do Google Drive",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "Reiniciar câmera",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"Pasta de gravação",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"Onde esta câmera grava. A mudança vale só para novas gravações; as existentes ficam onde estão. As pastas são configuradas em Configurações, Armazenamento.",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "Recebendo: {ingest}",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "Em repouso",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"Bateria {pct}%, carregando",
+"c6ee40a7"
+],
+"live.battery_read": [
+"Lido há {ago} (com a câmera acordada)",
+"9ac82569"
+],
+"live.battery_tip": [
+"Bateria {pct}%",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "O navegador bloqueou a nova janela: permita pop-ups para este site.",

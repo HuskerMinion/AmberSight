@@ -6970,6 +6970,18 @@
 "第一个能正常工作的",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"归档",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"数据文件夹",
+"90610aab"
+],
+"cameras.folder_missing": [
+"未设置",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "文件夹，例如 OneDrive 或 Google Drive 中的文件夹",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "重启摄像头",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"录像文件夹",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"此摄像头录像的位置。更改只影响新录像；已有录像保留在原处。文件夹在“设置”的“存储”中设置。",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "正在接收：{ingest}",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "休眠中",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"电量 {pct}%，正在充电",
+"c6ee40a7"
+],
+"live.battery_read": [
+"{ago}前读取（摄像头唤醒时）",
+"9ac82569"
+],
+"live.battery_tip": [
+"电量 {pct}%",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "浏览器拦截了新窗口：请允许此站点的弹出窗口。",

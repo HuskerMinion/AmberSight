@@ -6970,6 +6970,18 @@
 "de eerste die werkt",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"archief",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"Gegevensmap",
+"90610aab"
+],
+"cameras.folder_missing": [
+"niet ingesteld",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "Map, bijv. een map in OneDrive of Google Drive",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "Camera herstarten",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"Opnamemap",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"Waar deze camera opneemt. Een wijziging geldt alleen voor nieuwe opnamen; bestaande opnamen blijven waar ze zijn. Mappen stel je in onder Instellingen, Opslag.",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "Ontvangt: {ingest}",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "In slaap",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"Batterij {pct}%, laadt op",
+"c6ee40a7"
+],
+"live.battery_read": [
+"Gelezen {ago} geleden (terwijl de camera wakker was)",
+"9ac82569"
+],
+"live.battery_tip": [
+"Batterij {pct}%",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "De browser blokkeerde het nieuwe venster: sta pop-ups voor deze site toe",

@@ -6970,6 +6970,18 @@
 "[fîršt one thàt wörkš ··]",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"[àrçhîvé ·]",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"[Dàtà földér ·]",
+"90610aab"
+],
+"cameras.folder_missing": [
+"[ñöt šét ûp ·]",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "[Földér, é.g. à ÖñéDrîvé ör Gööglé Drîvé földér ······]",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "[Rébööt çàmérà ·]",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"[Réçördîñg földér ··]",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"[Whéré thîš çàmérà réçördš. Çhàñgîñg ît àfféçtš ñéw réçördîñgš öñlý; éxîštîñg réçördîñgš štàý whéré théý àré. Földérš àré šét ûp ûñdér Šéttîñgš, Štöràgé. ····················]",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "[Réçéîvîñg: {ingest} ··]",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "[Àšléép ·]",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"[Bàttérý {pct}%, çhàrgîñg ···]",
+"c6ee40a7"
+],
+"live.battery_read": [
+"[Réàd {ago} àgö (whîlé thé çàmérà wàš àwàké) ·····]",
+"9ac82569"
+],
+"live.battery_tip": [
+"[Bàttérý {pct}% ·]",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "[Thé bröwšér blöçkéd thé ñéw wîñdöw: àllöw pöp-ûpš för thîš šîté ········]",

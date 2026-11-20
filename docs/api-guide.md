@@ -321,7 +321,7 @@ can do the same to notice that the server was updated, or ignore it.
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
-| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras`. Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -1026,8 +1026,8 @@ number on. Main keys:
 | `/api/live/:id/ws` | fMP4 (H.264/H.265, optional audio) over WebSocket | Full-quality single view | Needs the camera on the native pipeline (see `/info`) |
 | `/api/live/:id/stream` | Same fMP4 over one endless HTTP response | Players that take a URL | **Not available for linked-server cameras** (404) |
 | `/api/live/:id/jpeg` | JPEG frames over WebSocket | Grids of many cameras | Analysis-size frames (about 640 px wide by default); works for every camera; does not wake battery cameras |
-| `/api/live/:id` | MJPEG `multipart/x-mixed-replace; boundary=frame` | Simple image views | Polled at about 10 fps; for linked-server cameras it returns a single JPEG |
-| `/api/snapshot/:id` | Single JPEG | Thumbnails, posters | Latest analysis frame; 503 `no frame captured yet` if none |
+| `/api/live/:id` | MJPEG `multipart/x-mixed-replace; boundary=frame` | Simple image views | Polled at about 10 fps; wakes a battery camera (it counts as watching); for linked-server cameras it returns a single JPEG (not asked while one is asleep on an older server: 503) |
+| `/api/snapshot/:id` | Single JPEG | Thumbnails, posters | Latest analysis frame; 503 `no frame captured yet` if none. Never wakes a battery camera: asleep, it is the last picture taken (`x-camera-asleep: 1`; `0` when the picture is current), or 503 (also with `x-camera-asleep: 1`) when there is none; wake one with `POST /api/cameras/:id/wake`. A linked server's camera: as that server's camera list last said (refreshed about every 20 s) |
 
 ### `GET /api/live/:id/info`
 
@@ -1386,8 +1386,8 @@ Any signed-in user who can see the camera may call this. The body is ignored. Re
 ```
 
 The camera stays awake until `awake_until` (epoch seconds, at least the camera's idle timeout,
-minimum 30 s). Opening `/info`, `/ws`, `/stream`, `/api/live/:id` or `/api/snapshot/:id` also
-wakes it. Call `wake` periodically while the user keeps watching (every 20 s or so is plenty).
+minimum 30 s). Opening `/info`, `/ws`, `/stream` or `/api/live/:id` (MJPEG) also wakes it; `/api/snapshot/:id`
+does not (since 0.12.4). Call `wake` periodically while the user keeps watching (every 20 s or so is plenty).
 Returns 404 for unknown cameras and for linked-server cameras. One account may wake one camera
 once every 10 seconds: sooner is **429** with `Retry-After: 10` (the camera is awake already).
 
@@ -3281,6 +3281,18 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.12.4**
+
+- `GET /api/snapshot/:id` no longer wakes a battery (on-demand) camera, for anyone: asleep, it is
+  the last picture taken, with `x-camera-asleep: 1` (503 when there is none, with the same
+  header; a current picture says `x-camera-asleep: 0`). Wake one with
+  `POST /api/cameras/:id/wake` (or by watching it). Polling snapshots of a battery camera kept it
+  awake and drained its battery. The same holds for a linked server's camera: one asleep on an
+  older linked server (whose camera list does not say `snapshot_no_wake`) gets a 503 instead of
+  being asked. `GET /api/live/:id` (MJPEG) still wakes a camera of this server: it is watching.
+- `battery` in `GET /api/cameras` for battery cameras behind a Reolink Home Hub, read while the
+  camera is awake (at most every 10 minutes).
 
 **New in 0.12.3**
 

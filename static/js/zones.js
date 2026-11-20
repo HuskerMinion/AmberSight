@@ -764,10 +764,17 @@ export async function openZoneEditor(id, opts) {
   const ro = new ResizeObserver(size);
   ro.observe(stage);
   window.addEventListener('resize', size);
-  let picTimer = 0, tickTimer = 0;
+  let picTimer = 0, tickTimer = 0, wokeAt = 0;
   const nopic = $q('[data-nopic]');
   function pic() {
     if (gone) return;
+    // A battery camera: kept awake while zones are drawn on it, as when it is
+    // watched (a picture request alone no longer wakes it; a wake lasts its idle time).
+    const cam = camFromId(id);
+    if (cam && cam.on_demand && Date.now() - wokeAt > 20000) {
+      wokeAt = Date.now();
+      api('/api/cameras/' + id + '/wake', { method: 'POST' }).catch(() => { /* asleep it stays: the last picture shows */ });
+    }
     const n = new Image();
     n.onload = () => {
       if (gone) return;

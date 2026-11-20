@@ -6970,6 +6970,18 @@
 "erster, der funktioniert",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"Archiv",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"Datenordner",
+"90610aab"
+],
+"cameras.folder_missing": [
+"nicht eingerichtet",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "Ordner, z. B. ein OneDrive- oder Google-Drive-Ordner",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "Kamera neu starten",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"Aufnahmeordner",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"Wo diese Kamera aufzeichnet. Eine Änderung betrifft nur neue Aufnahmen; vorhandene Aufnahmen bleiben, wo sie sind. Ordner werden unter Einstellungen, Speicher eingerichtet.",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "Empfang: {ingest}",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "Schläft",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"Akku {pct}%, lädt",
+"c6ee40a7"
+],
+"live.battery_read": [
+"Gelesen vor {ago} (während die Kamera wach war)",
+"9ac82569"
+],
+"live.battery_tip": [
+"Akku {pct}%",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "Der Browser hat das neue Fenster blockiert: Erlaube Pop-ups für diese Seite",

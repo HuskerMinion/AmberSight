@@ -67,6 +67,30 @@ fn target_of(engine: &Engine, id: usize) -> Option<(LinkConfig, usize)> {
     l.show.then_some((l, cam))
 }
 
+/// A linked server's battery camera asleep, on a server whose picture request
+/// would wake it (older than 0.12.4, which says `snapshot_no_wake`): the
+/// picture is not asked for, as for our own cameras.
+pub fn picture_would_wake(engine: &Engine, id: usize) -> bool {
+    shown_cam(engine, id).is_some_and(|c| would_wake(&c))
+}
+
+/// Whether a linked server's battery camera is asleep, as its last camera
+/// list said (for `x-camera-asleep` on the pictures passed on).
+pub fn shown_asleep(engine: &Engine, id: usize) -> Option<bool> {
+    shown_cam(engine, id).map(|c| c["on_demand"].as_bool() == Some(true) && c["sleeping"].as_bool() == Some(true))
+}
+
+fn shown_cam(engine: &Engine, id: usize) -> Option<serde_json::Value> {
+    let (l, cam) = target_of(engine, id)?;
+    let cache = cache().lock().unwrap();
+    cache.get(&l.id)?.cams.iter().find(|c| c["id"].as_u64() == Some(cam as u64)).cloned()
+}
+
+fn would_wake(c: &serde_json::Value) -> bool {
+    let flag = |k: &str| c[k].as_bool().unwrap_or(false);
+    flag("on_demand") && flag("sleeping") && !flag("snapshot_no_wake")
+}
+
 fn err(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -116,6 +140,8 @@ pub async fn share_cameras(State(engine): State<Arc<Engine>>, h: HeaderMap) -> R
                 "sleeping": st.sleeping,
                 "enabled": c.active.load(std::sync::atomic::Ordering::Relaxed),
                 "on_demand": cfg.on_demand,
+                // Our /link/snapshot never wakes it (servers before 0.12.4 did).
+                "snapshot_no_wake": true,
                 "audio": cfg.audio,
                 "overlay_text": cfg.overlay_text,
                 "overlay_pos": cfg.overlay_pos,
@@ -486,5 +512,21 @@ mod tests {
         assert_eq!(split(id), Some((2, 15)));
         assert!(!is_remote(15));
         assert_eq!(remote_id(0, PER_LINK), None);
+    }
+
+    #[test]
+    fn an_older_servers_sleeping_battery_camera_is_not_asked_for_a_picture() {
+        let cam = |on_demand: bool, sleeping: bool, no_wake: Option<bool>| {
+            let mut c = serde_json::json!({ "id": 0, "on_demand": on_demand, "sleeping": sleeping });
+            if let Some(f) = no_wake {
+                c["snapshot_no_wake"] = f.into();
+            }
+            c
+        };
+        assert!(would_wake(&cam(true, true, None)));
+        assert!(would_wake(&cam(true, true, Some(false))));
+        assert!(!would_wake(&cam(true, true, Some(true))));
+        assert!(!would_wake(&cam(true, false, None)));
+        assert!(!would_wake(&cam(false, true, None)));
     }
 }

@@ -6970,6 +6970,18 @@
 "första som fungerar",
 "999cfd38"
 ],
+"cameras.folder_archive": [
+"arkiv",
+"98fe03c5"
+],
+"cameras.folder_data": [
+"Datamapp",
+"90610aab"
+],
+"cameras.folder_missing": [
+"inte inställd",
+"99f6442f"
+],
 "cameras.folder_placeholder": [
 "Mapp, t.ex. en OneDrive- eller Google Drive-mapp",
 "145cee5c"
@@ -7885,6 +7897,14 @@
 "cameras.reboot_camera": [
 "Starta om kameran",
 "aded62c7"
+],
+"cameras.rec_folder": [
+"Inspelningsmapp",
+"2fa96510"
+],
+"cameras.rec_folder_hint": [
+"Var den här kameran spelar in. Ändringen gäller bara nya inspelningar; befintliga stannar där de är. Mappar ställs in under Inställningar, Lagring.",
+"cfc8409b"
 ],
 "cameras.receiving": [
 "Tar emot: {ingest}",
@@ -13029,6 +13049,18 @@
 "live.asleep": [
 "Sover",
 "2972214f"
+],
+"live.battery_charging_tip": [
+"Batteri {pct} %, laddar",
+"c6ee40a7"
+],
+"live.battery_read": [
+"Läst för {ago} sedan (medan kameran var vaken)",
+"9ac82569"
+],
+"live.battery_tip": [
+"Batteri {pct} %",
+"35b60b14"
 ],
 "live.browser_blocked": [
 "Webbläsaren blockerade det nya fönstret: tillåt popup-fönster för den här webbplatsen",

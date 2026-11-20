@@ -270,6 +270,8 @@ fn spawn_reolink_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &Ca
         let client = crate::controls::session::get(&format!("https://{host}"), &user, &pass);
         let mut last: Option<crate::reolink::ChannelState> = None;
         let mut failing_since: Option<std::time::Instant> = None;
+        // (Answers with no level in a row: after BATTERY_TRIES the device is taken not to say.)
+        let (mut battery_misses, mut battery_at): (u32, Option<std::time::Instant>) = (0, None);
         info!("camera '{name}': reading motion and AI state from {host} channel {channel}");
         loop {
             let current = engine.camera(handle.id).is_some_and(|c| Arc::ptr_eq(&c, &handle));
@@ -302,6 +304,27 @@ fn spawn_reolink_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &Ca
                         st.device_sleeping = s.sleeping;
                         last = Some(s);
                     }
+                    // A battery camera's charge: read only while it is awake anyway
+                    // (asking a sleeping one could wake it), at most every 10 minutes;
+                    // a device that does not say is not asked again.
+                    let awake = last.as_ref().is_some_and(|s| s.sleeping == Some(false));
+                    if battery_misses < BATTERY_TRIES && awake && handle.running.read().unwrap().on_demand && battery_at.is_none_or(|t: std::time::Instant| t.elapsed() >= BATTERY_EVERY) {
+                        battery_at = Some(std::time::Instant::now());
+                        match client.with(|c| c.battery_raw(channel)) {
+                            Ok(raw) => match raw.as_ref().and_then(crate::reolink::parse_battery) {
+                                Some((percent, charging)) => {
+                                    // (What the hub says about charging, as it says it: the words differ by model.)
+                                    let b = raw.as_ref().map(|r| crate::reolink::battery_fields(r)).unwrap_or_default();
+                                    info!("camera '{name}': battery {percent}%{} ({b})", if charging { ", charging" } else { "" });
+                                    handle.state.write().unwrap().battery = Some(BatteryLevel { percent, charging, at_ms: chrono::Utc::now().timestamp_millis() });
+                                    battery_misses = 0;
+                                }
+                                // (One error answer, e.g. while the camera's link to the hub comes up, is asked again later.)
+                                None => battery_misses += 1,
+                            },
+                            Err(_) => {}
+                        }
+                    }
                     pause(std::time::Duration::from_millis(1000));
                 }
                 Err(e) => {
@@ -315,6 +338,11 @@ fn spawn_reolink_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &Ca
         }
     });
 }
+
+/// How often a battery camera's charge is read while it is awake.
+const BATTERY_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+/// Answers with no battery level in a row before a device is no longer asked.
+const BATTERY_TRIES: u32 = 3;
 
 /// Why a battery Argus camera with no UID does nothing.
 pub(crate) const NEEDS_UID: &str = "a battery Argus needs its UID (Reolink app > Device info); set it in the camera's settings";

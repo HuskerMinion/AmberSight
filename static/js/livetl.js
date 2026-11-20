@@ -776,14 +776,26 @@ function sharpNow(p) {
   const s = p.shownIdx >= 0 ? p.slots[p.shownIdx] : null;
   return !!s && s.shownMs != null && Math.abs(s.shownMs - S.playhead) < sharpMs(p);
 }
+// One camera on screen: sharp pictures while the pointer moves too, one ask
+// at a time, each for where the pointer is when the last one came; a sharp
+// picture stays while it is about as near the pointer as the strip's own
+// pictures are (the strip shows only when the sharp one falls behind).
+function sharpDrag() {
+  // (Linked servers' tiles ask for no pictures: not counted.)
+  return S.solo !== null || [...players].filter(x => !x.cam.remote).length === 1;
+}
 function scrubSharp(p, ts, rec) {
   if (!PIC_OK || p.picFail || p.scrubFail) return false;
-  if (rec && performance.now() - (S.scrubMoved || 0) >= SCRUB_REST_MS) {
+  const moving = performance.now() - (S.scrubMoved || 0) < SCRUB_REST_MS;
+  const drag = sharpDrag();
+  if (rec && (drag || !moving)) {
     const q = picState(p), now = Date.now();
     if (!q.busy && now >= q.retryAt && q.askedAt !== ts && now - q.lastAsk >= picGap()) askPic(p, ts, true);
   }
   const q = p.pic;
-  const show = !!q && q.drawn && q.shownFor !== null && !q.none && Math.abs(q.shownFor - ts) < 1000;
+  const near = drag && moving ? sharpMs(p) : 1000;
+  // (Never in a break in the recording: the tile says so there.)
+  const show = rec && !!q && q.drawn && q.shownFor !== null && !q.none && Math.abs(q.shownFor - ts) < near;
   if (q) q.cv.hidden = !show;
   if (show) { p.cv.hidden = true; p.msg.hidden = true; p.waitSince = 0; }
   return show;
@@ -1018,7 +1030,7 @@ function tickVideo(p) {
     }
     // Just back from fast pictures: the last one stays until the video is there.
     // (A sharp picture from dragging the strip: only of about this moment.)
-    const picHold = p.pic && p.pic.fromScrub ? 1000 : 5000 * Math.max(1, Math.abs(S.speed));
+    const picHold = p.pic && p.pic.fromScrub ? (!rec ? 0 : sharpDrag() ? sharpMs(p) : 1000) : 5000 * Math.max(1, Math.abs(S.speed));
     if (!near && !S.scrubbing && p.pic && p.pic.drawn && p.pic.shownFor !== null && Math.abs(p.pic.shownFor - ts) < picHold) {
       p.pic.cv.hidden = false; p.cv.hidden = true; p.msg.hidden = true;
       return;
@@ -1738,8 +1750,11 @@ function initPointer() {
     players.forEach(p => {
       // The video already showing about this moment stays (sharp).
       if (!picMode(p) && sharpNow(p)) { p.cv.hidden = true; return; }
-      // A sharp picture of another moment gives way to the strip at once.
-      if (p.pic && p.pic.shownFor !== null && Math.abs(p.pic.shownFor - S.playhead) >= 1000) p.pic.cv.hidden = true;
+      // A sharp picture of another moment gives way to the strip at once
+      // (one camera on screen: one about as near as the strip's pictures stays).
+      const rec = recorded(p.cam.name, S.playhead), keep = !picMode(p) && sharpDrag() && rec;
+      if (p.pic && p.pic.shownFor !== null && (!rec || Math.abs(p.pic.shownFor - S.playhead) >= (keep ? sharpMs(p) : 1000))) p.pic.cv.hidden = true;
+      else if (keep && p.pic && p.pic.drawn && !p.pic.cv.hidden) { p.cv.hidden = true; p.msg.hidden = true; return; }
       if (drawStrip(p, S.playhead)) p.msg.hidden = true;
       // Nothing to show here (a gap, no strip yet): the tile says so now.
       else if (p.shownIdx < 0 && (!p.pic || p.pic.cv.hidden) && p.msg.hidden) tickPlayer(p);

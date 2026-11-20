@@ -44,6 +44,10 @@
 .pill[hidden], .cover[hidden], .pz[hidden] { display: none !important; }
 .ptl { pointer-events: auto; flex: 0 1 auto; }
 .ptl .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.bat { display: inline-flex; align-items: center; gap: 3px; color: #aeb7c3; font-size: 11px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.bat[hidden] { display: none; }
+.bat .ic { width: 14px; height: 14px; }
+.bat.low { color: var(--warn); }
 .pz { display: inline-flex; align-items: center; gap: 4px; color: #aeb7c3; flex: 0 100 auto; min-width: 0; font-size: 11px; }
 .pz .pzt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .pz .ic { width: 13px; height: 13px; }

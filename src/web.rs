@@ -2336,6 +2336,10 @@ async fn add_camera(
     if let Some(e) = camera_clash(&engine, &cam, None) {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": e })));
     }
+    let folders = engine.config.lock().unwrap().storage.folders.clone();
+    if let Err(e) = check_record_folder(&mut cam, &folders, None) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
+    }
     if let Err(e) = check_copy_folder(&engine, &mut cam, None, None).await {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
@@ -2345,6 +2349,24 @@ async fn add_camera(
         StatusCode::CREATED,
         Json(serde_json::json!({ "id": id, "result": "success" })),
     )
+}
+
+/// A camera's recording folder: empty = the data folder, else the name of a
+/// [[storage.folders]] entry. A name that is no longer listed is kept only when
+/// the camera already had it (so saving other settings still works).
+fn check_record_folder(cam: &mut CameraConfig, folders: &[crate::config::FolderConfig], before: Option<&CameraConfig>) -> Result<(), String> {
+    cam.folder = cam.folder.take().map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+    let Some(name) = cam.folder.clone() else { return Ok(()) };
+    // (Matched as trimmed, kept as set up: a folder named "NAS " is looked up by that name.)
+    if let Some(f) = folders.iter().find(|f| f.name.trim() == name) {
+        cam.folder = Some(f.name.clone());
+        return Ok(());
+    }
+    if let Some(b) = before.and_then(|b| b.folder.clone()).filter(|b| b.trim() == name) {
+        cam.folder = Some(b);
+        return Ok(());
+    }
+    Err(format!("Recording folder: \"{name}\" is not one of the folders set under Storage; pick one from the list or the data folder"))
 }
 
 /// The folder event clips are also saved to: one AmberSight may use (not a
@@ -2767,6 +2789,10 @@ async fn update_camera(
     }
     if let Some(e) = camera_clash(&engine, &cam, Some(id)) {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": e })));
+    }
+    let folders = engine.config.lock().unwrap().storage.folders.clone();
+    if let Err(e) = check_record_folder(&mut cam, &folders, Some(&cur)) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
     }
     if let Err(e) = check_copy_folder(&engine, &mut cam, Some(id), Some(&cur)).await {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })));
@@ -3214,7 +3240,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -4909,24 +4935,42 @@ pub fn may_wake(engine: &Engine, user: &str) -> bool {
 
 pub(crate) async fn snapshot(State(engine): State<Arc<Engine>>, caller: Option<axum::Extension<Caller>>, AxPath(id): AxPath<usize>) -> Response {
     if crate::remote::is_remote(id) {
-        return crate::remote::proxy_get(&engine, id, "/link/snapshot/{id}", "image/jpeg").await;
+        if crate::remote::picture_would_wake(&engine, id) {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("x-camera-asleep", "1")
+                .body(Body::from("the camera is asleep (a battery camera on a linked server that would wake it for a picture)"))
+                .unwrap();
+        }
+        let mut r = crate::remote::proxy_get(&engine, id, "/link/snapshot/{id}", "image/jpeg").await;
+        // (As that server's camera list last said: its own header is not passed on.)
+        if let Some(asleep) = crate::remote::shown_asleep(&engine, id) {
+            if matches!(r.status(), StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE) {
+                r.headers_mut().insert("x-camera-asleep", header::HeaderValue::from_static(if asleep { "1" } else { "0" }));
+            }
+        }
+        return r;
     }
-    // Asking for a picture of a battery camera wakes it (not for the demo
-    // account: it gets the last picture there is).
-    let user = caller.map(|c| c.0 .0).unwrap_or_default();
-    if engine.camera(id).is_some_and(|h| h.running.read().unwrap().on_demand) && may_wake(&engine, &user) {
-        engine.wake_camera(id, "a picture request (GET /api/snapshot)");
-    }
+    // A picture request never wakes a battery camera: it gets the last picture
+    // there is (a client asking every few minutes kept one awake for hours and
+    // ran its battery down). Waking is for watching it (live view, the Wake
+    // button: POST /api/cameras/:id/wake).
+    let _ = caller;
     let handle = match engine.camera(id) {
         Some(h) => h,
         None => return (StatusCode::NOT_FOUND, "camera not found").into_response(),
     };
-    let (frame, seq, name) = {
+    let (frame, seq, name, asleep) = {
         let st = handle.state.read().unwrap();
-        (st.latest_frame.clone(), st.frame_seq, st.name.clone())
+        (st.latest_frame.clone(), st.frame_seq, st.name.clone(), st.sleeping)
     };
     if frame.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "no frame captured yet").into_response();
+        let why = if asleep { "the camera is asleep (a battery camera) and no picture was taken yet" } else { "no frame captured yet" };
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("x-camera-asleep", if asleep { "1" } else { "0" })
+            .body(Body::from(why))
+            .unwrap();
     }
     // (The camera's text is burned in here, once per picture.)
     let text = engine.picture_cfg(&name).and_then(|c| crate::picture_text::text_filter(&c, crate::picture_text::Clock::Live));
@@ -4940,13 +4984,23 @@ pub(crate) async fn snapshot(State(engine): State<Arc<Engine>>, caller: Option<a
     Response::builder()
         .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CACHE_CONTROL, "no-cache")
+        // The last picture of a battery camera asleep (not taken now).
+        .header("x-camera-asleep", if asleep { "1" } else { "0" })
         .body(Body::from(frame))
         .unwrap()
 }
 
 async fn live(State(engine): State<Arc<Engine>>, caller: Option<axum::Extension<Caller>>, AxPath(id): AxPath<usize>) -> Response {
     // Another server's camera: one current picture (its live view uses the sockets).
+    // (A battery camera asleep on an older server is not asked: that would wake it.)
     if crate::remote::is_remote(id) {
+        if crate::remote::picture_would_wake(&engine, id) {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("x-camera-asleep", "1")
+                .body(Body::from("the camera is asleep (a battery camera on a linked server that would wake it for a picture)"))
+                .unwrap();
+        }
         return crate::remote::proxy_get(&engine, id, "/link/snapshot/{id}", "image/jpeg").await;
     }
     let user = caller.map(|c| c.0 .0).unwrap_or_default();
@@ -6337,6 +6391,32 @@ mod delivery_settings_tests {
 #[cfg(test)]
 mod camera_merge_tests {
     use super::*;
+
+    #[test]
+    fn record_folder_must_be_listed() {
+        let fs = vec![crate::config::FolderConfig { name: "Big".into(), path: "/big".into(), max_mb: 0, archive: false, private: None }];
+        let base: CameraConfig = serde_json::from_value(serde_json::json!({ "name": "a", "url": "rtsp://x/1" })).unwrap();
+        let mut c = merge_camera_json(&base, serde_json::json!({ "folder": "Big" })).unwrap();
+        assert!(check_record_folder(&mut c, &fs, None).is_ok());
+        let mut c = merge_camera_json(&base, serde_json::json!({ "folder": "  " })).unwrap();
+        assert!(check_record_folder(&mut c, &fs, None).is_ok() && c.folder.is_none());
+        let mut c = merge_camera_json(&base, serde_json::json!({ "folder": "Nope" })).unwrap();
+        assert!(check_record_folder(&mut c, &fs, None).unwrap_err().contains("Nope"));
+        let mut old = base.clone();
+        old.folder = Some("Nope".into());
+        let mut c = merge_camera_json(&old, serde_json::json!({ "fps": 5 })).unwrap();
+        assert!(check_record_folder(&mut c, &fs, Some(&old)).is_ok());
+        // A folder set up with spaces around its name keeps that name.
+        let fs = vec![crate::config::FolderConfig { name: "NAS ".into(), path: "/nas".into(), max_mb: 0, archive: false, private: None }];
+        let mut old = base.clone();
+        old.folder = Some("NAS ".into());
+        let mut c = merge_camera_json(&old, serde_json::json!({ "fps": 5 })).unwrap();
+        assert!(check_record_folder(&mut c, &fs, Some(&old)).is_ok());
+        assert_eq!(c.folder.as_deref(), Some("NAS "));
+        let mut c = merge_camera_json(&base, serde_json::json!({ "folder": "NAS" })).unwrap();
+        assert!(check_record_folder(&mut c, &fs, None).is_ok());
+        assert_eq!(c.folder.as_deref(), Some("NAS "));
+    }
 
     #[test]
     fn partial_camera_update_keeps_unsent_fields() {
@@ -9782,8 +9862,13 @@ mod demo_and_snooze_tests {
         h.state.write().unwrap().latest_frame = vec![0xff, 0xd8, 0xff, 0xd9];
         assert_eq!(send(&app, me("GET", &snap)).await.0, StatusCode::OK);
         assert_eq!(awake(), 0);
-        // Anyone else wakes it.
-        assert_eq!(send(&app, Call { basic: Some("d13vic".into()), ..call("GET", &snap) }).await.0, StatusCode::OK);
+        // Nobody's picture request wakes it (a client asking every few minutes
+        // ran a battery down); the Wake button does.
+        let (s, h2, _) = send(&app, Call { basic: Some("d13vic".into()), ..call("GET", &snap) }).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(awake(), 0, "a picture request does not wake it");
+        let _ = h2;
+        assert_eq!(send(&app, Call { basic: Some("d13vic".into()), ..call("POST", &wake) }).await.0, StatusCode::OK);
         assert!(awake() > 0);
     }
 
