@@ -858,9 +858,16 @@ def run_rig(a, binary, cfg, logins, cams, tmp, logs, res_dir, hard_stop):
         st, img, hdr = api.get(f"/api/snapshot/{cid}", raw=True)
         add(name, "snapshot", st == 200 and isinstance(img, bytes) and img[:2] == b"\xff\xd8", f"status {st}, {len(img) if isinstance(img, bytes) else 0} bytes")
         if ingest and ingest.startswith("native"):
-            st, info, _ = api.get(f"/api/live/{cid}/info")
-            main_i = info.get("main") if isinstance(info, dict) else None
-            sub_i = info.get("sub") if isinstance(info, dict) else None
+            # A camera that drops its stream (the fault cameras) has no live
+            # stream for the ~2 s reconnect and until its next keyframe, by
+            # design (viewers wait): look again for a few seconds, as a page does.
+            for _try in range(6):
+                st, info, _ = api.get(f"/api/live/{cid}/info")
+                main_i = info.get("main") if isinstance(info, dict) else None
+                sub_i = info.get("sub") if isinstance(info, dict) else None
+                if main_i:
+                    break
+                time.sleep(1)
             buf, e = api.stream_bytes(f"/api/live/{cid}/stream?q=main", 3)
             lp = os.path.join(tmp, f"live-{cid}.mp4")
             open(lp, "wb").write(buf)

@@ -3282,6 +3282,13 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.12.1**
+
+- `POST /api/cameras/:id/ptz` with `move`: a camera that refuses the usual ContinuousMove is tried
+  with other forms of the move (no zoom velocity or no timeout, then small relative steps), and the
+  form that worked is remembered. Requests and answers are unchanged. When the camera hangs up
+  without answering, the 502 error says so and suggests a camera firmware update.
+
 **New in 0.12.0**
 
 - Languages: the web app can be shown in German, French, Dutch, Spanish, Italian, Chinese

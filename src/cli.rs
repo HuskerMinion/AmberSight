@@ -749,7 +749,11 @@ pub async fn run() -> Result<()> {
                     }
                     "stop" => p::ptz_stop(&t)?,
                     "goto" => p::ptz_goto(&t, &word(0)?)?,
-                    "move" => p::ptz_move(&t, num(0)?, num(1)?, num(2).unwrap_or(0.0), Some(std::time::Duration::from_millis(500)))?,
+                    "move" => {
+                        p::ptz_move(&t, num(0)?, num(1)?, num(2).unwrap_or(0.0), Some(std::time::Duration::from_millis(500)))?;
+                        // A camera that takes no timeout is stopped by us: stay for it.
+                        p::wait_for_our_stop(&t);
+                    }
                     "set-preset" => println!("token {}", p::ptz_set_preset(&t, &word(0)?)?),
                     "remove-preset" => p::ptz_remove_preset(&t, &word(0)?)?,
                     other => anyhow::bail!("unknown action {other}"),

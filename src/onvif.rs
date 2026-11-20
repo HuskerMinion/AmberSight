@@ -102,6 +102,10 @@ impl OnvifEventSource {
 /// password does not answer like that, an ONVIF service does.
 pub(crate) const SOAP_401: &str = " [SOAP fault]";
 
+/// The device hung up without sending a byte (some cameras do this for a
+/// request they do not like instead of sending a fault).
+pub(crate) const NO_ANSWER: &str = "the camera closed the connection without answering";
+
 pub fn host_from_rtsp_url(url: &str) -> Option<String> {
     let u = url::Url::parse(url).ok()?;
     u.host_str().map(|h| h.trim_matches(|c| c == '[' || c == ']').to_string())
@@ -620,7 +624,10 @@ fn http_post(
         }
         match s.read(&mut chunk) {
             Ok(0) => {
-                return try_parse_response(&buf, true).ok_or_else(|| anyhow!("truncated HTTP response"));
+                if buf.is_empty() {
+                    bail!("{NO_ANSWER}");
+                }
+                return try_parse_response(&buf, true).ok_or_else(|| anyhow!("truncated HTTP response ({} bytes)", buf.len()));
             }
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
@@ -633,6 +640,10 @@ fn http_post(
                 }
             }
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            // Closing with our request unread often comes as a reset, not a clean close.
+            Err(e) if buf.is_empty() && matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {
+                bail!("{NO_ANSWER} ({e})");
+            }
             Err(e) => return Err(e.into()),
         }
     }

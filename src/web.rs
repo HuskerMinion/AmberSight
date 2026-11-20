@@ -7202,6 +7202,10 @@ fn ptz_error(e: anyhow::Error) -> Response {
         return api_error(StatusCode::BAD_REQUEST, n.to_string());
     }
     tracing::warn!("PTZ: {e:#}");
+    if format!("{e:#}").contains(crate::onvif::NO_ANSWER) {
+        // Seen on Tapo cameras whose firmware broke ONVIF pan/tilt (fixed by a later firmware).
+        return api_error(StatusCode::BAD_GATEWAY, "the camera hung up without answering the PTZ request; if this keeps happening, a camera firmware update may help (details are in the server log)");
+    }
     api_error(StatusCode::BAD_GATEWAY, "the camera did not accept the PTZ request (details are in the server log)")
 }
 

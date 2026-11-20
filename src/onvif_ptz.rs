@@ -805,19 +805,25 @@ fn clamp_unit(v: f64) -> f64 {
     }
 }
 
-pub fn body_continuous_move(token: &str, pan: f64, tilt: f64, zoom: f64, timeout: Option<Duration>) -> String {
+#[cfg(test)]
+fn body_continuous_move(token: &str, pan: f64, tilt: f64, zoom: f64, timeout: Option<Duration>) -> String {
+    body_continuous(token, pan, tilt, Some(zoom), timeout)
+}
+
+/// ContinuousMove with the Zoom velocity left out when `zoom` is `None`.
+fn body_continuous(token: &str, pan: f64, tilt: f64, zoom: Option<f64>, timeout: Option<Duration>) -> String {
     let timeout = timeout
         .map(|t| format!("<tptz:Timeout>PT{:.1}S</tptz:Timeout>", t.as_secs_f64()))
         .unwrap_or_default();
+    let zoom = zoom.map(|z| format!("<tt:Zoom x=\"{:.3}\"/>", clamp_unit(z))).unwrap_or_default();
     format!(
         "<tptz:ContinuousMove {} {}><tptz:ProfileToken>{}</tptz:ProfileToken><tptz:Velocity>\
-<tt:PanTilt x=\"{:.3}\" y=\"{:.3}\"/><tt:Zoom x=\"{:.3}\"/></tptz:Velocity>{timeout}</tptz:ContinuousMove>",
+<tt:PanTilt x=\"{:.3}\" y=\"{:.3}\"/>{zoom}</tptz:Velocity>{timeout}</tptz:ContinuousMove>",
         soap_ns("tptz", NS_PTZ),
         soap_ns("tt", NS_SCHEMA),
         xml_escape(token),
         clamp_unit(pan),
         clamp_unit(tilt),
-        clamp_unit(zoom),
     )
 }
 
@@ -895,6 +901,10 @@ struct PtzSession {
     ptz_url: String,
     token: String,
     clock_offset: chrono::Duration,
+    /// The PTZ node lists its spaces without a continuous pan/tilt one but
+    /// with a relative one (some Tapo firmware): once the usual move is
+    /// refused, moves go straight to steps.
+    steps_only: bool,
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, PtzSession>> {
@@ -924,15 +934,24 @@ fn resolve_session(t: &PtzTarget, c: &mut Client) -> Result<PtzSession> {
         .find(|p| p.has_ptz)
         .map(|p| p.token)
         .ok_or_else(|| NoPtz("this camera has no media profile with a PTZ configuration".into()))?;
-    let s = PtzSession { ptz_url, token, clock_offset: c.clock_offset };
+    let mut s = PtzSession { ptz_url, token, clock_offset: c.clock_offset, steps_only: false };
     // Some devices advertise a PTZ service and PTZ configurations without any
     // motors; a PTZ node (real or none) tells the truth.
     match ptz_call(c, &s, "GetNodes", &body_get_nodes()) {
         Ok(xml) if !has_ptz_node(&xml) => return Err(NoPtz("this camera reports no PTZ hardware".into()).into()),
         Err(e) => tracing::debug!("GetNodes: {e:#}"),
-        Ok(_) => {}
+        Ok(xml) => s.steps_only = steps_only(&xml),
     }
     Ok(s)
+}
+
+/// Whether the first PTZ node lists its spaces, with a relative pan/tilt
+/// space but no continuous one.
+fn steps_only(xml: &str) -> bool {
+    let Ok(doc) = roxmltree::Document::parse(xml) else { return false };
+    let Some(sp) = doc.descendants().find(|n| n.is_element() && n.tag_name().name() == "SupportedPTZSpaces") else { return false };
+    let has = |name: &str| sp.children().any(|n| n.is_element() && n.tag_name().name() == name);
+    has("RelativePanTiltTranslationSpace") && !has("ContinuousPanTiltVelocitySpace")
 }
 
 /// Whether a GetNodesResponse lists at least one PTZ node.
@@ -972,20 +991,373 @@ fn ptz_call(c: &mut Client, s: &PtzSession, op: &str, body: &str) -> Result<Stri
     c.call(&s.ptz_url, &format!("{NS_PTZ}/{op}"), body, true, CALL_TIMEOUT).with_context(|| op.to_string())
 }
 
+/// The ways a move can be asked for, tried in order until the camera takes
+/// one. Some cameras (Tapo, seen on the C510W/C520WS/C530WS) hang up on the
+/// usual ContinuousMove without a word, while presets work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MoveForm {
+    /// ContinuousMove with the Zoom velocity and a Timeout.
+    Full,
+    /// No Zoom velocity (the camera has no zoom, or rejects a zero one).
+    NoZoom,
+    /// No Zoom and no Timeout: AmberSight sends the Stop itself.
+    Bare,
+    /// Zoom kept, no Timeout (for zoom moves).
+    NoTimeout,
+    /// A small RelativeMove for each tick of a held arrow.
+    Step,
+}
+
+/// Forms that keep the camera's own timeout come first, so a lost Stop
+/// cannot leave the camera moving; then the one Home Assistant sends
+/// (pan/tilt only, no timeout, its own Stop), then steps.
+const PAN_TILT_FORMS: [MoveForm; 4] = [MoveForm::Full, MoveForm::NoZoom, MoveForm::Bare, MoveForm::Step];
+const ZOOM_FORMS: [MoveForm; 2] = [MoveForm::Full, MoveForm::NoTimeout];
+/// A step's size per unit of velocity, in the generic space (-1..1 = the whole range).
+/// The web arrows send 0.5 about every 0.9 s, so a step is 0.06 of the range.
+const STEP_PER_VELOCITY: f64 = 0.12;
+
+impl MoveForm {
+    fn body(self, token: &str, pan: f64, tilt: f64, zoom: f64, timeout: Option<Duration>) -> (&'static str, String) {
+        match self {
+            MoveForm::Full => ("ContinuousMove", body_continuous(token, pan, tilt, Some(zoom), timeout)),
+            MoveForm::NoZoom => ("ContinuousMove", body_continuous(token, pan, tilt, None, timeout)),
+            MoveForm::Bare => ("ContinuousMove", body_continuous(token, pan, tilt, None, None)),
+            MoveForm::NoTimeout => ("ContinuousMove", body_continuous(token, pan, tilt, Some(zoom), None)),
+            MoveForm::Step => {
+                let m = AimMove {
+                    pan: clamp_unit(pan) * STEP_PER_VELOCITY,
+                    tilt: clamp_unit(tilt) * STEP_PER_VELOCITY,
+                    zoom: None,
+                    space: GENERIC_SPACE,
+                };
+                ("RelativeMove", body_relative_move(token, &m))
+            }
+        }
+    }
+    /// Whether the camera keeps moving until it is told to stop.
+    fn needs_our_stop(self) -> bool {
+        matches!(self, MoveForm::Bare | MoveForm::NoTimeout)
+    }
+}
+
+/// What each camera's moves have learned.
+#[derive(Clone, Copy, Default)]
+struct MoveState {
+    /// Index into PAN_TILT_FORMS of the form this camera took.
+    form: usize,
+    /// Index into ZOOM_FORMS of the form this camera took for zoom moves.
+    zoom_form: usize,
+    /// When the usual form is tried again on a camera on a fallback form.
+    recheck_at: Option<Instant>,
+    /// The usual form has worked on this camera: a later refusal (an end
+    /// stop, a busy camera) is an error, never a reason to change forms.
+    usual_ok: bool,
+    /// The same for zoom moves.
+    zoom_usual_ok: bool,
+    /// Bumped by every move that went through, every stop and every command
+    /// that replaces a move, so an older stop knows it is out of date.
+    gen: u64,
+    /// The last move was a step: it ends by itself, and a Stop right after a
+    /// short click would cut it off.
+    stepped: bool,
+    /// When AmberSight stops a move the camera was given no timeout for.
+    stop_at: Option<Instant>,
+    /// A thread is waiting to send that stop (one per camera).
+    timer: bool,
+}
+
+impl MoveState {
+    /// The camera moves with a form other than the usual one.
+    fn picky(&self) -> bool {
+        self.form > 0
+    }
+    /// Its moves carry no timeout, so it may be moving until AmberSight stops it.
+    fn needs_our_stops(&self) -> bool {
+        PAN_TILT_FORMS[self.form.min(PAN_TILT_FORMS.len() - 1)].needs_our_stop()
+            || ZOOM_FORMS[self.zoom_form.min(ZOOM_FORMS.len() - 1)].needs_our_stop()
+    }
+}
+
+/// A fallback form is checked against the usual one again after this long.
+const RELEARN_AFTER: Duration = Duration::from_secs(10 * 60);
+
+fn move_states() -> &'static Mutex<HashMap<String, MoveState>> {
+    static S: OnceLock<Mutex<HashMap<String, MoveState>>> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+fn move_state(key: &str) -> MoveState {
+    move_states().lock().unwrap().get(key).copied().unwrap_or_default()
+}
+
+fn with_move_state<T>(key: &str, f: impl FnOnce(&mut MoveState) -> T) -> T {
+    f(move_states().lock().unwrap().entry(key.to_string()).or_default())
+}
+
+/// Another PTZ command replaces any move AmberSight was going to stop:
+/// run it, and if it fails, the stop that was owed is kept.
+fn replacing_our_stop<T>(t: &PtzTarget, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let key = session_key(t);
+    let (prev, gen) = with_move_state(&key, |st| {
+        st.gen += 1;
+        (st.stop_at.take(), st.gen)
+    });
+    let r = f();
+    if r.is_err() {
+        keep_stopping(t, gen, prev);
+    }
+    r
+}
+
+/// A command that replaced a move (or a Stop) failed: unless something newer
+/// came in meanwhile, keep the stop that was owed, and on a camera whose
+/// moves carry no timeout, owe one in a second (it may still be moving).
+fn keep_stopping(t: &PtzTarget, gen: u64, prev: Option<Instant>) {
+    let key = session_key(t);
+    // Checked and set in one step, so a move landing meanwhile keeps its own stop time.
+    let spawn = with_move_state(&key, |st| {
+        if st.gen != gen {
+            return false;
+        }
+        let at = match prev {
+            Some(at) => at,
+            None if st.needs_our_stops() => Instant::now() + Duration::from_secs(1),
+            None => return false,
+        };
+        st.stop_at = Some(at);
+        !std::mem::replace(&mut st.timer, true)
+    });
+    if spawn {
+        let t = t.clone();
+        std::thread::spawn(move || run_stop_timer(&key, &t));
+    }
+}
+
+/// Have AmberSight stop the camera at `at` (one timer thread per camera).
+fn arm_stop(t: &PtzTarget, at: Instant) {
+    let key = session_key(t);
+    let spawn = with_move_state(&key, |st| {
+        st.stop_at = Some(at);
+        !std::mem::replace(&mut st.timer, true)
+    });
+    if spawn {
+        let t = t.clone();
+        std::thread::spawn(move || run_stop_timer(&key, &t));
+    }
+}
+
+/// Whether the camera hung up without answering (Tapo's way of refusing).
+fn hung_up(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    s.contains(crate::onvif::NO_ANSWER) || s.contains("truncated HTTP response")
+}
+
+/// Whether the camera turned down this form of the request (a fault, an
+/// HTTP error, or hanging up without an answer), so another form may work.
+/// A refused login, a timeout or an unreachable camera is not: trying other
+/// forms would only count as more wrong passwords.
+fn refused_form(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    if s.contains("HTTP 401") || s.contains("uthorized") {
+        return false;
+    }
+    s.contains(crate::onvif::NO_ANSWER)
+        || s.contains("truncated HTTP response")
+        || s.contains("SOAP fault")
+        || s.contains("HTTP 4")
+        || s.contains("HTTP 5")
+}
+
 /// Start moving at the given velocities (each -1..1). With a timeout the
-/// camera stops by itself.
+/// camera stops by itself (when the camera does not take a timeout,
+/// AmberSight sends the Stop when it runs out).
 pub fn ptz_move(t: &PtzTarget, pan: f64, tilt: f64, zoom: f64, timeout: Option<Duration>) -> Result<()> {
-    with_session(t, |c, s| {
-        ptz_call(c, s, "ContinuousMove", &body_continuous_move(&s.token, pan, tilt, zoom, timeout)).map(drop)
-    })
+    let key = session_key(t);
+    let zooming = clamp_unit(zoom).abs() >= 0.0005;
+    let forms: &[MoveForm] = if zooming { &ZOOM_FORMS } else { &PAN_TILT_FORMS };
+    let st0 = with_move_state(&key, |st| {
+        // A tick on its way keeps the earlier move's stop from firing meanwhile.
+        if let (Some(at), Some(d)) = (st.stop_at, timeout) {
+            st.stop_at = Some(at.max(Instant::now() + d));
+        }
+        *st
+    });
+    let learned = match st0 {
+        MoveState { zoom_form, .. } if zooming => zoom_form.min(forms.len() - 1),
+        MoveState { form, recheck_at: Some(at), .. } if form > 0 && Instant::now() >= at => 0,
+        MoveState { form, .. } => form.min(forms.len() - 1),
+    };
+    let r = with_session(t, |c, s| {
+        let mut first_err = None;
+        let mut i = learned;
+        while i < forms.len() {
+            let f = forms[i];
+            let (op, body) = f.body(&s.token, pan, tilt, zoom, timeout);
+            match ptz_call(c, s, op, &body) {
+                Ok(_) => return Ok((i, learned)),
+                Err(e) if !(if zooming { st0.zoom_usual_ok } else { st0.usual_ok }) && refused_form(&e) && i + 1 < forms.len() => {
+                    tracing::debug!(host = %t.host, form = ?f, "PTZ move refused: {e:#}");
+                    // A camera that lists no continuous space: straight on to steps.
+                    let next = if !zooming && s.steps_only { forms.len() - 1 } else { i + 1 };
+                    // Steps only for a camera that hangs up on continuous moves: a
+                    // fault (an end stop, a busy camera) is no reason to step.
+                    if forms[next] == MoveForm::Step && !hung_up(&e) {
+                        return Err(first_err.unwrap_or(e));
+                    }
+                    first_err.get_or_insert(e);
+                    i = next;
+                }
+                // The camera went quiet or refused the login: say that.
+                Err(e) if !refused_form(&e) => return Err(e),
+                Err(e) => return Err(first_err.unwrap_or(e)),
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no move form to try")))
+    });
+    let mut states = move_states().lock().unwrap();
+    let st = states.entry(key.clone()).or_default();
+    let (i, start) = match r {
+        Ok(v) => v,
+        Err(e) => {
+            st.stepped = false;
+            // Try every form again next time.
+            if zooming {
+                st.zoom_form = 0;
+            } else if !st.usual_ok {
+                st.form = 0;
+                st.recheck_at = None;
+            }
+            return Err(e);
+        }
+    };
+    let f = forms[i];
+    st.gen += 1;
+    if zooming {
+        if i == 0 {
+            st.zoom_usual_ok = true;
+            st.zoom_form = 0;
+        } else if !st.zoom_usual_ok {
+            st.zoom_form = i;
+        }
+    } else if i == 0 {
+        st.usual_ok = true;
+        st.recheck_at = None;
+        st.form = 0;
+    } else if !st.usual_ok {
+        // (A move racing one that just took the usual form leaves it be.)
+        if st.form != i {
+            tracing::info!(host = %t.host, "PTZ: the camera refused the usual ContinuousMove; moves now use {f:?}");
+        }
+        if start == 0 || st.recheck_at.is_none() {
+            st.recheck_at = Some(Instant::now() + RELEARN_AFTER);
+        }
+        st.form = i;
+    }
+    st.stepped = f == MoveForm::Step;
+    match (f.needs_our_stop(), timeout) {
+        (true, Some(d)) => {
+            drop(states);
+            arm_stop(t, Instant::now() + d);
+        }
+        // The camera stops this one by itself (or nobody asked for a stop).
+        _ => st.stop_at = None,
+    }
+    Ok(())
+}
+
+/// Wait until the camera's pending stop time and send the stop, unless a
+/// newer move moved the time on or another command cancelled it.
+fn run_stop_timer(key: &str, t: &PtzTarget) {
+    loop {
+        enum Next {
+            Done,
+            Sleep(Duration),
+            Stop(u64),
+        }
+        let next = with_move_state(key, |st| match st.stop_at {
+            None => {
+                st.timer = false;
+                Next::Done
+            }
+            Some(at) if Instant::now() >= at => {
+                st.stop_at = None;
+                Next::Stop(st.gen)
+            }
+            Some(at) => Next::Sleep(at - Instant::now()),
+        });
+        match next {
+            Next::Done => return,
+            // In short slices, so a newer, earlier stop time is not missed.
+            Next::Sleep(d) => std::thread::sleep(d.min(Duration::from_millis(100))),
+            Next::Stop(gen) => {
+                if let Err(e) = send_stop_picky(t) {
+                    tracing::debug!("PTZ: stopping after the move's time ran out: {e:#}; trying again");
+                    std::thread::sleep(Duration::from_secs(1));
+                    // Unless another move, stop or preset came in meanwhile.
+                    if move_state(key).gen == gen {
+                        if let Err(e) = send_stop_picky(t) {
+                            tracing::warn!("PTZ: stopping after the move's time ran out: {e:#}");
+                        }
+                    }
+                }
+                // A move that came in meanwhile has its own stop time: keep going.
+            }
+        }
+    }
+}
+
+/// For a one-shot caller (the CLI): wait for any stop AmberSight owes this
+/// camera, so the process does not exit with the camera still moving.
+pub fn wait_for_our_stop(t: &PtzTarget) {
+    let key = session_key(t);
+    let give_up = Instant::now() + CALL_TIMEOUT * 3;
+    while move_state(&key).timer && Instant::now() < give_up {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 pub fn ptz_absolute(t: &PtzTarget, pan: f64, tilt: f64, zoom: f64) -> Result<()> {
-    with_session(t, |c, s| ptz_call(c, s, "AbsoluteMove", &body_absolute_move(&s.token, pan, tilt, zoom)).map(drop))
+    replacing_our_stop(t, || with_session(t, |c, s| ptz_call(c, s, "AbsoluteMove", &body_absolute_move(&s.token, pan, tilt, zoom)).map(drop)))
 }
 
 pub fn ptz_stop(t: &PtzTarget) -> Result<()> {
+    let (stepped, picky, gen) = with_move_state(&session_key(t), |st| {
+        st.stop_at = None;
+        st.gen += 1;
+        (std::mem::take(&mut st.stepped), st.picky() || st.needs_our_stops(), st.gen)
+    });
+    if stepped {
+        // A step ends by itself; a Stop now would cut a short click's step off.
+        return Ok(());
+    }
+    if !picky {
+        return send_stop(t);
+    }
+    let r = send_stop_picky(t);
+    if r.is_err() {
+        keep_stopping(t, gen, None);
+    }
+    r
+}
+
+fn send_stop(t: &PtzTarget) -> Result<()> {
     with_session(t, |c, s| ptz_call(c, s, "Stop", &body_stop(&s.token)).map(drop))
+}
+
+/// For a camera on a fallback form: a zero-speed move in the form it took,
+/// then the Stop. Some Tapo firmware is reported to keep panning after a Stop.
+fn send_stop_picky(t: &PtzTarget) -> Result<()> {
+    let form = PAN_TILT_FORMS[move_state(&session_key(t)).form.min(PAN_TILT_FORMS.len() - 1)];
+    with_session(t, |c, s| {
+        if form != MoveForm::Step {
+            let (op, body) = form.body(&s.token, 0.0, 0.0, 0.0, Some(Duration::from_secs(1)));
+            if let Err(e) = ptz_call(c, s, op, &body) {
+                tracing::debug!("PTZ zero-speed move before Stop: {e:#}");
+            }
+        }
+        ptz_call(c, s, "Stop", &body_stop(&s.token)).map(drop)
+    })
 }
 
 pub fn ptz_presets(t: &PtzTarget) -> Result<Vec<Preset>> {
@@ -1001,7 +1373,7 @@ pub fn ptz_presets(t: &PtzTarget) -> Result<Vec<Preset>> {
 }
 
 pub fn ptz_goto(t: &PtzTarget, preset: &str) -> Result<()> {
-    with_session(t, |c, s| ptz_call(c, s, "GotoPreset", &body_goto_preset(&s.token, preset)).map(drop))
+    replacing_our_stop(t, || with_session(t, |c, s| ptz_call(c, s, "GotoPreset", &body_goto_preset(&s.token, preset)).map(drop)))
 }
 
 /// Store the current position as a preset; returns its token.
@@ -1157,7 +1529,7 @@ pub fn body_relative_move(token: &str, m: &AimMove) -> String {
 
 /// Send a relative move (click-to-aim).
 pub fn ptz_relative(t: &PtzTarget, m: &AimMove) -> Result<()> {
-    with_session(t, |c, s| ptz_call(c, s, "RelativeMove", &body_relative_move(&s.token, m)).map(drop))
+    replacing_our_stop(t, || with_session(t, |c, s| ptz_call(c, s, "RelativeMove", &body_relative_move(&s.token, m)).map(drop)))
 }
 
 /// Ask the camera what its PTZ node supports. No PTZ => default caps.
@@ -1699,6 +2071,9 @@ mod tests {
         assert_eq!(find_desc(&doc, "Zoom").unwrap().attribute("x"), Some("0.000"));
         let no_to = wrapped(&body_continuous_move("p", 0.0, 0.0, 0.0, None));
         assert!(find_desc(&roxmltree::Document::parse(&no_to).unwrap(), "Timeout").is_none());
+        let no_zoom = wrapped(&body_continuous("p", 0.3, 0.0, None, None));
+        let doc = roxmltree::Document::parse(&no_zoom).unwrap();
+        assert!(find_desc(&doc, "Zoom").is_none() && find_desc(&doc, "PanTilt").is_some());
 
         let g = wrapped(&body_goto_preset("p1", "7"));
         let doc = roxmltree::Document::parse(&g).unwrap();
@@ -1952,6 +2327,302 @@ mod tests {
             }
         });
         port
+    }
+
+    /// A PTZ camera that hangs up, without a byte, on any ContinuousMove that
+    /// `hangs_up` matches (as Tapo cameras do), and answers everything else.
+    /// Returns the port and the moves and stops it was sent.
+    fn picky_ptz_camera(hangs_up: fn(&str) -> bool) -> (u16, Arc<Mutex<Vec<String>>>) {
+        picky_ptz_camera_with(hangs_up, "")
+    }
+
+    /// The same, with these SupportedPTZSpaces in its GetNodes answer.
+    fn picky_ptz_camera_with(hangs_up: fn(&str) -> bool, spaces: &'static str) -> (u16, Arc<Mutex<Vec<String>>>) {
+        picky_ptz_camera_full(hangs_up, |_| false, spaces)
+    }
+
+    /// The same, also answering a SOAP fault (HTTP 500) to any ContinuousMove
+    /// that `faults` matches, and to a GotoPreset of preset "missing".
+    fn picky_ptz_camera_full(hangs_up: fn(&str) -> bool, faults: fn(&str) -> bool, spaces: &'static str) -> (u16, Arc<Mutex<Vec<String>>>) {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut s) = conn else { break };
+                let (_, body) = crate::test_ports::read_http_request(&mut s);
+                let req = String::from_utf8_lossy(&body).into_owned();
+                let inner = if req.contains("GetCapabilities") {
+                    format!("<tds:GetCapabilitiesResponse xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\" xmlns:tt=\"{NS_SCHEMA}\"><tds:Capabilities><tt:Media><tt:XAddr>http://127.0.0.1:{port}/onvif/media</tt:XAddr></tt:Media><tt:PTZ><tt:XAddr>http://127.0.0.1:{port}/onvif/ptz</tt:XAddr></tt:PTZ></tds:Capabilities></tds:GetCapabilitiesResponse>")
+                } else if req.contains("GetProfiles") {
+                    format!("<trt:GetProfilesResponse xmlns:trt=\"{NS_MEDIA}\" xmlns:tt=\"{NS_SCHEMA}\"><trt:Profiles token=\"p1\"><tt:Name>main</tt:Name><tt:PTZConfiguration token=\"z\"/></trt:Profiles></trt:GetProfilesResponse>")
+                } else if req.contains("GetNodes") {
+                    let sp = if spaces.is_empty() { String::new() } else { format!("<tt:SupportedPTZSpaces>{spaces}</tt:SupportedPTZSpaces>") };
+                    format!("<tptz:GetNodesResponse xmlns:tptz=\"{NS_PTZ}\" xmlns:tt=\"{NS_SCHEMA}\"><tptz:PTZNode token=\"n\">{sp}</tptz:PTZNode></tptz:GetNodesResponse>")
+                } else if req.contains("ContinuousMove") || req.contains("RelativeMove") || req.contains("<tptz:Stop") {
+                    let op = ["ContinuousMove", "RelativeMove", "Stop"].into_iter().find(|o| req.contains(o)).unwrap();
+                    let mut what = op.to_string();
+                    if req.contains("<tt:Zoom") {
+                        what.push_str("+zoom");
+                    }
+                    if req.contains("Timeout") {
+                        what.push_str("+timeout");
+                    }
+                    if op == "RelativeMove" {
+                        // The step as sent: "x y space-name".
+                        let doc = roxmltree::Document::parse(&req).unwrap();
+                        let pt = find_desc(&doc, "PanTilt").unwrap();
+                        let space = pt.attribute("space").unwrap_or("").rsplit('/').next().unwrap();
+                        what.push_str(&format!(" {} {} {space}", pt.attribute("x").unwrap(), pt.attribute("y").unwrap()));
+                    }
+                    log.lock().unwrap().push(what);
+                    if op == "ContinuousMove" && hangs_up(&req) {
+                        continue; // drop the connection without a word
+                    }
+                    if op == "ContinuousMove" && faults(&req) {
+                        let _ = write!(s, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/soap+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", PICKY_FAULT.len(), PICKY_FAULT);
+                        continue;
+                    }
+                    format!("<tptz:{op}Response xmlns:tptz=\"{NS_PTZ}\"/>")
+                } else if req.contains("GotoPreset") && req.contains(">missing<") {
+                    log.lock().unwrap().push("GotoPreset missing".into());
+                    let _ = write!(s, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/soap+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", PICKY_FAULT.len(), PICKY_FAULT);
+                    continue;
+                } else {
+                    format!("<tds:GetSystemDateAndTimeResponse xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"/>")
+                };
+                let body = format!("<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body>{inner}</s:Body></s:Envelope>");
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/soap+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            }
+        });
+        (port, seen)
+    }
+
+    const PICKY_FAULT: &str = "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><s:Fault><s:Code><s:Value>s:Receiver</s:Value></s:Code><s:Reason><s:Text>busy</s:Text></s:Reason></s:Fault></s:Body></s:Envelope>";
+
+    fn picky_target(port: u16) -> PtzTarget {
+        let c: CameraConfig = toml::from_str(&format!("name = \"c\"\nurl = \"rtsp://127.0.0.1:554/s\"\nonvif_port = {port}\nusername = \"u\"\npassword = \"p\"\n")).unwrap();
+        target_from_config(&c).unwrap()
+    }
+
+    #[test]
+    fn a_camera_that_takes_the_usual_move_sees_exactly_what_it_saw_before() {
+        let (port, seen) = picky_ptz_camera(|_| false);
+        let t = picky_target(port);
+        ptz_move(&t, 0.5, 0.0, 0.0, Some(Duration::from_millis(1500))).unwrap();
+        ptz_stop(&t).unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "Stop"]);
+    }
+
+    #[test]
+    fn a_camera_that_hangs_up_on_a_zoom_velocity_moves_without_one() {
+        let (port, seen) = picky_ptz_camera(|req| req.contains("<tt:Zoom"));
+        let t = picky_target(port);
+        let to = Some(Duration::from_millis(1500));
+        ptz_move(&t, 0.5, 0.0, 0.0, to).expect("the second form is taken");
+        ptz_move(&t, 0.5, 0.0, 0.0, to).expect("and remembered");
+        ptz_stop(&t).unwrap();
+        // The camera's own timeout is kept; the Stop comes after a zero-speed move.
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "ContinuousMove+timeout", "ContinuousMove+timeout", "ContinuousMove+timeout", "Stop"]);
+        // A zoom move still sends its zoom.
+        seen.lock().unwrap().clear();
+        assert!(ptz_move(&t, 0.0, 0.0, 0.5, to).is_err(), "this camera refuses any zoom velocity");
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "ContinuousMove+zoom"]);
+    }
+
+    #[test]
+    fn a_camera_that_hangs_up_on_every_continuous_move_steps_instead() {
+        let (port, seen) = picky_ptz_camera(|_| true);
+        let t = picky_target(port);
+        ptz_move(&t, 0.5, -0.5, 0.0, Some(Duration::from_millis(1500))).expect("a step is taken");
+        // Released right away: no Stop, which would cut the step short.
+        ptz_stop(&t).unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["ContinuousMove+zoom+timeout", "ContinuousMove+timeout", "ContinuousMove", "RelativeMove 0.060 -0.060 TranslationGenericSpace"]
+        );
+    }
+
+    #[test]
+    fn a_camera_listing_no_continuous_space_still_gets_the_usual_move_first() {
+        let rel = "<tt:RelativePanTiltTranslationSpace><tt:URI>x</tt:URI></tt:RelativePanTiltTranslationSpace>";
+        // Takes the usual move although it lists no continuous space: as before.
+        let (port, seen) = picky_ptz_camera_with(|_| false, rel);
+        ptz_move(&picky_target(port), 0.5, 0.0, 0.0, Some(Duration::from_millis(1500))).unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout"]);
+        // Refuses it: straight on to steps.
+        let (port, seen) = picky_ptz_camera_with(|_| true, rel);
+        ptz_move(&picky_target(port), 0.5, 0.0, 0.0, Some(Duration::from_millis(1500))).unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "RelativeMove 0.060 0.000 TranslationGenericSpace"]);
+    }
+
+    #[test]
+    fn a_camera_that_took_the_usual_move_never_changes_forms() {
+        static REFUSE: AtomicBool = AtomicBool::new(false);
+        let (port, seen) = picky_ptz_camera(|_| REFUSE.load(Ordering::SeqCst));
+        let t = picky_target(port);
+        let to = Some(Duration::from_millis(1500));
+        ptz_move(&t, 0.5, 0.0, 0.0, to).unwrap();
+        // Later it refuses one (at an end stop, busy): an error, not a new form.
+        REFUSE.store(true, Ordering::SeqCst);
+        assert!(ptz_move(&t, 0.5, 0.0, 0.0, to).is_err());
+        REFUSE.store(false, Ordering::SeqCst);
+        ptz_move(&t, 0.5, 0.0, 0.0, to).unwrap();
+        ptz_stop(&t).unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "ContinuousMove+zoom+timeout", "ContinuousMove+zoom+timeout", "Stop"]);
+    }
+
+    #[test]
+    fn a_camera_that_took_the_usual_zoom_never_changes_zoom_forms() {
+        static REFUSE: AtomicBool = AtomicBool::new(false);
+        let (port, seen) = picky_ptz_camera_full(|_| false, |req| REFUSE.load(Ordering::SeqCst) && req.contains("Timeout"), "");
+        let t = picky_target(port);
+        let to = Some(Duration::from_millis(1500));
+        ptz_move(&t, 0.0, 0.0, 0.5, to).unwrap();
+        REFUSE.store(true, Ordering::SeqCst);
+        assert!(ptz_move(&t, 0.0, 0.0, 0.5, to).is_err(), "a fault at the zoom limit is an error");
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "ContinuousMove+zoom+timeout"]);
+    }
+
+    #[test]
+    fn a_fallback_form_is_checked_against_the_usual_one_again_later() {
+        let (port, seen) = picky_ptz_camera(|req| req.contains("<tt:Zoom"));
+        let t = picky_target(port);
+        let to = Some(Duration::from_millis(1500));
+        ptz_move(&t, 0.5, 0.0, 0.0, to).unwrap();
+        assert!(move_state(&session_key(&t)).recheck_at.is_some_and(|at| at > Instant::now() + RELEARN_AFTER / 2));
+        // Ten minutes on:
+        with_move_state(&session_key(&t), |st| st.recheck_at = Some(Instant::now()));
+        ptz_move(&t, 0.5, 0.0, 0.0, to).unwrap();
+        ptz_move(&t, 0.5, 0.0, 0.0, to).unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "ContinuousMove+timeout", "ContinuousMove+zoom+timeout", "ContinuousMove+timeout", "ContinuousMove+timeout"]);
+    }
+
+    /// Takes a ContinuousMove only with neither a zoom velocity nor a timeout.
+    fn bare_only(req: &str) -> bool {
+        req.contains("<tt:Zoom") || req.contains("Timeout")
+    }
+
+    #[test]
+    fn a_move_without_a_timeout_is_stopped_by_us_when_it_runs_out() {
+        let (port, seen) = picky_ptz_camera(bare_only);
+        let t = picky_target(port);
+        let to = Some(Duration::from_millis(1500));
+        ptz_move(&t, 0.0, 0.5, 0.0, to).unwrap();
+        // A newer move before the time runs out moves the stop on.
+        ptz_move(&t, 0.0, 0.5, 0.0, to).unwrap();
+        assert!(move_state(&session_key(&t)).timer, "one timer waits for the stop");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while move_state(&session_key(&t)).timer && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // (The automatic stop is a zero-speed move, then the Stop.)
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "ContinuousMove+timeout", "ContinuousMove", "ContinuousMove", "ContinuousMove", "Stop"]);
+    }
+
+    #[test]
+    fn another_ptz_command_cancels_our_pending_stop() {
+        let (port, seen) = picky_ptz_camera(bare_only);
+        let t = picky_target(port);
+        ptz_move(&t, 0.0, 0.5, 0.0, Some(Duration::from_millis(300))).unwrap();
+        ptz_goto(&t, "1").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while move_state(&session_key(&t)).timer && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!seen.lock().unwrap().iter().any(|s| s == "Stop"), "the preset's travel is not cut short: {:?}", seen.lock().unwrap());
+    }
+
+    #[test]
+    fn a_failed_preset_keeps_the_stop_we_owe() {
+        let (port, seen) = picky_ptz_camera(bare_only);
+        let t = picky_target(port);
+        ptz_move(&t, 0.0, 0.5, 0.0, Some(Duration::from_millis(300))).unwrap();
+        assert!(ptz_goto(&t, "missing").is_err());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while move_state(&session_key(&t)).timer && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some("Stop"), "{:?}", seen.lock().unwrap());
+    }
+
+    #[test]
+    fn a_fault_never_puts_a_camera_on_steps() {
+        // Faults every continuous move (does not hang up), takes steps.
+        let (port, seen) = picky_ptz_camera_full(|_| false, |_| true, "");
+        let t = picky_target(port);
+        assert!(ptz_move(&t, 0.5, 0.0, 0.0, Some(Duration::from_millis(1500))).is_err());
+        assert_eq!(*seen.lock().unwrap(), ["ContinuousMove+zoom+timeout", "ContinuousMove+timeout", "ContinuousMove"]);
+        assert_eq!(move_state(&session_key(&t)).form, 0);
+    }
+
+    #[test]
+    fn a_shorter_new_stop_time_is_kept() {
+        let (port, seen) = picky_ptz_camera(bare_only);
+        let t = picky_target(port);
+        ptz_move(&t, 0.0, 0.5, 0.0, Some(Duration::from_secs(10))).unwrap();
+        ptz_stop(&t).unwrap();
+        let started = Instant::now();
+        ptz_move(&t, 0.0, 0.5, 0.0, Some(Duration::from_millis(100))).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while move_state(&session_key(&t)).timer && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "stopped after {:?}", started.elapsed());
+        assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some("Stop"));
+    }
+
+    #[test]
+    fn a_failed_preset_on_a_camera_without_timeouts_owes_a_stop() {
+        // Nothing was owed any more (a Stop went through), but the camera's moves
+        // carry no timeout and the preset failed: it may still be moving.
+        let (port, seen) = picky_ptz_camera(bare_only);
+        let t = picky_target(port);
+        ptz_move(&t, 0.0, 0.5, 0.0, Some(Duration::from_secs(10))).unwrap();
+        // The owed stop is taken by a stop that went through; then a preset fails.
+        ptz_stop(&t).unwrap();
+        seen.lock().unwrap().clear();
+        assert!(ptz_goto(&t, "missing").is_err());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !seen.lock().unwrap().iter().any(|s| s == "Stop") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(*seen.lock().unwrap(), ["GotoPreset missing", "ContinuousMove", "Stop"], "a failed preset on a camera without timeouts owes a stop");
+    }
+
+    #[test]
+    fn the_cli_waits_for_the_stop_it_owes() {
+        let (port, seen) = picky_ptz_camera(bare_only);
+        let t = picky_target(port);
+        ptz_move(&t, 0.0, 0.5, 0.0, Some(Duration::from_millis(200))).unwrap();
+        wait_for_our_stop(&t);
+        assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some("Stop"));
+    }
+
+    #[test]
+    fn a_node_without_a_continuous_space_takes_steps() {
+        let node = |spaces: &str| format!("<tptz:GetNodesResponse xmlns:tptz=\"{NS_PTZ}\" xmlns:tt=\"{NS_SCHEMA}\"><tptz:PTZNode token=\"n\"><tt:SupportedPTZSpaces>{spaces}</tt:SupportedPTZSpaces></tptz:PTZNode></tptz:GetNodesResponse>");
+        let rel = "<tt:RelativePanTiltTranslationSpace><tt:URI>x</tt:URI></tt:RelativePanTiltTranslationSpace>";
+        let cont = "<tt:ContinuousPanTiltVelocitySpace><tt:URI>y</tt:URI></tt:ContinuousPanTiltVelocitySpace>";
+        assert!(steps_only(&node(rel)));
+        assert!(!steps_only(&node(&format!("{rel}{cont}"))));
+        assert!(!steps_only(&node(cont)));
+        assert!(!steps_only(&node("")), "no relative space either: try the usual way");
+        assert!(!steps_only(&format!("<tptz:GetNodesResponse xmlns:tptz=\"{NS_PTZ}\"><tptz:PTZNode token=\"n\"/></tptz:GetNodesResponse>")), "no detail: try the usual way");
+    }
+
+    #[test]
+    fn only_a_refusal_moves_on_to_another_form() {
+        assert!(refused_form(&anyhow!(crate::onvif::NO_ANSWER).context("ContinuousMove")));
+        assert!(refused_form(&anyhow!("truncated HTTP response (12 bytes)")));
+        assert!(refused_form(&anyhow!("SOAP fault: Sender InvalidArgVal (HTTP 400)")));
+        assert!(refused_form(&anyhow!("HTTP 500")));
+        assert!(!refused_form(&anyhow!("HTTP 401 unauthorized (check username/password) [SOAP fault]")));
+        assert!(!refused_form(&anyhow!("SOAP fault: Sender not Authorized ter:NotAuthorized (HTTP 400)")), "a refused login is never tried in other forms");
+        assert!(!refused_form(&anyhow!("timed out waiting for 10.0.0.2")));
+        assert!(!refused_form(&anyhow!("connect 10.0.0.2:2020")));
     }
 
     #[test]
