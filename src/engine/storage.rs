@@ -43,6 +43,15 @@ impl Engine {
     }
 
     fn storage_usage_scan(self: &Arc<Engine>) -> serde_json::Value {
+        // Alerts deleted before this walk are in it (taken off the count when
+        // it is stored, below); ones deleted during it may not be.
+        let freed_before = events_freed_since_walk(&self.data_dir);
+        let v = self.storage_usage_walk();
+        walk_done(&self.data_dir, freed_before);
+        v
+    }
+
+    fn storage_usage_walk(self: &Arc<Engine>) -> serde_json::Value {
         let mut bytes = 0u64;
         // Everything but recordings (cameras/<x>/segments), which the
         // database counts exactly and at once.
@@ -257,13 +266,23 @@ pub fn storage_level(c: &FolderCap, short: bool, rolls: bool, days_kept: Option<
 
 /// Folders whose last retention pass could not free what it needed.
 static SHORT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+// (Tests: per thread, as tests run passes side by side.)
+#[cfg(test)]
+thread_local! {
+    static SHORT_T: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
+}
 
 fn set_short(names: HashSet<String>) {
+    #[cfg(test)]
+    SHORT_T.with(|s| *s.borrow_mut() = Some(names.clone()));
     *SHORT.lock().unwrap() = Some(names);
 }
 
 /// Whether the last pass came up short for folder `name` ("" = data folder).
 pub fn was_short(name: &str) -> bool {
+    #[cfg(test)]
+    return SHORT_T.with(|s| s.borrow().as_ref().is_some_and(|s| s.contains(name)));
+    #[cfg(not(test))]
     SHORT.lock().unwrap().as_ref().is_some_and(|s| s.contains(name))
 }
 
@@ -277,6 +296,10 @@ impl Engine {
         // every cameras/<x>/segments.
         let usage = self.storage_usage();
         let other = usage["other_bytes"].as_u64().unwrap_or_else(|| usage["bytes"].as_u64().unwrap_or(0));
+        #[cfg(test)]
+        let other = TEST_OTHER_BYTES.with(|c| c.get()).unwrap_or(other);
+        // (Less the alerts deleted since it was measured.)
+        let other = other.saturating_sub(events_freed_since_walk(&self.data_dir));
         (other + self.db.folder_bytes("").unwrap_or(0).max(0) as u64)
             // Time-lapse videos keep their own days (Settings > Time-lapse)
             // and are never removed to make room: counting them would only
@@ -1013,6 +1036,8 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
         (c.storage.folders.clone(), archive, c.storage.events_kept_from_ms(Utc::now().timestamp()))
     };
 
+    // Old copies of moved recordings that would not go before.
+    retry_leftovers();
     // Caps as they stand now (automatic ones follow the free space).
     let caps = engine.storage_caps();
     let mut short: HashSet<String> = HashSet::new();
@@ -1029,16 +1054,59 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
     if (data.cap > 0 || (data.auto && data.total.is_some())) && data.used > data.cap {
         let usage = data.used;
         let to_free = usage - goal(data);
-        {
+        if let Some(arch) = archive.as_ref() {
+            // Moved to the archive, oldest first, a batch a pass. A file that
+            // will not move is passed over (one locked or unreadable file must
+            // not stop the rest); a few failures in a row end the moving (a
+            // share that is down must not hold the pass up file after file).
+            let rows = db.oldest_segments_in("", MOVE_ROWS)?;
+            let whole = rows.len() < MOVE_ROWS;
+            let mut freed = 0u64;
+            let mut moves = Moves::new(&arch.1);
+            for s in rows {
+                if freed >= to_free {
+                    break;
+                }
+                match retire_segment(engine, &s.path, &dir.join(&s.path), Some(arch)) {
+                    Ok(()) => {
+                        freed += s.bytes.max(0) as u64;
+                        moves.ok();
+                    }
+                    Err(e) => {
+                        retire_failed(&e);
+                        if !moves.failed(e, &s.path) {
+                            break;
+                        }
+                    }
+                }
+            }
+            let moved = moves.moved;
+            let move_failed = moves.failing();
+            // The archive did not take them (a network share the service
+            // cannot write, a drive gone): this folder's recordings are
+            // deleted instead, quiet footage first, so the cap holds. Only
+            // then; a long backlog of a working archive waits for the next
+            // passes' moves.
+            archive_result("", move_failed.is_some(), moved);
+            if let Some(e) = &move_failed {
+                if freed < to_free && archive_failing_long("") {
+                    let deleted = delete_over(engine, dir, "", kept_from, to_free - freed)?;
+                    freed += deleted;
+                    archive_not_taking(engine, e, deleted);
+                }
+            }
+            // No recording left here to move or delete: the alerts' own clips
+            // (kept in the data folder, never moved) go, oldest first.
+            if freed < to_free && (whole || move_failed.is_some()) && db.segments_to_purge("", kept_from, 1)?.is_empty() {
+                freed += delete_alert_clips(engine, dir, kept_from, to_free - freed)?;
+            }
+            if freed < to_free {
+                short.insert(String::new());
+            }
+        } else {
+            // Deleting keeps recent event footage until the quiet footage is gone.
             let mut cands: Vec<PurgeCandidate> = Vec::new();
-            // Moving to the archive goes strictly oldest first; deleting
-            // keeps recent event footage until the quiet footage is gone.
-            let rows = if archive.is_some() {
-                db.oldest_segments_in("", 5000)?.into_iter().map(|s| (s, false)).collect()
-            } else {
-                db.segments_to_purge("", kept_from, 5000)?
-            };
-            for (s, kept) in rows {
+            for (s, kept) in db.segments_to_purge("", kept_from, 5000)? {
                 cands.push(PurgeCandidate {
                     time: s.start_ms / 1000,
                     size: s.bytes.max(0) as u64,
@@ -1048,12 +1116,10 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
                     kept,
                 });
             }
-            if archive.is_none() {
-                for ev in db.oldest_unprotected_events(5000)? {
-                    let size = event_files_size(dir, &ev.id);
-                    let kept = ev.start * 1000 >= kept_from;
-                    cands.push(PurgeCandidate { time: ev.start, size, kind: PurgeKind::Event { id: ev.id, protect: false }, kept });
-                }
+            for ev in db.oldest_unprotected_events(5000)? {
+                let size = event_files_size(dir, &ev.id);
+                let kept = ev.start * 1000 >= kept_from;
+                cands.push(PurgeCandidate { time: ev.start, size, kind: PurgeKind::Event { id: ev.id, protect: false }, kept });
             }
             let picked = select_purge(cands, to_free);
             if picked.iter().map(|c| c.size).sum::<u64>() < to_free {
@@ -1064,13 +1130,14 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
                 match c.kind {
                     PurgeKind::Segment { path, .. } => {
                         let rel = crate::db::relative_path(dir, &path);
-                        if let Err(e) = retire_segment(engine, &rel, &path, archive.as_ref()) {
+                        if let Err(e) = retire_segment(engine, &rel, &path, None) {
                             retire_failed(&e);
                             short.insert(String::new());
                         }
                     }
                     PurgeKind::Event { id, .. } => {
                         remove_event_files(dir, &id);
+                        events_freed(dir, c.size);
                         purged.push(id);
                     }
                 }
@@ -1097,15 +1164,43 @@ pub(super) fn retention_pass(engine: &Arc<Engine>) -> anyhow::Result<()> {
         } else {
             db.segments_to_purge(&f.name, kept_from, 5000)?.into_iter().map(|r| r.0).collect()
         };
+        let mut moves = dest.map(|a| Moves::new(&a.1));
         for s in rows {
             if usage <= goal {
                 break;
             }
-            if let Err(e) = retire_segment(engine, &s.path, &f.path.join(&s.path), dest) {
-                retire_failed(&e);
-                short.insert(f.name.clone());
+            match retire_segment(engine, &s.path, &f.path.join(&s.path), dest) {
+                Ok(()) => {
+                    usage -= s.bytes;
+                    if let Some(m) = moves.as_mut() {
+                        m.ok();
+                    }
+                }
+                Err(e) => {
+                    retire_failed(&e);
+                    // A failed move is passed over (and made up by deleting
+                    // below when the archive is failing); a delete that failed
+                    // is left for the next pass.
+                    if let Some(m) = moves.as_mut() {
+                        if !m.failed(e, &s.path) {
+                            break;
+                        }
+                    }
+                }
             }
-            usage -= s.bytes;
+        }
+        let moved = moves.as_ref().is_some_and(|m| m.moved);
+        let move_failed = moves.and_then(Moves::failing);
+        // The archive did not take them (for a while): deleted instead, so the cap holds.
+        if dest.is_some() {
+            archive_result(&f.name, move_failed.is_some(), moved);
+        }
+        if let Some(e) = move_failed {
+            if usage > goal && archive_failing_long(&f.name) {
+                let deleted = delete_over(engine, &f.path, &f.name, kept_from, (usage - goal) as u64)?;
+                usage -= deleted as i64;
+                archive_not_taking(engine, &e, deleted);
+            }
         }
         if usage > goal {
             short.insert(f.name.clone());
@@ -1190,6 +1285,9 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
         // Moving to the archive frees this drive only if the archive is
         // elsewhere, and only while the archive has room itself.
         let to_archive = archive.filter(|a| archive_drive.as_deref().is_some_and(|ad| ad != key) && short_of(&a.1) == Some(0));
+        // (Tests: an archive on another drive with room.)
+        #[cfg(test)]
+        let to_archive = if TEST_ARCHIVE_ELSEWHERE.with(|c| c.get()) { archive } else { to_archive };
         let mut cands: Vec<PurgeCandidate> = Vec::new();
         let mut home: std::collections::HashMap<std::path::PathBuf, usize> = Default::default();
         // Whether every list below came back whole (shorter than its limit):
@@ -1258,20 +1356,39 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
                     let (_, root, is_archive) = &roots[i];
                     let rel = crate::db::relative_path(root, &path);
                     let dest = if *is_archive { None } else { to_archive };
-                    match retire_segment(engine, &rel, &path, dest) {
-                        Err(e) => retire_failed(&e),
-                        Ok(()) if kept_paths.contains(&path) => {
-                            if dest.is_some() {
-                                kept_moved += 1;
-                            } else {
-                                kept_deleted += 1;
+                    // The drive must keep its reserve: a recording the archive
+                    // did not take is deleted instead.
+                    // (Where it went: the archive, or None when deleted.)
+                    let went = match retire_segment(engine, &rel, &path, dest) {
+                        Ok(()) => Ok(dest),
+                        Err(e) if dest.is_some() => {
+                            retire_failed(&e);
+                            let r = retire_segment(engine, &rel, &path, None);
+                            if r.is_ok() {
+                                archive_not_taking(engine, &e, c.size);
                             }
+                            r.map(|()| None)
                         }
-                        Ok(()) => {}
+                        Err(e) => Err(e),
+                    };
+                    let dest = match went {
+                        Ok(d) => d,
+                        Err(e) => {
+                            retire_failed(&e);
+                            continue;
+                        }
+                    };
+                    if kept_paths.contains(&path) {
+                        if dest.is_some() {
+                            kept_moved += 1;
+                        } else {
+                            kept_deleted += 1;
+                        }
                     }
                 }
                 PurgeKind::Event { id, .. } => {
                     remove_event_files(dir, &id);
+                    events_freed(dir, c.size);
                     purged.push(id);
                 }
             }
@@ -1286,8 +1403,290 @@ fn disk_guard(engine: &Arc<Engine>, folders: &[crate::config::FolderConfig], arc
     Ok(())
 }
 
+/// Recordings moved to the archive in one pass at most (tests: a few).
+#[cfg(not(test))]
+const MOVE_ROWS: usize = 5000;
+#[cfg(test)]
+const MOVE_ROWS: usize = 3;
+
 /// Rows each list of the drive reserve holds at a time.
 const GUARD_ROWS: usize = 5000;
+
+/// Delete up to `need` bytes of folder `name`'s recordings (root `root`; ""
+/// = the data folder), quiet footage first, as the caps do without an
+/// archive. Kept bookmark video is never chosen (only the drive reserve takes
+/// that). Returns the bytes freed.
+fn delete_over(engine: &Arc<Engine>, root: &std::path::Path, name: &str, kept_from: i64, need: u64) -> anyhow::Result<u64> {
+    let cands: Vec<PurgeCandidate> = engine
+        .db
+        .segments_to_purge(name, kept_from, 5000)?
+        .into_iter()
+        .map(|(s, kept)| PurgeCandidate { time: s.start_ms / 1000, size: s.bytes.max(0) as u64, kind: PurgeKind::Segment { path: root.join(&s.path), newest: false }, kept })
+        .collect();
+    let mut freed = 0u64;
+    for c in select_purge(cands, need) {
+        if let PurgeKind::Segment { path, .. } = c.kind {
+            let rel = crate::db::relative_path(root, &path);
+            match retire_segment(engine, &rel, &path, None) {
+                // (A file the disk would not give up is left to the sweep: not freed yet.)
+                Ok(()) if !path.exists() => freed += c.size,
+                Ok(()) => {}
+                Err(e) => retire_failed(&e),
+            }
+        }
+    }
+    Ok(freed)
+}
+
+/// The data folder with an archive and no recording left in it: unprotected
+/// alerts with a saved clip go, oldest first, until `need` bytes are free
+/// (alerts whose files take nothing are left alone). Returns the bytes freed.
+fn delete_alert_clips(engine: &Arc<Engine>, dir: &std::path::Path, kept_from: i64, need: u64) -> anyhow::Result<u64> {
+    // Alerts past the days alerts are kept (Settings, Recording), with files.
+    let mut cands: Vec<(String, u64)> = Vec::new();
+    for ev in engine.db.oldest_unprotected_events_with_clip(5000)? {
+        if ev.start * 1000 >= kept_from {
+            break;
+        }
+        // Only alerts with a saved clip file (most play from the recordings,
+        // which are in the archive: those are left alone).
+        if !dir.join("clips").join(format!("{}.mp4", ev.id)).is_file() {
+            continue;
+        }
+        cands.push((ev.id.clone(), event_files_size(dir, &ev.id)));
+    }
+    // Only when that brings the folder within its limit: the rest is the
+    // database, pictures and the alerts kept, which deleting alerts would
+    // not fix (the folder is shown as short instead).
+    if cands.iter().map(|c| c.1).sum::<u64>() < need {
+        return Ok(0);
+    }
+    let mut freed = 0u64;
+    let mut purged = Vec::new();
+    for (id, size) in cands {
+        if freed >= need {
+            break;
+        }
+        remove_event_files(dir, &id);
+        events_freed(dir, size);
+        freed += size;
+        purged.push(id);
+    }
+    engine.db.delete_events(&purged)?;
+    Ok(freed)
+}
+
+/// How long the archive must keep failing before the size caps delete what
+/// it did not take (a NAS restarting, a USB drive waking up: moved a few
+/// minutes later instead). The drive reserve does not wait.
+#[cfg(not(test))]
+const ARCHIVE_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+#[cfg(test)]
+const ARCHIVE_GRACE: std::time::Duration = std::time::Duration::ZERO;
+
+/// Moves to the archive failing: (since when, the last failure); None when
+/// the last one worked. Failures more than 5 minutes apart start over (an old
+/// failure must not make a new one skip the wait).
+/// Kept per folder ("" = the data folder): one whose moves work must not
+/// reset the wait of one whose moves fail.
+type Failing = Option<(std::time::Instant, std::time::Instant)>;
+type FailingMap = std::collections::HashMap<String, (std::time::Instant, std::time::Instant)>;
+#[cfg(not(test))]
+static ARCHIVE_FAILING: Mutex<Option<FailingMap>> = Mutex::new(None);
+#[cfg(test)]
+thread_local! {
+    static ARCHIVE_FAILING_T: std::cell::RefCell<FailingMap> = std::cell::RefCell::new(FailingMap::new());
+}
+
+fn archive_failing_with<R>(f: impl FnOnce(&mut FailingMap) -> R) -> R {
+    #[cfg(not(test))]
+    return f(ARCHIVE_FAILING.lock().unwrap().get_or_insert_with(Default::default));
+    #[cfg(test)]
+    return ARCHIVE_FAILING_T.with(|m| f(&mut m.borrow_mut()));
+}
+
+/// A pass's moves out of folder `name`: nothing moved and one failed
+/// (`failed`), or some worked (`moved`).
+fn archive_result(name: &str, failed: bool, moved: bool) {
+    let now = std::time::Instant::now();
+    archive_failing_with(|m| {
+        if failed {
+            let prev: Failing = m.get(name).copied();
+            let since = match prev {
+                Some((since, last)) if now.duration_since(last) <= std::time::Duration::from_secs(300) => since,
+                _ => now,
+            };
+            m.insert(name.to_string(), (since, now));
+        } else if moved {
+            m.remove(name);
+        }
+    })
+}
+
+fn archive_failing_long(name: &str) -> bool {
+    archive_failing_with(|m| m.get(name).is_some_and(|(since, _)| since.elapsed() >= ARCHIVE_GRACE))
+}
+
+/// Failed moves in a row after which the archive is tried with a small file.
+const FAILS_IN_A_ROW: usize = 3;
+/// Failed moves that end a pass's moving whatever else.
+const MAX_FAILS: usize = 50;
+
+/// A pass's moves to the archive: whether to go on after a failure, and
+/// whether the archive counts as failing (then the caps may delete instead).
+struct Moves {
+    root: std::path::PathBuf,
+    moved: bool,
+    in_row: usize,
+    fails: usize,
+    /// The archive took a small file where a failed one was to go: the
+    /// failures are those files' own (a kept file that will not copy, say).
+    took_probe: bool,
+    /// Asked and refused, or full: the archive's own failure.
+    archive_side: bool,
+    last: Option<(anyhow::Error, String)>,
+}
+
+impl Moves {
+    fn new(root: &std::path::Path) -> Moves {
+        Moves { root: root.to_path_buf(), moved: false, in_row: 0, fails: 0, took_probe: false, archive_side: false, last: None }
+    }
+
+    fn ok(&mut self) {
+        self.moved = true;
+        self.in_row = 0;
+    }
+
+    /// The move of recording `rel` failed with `e`: false ends the moving.
+    fn failed(&mut self, e: anyhow::Error, rel: &str) -> bool {
+        self.fails += 1;
+        self.in_row += 1;
+        let full = is_full(&e);
+        self.last = Some((e, rel.to_string()));
+        if full {
+            self.archive_side = true;
+            return false;
+        }
+        if self.fails >= MAX_FAILS {
+            return false;
+        }
+        if self.in_row >= FAILS_IN_A_ROW && !self.took_probe {
+            if self.probe() {
+                self.took_probe = true;
+            } else {
+                self.archive_side = true;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the archive takes a small file in the folder the last failed
+    /// recording was to go to.
+    fn probe(&self) -> bool {
+        let Some((_, rel)) = &self.last else { return false };
+        archive_takes(&self.root, rel)
+    }
+
+    /// The error, when the archive itself is failing: it refused (or is full),
+    /// or nothing moved and it does not take a small file where the files go.
+    fn failing(self) -> Option<anyhow::Error> {
+        let failing = self.archive_side || (!self.moved && !self.took_probe && self.last.is_some() && !self.probe());
+        if failing {
+            self.last.map(|l| l.0)
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether a write failed because the drive (or the user's quota) is full.
+fn is_full(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| matches!(io.kind(), std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded)))
+}
+
+/// Whether the archive folder `root` takes a file now where recording `rel`
+/// goes: a small one written and removed in that folder (made if missing;
+/// never when the archive itself is not there).
+fn archive_takes(root: &std::path::Path, rel: &str) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    let folder = root.join(rel).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| root.to_path_buf());
+    if std::fs::create_dir_all(&folder).is_err() {
+        return false;
+    }
+    let probe = folder.join(format!(".ambersight-write-check-{}", std::process::id()));
+    let ok = std::fs::write(&probe, b"ok").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// Old copies of recordings already copied to the archive that the disk
+/// would not give up then (locked): tried again every pass.
+static LEFTOVERS: Mutex<Option<HashSet<std::path::PathBuf>>> = Mutex::new(None);
+
+fn leftover(path: &std::path::Path) {
+    let mut l = LEFTOVERS.lock().unwrap();
+    let l = l.get_or_insert_with(Default::default);
+    if l.len() < 100_000 {
+        l.insert(path.to_path_buf());
+    }
+}
+
+/// Remove the leftovers whose disk now lets them go.
+fn retry_leftovers() {
+    if let Some(l) = LEFTOVERS.lock().unwrap().as_mut() {
+        l.retain(|p| matches!(std::fs::remove_file(p), Err(e) if e.kind() != std::io::ErrorKind::NotFound));
+    }
+}
+
+/// Alerts' files deleted since the data folder was last measured (by data
+/// folder): its size is measured every 10 minutes, and without this the next
+/// pass a minute later would see the same overage and delete it again.
+static EVENTS_FREED: Mutex<Option<std::collections::HashMap<std::path::PathBuf, u64>>> = Mutex::new(None);
+
+fn events_freed(dir: &std::path::Path, bytes: u64) {
+    *EVENTS_FREED.lock().unwrap().get_or_insert_with(Default::default).entry(dir.to_path_buf()).or_default() += bytes;
+}
+
+fn events_freed_since_walk(dir: &std::path::Path) -> u64 {
+    EVENTS_FREED.lock().unwrap().as_ref().and_then(|m| m.get(dir).copied()).unwrap_or(0)
+}
+
+/// A new measurement of the data folder is done: the `before` bytes deleted
+/// before it started are in it, no longer to be taken off.
+fn walk_done(dir: &std::path::Path, before: u64) {
+    if let Some(n) = EVENTS_FREED.lock().unwrap().as_mut().and_then(|m| m.get_mut(dir)) {
+        *n = n.saturating_sub(before);
+    }
+}
+
+/// The archive folder did not take recordings that had to leave a full
+/// folder or drive, so they were deleted instead (`deleted` bytes): logged,
+/// and the admins hear it at most every 6 hours.
+fn archive_not_taking(engine: &Arc<Engine>, e: &anyhow::Error, deleted: u64) {
+    if deleted == 0 {
+        return;
+    }
+    #[cfg(test)]
+    ARCHIVE_FAIL_TOLD.with(|c| c.set(c.get() + 1));
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut l = LAST.lock().unwrap();
+        if l.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(600)) {
+            warn!("storage: the archive folder is not taking recordings ({e:#}); deleted {:.1} GB of the oldest instead to keep within the size limits", deleted as f64 / 1e9);
+            *l = Some(std::time::Instant::now());
+        }
+    }
+    crate::account_http::tell_admins_once(
+        engine,
+        "archive-not-taking",
+        6 * 3600,
+        "Recordings could not be moved to the archive folder: the oldest were deleted instead".to_string(),
+        format!("Moving old recordings to the archive folder failed ({e:#}), so the oldest were deleted to keep the recording folders within their size limits and the drive from filling. Check that the archive folder is reachable and writable by the account AmberSight runs as (a Windows service runs as SYSTEM, which may not be allowed to write to a network share). The archive folder is set in Settings, Recording."),
+    );
+}
 
 /// Admins hear (at most every 6 hours) that kept bookmark video had to leave
 /// the full drive: `deleted` files deleted, `moved` moved to the archive folder.
@@ -1318,6 +1717,11 @@ fn kept_video_gone(engine: &Arc<Engine>, deleted: usize, moved: usize) {
 #[cfg(test)]
 thread_local! {
     static KEPT_GONE_TOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ARCHIVE_FAIL_TOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tests: the data folder's other files (pictures, database) as measured, on this thread.
+    static TEST_OTHER_BYTES: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Tests: the drive reserve treats the archive as on another drive with room.
+    static TEST_ARCHIVE_ELSEWHERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Tests: how far every drive is short of its reserve, on this thread.
     static TEST_NEED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
@@ -1385,12 +1789,17 @@ fn retire_segment(
                 std::fs::create_dir_all(parent)?;
             }
             if std::fs::rename(src, &dest).is_err() {
-                std::fs::copy(src, &dest)?;
-                // Already gone (a folder sweep got to it meanwhile) is fine:
-                // the copy is in the archive.
+                if let Err(e) = std::fs::copy(src, &dest) {
+                    // No half copy left in the archive.
+                    let _ = std::fs::remove_file(&dest);
+                    return Err(e.into());
+                }
+                // Copied: it counts as moved. A source the disk will not give
+                // up yet (locked by a player or a scanner) is tried again each
+                // pass; one already gone is fine.
                 if let Err(e) = std::fs::remove_file(src) {
                     if e.kind() != std::io::ErrorKind::NotFound {
-                        return Err(e.into());
+                        leftover(src);
                     }
                 }
             }
@@ -2120,6 +2529,423 @@ mod import_wait_tests {
         let rows = e.db.segments_overlapping("office_wyze", 0, i64::MAX).unwrap();
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(e.db.folder_bytes("new").unwrap() <= 1024 * 1024);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An archive folder that takes nothing (a network share the service may
+    /// see but not write, a drive gone): the data folder's fixed cap still
+    /// holds. Its oldest recordings are deleted instead of moved, and the
+    /// admins hear why (GitHub Discussion #9: the system drive filled).
+    #[test]
+    fn a_data_folder_cap_holds_when_the_archive_takes_nothing() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archfail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("cameras/cam/segments")).unwrap();
+        let arch = dir.join("archive");
+        // The archive is not there (a share the service cannot reach): nothing can move.
+        let cfg = format!("[storage]\nmax_mb = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let file = |i: i64| data.join(format!("cameras/cam/segments/{i}.mp4"));
+        for i in 0..5 {
+            std::fs::write(file(i), vec![0u8; 400_000]).unwrap();
+            let row = crate::db::SegmentRow { path: format!("cameras/cam/segments/{i}.mp4"), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 400_000, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        // An alert with its clip, older than every recording: it stays while
+        // recordings can go.
+        let ev = |id: &str, start: i64| crate::engine::Event { id: id.into(), camera_id: 0, camera: "cam".into(), start, end: start + 10, score: 0.5, clip: Some(format!("/api/clips/{id}")), thumb: None, objects: vec![], protect: false };
+        std::fs::create_dir_all(data.join("clips")).unwrap();
+        std::fs::write(data.join("clips/old-1.mp4"), vec![0u8; 300_000]).unwrap();
+        e.db.insert_event(&ev("old-1", t0 / 1000 - 7200)).unwrap();
+        ARCHIVE_FAIL_TOLD.with(|c| c.set(0));
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        TEST_OTHER_BYTES.with(|c| c.set(Some(0)));
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        TEST_OTHER_BYTES.with(|c| c.set(None));
+        assert!(e.db.folder_bytes("").unwrap() <= 1024 * 1024, "the cap holds: {} bytes left", e.db.folder_bytes("").unwrap());
+        assert_eq!((0..5).filter(|&i| file(i).exists()).collect::<Vec<_>>(), [3, 4], "the oldest recordings go, no more");
+        assert!(data.join("clips/old-1.mp4").exists(), "the alert stays while recordings can go");
+        assert_eq!(ARCHIVE_FAIL_TOLD.with(|c| c.get()), 1, "the admins are told");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A working archive with a backlog longer than one pass moves (a batch a
+    /// pass) and deletes nothing: the rest is moved by the next passes.
+    #[test]
+    fn a_working_archive_with_a_backlog_moves_and_deletes_nothing() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archlog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("cameras/cam/segments")).unwrap();
+        let arch = dir.join("archive");
+        std::fs::create_dir_all(&arch).unwrap();
+        let cfg = format!("[storage]\nmax_mb = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let rel = |i: i64| format!("cameras/cam/segments/{i}.mp4");
+        for i in 0..8 {
+            std::fs::write(data.join(rel(i)), vec![0u8; 400_000]).unwrap();
+            let row = crate::db::SegmentRow { path: rel(i), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 400_000, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        TEST_OTHER_BYTES.with(|c| c.set(Some(0)));
+        retention_pass(&e).unwrap();
+        // One batch (MOVE_ROWS = 3 in tests) moved, nothing deleted.
+        assert_eq!((0..8).filter(|&i| arch.join(rel(i)).exists()).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!((0..8).filter(|&i| data.join(rel(i)).exists()).collect::<Vec<_>>(), [3, 4, 5, 6, 7]);
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        TEST_OTHER_BYTES.with(|c| c.set(None));
+        // The next pass moves the next batch, down to the cap; still nothing deleted.
+        assert_eq!((0..8).filter(|&i| arch.join(rel(i)).exists()).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
+        assert_eq!((0..8).filter(|&i| data.join(rel(i)).exists()).collect::<Vec<_>>(), [6, 7]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With an archive and no recording left in the data folder, the alerts'
+    /// own clips go, oldest first, only as far as needed, and not again on the
+    /// next pass (before the folder is measured again); an alert whose files
+    /// take nothing and a protected one stay.
+    #[test]
+    fn with_an_archive_alert_clips_go_once_no_recording_is_left() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("clips")).unwrap();
+        let arch = dir.join("archive");
+        std::fs::create_dir_all(&arch).unwrap();
+        let cfg = format!("[storage]\nmax_mb = 1\nevent_keep_days = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        // Two days old: past the one day alerts are kept.
+        let t0 = Utc::now().timestamp() - 2 * 86400;
+        let ev = |id: &str, start: i64, protect: bool| crate::engine::Event { id: id.into(), camera_id: 0, camera: "cam".into(), start, end: start + 10, score: 0.5, clip: Some(format!("/api/clips/{id}")), thumb: None, objects: vec![], protect };
+        // Oldest first: a protected one, one with no files, then three 400 KB clips.
+        e.db.insert_event(&ev("p", t0, true)).unwrap();
+        std::fs::write(data.join("clips/p.mp4"), vec![0u8; 400_000]).unwrap();
+        e.db.insert_event(&ev("nofile", t0 + 10, false)).unwrap();
+        for (i, id) in ["a", "b", "c"].into_iter().enumerate() {
+            e.db.insert_event(&ev(id, t0 + 20 + i as i64, false)).unwrap();
+            std::fs::write(data.join(format!("clips/{id}.mp4")), vec![0u8; 400_000]).unwrap();
+        }
+        // Past the keep days but with no clip file of its own (it plays from
+        // the recordings): its picture alone never makes it go.
+        e.db.insert_event(&ev("pic-only", t0 - 100, false)).unwrap();
+        std::fs::create_dir_all(data.join("thumbs")).unwrap();
+        std::fs::write(data.join("thumbs/pic-only.jpg"), vec![0u8; 900_000]).unwrap();
+        // An hour old: within the days alerts are kept, it stays.
+        e.db.insert_event(&ev("recent", Utc::now().timestamp() - 3600, false)).unwrap();
+        std::fs::write(data.join("clips/recent.mp4"), vec![0u8; 400_000]).unwrap();
+        // As measured: 1.6 MB, over the 1 MiB cap by about 550 KB.
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        TEST_OTHER_BYTES.with(|c| c.set(Some(1_600_000)));
+        retention_pass(&e).unwrap();
+        assert!(e.db.get_event("recent").unwrap().is_some(), "a kept alert stays");
+        assert!(e.db.get_event("pic-only").unwrap().is_some(), "an alert without a clip file stays");
+        let left = |e: &Arc<Engine>| ["p", "nofile", "a", "b", "c"].into_iter().filter(|id| e.db.get_event(id).ok().flatten().is_some()).collect::<Vec<_>>();
+        assert_eq!(left(&e), ["p", "nofile", "c"], "the two oldest clips past the keep days go (800 KB), no more");
+        assert!(!data.join("clips/a.mp4").exists() && data.join("clips/p.mp4").exists());
+        // A minute later, the folder not measured again: nothing more goes.
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        TEST_OTHER_BYTES.with(|c| c.set(None));
+        assert_eq!(left(&e), ["p", "nofile", "c"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Alerts deleted while the data folder is being measured stay taken off
+    /// its size after the measurement is stored; the ones from before it do not.
+    #[test]
+    fn alerts_deleted_during_a_measurement_stay_counted() {
+        let d = std::path::PathBuf::from(format!("/nonexistent/walk-{}", std::process::id()));
+        events_freed(&d, 100);
+        let before = events_freed_since_walk(&d);
+        events_freed(&d, 50);
+        walk_done(&d, before);
+        assert_eq!(events_freed_since_walk(&d), 50);
+    }
+
+    /// One file that will not move (its place in the archive is taken), kept
+    /// by a bookmark so nothing deletes it: the files behind it still move,
+    /// and nothing is deleted.
+    #[test]
+    fn one_stuck_file_does_not_stop_the_rest_moving() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archstuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("cameras/cam/segments")).unwrap();
+        let arch = dir.join("archive");
+        // File 0's place in the archive is a folder: it cannot be copied there.
+        std::fs::create_dir_all(arch.join("cameras/cam/segments/0.mp4")).unwrap();
+        let cfg = format!("[storage]\nmax_mb = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let rel = |i: i64| format!("cameras/cam/segments/{i}.mp4");
+        for i in 0..5 {
+            std::fs::write(data.join(rel(i)), vec![0u8; 400_000]).unwrap();
+            let row = crate::db::SegmentRow { path: rel(i), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 400_000, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        e.db.bookmark_add(&crate::db::Bookmark { id: 0, camera: Some("cam".into()), at_ms: t0 + 30_000, note: "n".into(), user: "ann".into(), owner: Some("ann".into()), created_ms: 0, updated_ms: 0, keep: true }).unwrap();
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        TEST_OTHER_BYTES.with(|c| c.set(Some(0)));
+        for _ in 0..3 {
+            retention_pass(&e).unwrap();
+        }
+        TEST_RESERVE.with(|r| r.set(None));
+        TEST_OTHER_BYTES.with(|c| c.set(None));
+        assert_eq!((1..5).filter(|&i| arch.join(rel(i)).is_file()).collect::<Vec<_>>(), [1, 2, 3], "the rest moved, as far as the cap needs");
+        assert_eq!((0..5).filter(|&i| data.join(rel(i)).exists()).collect::<Vec<_>>(), [0, 4], "the stuck one stays, nothing deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Three stuck, kept files at the head with a working archive: nothing is
+    /// deleted, and the archive is not counted as failing (it takes a file of
+    /// its own).
+    #[test]
+    fn three_stuck_files_at_the_head_do_not_make_a_working_archive_fail() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archstuck3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("cameras/cam/segments")).unwrap();
+        let arch = dir.join("archive");
+        for i in 0..3 {
+            std::fs::create_dir_all(arch.join(format!("cameras/cam/segments/{i}.mp4"))).unwrap();
+        }
+        let cfg = format!("[storage]\nmax_mb = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let rel = |i: i64| format!("cameras/cam/segments/{i}.mp4");
+        for i in 0..8 {
+            std::fs::write(data.join(rel(i)), vec![0u8; 200_000]).unwrap();
+            let row = crate::db::SegmentRow { path: rel(i), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 200_000, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        // Kept: files 0..=2 (a bookmark at 1:30 holds the minutes around it).
+        e.db.bookmark_add(&crate::db::Bookmark { id: 0, camera: Some("cam".into()), at_ms: t0 + 90_000, note: "n".into(), user: "ann".into(), owner: Some("ann".into()), created_ms: 0, updated_ms: 0, keep: true }).unwrap();
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        TEST_OTHER_BYTES.with(|c| c.set(Some(0)));
+        for _ in 0..4 {
+            retention_pass(&e).unwrap();
+        }
+        TEST_RESERVE.with(|r| r.set(None));
+        TEST_OTHER_BYTES.with(|c| c.set(None));
+        let deleted: Vec<i64> = (0..8).filter(|&i| !data.join(rel(i)).exists() && !arch.join(rel(i)).is_file()).collect();
+        assert!(deleted.is_empty(), "nothing deleted: {deleted:?}");
+        // (With a batch of 3 in tests the stuck ones fill it; with 5000 the rest move.)
+        assert!(!archive_failing_long(""), "the archive is not counted as failing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The archive's own folder takes files but the folder the recordings go
+    /// to does not (rights set by another account on a NAS): the archive
+    /// counts as failing and the cap holds.
+    #[cfg(unix)]
+    #[test]
+    fn an_archive_that_refuses_below_its_root_counts_as_failing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ambersight-archsub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("cameras/cam/segments")).unwrap();
+        let arch = dir.join("archive");
+        std::fs::create_dir_all(arch.join("cameras")).unwrap();
+        std::fs::set_permissions(arch.join("cameras"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores folder permissions: then nothing to show.
+        let root = std::fs::create_dir(arch.join("cameras/probe")).is_ok();
+        let cfg = format!("[storage]\nmax_mb = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let file = |i: i64| data.join(format!("cameras/cam/segments/{i}.mp4"));
+        for i in 0..5 {
+            std::fs::write(file(i), vec![0u8; 400_000]).unwrap();
+            let row = crate::db::SegmentRow { path: format!("cameras/cam/segments/{i}.mp4"), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 400_000, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        TEST_OTHER_BYTES.with(|c| c.set(Some(0)));
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        TEST_OTHER_BYTES.with(|c| c.set(None));
+        std::fs::set_permissions(arch.join("cameras"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !root {
+            assert_eq!((0..5).filter(|&i| file(i).exists()).collect::<Vec<_>>(), [3, 4], "the cap holds");
+            assert!(std::fs::read_dir(&arch).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("write-check")), "no check file left");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The wait before deleting is per folder: a folder whose moves work does
+    /// not restart another's.
+    #[test]
+    fn the_archive_wait_is_per_folder() {
+        archive_result("x-data", true, false);
+        archive_result("x-new", false, true);
+        assert!(archive_failing_long("x-data"), "still failing (wait 0 in tests)");
+        assert!(!archive_failing_long("x-new"));
+        archive_result("x-data", false, true);
+        assert!(!archive_failing_long("x-data"));
+    }
+
+    /// With a working archive, a data folder whose other files (the database,
+    /// pictures) alone are over its cap loses no alert: deleting them could
+    /// not bring it within the cap; the folder is shown as short instead.
+    #[test]
+    fn alerts_are_not_deleted_when_that_cannot_reach_the_cap() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archdb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("clips")).unwrap();
+        let arch = dir.join("archive");
+        std::fs::create_dir_all(&arch).unwrap();
+        let cfg = format!("[storage]\nmax_mb = 1\nevent_keep_days = 0\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = Utc::now().timestamp() - 86400;
+        for i in 0..5 {
+            let id = format!("e{i}");
+            e.db.insert_event(&crate::engine::Event { id: id.clone(), camera_id: 0, camera: "cam".into(), start: t0 + i, end: t0 + i + 10, score: 0.5, clip: Some(format!("/api/clips/{id}")), thumb: None, objects: vec![], protect: false }).unwrap();
+            std::fs::write(data.join(format!("clips/{id}.mp4")), vec![0u8; 1000]).unwrap();
+        }
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        TEST_OTHER_BYTES.with(|c| c.set(Some(3_000_000)));
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        TEST_OTHER_BYTES.with(|c| c.set(None));
+        assert_eq!((0..5).filter(|i| e.db.get_event(&format!("e{i}")).unwrap().is_some()).count(), 5);
+        assert!(was_short(""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An extra folder over its cap, the archive writable but the recordings'
+    /// own folder read-only (a file a player or scanner holds): each counts as
+    /// moved once copied (the index points at the archive copy), the disk's
+    /// copy is left to the sweep, nothing is deleted or copied twice.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_that_will_not_go_after_its_copy_counts_as_moved() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ambersight-archro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        let new = dir.join("new");
+        let seg = new.join("cameras/cam/segments");
+        std::fs::create_dir_all(data.join("cameras")).unwrap();
+        std::fs::create_dir_all(&seg).unwrap();
+        // The archive on another file system than the source, so rename fails and copy is used:
+        // here (one file system) a read-only source folder makes rename fail too.
+        let arch = dir.join("archive");
+        std::fs::create_dir_all(&arch).unwrap();
+        let cfg = format!(
+            "[[storage.folders]]\nname = \"new\"\npath = {:?}\nmax_mb = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n",
+            new.to_string_lossy(),
+            arch.to_string_lossy()
+        );
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let rel = |i: i64| format!("cameras/cam/segments/{i}.mp4");
+        for i in 0..5 {
+            std::fs::write(new.join(rel(i)), vec![0u8; 400_000]).unwrap();
+            let row = crate::db::SegmentRow { path: rel(i), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 400_000, video_frames: 10, kind: "continuous".into(), folder: "new".into() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores folder permissions: then nothing to show.
+        let root = std::fs::write(seg.join("probe"), b"x").is_ok();
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !root {
+            assert_eq!((0..5).filter(|&i| arch.join(rel(i)).exists()).collect::<Vec<_>>(), [0, 1, 2], "copied once, as far as the cap needs");
+            assert_eq!((0..5).filter(|&i| new.join(rel(i)).exists()).count(), 5, "the locked old copies stay for now");
+            assert_eq!(e.db.folder_bytes("archive").unwrap(), 1_200_000, "the index points at the archive copies");
+            assert_eq!(e.db.folder_bytes("new").unwrap(), 800_000);
+            // Let go: the next pass removes the old copies, nothing else.
+            TEST_RESERVE.with(|r| r.set(Some(0)));
+            retention_pass(&e).unwrap();
+            TEST_RESERVE.with(|r| r.set(None));
+            assert_eq!((0..5).filter(|&i| new.join(rel(i)).exists()).collect::<Vec<_>>(), [3, 4]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An extra folder over its cap with an archive that takes nothing: its
+    /// own oldest recordings are deleted, after one failed move.
+    #[test]
+    fn an_extra_folder_cap_holds_when_the_archive_takes_nothing() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archextra-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        let new = dir.join("new");
+        std::fs::create_dir_all(data.join("cameras")).unwrap();
+        std::fs::create_dir_all(new.join("cameras/cam/segments")).unwrap();
+        let arch = dir.join("archive");
+        // The archive is not there (a share the service cannot reach): nothing can move.
+        let cfg = format!(
+            "[[storage.folders]]\nname = \"new\"\npath = {:?}\nmax_mb = 1\n[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n",
+            new.to_string_lossy(),
+            arch.to_string_lossy()
+        );
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let file = |i: i64| new.join(format!("cameras/cam/segments/{i}.mp4"));
+        for i in 0..5 {
+            std::fs::write(file(i), vec![0u8; 400_000]).unwrap();
+            let row = crate::db::SegmentRow { path: format!("cameras/cam/segments/{i}.mp4"), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 400_000, video_frames: 10, kind: "continuous".into(), folder: "new".into() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        ARCHIVE_FAIL_TOLD.with(|c| c.set(0));
+        TEST_RESERVE.with(|r| r.set(Some(0)));
+        retention_pass(&e).unwrap();
+        TEST_RESERVE.with(|r| r.set(None));
+        assert_eq!((0..5).filter(|&i| file(i).exists()).collect::<Vec<_>>(), [3, 4]);
+        assert!(e.db.folder_bytes("new").unwrap() <= 1024 * 1024);
+        assert_eq!(ARCHIVE_FAIL_TOLD.with(|c| c.get()), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The drive reserve with an archive on another drive that takes nothing:
+    /// the full drive still gets its room (the recordings are deleted), it
+    /// does not fill up (GitHub Discussion #9).
+    #[test]
+    fn a_full_drive_is_freed_when_the_archive_takes_nothing() {
+        let dir = std::env::temp_dir().join(format!("ambersight-archfull-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(data.join("cameras/cam/segments")).unwrap();
+        let arch = dir.join("archive");
+        std::fs::create_dir_all(&arch).unwrap();
+        std::fs::write(arch.join("cameras"), b"not a folder").unwrap();
+        let cfg = format!("[[storage.folders]]\nname = \"archive\"\npath = {:?}\narchive = true\n", arch.to_string_lossy());
+        let mut e = Engine::for_test(toml::from_str(&cfg).unwrap());
+        Arc::get_mut(&mut e).unwrap().data_dir = data.clone();
+        let t0 = (Utc::now().timestamp() - 3600) * 1000;
+        let file = |i: i64| data.join(format!("cameras/cam/segments/{i}.mp4"));
+        for i in 0..5 {
+            std::fs::write(file(i), vec![0u8; 100]).unwrap();
+            let row = crate::db::SegmentRow { path: format!("cameras/cam/segments/{i}.mp4"), start_ms: t0 + i * 60_000, end_ms: t0 + (i + 1) * 60_000, bytes: 100, video_frames: 10, kind: "continuous".into(), folder: String::new() };
+            e.db.insert_segment("cam", &row).unwrap();
+        }
+        ARCHIVE_FAIL_TOLD.with(|c| c.set(0));
+        TEST_ARCHIVE_ELSEWHERE.with(|c| c.set(true));
+        TEST_NEED.with(|r| r.set(Some(250)));
+        retention_pass(&e).unwrap();
+        TEST_NEED.with(|r| r.set(None));
+        TEST_ARCHIVE_ELSEWHERE.with(|c| c.set(false));
+        assert_eq!((0..5).filter(|&i| file(i).exists()).collect::<Vec<_>>(), [3, 4], "the oldest are deleted");
+        assert!(ARCHIVE_FAIL_TOLD.with(|c| c.get()) > 0, "the admins are told");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

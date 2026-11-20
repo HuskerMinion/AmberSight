@@ -3282,6 +3282,12 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.12.3**
+
+- No API change. Storage: when old recordings cannot be moved to the archive folder, they are
+  deleted instead so the folders' size limits and the drive's free-space reserve hold; admins get a
+  notification saying so.
+
 **New in 0.12.2**
 
 - `GET /api/playback`: a window asked for again (a browser's later byte ranges) is the same clip as
