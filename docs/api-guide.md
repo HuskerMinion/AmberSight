@@ -3282,6 +3282,13 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.12.5**
+
+- No API change. `GET /api/playback/picture` finds the picture of every recorded moment of a
+  camera recorded through ffmpeg (some moments answered 204 `x-none: 1`, or a picture from the
+  start of the recording). Cameras recorded through ffmpeg (direct or motion-only) with Record
+  audio off no longer record sound; recordings made before keep the sound they have.
+
 **New in 0.12.4**
 
 - `GET /api/snapshot/:id` no longer wakes a battery (on-demand) camera, for anyone: asleep, it is

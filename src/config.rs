@@ -585,8 +585,8 @@ pub struct CameraConfig {
     /// text overlay). Skipped for direct stream-copy — no re-encode there.
     #[serde(default)]
     pub overlay: bool,
-    /// Copy the source's audio track into segments when present (classic NVR audio
-    /// channels). Direct mode already carries audio via -c copy.
+    /// Record the source's audio track into segments when present (classic NVR audio
+    /// channels); off: no recorder keeps the camera's sound.
     #[serde(default)]
     pub audio: bool,
     /// Share this camera's streams with other apps over RTSP (see

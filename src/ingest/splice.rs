@@ -1439,29 +1439,29 @@ fn codec_record(init: &[u8]) -> Option<(bool, &[u8])> {
     None
 }
 
+/// How far past a recording's first keyframe a moment may lie for that
+/// keyframe to be its picture without reading the recording's whole layout.
+const HEAD_PICK_MS: f64 = 3000.0;
+
 /// The picture on screen at `at_ms`: the last keyframe recorded at or
 /// before it. Where a recording's layout is not known yet, its first
-/// keyframe stands for all of it (one short read from the start of the
-/// file instead of a seek per fragment).
+/// keyframe stands for a moment up to HEAD_PICK_MS past it (one short read
+/// from the start of the file instead of a seek per fragment); otherwise,
+/// or when the start of the file has no keyframe of its own (ffmpeg can
+/// begin a recording with a fragment of audio alone), the whole layout is
+/// read (and kept). A file whose later part cannot be read keeps its first
+/// keyframe.
 pub fn key_picture(segments: &[SourceSegment], at_ms: i64) -> Result<Option<KeyPicture>> {
     let at = at_ms as f64 + 1.0;
     let mut order: Vec<&SourceSegment> = segments.iter().filter(|s| s.start_ms as f64 <= at).collect();
     // The recording that started last before `at` holds it.
     order.sort_by_key(|s| std::cmp::Reverse(s.start_ms));
-    for s in order {
-        let p = match parse_segment_opt(&s.path, false).ok().flatten() {
-            Some(p) => p,
-            None => match segment_head(&s.path) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::debug!("picture: skipping {}: {e:#}", s.path.display());
-                    continue;
-                }
-            },
-        };
-        let Some(video) = p.tracks.iter().find(|t| t.video).cloned() else { continue };
+    // The last keyframe at or before `at` in a recording's layout:
+    // (wall ms, offset in the file, size).
+    let pick_in = |s: &SourceSegment, p: &ParsedSegment| -> Option<(f64, u64, u32)> {
+        let video = p.tracks.iter().find(|t| t.video)?;
         let ts = video.timescale.max(1) as f64;
-        let mut pick: Option<(f64, u64, u32)> = None;
+        let mut pick = None;
         for frag in &p.fragments {
             let Some(vt) = frag.trafs.iter().find(|t| t.track_id == video.id) else { continue };
             let wall = s.start_ms as f64 + vt.tfdt as f64 * 1000.0 / ts;
@@ -1472,6 +1472,42 @@ pub fn key_picture(segments: &[SourceSegment], at_ms: i64) -> Result<Option<KeyP
                 pick = Some((wall, frag.offset + off, size));
             }
         }
+        pick
+    };
+    for s in order {
+        let (p, pick) = match parse_segment_opt(&s.path, false).ok().flatten() {
+            Some(p) => {
+                let pick = pick_in(s, &p);
+                (p, pick)
+            }
+            None => {
+                let head = segment_head(&s.path);
+                // (The first fragment's keyframe does only for a moment near
+                // it: further into the recording a later keyframe holds it.)
+                let near = |pick: &(f64, u64, u32)| at - pick.0 <= HEAD_PICK_MS || s.end_ms as f64 <= pick.0 + HEAD_PICK_MS;
+                match head.as_ref().ok().map(|h| (h, pick_in(s, h))) {
+                    Some((h, Some(pick))) if near(&pick) => (h.clone(), Some(pick)),
+                    // The first fragment holds no keyframe at or before `at`
+                    // (audio alone, or it could not be read), or `at` lies
+                    // further in: the whole layout, which is then kept like
+                    // any other.
+                    _ => match parse_segment(&s.path) {
+                        Ok(p) => {
+                            let pick = pick_in(s, &p);
+                            (p, pick)
+                        }
+                        // (A damaged later fragment: the first fragment's keyframe, if any, as before.)
+                        Err(e) => match head.as_ref().ok().and_then(|h| pick_in(s, h).map(|pk| (h.clone(), Some(pk)))) {
+                            Some(hp) => hp,
+                            None => {
+                                tracing::debug!("picture: skipping {}: {e:#}", s.path.display());
+                                continue;
+                            }
+                        },
+                    },
+                }
+            }
+        };
         let Some((wall, off, size)) = pick else { continue };
         // (Already checked when the layout was read; checked again here so a
         // damaged number can never make us set aside gigabytes of memory.)
@@ -1917,6 +1953,78 @@ mod tests {
         assert_eq!(k.size, Some((64, 48)));
         assert_eq!(k.desc, avcc);
         assert!(!k.data.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A recording from the ffmpeg pipeline (its layout is not in the index)
+    /// that starts with a fragment of audio alone, as ffmpeg writes it when
+    /// the camera's video timestamps run ahead of its audio: its keyframes
+    /// are found, not "nothing recorded".
+    #[test]
+    fn a_picture_is_found_when_a_recording_starts_with_audio_alone() {
+        use crate::ingest::fmp4::{fragment, init_segment, Sample, TrackRun};
+        use crate::ingest::g711::flac_sample_entry;
+        let dir = std::env::temp_dir().join(format!("amber-picture-audio-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let avcc = [1u8, 0x64, 0, 0x28, 0xff, 0xe0, 0];
+        let video = TrackInfo { sample_entry: crate::ingest::flv::video_sample_entry(false, &avcc, 64, 48), ..video_track() };
+        let audio = TrackInfo { kind: TrackKind::Audio, timescale: 8000, sample_entry: flac_sample_entry(8000), width: 0, height: 0 };
+        let sample = |duration: u32, is_sync: bool| Sample { duration, data: vec![if is_sync { 0x65 } else { 0x41 }; 40], is_sync, composition_offset: 0 };
+        let gop = |at: u64| TrackRun { track_index: 0, base_decode_time: at, samples: (0..10).map(|i| sample(9000, i == 0)).collect() };
+        let sound = |at: u64| TrackRun { track_index: 1, base_decode_time: at, samples: vec![sample(8000, true)] };
+        let mut file = init_segment(&[video, audio]);
+        // Audio alone first, then a keyframe each second (0 s and 1 s).
+        file.extend(fragment(1, &[sound(0)]));
+        file.extend(fragment(2, &[gop(0), sound(8000)]));
+        file.extend(fragment(3, &[gop(90_000)]));
+        let path = dir.join("cam-1795214089461-seg000001.mp4");
+        std::fs::write(&path, &file).unwrap();
+        let t0 = 1_795_214_100_000i64;
+        let segs = vec![SourceSegment { path, start_ms: t0, end_ms: t0 + 2000, low: false, sub: false }];
+        let k = key_picture(&segs, t0 + 1500).unwrap().expect("a recorded moment has a picture");
+        assert_eq!(k.wall_ms - t0, 1000);
+        assert_eq!(k.data[0], 0x65);
+        assert_eq!(key_picture(&segs, t0 + 500).unwrap().map(|k| k.wall_ms - t0), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picture_far_into_a_recording_is_its_nearest_keyframe() {
+        use crate::ingest::fmp4::{fragment, init_segment, Sample, TrackRun};
+        let dir = std::env::temp_dir().join(format!("amber-picture-far-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let avcc = [1u8, 0x64, 0, 0x28, 0xff, 0xe0, 0];
+        let video = TrackInfo { sample_entry: crate::ingest::flv::video_sample_entry(false, &avcc, 64, 48), ..video_track() };
+        let sample = |duration: u32, is_sync: bool, v: u8| Sample { duration, data: vec![v; 40], is_sync, composition_offset: 0 };
+        // A keyframe each second for 10 s, its first byte the second it is at.
+        let mut file = init_segment(&[video]);
+        for k in 0..10u32 {
+            let run = TrackRun { track_index: 0, base_decode_time: k as u64 * 90_000, samples: (0..10).map(|i| sample(9000, i == 0, k as u8)).collect() };
+            file.extend(fragment(k + 1, &[run]));
+        }
+        // (A layout never read before: no other test uses this file.)
+        let path = dir.join(format!("cam-far-{}-seg000001.mp4", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+        let t0 = 1_795_214_100_000i64;
+        let segs = vec![SourceSegment { path, start_ms: t0, end_ms: t0 + 10_000, low: false, sub: false }];
+        // 8.5 s in: the keyframe at 8 s, not the recording's first one.
+        let k = key_picture(&segs, t0 + 8500).unwrap().expect("a picture");
+        assert_eq!((k.wall_ms - t0, k.data[0]), (8000, 8));
+        assert_eq!(key_picture(&segs, t0 + 1200).unwrap().map(|k| k.wall_ms - t0), Some(1000));
+        // A copy whose last fragment is damaged: its first keyframe still.
+        let mut bad = file.clone();
+        let at = bad.windows(4).rposition(|w| w == b"trun").unwrap();
+        bad[at..at + 4].copy_from_slice(b"trux");
+        let path = dir.join(format!("cam-far-bad-{}-seg000001.mp4", std::process::id()));
+        std::fs::write(&path, &bad).unwrap();
+        let segs = vec![SourceSegment { path, start_ms: t0, end_ms: t0 + 10_000, low: false, sub: false }];
+        if let Some(k) = key_picture(&segs, t0 + 8500).unwrap() {
+            assert!(k.wall_ms - t0 == 0 || k.wall_ms - t0 == 8000, "{}", k.wall_ms - t0);
+        } else {
+            panic!("a damaged later fragment left no picture at all");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

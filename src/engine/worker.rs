@@ -12,13 +12,45 @@ pub fn recording_filters(cfg: &CameraConfig) -> String {
     }
 }
 
+/// Which of the camera's streams a recorder keeps: the first video stream,
+/// and the first audio stream only when the camera records sound (ffmpeg on
+/// its own takes an audio stream too). `copy`: the sound is copied as it
+/// is, as before (made AAC, ffmpeg cannot write a recording until sound
+/// arrives: a camera that lists sound but sends none recorded nothing);
+/// else it is made AAC, as the re-encoding recorders do.
+fn recorder_maps(audio: bool, copy: bool) -> Vec<String> {
+    let mut a: Vec<String> = ["-map", "0:v:0"].map(String::from).to_vec();
+    if audio {
+        a.extend(["-map", "0:a:0?", "-c:a", if copy { "copy" } else { "aac" }].map(String::from));
+    }
+    a
+}
+
+/// The ffmpeg arguments of the direct recorder (`input`: its input
+/// arguments; `out`: the segment file pattern): the camera's stream copied
+/// as it is, its sound only when the camera records sound (ffmpeg on its
+/// own takes a video and an audio stream, so sound was recorded with
+/// "Record audio" off).
+fn direct_recorder_args(input: Vec<String>, audio: bool, segment_seconds: u64, out: String) -> Vec<String> {
+    let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    rargs.extend(input);
+    rargs.extend(recorder_maps(audio, true));
+    rargs.extend(["-f", "segment", "-segment_time"].map(String::from));
+    rargs.push(segment_seconds.to_string());
+    rargs.extend(["-reset_timestamps", "1"].map(String::from));
+    rargs.extend(FRAGMENTED.map(String::from));
+    rargs.extend(["-c:v", "copy"].map(String::from));
+    rargs.push(out);
+    rargs
+}
+
 /// The ffmpeg arguments of the sub stream recorder (`input`: its input
 /// arguments; `out`: the segment file pattern): the sub stream copied as
 /// it is.
 fn sub_recorder_args(input: Vec<String>, segment_seconds: u64, out: String) -> Vec<String> {
     let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
     rargs.extend(input);
-    rargs.extend(["-map", "0:v"].map(String::from));
+    rargs.extend(["-map", "0:v:0"].map(String::from));
     rargs.extend(["-f", "segment", "-segment_time"].map(String::from));
     rargs.push(segment_seconds.to_string());
     rargs.extend(["-reset_timestamps", "1"].map(String::from));
@@ -553,7 +585,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 "[rec]".into(),
             ]);
             if cfg.audio {
-                args.extend(["-map", "0:a?", "-c:a", "aac"].map(String::from));
+                args.extend(["-map", "0:a:0?", "-c:a", "aac"].map(String::from));
             }
             args.extend(super::ffpath::rec_encode_args(rec_enc.as_ref(), segment_seconds));
             args.extend(super::ffpath::encode_thread_args(rec_enc.as_ref(), budget));
@@ -658,9 +690,9 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
             rargs.extend(super::ffpath::decode_thread_args(budget));
             rargs.extend(input_args(&cfg, try_udp, &camera_url(&cfg)));
-            rargs.extend(["-map", "0:v"].map(String::from));
+            rargs.extend(["-map", "0:v:0"].map(String::from));
             if cfg.audio {
-                rargs.extend(["-map", "0:a?", "-c:a", "aac"].map(String::from));
+                rargs.extend(["-map", "0:a:0?", "-c:a", "aac"].map(String::from));
             }
             if !picture.is_empty() {
                 chain.push(picture.clone());
@@ -703,18 +735,8 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // Direct mode: a second ffmpeg stream-copies the source into segments
         // while the analysis process decodes its own stream.
         if direct && !motion_only {
-            let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
-            rargs.extend(input_args(&cfg, try_udp, &camera_url(&cfg)));
-            rargs.push("-f".into());
-            rargs.push("segment".into());
-            rargs.push("-segment_time".into());
-            rargs.push(engine.config.lock().unwrap().storage.segment_seconds.to_string());
-            rargs.push("-reset_timestamps".into());
-            rargs.push("1".into());
-            rargs.extend(FRAGMENTED.map(String::from));
-            rargs.push("-c".into());
-            rargs.push("copy".into());
-            rargs.push(seg_dir.join(format!("{seg_prefix}%06d.mp4")).to_string_lossy().into_owned());
+            let segment_seconds = engine.config.lock().unwrap().storage.segment_seconds;
+            let rargs = direct_recorder_args(input_args(&cfg, try_udp, &camera_url(&cfg)), cfg.audio, segment_seconds, seg_dir.join(format!("{seg_prefix}%06d.mp4")).to_string_lossy().into_owned());
             let rec_child: Option<std::process::Child> = match crate::child::ffmpeg()
                 .args(&rargs)
                 .stdout(std::process::Stdio::null())
@@ -992,6 +1014,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                             rargs.extend(super::ffpath::decode_thread_args(budget));
                                         }
                                         rargs.extend(input_args(&cfg, try_udp, &camera_url(&cfg)));
+                                        rargs.extend(recorder_maps(cfg.audio, copy));
                                         rargs.push("-f".into());
                                         rargs.push("segment".into());
                                         rargs.push("-segment_time".into());
@@ -1000,7 +1023,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                         rargs.push("1".into());
                                         rargs.extend(FRAGMENTED.map(String::from));
                                         if copy {
-                                            rargs.push("-c".into());
+                                            rargs.push("-c:v".into());
                                             rargs.push("copy".into());
                                         } else {
                                             let mut chain: Vec<&str> = Vec::new();
@@ -2686,8 +2709,71 @@ mod recording_filter_tests {
         let input = vec!["-i".to_string(), "rtsp://192.0.2.1/sub".to_string()];
         let a = sub_recorder_args(input, 10, "out%06d.mp4".into());
         let j = a.join(" ");
-        assert!(j.contains("-c copy") && !j.contains("-vf"), "{j}");
+        assert!(j.contains("-c copy") && j.contains("-map 0:v:0") && !j.contains("-vf"), "{j}");
         assert_eq!(a.last().map(String::as_str), Some("out%06d.mp4"));
+    }
+
+    #[test]
+    fn the_direct_recorder_records_sound_only_when_asked() {
+        let input = || vec!["-i".to_string(), "rtsp://192.0.2.1/main".to_string()];
+        let off = direct_recorder_args(input(), false, 10, "out%06d.mp4".into()).join(" ");
+        assert!(off.contains("-map 0:v:0") && !off.contains("0:a") && off.contains("-c:v copy"), "{off}");
+        let on = direct_recorder_args(input(), true, 10, "out%06d.mp4".into()).join(" ");
+        assert!(on.contains("-map 0:v:0") && on.contains("-map 0:a:0? -c:a copy") && on.contains("-c:v copy"), "{on}");
+    }
+
+    #[test]
+    fn the_motion_recorder_records_sound_only_when_asked() {
+        for copy in [true, false] {
+            assert_eq!(recorder_maps(false, copy).join(" "), "-map 0:v:0");
+        }
+        assert_eq!(recorder_maps(true, true).join(" "), "-map 0:v:0 -map 0:a:0? -c:a copy");
+        assert_eq!(recorder_maps(true, false).join(" "), "-map 0:v:0 -map 0:a:0? -c:a aac");
+    }
+
+    /// With ffmpeg: a source with sound, recorded with sound off, has no
+    /// audio track; with sound on, it has one.
+    #[test]
+    fn a_direct_recording_has_no_sound_with_record_audio_off() {
+        let ff = crate::ffmpeg_bin::program();
+        let dir = std::env::temp_dir().join(format!("amber-direct-audio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.mp4");
+        let made = std::process::Command::new(&ff)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=2", "-f", "lavfi", "-i", "sine=duration=2"])
+            .args(["-c:v", "libx264", "-g", "10", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+            .arg(&src)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ffmpeg with libx264/aac not available");
+            return;
+        }
+        // G.711 sound, as many cameras send (MP4 cannot hold it as it is).
+        let g711 = dir.join("src.mkv");
+        let made = std::process::Command::new(&ff)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&src)
+            .args(["-c:v", "copy", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1"])
+            .arg(&g711)
+            .status();
+        assert!(made.is_ok_and(|s| s.success()));
+        let tracks = |src: &std::path::Path, tag: &str, audio: bool| {
+            let out = dir.join(format!("{tag}{}-%06d.mp4", audio as u8));
+            let input = vec!["-i".to_string(), src.to_string_lossy().into_owned()];
+            let st = std::process::Command::new(&ff).args(direct_recorder_args(input, audio, 10, out.to_string_lossy().into_owned())).status().unwrap();
+            assert!(st.success(), "{tag} audio {audio}: the recorder failed");
+            let first = dir.join(format!("{tag}{}-000000.mp4", audio as u8));
+            let probe = std::process::Command::new(&ff).args(["-hide_banner", "-i"]).arg(&first).output().unwrap();
+            let info = String::from_utf8_lossy(&probe.stderr).into_owned();
+            assert!(info.contains("Video:"), "{tag}: {info}");
+            info.contains("Audio:")
+        };
+        assert!(!tracks(&src, "aac", false), "sound recorded with Record audio off");
+        assert!(tracks(&src, "aac", true), "no sound with Record audio on");
+        // (G.711 with sound on cannot be copied into MP4: as before, not yet handled here.)
+        assert!(!tracks(&g711, "g711", false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
