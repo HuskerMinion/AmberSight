@@ -17,13 +17,26 @@ pub fn recording_filters(cfg: &CameraConfig) -> String {
 /// its own takes an audio stream too). `copy`: the sound is copied as it
 /// is, as before (made AAC, ffmpeg cannot write a recording until sound
 /// arrives: a camera that lists sound but sends none recorded nothing);
-/// else it is made AAC, as the re-encoding recorders do.
-fn recorder_maps(audio: bool, copy: bool) -> Vec<String> {
+/// else it is made AAC, as the re-encoding recorders do. `flac`: sound an
+/// MP4 file cannot hold as it is (G.711, which the camera's recorder said
+/// so of) is made FLAC instead of copied, as the built-in reader does.
+fn recorder_maps(audio: bool, copy: bool, flac: bool) -> Vec<String> {
     let mut a: Vec<String> = ["-map", "0:v:0"].map(String::from).to_vec();
     if audio {
-        a.extend(["-map", "0:a:0?", "-c:a", if copy { "copy" } else { "aac" }].map(String::from));
+        let codec = match (copy, flac) {
+            (true, false) => "copy",
+            (true, true) => "flac",
+            (false, _) => "aac",
+        };
+        a.extend(["-map", "0:a:0?", "-c:a", codec].map(String::from));
     }
     a
+}
+
+/// ffmpeg's words for a stream the MP4 file cannot hold as it is ("Could not
+/// find tag for codec pcm_mulaw in stream #1"): a G.711 camera's sound copied.
+pub(crate) fn copy_codec_refused(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("could not find tag for codec")
 }
 
 /// The ffmpeg arguments of the direct recorder (`input`: its input
@@ -31,14 +44,14 @@ fn recorder_maps(audio: bool, copy: bool) -> Vec<String> {
 /// as it is, its sound only when the camera records sound (ffmpeg on its
 /// own takes a video and an audio stream, so sound was recorded with
 /// "Record audio" off).
-fn direct_recorder_args(input: Vec<String>, audio: bool, segment_seconds: u64, out: String) -> Vec<String> {
+fn direct_recorder_args(input: Vec<String>, audio: bool, flac: bool, segment_seconds: u64, out: String) -> Vec<String> {
     let mut rargs: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
     rargs.extend(input);
-    rargs.extend(recorder_maps(audio, true));
+    rargs.extend(recorder_maps(audio, true, flac));
     rargs.extend(["-f", "segment", "-segment_time"].map(String::from));
     rargs.push(segment_seconds.to_string());
     rargs.extend(["-reset_timestamps", "1"].map(String::from));
-    rargs.extend(FRAGMENTED.map(String::from));
+    rargs.extend(fragmented(audio && flac));
     rargs.extend(["-c:v", "copy"].map(String::from));
     rargs.push(out);
     rargs
@@ -295,6 +308,18 @@ pub fn video_filter(cfg: &CameraConfig) -> String {
 /// reader writes.
 const FRAGMENTED: [&str; 2] = ["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"];
 
+/// [`FRAGMENTED`] for a copying recorder; with `flac` (its sound made FLAC,
+/// see [`recorder_maps`]) the MP4 muxer is let take it: ffmpeg before 6
+/// (Debian 12, Ubuntu 22.04) calls FLAC in MP4 experimental and refuses it
+/// ("Experimental feature"), and only the segment's own options reach it.
+fn fragmented(flac: bool) -> [String; 2] {
+    let mut f = FRAGMENTED.map(String::from);
+    if flac {
+        f[1].push_str(":strict=experimental");
+    }
+    f
+}
+
 pub fn ffmpeg_input_args(url: &str) -> Vec<String> {
     ffmpeg_input_args_over(url, false)
 }
@@ -411,6 +436,10 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
     }
     // Retry delay for local sources that fail; grows while nothing works.
     let mut backoff: u64 = 3;
+    // Sessions in a row a recorder stopped by itself soon after the start.
+    let mut rec_quick: u32 = 0;
+    // The camera's sound cannot be copied into an MP4 file (G.711): made FLAC.
+    let mut audio_flac = false;
     // (Hardware decoding that failed for this camera is remembered in
     // hwdecode: the way is tried again after a wait that grows each time.)
     // The same for the hardware encoder of a re-encoded recording (why it is
@@ -664,15 +693,22 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // Recorders (direct, sub stream) with their stderr, and whether their
         // early exit has been looked at.
         let mut rec_watch: Vec<RecWatch> = Vec::new();
+        // The same recorders with their recordings' name start, for the stall watch.
+        let mut stall_recs: Vec<(Arc<Mutex<std::process::Child>>, String)> = Vec::new();
         let started = std::time::Instant::now();
         let mut last_rec_check = std::time::Instant::now();
         let mut motion_checked = false;
         let motion_bad = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut motion_renew = std::time::Instant::now();
         let mut motion_started = std::time::Instant::now();
+        // Whether the event recorder still starts new files (it runs only
+        // while pictures come, so the frame loop looks at it itself).
+        let mut motion_progress: Option<SegProgress> = None;
         // The main-stream recorder (analysis on the sub stream) stopped by
         // itself: its last words, and the session restarts.
         let mut rec_died: Option<String> = None;
+        // The recorder that stopped copies the stream (decodes nothing).
+        let mut rec_died_copy = false;
         let mut meter = super::ffpath::SegMeter::default();
 
         // The main stream recorded by its own ffmpeg while motion decodes
@@ -720,6 +756,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                     let cb = Arc::new(Mutex::new(c));
                     children.push(cb.clone());
                     if let Some((_, t)) = extra_tails.last() {
+                        stall_recs.push((cb.clone(), seg_prefix.clone()));
                         let mut w = RecWatch::new(cb, t.clone());
                         w.main = true;
                         rec_watch.push(w);
@@ -736,7 +773,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // while the analysis process decodes its own stream.
         if direct && !motion_only {
             let segment_seconds = engine.config.lock().unwrap().storage.segment_seconds;
-            let rargs = direct_recorder_args(input_args(&cfg, try_udp, &camera_url(&cfg)), cfg.audio, segment_seconds, seg_dir.join(format!("{seg_prefix}%06d.mp4")).to_string_lossy().into_owned());
+            let rargs = direct_recorder_args(input_args(&cfg, try_udp, &camera_url(&cfg)), cfg.audio, audio_flac, segment_seconds, seg_dir.join(format!("{seg_prefix}%06d.mp4")).to_string_lossy().into_owned());
             let rec_child: Option<std::process::Child> = match crate::child::ffmpeg()
                 .args(&rargs)
                 .stdout(std::process::Stdio::null())
@@ -760,9 +797,12 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                 let cb = Arc::new(Mutex::new(c));
                 children.push(cb.clone());
                 if let Some((_, t)) = extra_tails.last() {
+                    stall_recs.push((cb.clone(), seg_prefix.clone()));
                     let mut w = RecWatch::new(cb, t.clone());
-                    // With motion on the sub stream nothing else would notice it stop.
+                    // (It records the main stream all along; with motion on the
+                    // main stream too, its stop alone still restarts the camera.)
                     w.main = ana_sub;
+                    w.copy = true;
                     rec_watch.push(w);
                 }
             }
@@ -783,7 +823,10 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                     let cb = Arc::new(Mutex::new(c));
                     children.push(cb.clone());
                     if let Some((_, t)) = extra_tails.last() {
-                        rec_watch.push(RecWatch::new(cb, t.clone()));
+                        stall_recs.push((cb.clone(), format!("{slug_name}-sub-{run_ts}-seg")));
+                        let mut w = RecWatch::new(cb, t.clone());
+                        w.copy = true;
+                        rec_watch.push(w);
                     }
                 }
                 Err(err) => {
@@ -793,6 +836,27 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
         }
         start_watchdog(children.clone(), handle.clone());
+        let stall_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stall_msg: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        // One ffmpeg records and feeds motion: stuck, it is restarted as
+        // any recorder (pictures may still come while it writes nothing new).
+        if single && cfg.record {
+            stall_recs.push((child_box.clone(), seg_prefix.clone()));
+        }
+        if !stall_recs.is_empty() {
+            start_stall_watch(StallWatch {
+                camera: cfg.name.clone(),
+                seg_dir: seg_dir.clone(),
+                folder_name: folder_name.clone(),
+                folder_root: folder_root.clone(),
+                segment_seconds,
+                recorders: std::mem::take(&mut stall_recs),
+                capture: child_box.clone(),
+                handle: handle.clone(),
+                stop: stall_stop.clone(),
+                stuck: stall_msg.clone(),
+            });
+        }
         // Events of a motion-only camera are re-encoded too when the
         // picture changes or Direct copy is off.
         let motion_reencode = motion_only && netcam && !(cfg.direct && picture.is_empty());
@@ -929,19 +993,73 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                         }
                         // (Whether the folder is there is asked on the probe's own
                         // thread: a hung share must not stall frames.)
+                        // Every recorder ran a good while: a later quick stop
+                        // gets its quick tries again. (A session has one
+                        // continuous recorder: direct, re-encoded main stream,
+                        // or the sub stream's copy.)
+                        if started.elapsed() >= REC_LONG && !rec_watch.is_empty() && rec_watch.iter().all(|w| !w.done) {
+                            rec_quick = 0;
+                        }
                         for w in rec_watch.iter_mut() {
                             if !w.done {
                                 if w.child.lock().unwrap().try_wait().ok().flatten().is_some() {
                                     w.done = true;
+                                    if stall_msg.lock().unwrap().is_some() {
+                                        // The stall watch stopped it: the session ends with
+                                        // its reason (not a quick stop, no hold).
+                                        rec_died = Some(String::new());
+                                        rec_died_copy = w.copy;
+                                        break;
+                                    }
                                     let text = w.tail.lock().unwrap().clone();
-                                    if w.main && !write_hint(&[text.as_str()]) {
-                                        // Motion goes on from the sub stream:
-                                        // start over so recording resumes.
-                                        rec_died = Some(text);
-                                    } else if exit_needs_probe(&text, started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
-                                        spawn_folder_check(&folder_name, &folder_root, &seg_dir, 90, Some(w.bad.clone()));
+                                    // Sound it could not copy (G.711): at
+                                    // once again with that sound made FLAC.
+                                    let step = if w.copy && cfg.audio && !audio_flac && copy_codec_refused(&text) {
+                                        info!("camera '{}': its sound cannot be copied into the recording ({}); recording it as FLAC", cfg.name, tail_summary(&text).unwrap_or_default());
+                                        audio_flac = true;
+                                        RecExit::Restart
+                                    } else {
+                                        rec_exit_step(&text, started.elapsed(), &mut rec_quick)
+                                    };
+                                    match step {
+                                        // Motion goes on without it (from the
+                                        // sub stream, or from its own read of
+                                        // the main stream): start over so
+                                        // recording resumes.
+                                        RecExit::Restart => {
+                                            rec_died = Some(text);
+                                            rec_died_copy = w.copy;
+                                        }
+                                        // It stops at once every time (a
+                                        // codec the file cannot hold, a camera
+                                        // that takes one connection): motion
+                                        // goes on, recording is tried again later.
+                                        RecExit::Hold => {
+                                            let msg = recorder_held_text(tail_summary(&text).as_deref());
+                                            warn!("camera '{}': {msg}", cfg.name);
+                                            {
+                                                let mut st = handle.state.write().unwrap();
+                                                st.last_error = Some(msg);
+                                                st.last_error_at = Some(Utc::now().timestamp());
+                                            }
+                                            w.hold = Some((std::time::Instant::now() + REC_HOLD, text.clone()));
+                                            if exit_needs_probe(&text, started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
+                                                spawn_folder_check(&folder_name, &folder_root, &seg_dir, 90, Some(w.bad.clone()));
+                                            }
+                                        }
+                                        RecExit::Folder => {
+                                            if exit_needs_probe(&text, started.elapsed(), &mut || super::storage::real_probe_due(&folder_name, 600)) {
+                                                spawn_folder_check(&folder_name, &folder_root, &seg_dir, 90, Some(w.bad.clone()));
+                                            }
+                                        }
                                     }
                                 }
+                            } else if let Some((_, text)) = w.hold.as_ref().filter(|(at, _)| std::time::Instant::now() >= *at && recorder.is_none()) {
+                                // Held long enough: the camera starts over to try recording again
+                                // (not while a motion event is being recorded: the sub stream
+                                // recorder's retry waits for the event's end).
+                                rec_died = Some(text.clone());
+                                rec_died_copy = w.copy;
                             } else if w.due_renewal() {
                                 // Dead from a folder problem and the stream
                                 // goes on: keep the finding alive (no restart
@@ -952,10 +1070,43 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                         if rec_died.is_some() {
                             break;
                         }
+                        // An event recorder that runs on and writes but starts
+                        // no new file (the camera's timestamps stopped): its
+                        // file is closed and the event goes on in a new one.
+                        // (One that writes nothing is left alone: on a hung
+                        // share a stop would hang too, holding its places.)
+                        if let (Some(p), Some(prefix), false) = (motion_progress.as_mut(), motion_prefix.as_ref(), motion_checked) {
+                            let now = std::time::Instant::now();
+                            p.poll(&seg_dir, prefix, now);
+                            let why = match p.verdict(now, stuck_after(segment_seconds)) {
+                                Progress::Stuck(limit) => Some(format!("the event recorder stopped starting new recordings ({} s with no new file)", limit.as_secs())),
+                                Progress::Fine | Progress::NotWriting | Progress::NotWritingLong(_) => None,
+                            };
+                            if let Some(why) = why {
+                                if recorder.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_none()) {
+                                    warn!("camera '{}': {why}; starting it over", cfg.name);
+                                    if let Some(c) = recorder.take() {
+                                        let slot = recorder_slot.take();
+                                        let writing = engine.writing_into(&cfg.name);
+                                        thread::spawn(move || {
+                                            stop_recorder(c);
+                                            drop(slot);
+                                            drop(writing);
+                                        });
+                                    }
+                                }
+                                motion_progress = None;
+                            }
+                        }
                         if !motion_checked && recorder.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_some()) {
                             motion_checked = true;
                             motion_renew = std::time::Instant::now() + std::time::Duration::from_secs(300);
                             let text = extra_tails.iter().rev().find(|(n, _)| *n == "motion recorder").map(|(_, t)| t.lock().unwrap().clone()).unwrap_or_default();
+                            // Its sound could not be copied (G.711): FLAC for the next events.
+                            if cfg.audio && !audio_flac && copy_codec_refused(&text) {
+                                info!("camera '{}': its sound cannot be copied into the recording; recording it as FLAC", cfg.name);
+                                audio_flac = true;
+                            }
                             // The graphics card would not encode it: the
                             // processor for the next events.
                             if let (Some(label), true) = (&motion_hw, super::ffpath::hw_encode_blamed(&text)) {
@@ -1014,14 +1165,14 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                             rargs.extend(super::ffpath::decode_thread_args(budget));
                                         }
                                         rargs.extend(input_args(&cfg, try_udp, &camera_url(&cfg)));
-                                        rargs.extend(recorder_maps(cfg.audio, copy));
+                                        rargs.extend(recorder_maps(cfg.audio, copy, audio_flac));
                                         rargs.push("-f".into());
                                         rargs.push("segment".into());
                                         rargs.push("-segment_time".into());
                                         rargs.push(segment_seconds.to_string());
                                         rargs.push("-reset_timestamps".into());
                                         rargs.push("1".into());
-                                        rargs.extend(FRAGMENTED.map(String::from));
+                                        rargs.extend(fragmented(cfg.audio && copy && audio_flac));
                                         if copy {
                                             rargs.push("-c:v".into());
                                             rargs.push("copy".into());
@@ -1063,12 +1214,14 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
                                                 motion_hw = enc.as_ref().map(super::ffpath::encoder_label);
                                                 recorder_slot = slot;
                                                 motion_started = std::time::Instant::now();
+                                                motion_progress = Some(SegProgress::new(motion_started));
                                                 motion_checked = false;
                                                 motion_bad.store(false, Ordering::Relaxed);
                                             }
                                             Err(err) => warn!("camera '{}': motion-only recorder failed: {}", cfg.name, err),
                                         }
                                     } else if !m {
+                                        motion_progress = None;
                                         if let Some(c) = recorder.take() {
                                             // Don't stall the frame loop while ffmpeg finalizes the MP4.
                                             // (A rename waits for the file: Engine::writing_into.)
@@ -1094,6 +1247,16 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
         }
 
+        // The stall watch stopped a stuck recorder (and the capture): that is
+        // why the session ended, whatever the recorder's exit said.
+        stall_stop.store(true, Ordering::Relaxed);
+        let rec_stuck = match stall_msg.lock().unwrap().take() {
+            Some(m) => {
+                rec_died = Some(m);
+                true
+            }
+            None => false,
+        };
         // The main-stream recorder was still going when motion stopped (so
         // the sub stream, not the camera, ended the session).
         // Motion (the sub stream) stopped by itself: the sub stream's fault
@@ -1176,7 +1339,7 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // The graphics card would not decode or encode the re-encoded
         // recording: at once again, first without its decoding, then on
         // the processor (libx264).
-        let rec_text = if single { Some(main_text.clone()) } else { rec_died.clone() };
+        let rec_text = if single { Some(main_text.clone()) } else { rec_died.clone().filter(|_| !rec_died_copy) };
         if let (Some(label), Some(text), true) = (&rec_label, &rec_text, active) {
             if super::ffpath::hw_encode_blamed(text) {
                 let why = hw_line(text).unwrap_or_else(|| "it failed".into());
@@ -1216,12 +1379,17 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
             }
         }
         // The card would not decode this camera: at once again, on the processor.
-        let hw_text = match (&rec_died, single) {
-            // (A separate main-stream recorder on libx264 decodes with hwaccel too.)
-            (Some(t), false) if rec_enc.is_none() && hw_args.is_some() => format!("{main_text}\n{t}"),
-            _ => main_text.clone(),
+        // A recorder ended the session: the motion decoder was still going
+        // (its hardware decoding worked, whatever lines it printed), so only
+        // that recorder's own words count, and only if it decodes on the card
+        // (a separate main-stream recorder on libx264 decodes with hwaccel too).
+        let rec_hw = !single && !rec_died_copy && rec_enc.is_none() && hw_args.is_some();
+        let hw_text = match &rec_died {
+            Some(t) if rec_hw => t.clone(),
+            Some(_) => String::new(),
+            None => main_text.clone(),
         };
-        if (ana_hw || (hw_args.is_some() && rec_died.is_some() && rec_enc.is_none())) && hw_blamed(&hw_text) && active {
+        if (ana_hw || (rec_died.is_some() && rec_hw)) && hw_blamed(&hw_text) && active {
             let main_text = hw_text;
             let why = hw_line(&main_text).unwrap_or_else(|| "it failed".into());
             let what = hw.spec.as_deref().map(crate::hwdecode::describe).unwrap_or_default();
@@ -1235,7 +1403,13 @@ pub(super) fn camera_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         }
         if !local {
             let why = tail_summary(rec_died.as_deref().unwrap_or(&main_text));
-            let mut reason = ended_text(why.as_deref());
+            // (The stall watch's words as they are: the stream did not end.)
+            let mut reason = match (&rec_died, rec_stuck) {
+                (Some(m), true) => m.clone(),
+                // A recorder stopped by itself while the stream went on.
+                (Some(_), false) => recorder_stopped_text(why.as_deref()),
+                _ => ended_text(why.as_deref()),
+            };
             // macOS's Local Network privacy (ffmpeg: "No route to host").
             if let Some(m) = crate::macnet::blocked(&main_text, &cfg.url) {
                 reason = m;
@@ -2396,13 +2570,60 @@ struct RecWatch {
     bad: Arc<std::sync::atomic::AtomicBool>,
     next_renewal: std::time::Instant,
     /// The camera's continuous main-stream recording while motion decodes
-    /// the sub stream: when it stops (not from its folder) the camera starts over.
+    /// the sub stream (a recorder of either kind that stops, not from its
+    /// folder, starts the camera over).
     main: bool,
+    /// It stream-copies (the direct and sub stream recorders): its stop says
+    /// nothing about hardware decoding or encoding.
+    copy: bool,
+    /// Stopped at once too many sessions in a row: when the camera starts
+    /// over to try it again, and its last words.
+    hold: Option<(std::time::Instant, String)>,
+}
+
+/// A recorder that ran this long and stopped is started again at once.
+const REC_LONG: std::time::Duration = std::time::Duration::from_secs(60);
+/// Sessions in a row a recorder may stop soon after the start and still
+/// restart the camera at once.
+const REC_QUICK_TRIES: u32 = 2;
+/// After those, motion goes on this long before recording is tried again.
+const REC_HOLD: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What a recorder that stopped by itself while the stream goes on leads to.
+#[derive(Debug, PartialEq)]
+enum RecExit {
+    /// The camera starts over.
+    Restart,
+    /// Motion goes on; recording is tried again after `REC_HOLD`.
+    Hold,
+    /// Its folder (refused writes): the folder is looked at, no restart.
+    Folder,
+}
+
+fn rec_exit_step(text: &str, ran_for: std::time::Duration, quick_in_row: &mut u32) -> RecExit {
+    if write_hint(&[text]) {
+        return RecExit::Folder;
+    }
+    if ran_for >= REC_LONG {
+        *quick_in_row = 0;
+        return RecExit::Restart;
+    }
+    if *quick_in_row >= REC_QUICK_TRIES {
+        return RecExit::Hold;
+    }
+    *quick_in_row += 1;
+    RecExit::Restart
+}
+
+/// A recorder that keeps stopping at once: motion goes on without it.
+pub(crate) fn recorder_held_text(why: Option<&str>) -> String {
+    let cause = why.map(|w| format!(" (ffmpeg: {w})")).unwrap_or_default();
+    format!("the recorder keeps stopping at once{cause}; motion detection goes on and recording is tried again every {} min", REC_HOLD.as_secs() / 60)
 }
 
 impl RecWatch {
     fn new(child: Arc<Mutex<std::process::Child>>, tail: StderrTail) -> Self {
-        RecWatch { child, tail, done: false, bad: Arc::new(std::sync::atomic::AtomicBool::new(false)), next_renewal: std::time::Instant::now() + std::time::Duration::from_secs(300), main: false }
+        RecWatch { child, tail, done: false, bad: Arc::new(std::sync::atomic::AtomicBool::new(false)), next_renewal: std::time::Instant::now() + std::time::Duration::from_secs(300), main: false, copy: false, hold: None }
     }
     /// A recorder that died from a folder problem renews its finding every
     /// 5 minutes while it stays that way.
@@ -2413,6 +2634,351 @@ impl RecWatch {
         }
         false
     }
+}
+
+/// How far a recorder has got: the newest recording it started
+/// ("<prefix>NNNNNN.mp4"), when that was first seen, and whether the open
+/// file still grows.
+#[derive(Debug, Clone, Copy)]
+struct SegProgress {
+    idx: u32,
+    /// When the newest recording was first seen (the watch's start until one is).
+    at: std::time::Instant,
+    /// `at` is when a recording was seen (not just the watch's start).
+    seen: bool,
+    /// The longest time seen between two new recordings (a camera with
+    /// keyframes far apart starts its files that far apart).
+    gap: std::time::Duration,
+    /// The open file's size at the last look, when it last grew, and the
+    /// longest time seen between two growths (fragments are written a
+    /// keyframe at a time).
+    size: u64,
+    grew_at: std::time::Instant,
+    grow_gap: std::time::Duration,
+    /// Times the open file grew since it was first seen: none yet, the
+    /// camera has not sent the keyframe that ends its first fragment.
+    grows: u32,
+    /// The camera's last session's gap: used until this one learns its own.
+    seed: std::time::Duration,
+}
+
+/// What a recorder's progress says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Progress {
+    Fine,
+    /// No new recording for its limit while the open file still grows: the
+    /// camera's timestamps stopped moving (ffmpeg starts the next file by
+    /// them).
+    Stuck(std::time::Duration),
+    /// No new recording and the open file stopped growing too: the
+    /// recorder may be held up by its folder (one that hangs). Its folder
+    /// is checked.
+    NotWriting,
+    /// Not writing for twice its limit: stuck all the same (a camera whose
+    /// video stopped while its sound goes on keeps ffmpeg running with the
+    /// file as it was).
+    NotWritingLong(std::time::Duration),
+}
+
+/// The most a long-keyframe camera raises the limit to.
+const STUCK_MAX: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// How long a file nothing was written to since it opened may wait: ffmpeg
+/// writes a keyframe's fragment when the next keyframe comes, and a camera
+/// sending one every few minutes (a "smart" codec at a low frame rate)
+/// writes nothing for that long, nor starts a new file. (Its first new file
+/// then teaches the watch the gap, kept for the camera's next sessions.)
+const FIRST_KEYFRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(360);
+
+/// The gap between two new recordings learned per recordings folder, by
+/// the camera's latest session to learn one: its next session starts with
+/// it (else a camera whose keyframes are minutes apart would be cut short
+/// each session before it is learned again) until it learns its own (so a
+/// share that hung once, taken for a gap, does not stay for good).
+static LEARNED_GAP: Mutex<Option<std::collections::HashMap<std::path::PathBuf, std::time::Duration>>> = Mutex::new(None);
+
+fn learned_gap(dir: &std::path::Path) -> std::time::Duration {
+    LEARNED_GAP.lock().unwrap().as_ref().and_then(|m| m.get(dir).copied()).unwrap_or_default()
+}
+
+fn learn_gap(dir: &std::path::Path, gap: std::time::Duration) {
+    LEARNED_GAP.lock().unwrap().get_or_insert_with(Default::default).insert(dir.to_path_buf(), gap.min(STUCK_MAX));
+}
+
+impl SegProgress {
+    fn new(now: std::time::Instant) -> Self {
+        SegProgress { idx: 0, at: now, seen: false, gap: std::time::Duration::ZERO, size: 0, grew_at: now, grow_gap: std::time::Duration::ZERO, grows: 0, seed: std::time::Duration::ZERO }
+    }
+
+    /// Looks for recordings started since the last look, and at the open
+    /// file's size.
+    fn poll(&mut self, dir: &std::path::Path, prefix: &str, now: std::time::Instant) {
+        let name = |i: u32| dir.join(format!("{prefix}{i:06}.mp4"));
+        if !self.seen && self.idx == 0 && name(0).exists() {
+            self.seen = true;
+            self.at = now;
+        }
+        let mut n = 0u32;
+        while n < 1000 && name(self.idx + 1).exists() {
+            self.idx += 1;
+            n += 1;
+        }
+        if n > 0 {
+            // (Learned from one new file at a time only: files that come in a
+            // burst after a hold-up say nothing of the camera's keyframes.)
+            if self.seen && n == 1 {
+                self.gap = self.gap.max(now.saturating_duration_since(self.at));
+                learn_gap(dir, self.gap);
+            }
+            self.seen = true;
+            self.at = now;
+            self.size = 0;
+            self.grows = 0;
+        }
+        let cur = std::fs::metadata(name(self.idx)).map(|m| m.len()).unwrap_or(0);
+        self.grew(cur, now);
+    }
+
+    /// The open file's size now.
+    fn grew(&mut self, cur: u64, now: std::time::Instant) {
+        if cur > self.size {
+            if self.size > 0 {
+                self.grow_gap = self.grow_gap.max(now.saturating_duration_since(self.grew_at));
+                self.grows += 1;
+            }
+            self.size = cur;
+            self.grew_at = now;
+        }
+    }
+
+    /// How long it may go without a new recording: `base`, or three times
+    /// the longest gap seen between two (at most `STUCK_MAX`).
+    fn limit(&self, base: std::time::Duration) -> std::time::Duration {
+        let gap = if self.gap.is_zero() { self.seed } else { self.gap };
+        base.max(gap.saturating_mul(3).min(STUCK_MAX))
+    }
+
+    fn verdict(&self, now: std::time::Instant, base: std::time::Duration) -> Progress {
+        let mut limit = self.limit(base);
+        if self.grows == 0 {
+            limit = limit.max(FIRST_KEYFRAME_WAIT);
+        }
+        if now.saturating_duration_since(self.at) < limit {
+            return Progress::Fine;
+        }
+        // Written within the last 30 s (or twice the longest pause between
+        // two writes seen): still writing.
+        let window = std::time::Duration::from_secs(30).max(self.grow_gap.saturating_mul(2)).min(limit);
+        if now.saturating_duration_since(self.grew_at) < window {
+            Progress::Stuck(limit)
+        } else if now.saturating_duration_since(self.at) >= limit.saturating_mul(2) {
+            Progress::NotWritingLong(limit.saturating_mul(2))
+        } else {
+            Progress::NotWriting
+        }
+    }
+}
+
+/// How long a recorder may run without starting a new recording before it
+/// is taken to be stuck: three recordings' length, at least 90 s.
+fn stuck_after(segment_seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(segment_seconds.saturating_mul(3).max(90))
+}
+
+/// What the recorders' stall watch needs to know of the session.
+struct StallWatch {
+    camera: String,
+    seg_dir: std::path::PathBuf,
+    folder_name: String,
+    folder_root: std::path::PathBuf,
+    segment_seconds: u64,
+    /// The recorders with their recordings' name start ("<prefix>000000.mp4", ...).
+    recorders: Vec<(Arc<Mutex<std::process::Child>>, String)>,
+    /// The capture (motion decoder): stopped too, so the session ends.
+    capture: Arc<Mutex<std::process::Child>>,
+    handle: Arc<CameraHandle>,
+    /// Set when the session ends: the watch stops.
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Why it stopped the recorders, for the session's end.
+    stuck: Arc<Mutex<Option<String>>>,
+}
+
+/// Cameras (by their recordings folder): whether a stall watch runs, and the
+/// one session's watch waiting for it to go. One held up by a share that
+/// hangs keeps its place until it comes back; a camera then has at most that
+/// one and one waiting (a newer session's watch takes the waiting place, the
+/// older waiter ends), not one more blocked thread each restart.
+static STALL_WATCHING: Mutex<Option<std::collections::HashMap<std::path::PathBuf, StallEntry>>> = Mutex::new(None);
+static STALL_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[derive(Debug, Default)]
+struct StallEntry {
+    held: bool,
+    waiting: Option<u64>,
+}
+
+/// Held while a camera's stall watch runs.
+struct StallSlot(std::path::PathBuf);
+
+impl StallSlot {
+    /// Puts a session's watch in line for the camera's place (the newest
+    /// session's only: an older one waiting gives up). Its turn.
+    fn queue(dir: &std::path::Path) -> u64 {
+        let turn = STALL_TURN.fetch_add(1, Ordering::Relaxed);
+        STALL_WATCHING.lock().unwrap().get_or_insert_with(Default::default).entry(dir.to_path_buf()).or_default().waiting = Some(turn);
+        turn
+    }
+
+    /// Waits for the place as long as it takes: None when a newer session's
+    /// watch took the turn, or this one's session is `over`.
+    fn wait(dir: &std::path::Path, turn: u64, over: &dyn Fn() -> bool) -> Option<StallSlot> {
+        loop {
+            {
+                let mut g = STALL_WATCHING.lock().unwrap();
+                let e = g.get_or_insert_with(Default::default).entry(dir.to_path_buf()).or_default();
+                if e.waiting != Some(turn) {
+                    return None;
+                }
+                if over() {
+                    e.waiting = None;
+                    // (Nobody holds the place: the entry goes, as when a watch ends.)
+                    if !e.held {
+                        if let Some(m) = g.as_mut() {
+                            m.remove(dir);
+                        }
+                    }
+                    return None;
+                }
+                if !e.held {
+                    e.held = true;
+                    e.waiting = None;
+                    return Some(StallSlot(dir.to_path_buf()));
+                }
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for StallSlot {
+    fn drop(&mut self) {
+        if let Some(m) = STALL_WATCHING.lock().unwrap().as_mut() {
+            if let Some(e) = m.get_mut(&self.0) {
+                e.held = false;
+                if e.waiting.is_none() {
+                    m.remove(&self.0);
+                }
+            }
+        }
+    }
+}
+
+/// One recorder as the stall watch follows it.
+struct Followed {
+    child: Arc<Mutex<std::process::Child>>,
+    prefix: String,
+    progress: SegProgress,
+    /// When its folder may be checked again while it writes nothing.
+    next_probe: Option<std::time::Instant>,
+    /// The last check found the folder refusing writes.
+    folder_bad: bool,
+}
+
+/// Every 5 s, on a thread of its own (a hung folder stalls only it, never
+/// the frames, and it looks even while no frames come): a recorder still
+/// running that starts no new recording for its limit while its file
+/// grows is stuck. It and the capture are stopped (the session ends) and
+/// why is left in `stuck`. One whose file stopped growing too is not
+/// writing: its folder is checked (a real write, here: a share that hangs
+/// holds up only this thread; again every 5 minutes). A folder that takes
+/// the write means the recorder is stuck after all, and so does writing
+/// nothing for twice its limit unless the folder refuses writes (that is
+/// reported, and a new recorder would not do better).
+/// (Only one child is locked at a time, and only to kill or look: nothing
+/// is waited for here; the session's end reaps them.)
+/// It starts once the camera's last watch has gone (at once, normally; a
+/// last one held up by a share that hangs is waited for, see StallSlot).
+fn start_stall_watch(w: StallWatch) {
+    let turn = StallSlot::queue(&w.seg_dir);
+    thread::spawn(move || {
+        let over = || w.stop.load(Ordering::Relaxed) || !w.handle.active.load(Ordering::Relaxed);
+        let Some(_slot) = StallSlot::wait(&w.seg_dir, turn, &over) else { return };
+        let base = stuck_after(w.segment_seconds);
+        let mut recs: Vec<Followed> = w
+            .recorders
+            .into_iter()
+            .map(|(child, prefix)| {
+                let mut progress = SegProgress::new(std::time::Instant::now());
+                progress.seed = learned_gap(&w.seg_dir);
+                Followed { child, prefix, progress, next_probe: None, folder_bad: false }
+            })
+            .collect();
+        loop {
+            for _ in 0..20 {
+                if over() {
+                    return;
+                }
+                thread::sleep(std::time::Duration::from_millis(250));
+            }
+            let now = std::time::Instant::now();
+            recs.retain(|r| r.child.lock().unwrap().try_wait().ok().flatten().is_none());
+            if recs.is_empty() {
+                return;
+            }
+            for r in recs.iter_mut() {
+                r.progress.poll(&w.seg_dir, &r.prefix, now);
+                let why = match r.progress.verdict(now, base) {
+                    Progress::Fine => {
+                        r.folder_bad = false;
+                        None
+                    }
+                    Progress::Stuck(limit) => Some(format!(
+                        "the recorder stopped starting new recordings ({} s with no new file while the stream went on); starting over",
+                        limit.as_secs()
+                    )),
+                    Progress::NotWritingLong(after) if !r.folder_bad => Some(format!(
+                        "the recorder has written nothing for {} s while it kept running; starting over",
+                        after.as_secs()
+                    )),
+                    Progress::NotWriting | Progress::NotWritingLong(_) => {
+                        let mut why = None;
+                        if r.next_probe.is_none_or(|t| now >= t) {
+                            r.next_probe = Some(now + std::time::Duration::from_secs(300));
+                            warn!("camera '{}': the recorder has written nothing for a while; checking its folder", w.camera);
+                            // (One probe per folder at a time: skipped while another runs.)
+                            if let Some(_probe) = ProbeSlot::take(&w.folder_name) {
+                                match w.folder_root.is_dir().then(|| super::storage::probe_folder(&w.folder_name, &w.seg_dir, 330)).flatten() {
+                                    Some(true) => {
+                                        r.folder_bad = false;
+                                        why = Some("the recorder has written nothing for a while although its folder takes writes; starting over".to_string());
+                                    }
+                                    Some(false) => r.folder_bad = true,
+                                    None => {}
+                                }
+                            }
+                        }
+                        why
+                    }
+                };
+                if let Some(msg) = why {
+                    if over() {
+                        return;
+                    }
+                    warn!("camera '{}': {msg}", w.camera);
+                    // (A gap it went by is not taken on: a share that hung once
+                    // and stuck sessions after it would each wait that long.)
+                    if let Some(m) = LEARNED_GAP.lock().unwrap().as_mut() {
+                        m.remove(&w.seg_dir);
+                    }
+                    // (Left before the kills: the session's end finds it.)
+                    *w.stuck.lock().unwrap() = Some(msg);
+                    let _ = r.child.lock().unwrap().kill();
+                    let _ = w.capture.lock().unwrap().kill();
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Folders with a probe outstanding: a second is not started meanwhile (a
@@ -2527,6 +3093,14 @@ pub(crate) fn ended_text(why: Option<&str>) -> String {
     match why {
         Some(w) => format!("stream ended (ffmpeg: {w})"),
         None => "stream ended".to_string(),
+    }
+}
+
+/// A camera restarted because one of its recorders stopped by itself.
+pub(crate) fn recorder_stopped_text(why: Option<&str>) -> String {
+    match why {
+        Some(w) => format!("the recorder stopped (ffmpeg: {w}); starting the camera over"),
+        None => "the recorder stopped; starting the camera over".to_string(),
     }
 }
 
@@ -2682,6 +3256,27 @@ mod tail_tests {
     fn ended_text_forms() {
         assert_eq!(ended_text(Some("401 Unauthorized")), "stream ended (ffmpeg: 401 Unauthorized)");
         assert_eq!(ended_text(None), "stream ended");
+        assert_eq!(recorder_stopped_text(None), "the recorder stopped; starting the camera over");
+        assert_eq!(recorder_stopped_text(Some("Broken pipe")), "the recorder stopped (ffmpeg: Broken pipe); starting the camera over");
+        assert_eq!(recorder_held_text(Some("Could not find tag for codec pcm_mulaw")), "the recorder keeps stopping at once (ffmpeg: Could not find tag for codec pcm_mulaw); motion detection goes on and recording is tried again every 5 min");
+    }
+
+    #[test]
+    fn a_recorder_that_keeps_stopping_at_once_is_held_not_restarted_for_good() {
+        let s = std::time::Duration::from_secs;
+        let mut q = 0;
+        // Its folder refuses writes: never a restart.
+        assert_eq!(rec_exit_step("out.mp4: Permission denied", s(5), &mut q), RecExit::Folder);
+        assert_eq!(q, 0);
+        // Two quick stops restart the camera; the third holds it (and stays held).
+        assert_eq!(rec_exit_step("Could not find tag for codec pcm_mulaw", s(5), &mut q), RecExit::Restart);
+        assert_eq!(rec_exit_step("Could not find tag for codec pcm_mulaw", s(5), &mut q), RecExit::Restart);
+        assert_eq!(rec_exit_step("Could not find tag for codec pcm_mulaw", s(5), &mut q), RecExit::Hold);
+        assert_eq!(rec_exit_step("Could not find tag for codec pcm_mulaw", s(5), &mut q), RecExit::Hold);
+        // One that worked a good while and stopped: at once, and the quick tries are back.
+        assert_eq!(rec_exit_step("Connection reset by peer", s(600), &mut q), RecExit::Restart);
+        assert_eq!(q, 0);
+        assert_eq!(rec_exit_step("", s(5), &mut q), RecExit::Restart);
     }
 }
 
@@ -2716,19 +3311,289 @@ mod recording_filter_tests {
     #[test]
     fn the_direct_recorder_records_sound_only_when_asked() {
         let input = || vec!["-i".to_string(), "rtsp://192.0.2.1/main".to_string()];
-        let off = direct_recorder_args(input(), false, 10, "out%06d.mp4".into()).join(" ");
+        let off = direct_recorder_args(input(), false, false, 10, "out%06d.mp4".into()).join(" ");
         assert!(off.contains("-map 0:v:0") && !off.contains("0:a") && off.contains("-c:v copy"), "{off}");
-        let on = direct_recorder_args(input(), true, 10, "out%06d.mp4".into()).join(" ");
+        let on = direct_recorder_args(input(), true, false, 10, "out%06d.mp4".into()).join(" ");
         assert!(on.contains("-map 0:v:0") && on.contains("-map 0:a:0? -c:a copy") && on.contains("-c:v copy"), "{on}");
+    }
+
+    /// A folder of its own for a test, removed afterwards.
+    fn stuck_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("amber-stuck-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_recorder_that_starts_no_new_recording_while_writing_is_stuck() {
+        let dir = stuck_dir("writing");
+        let s = |n: u64| std::time::Duration::from_secs(n);
+        let t0 = std::time::Instant::now();
+        let base = stuck_after(10);
+        assert_eq!(base.as_secs(), 90, "at least 90 s");
+        assert_eq!(stuck_after(60).as_secs(), 180);
+        let mut p = SegProgress::new(t0);
+        let f0 = dir.join("cam-1-seg000000.mp4");
+        std::fs::write(&f0, b"x").unwrap();
+        p.poll(&dir, "cam-1-seg", t0 + s(5));
+        // The next ones started: progress, counted from when they were seen.
+        std::fs::write(dir.join("cam-1-seg000001.mp4"), b"x").unwrap();
+        std::fs::write(dir.join("cam-1-seg000002.mp4"), b"x").unwrap();
+        let t1 = t0 + s(15);
+        p.poll(&dir, "cam-1-seg", t1);
+        assert_eq!(p.idx, 2);
+        // (Two files in one look: 5 s apart each, under the base.)
+        assert_eq!(p.limit(base), base);
+        // The open file keeps growing, no new one: stuck once the limit is over.
+        for i in 1..=18u64 {
+            std::fs::write(dir.join("cam-1-seg000002.mp4"), vec![0u8; 100 * i as usize]).unwrap();
+            p.poll(&dir, "cam-1-seg", t1 + s(5 * i));
+            let v = p.verdict(t1 + s(5 * i), base);
+            if 5 * i < 90 {
+                assert_eq!(v, Progress::Fine, "{i}");
+            } else {
+                assert_eq!(v, Progress::Stuck(base));
+            }
+        }
+        // Another camera's (or run's) files do not count.
+        std::fs::write(dir.join("cam-2-seg000003.mp4"), b"x").unwrap();
+        p.poll(&dir, "cam-1-seg", t1 + s(95));
+        assert_eq!(p.verdict(t1 + s(95), base), Progress::Stuck(base));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recorder_whose_file_stopped_growing_is_not_writing_not_stuck() {
+        let dir = stuck_dir("stalled");
+        let s = |n: u64| std::time::Duration::from_secs(n);
+        let t0 = std::time::Instant::now();
+        let base = stuck_after(10);
+        let mut p = SegProgress::new(t0);
+        let f = dir.join("cam-1-seg000000.mp4");
+        // Written for 40 s, every 5 s, then nothing more (a folder that hangs).
+        for i in 1..=8u64 {
+            std::fs::write(&f, vec![0u8; 100 * i as usize]).unwrap();
+            p.poll(&dir, "cam-1-seg", t0 + s(5 * i));
+        }
+        for i in 9..=30u64 {
+            p.poll(&dir, "cam-1-seg", t0 + s(5 * i));
+        }
+        assert_eq!(p.verdict(t0 + s(150), base), Progress::NotWriting);
+        // Writing again: stuck after all (it still starts no new file).
+        std::fs::write(&f, vec![0u8; 5000]).unwrap();
+        p.poll(&dir, "cam-1-seg", t0 + s(155));
+        assert_eq!(p.verdict(t0 + s(155), base), Progress::Stuck(base));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recorder_writing_nothing_for_twice_its_limit_is_stuck_after_all() {
+        // A camera whose video stops while its sound goes on: ffmpeg keeps running,
+        // the file as it was (no new file, no growth). Nothing written since the
+        // file opened, so it is given the wait for a camera's first keyframe (6 min).
+        let dir = stuck_dir("silent");
+        let s = |n: u64| std::time::Duration::from_secs(n);
+        let base = stuck_after(10);
+        let t0 = std::time::Instant::now();
+        let mut p = SegProgress::new(t0);
+        let f = dir.join("cam-1-seg000000.mp4");
+        std::fs::write(&f, vec![0u8; 786_460]).unwrap();
+        let mut first_long = None;
+        for i in 1..=150u64 {
+            p.poll(&dir, "cam-1-seg", t0 + s(5 * i));
+            match p.verdict(t0 + s(5 * i), base) {
+                Progress::NotWritingLong(after) => {
+                    assert_eq!(after, s(720));
+                    first_long.get_or_insert(5 * i);
+                }
+                v if 5 * i < 365 => assert_eq!(v, Progress::Fine, "{i}"),
+                v => assert_eq!(v, Progress::NotWriting, "{i}"),
+            }
+        }
+        // (The file was first seen at 5 s.)
+        assert_eq!(first_long, Some(725));
+        // Once its file has been written to, the usual limit (90 s) holds.
+        let dir = stuck_dir("silent2");
+        let t0 = std::time::Instant::now();
+        let mut p = SegProgress::new(t0);
+        let f = dir.join("cam-1-seg000000.mp4");
+        std::fs::write(&f, vec![0u8; 1000]).unwrap();
+        p.poll(&dir, "cam-1-seg", t0);
+        std::fs::write(&f, vec![0u8; 2000]).unwrap();
+        p.poll(&dir, "cam-1-seg", t0 + s(5));
+        assert_eq!(p.verdict(t0 + s(89), base), Progress::Fine);
+        assert_eq!(p.verdict(t0 + s(95), base), Progress::NotWriting);
+        assert_eq!(p.verdict(t0 + s(185), base), Progress::NotWritingLong(s(180)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_slowly_growing_stuck_file_is_restarted_within_twice_its_limit() {
+        // ffmpeg writes the open file 256 KiB at a time: a stuck low-bitrate stream
+        // (7 KB/s) grows every ~37 s.
+        let dir = stuck_dir("lowrate");
+        let s = |n: u64| std::time::Duration::from_secs(n);
+        let base = stuck_after(5);
+        let t0 = std::time::Instant::now();
+        let mut p = SegProgress::new(t0);
+        let f = dir.join("cam-1-seg000000.mp4");
+        let mut restart = None;
+        for i in 1..=60u64 {
+            let t = 5 * i;
+            std::fs::write(&f, vec![0u8; 28 + 262_144 * (t / 37) as usize]).unwrap();
+            p.poll(&dir, "cam-1-seg", t0 + s(t));
+            if matches!(p.verdict(t0 + s(t), base), Progress::Stuck(_) | Progress::NotWritingLong(_)) {
+                restart = Some(t);
+                break;
+            }
+        }
+        assert!(restart.is_some_and(|t| (90..=185).contains(&t)), "{restart:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_that_come_in_a_burst_do_not_raise_the_limit() {
+        let dir = stuck_dir("burst");
+        let s = |n: u64| std::time::Duration::from_secs(n);
+        let base = stuck_after(10);
+        let t0 = std::time::Instant::now();
+        let mut p = SegProgress::new(t0);
+        std::fs::write(dir.join("cam-1-seg000000.mp4"), b"x").unwrap();
+        p.poll(&dir, "cam-1-seg", t0);
+        // Held up 85 s (a share that hung), then three files at once.
+        for i in 1..=3 {
+            std::fs::write(dir.join(format!("cam-1-seg{i:06}.mp4")), b"x").unwrap();
+        }
+        p.poll(&dir, "cam-1-seg", t0 + s(85));
+        assert_eq!(p.idx, 3);
+        assert_eq!(p.limit(base), base);
+        // One at a time, 40 s apart: learned.
+        std::fs::write(dir.join("cam-1-seg000004.mp4"), b"x").unwrap();
+        p.poll(&dir, "cam-1-seg", t0 + s(125));
+        assert_eq!(p.limit(base), s(120));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_sessions_watch_waits_for_the_last_one_and_only_the_newest_waits() {
+        use std::sync::atomic::AtomicBool;
+        let dir = std::env::temp_dir().join(format!("amber-stall-slot-{}", std::process::id()));
+        // The last session's watch, held up 3 s.
+        let t = StallSlot::queue(&dir);
+        let held = StallSlot::wait(&dir, t, &|| false).expect("free");
+        // An older waiting session, then a newer one: the older gives up.
+        let older = StallSlot::queue(&dir);
+        let newer = StallSlot::queue(&dir);
+        assert!(StallSlot::wait(&dir, older, &|| false).is_none(), "a newer session took the turn");
+        let d = dir.clone();
+        let t0 = std::time::Instant::now();
+        let waiter = thread::spawn(move || StallSlot::wait(&d, newer, &|| false).map(|s| (s, t0.elapsed())));
+        thread::sleep(std::time::Duration::from_secs(3));
+        drop(held);
+        let (slot, after) = waiter.join().unwrap().expect("starts once the place is free");
+        assert!(after >= std::time::Duration::from_secs(3) && after < std::time::Duration::from_secs(4), "{after:?}");
+        // A session that ended while waiting gives up.
+        let ended = Arc::new(AtomicBool::new(false));
+        let late = StallSlot::queue(&dir);
+        let e = ended.clone();
+        let d = dir.clone();
+        let gone = thread::spawn(move || StallSlot::wait(&d, late, &|| e.load(Ordering::Relaxed)).is_none());
+        thread::sleep(std::time::Duration::from_millis(300));
+        ended.store(true, Ordering::Relaxed);
+        assert!(gone.join().unwrap());
+        drop(slot);
+        assert!(STALL_WATCHING.lock().unwrap().as_ref().is_none_or(|m| !m.contains_key(&dir)), "nothing left behind");
+        // A session over before its watch got the free place: nothing left either.
+        let t = StallSlot::queue(&dir);
+        assert!(StallSlot::wait(&dir, t, &|| true).is_none());
+        assert!(STALL_WATCHING.lock().unwrap().as_ref().is_none_or(|m| !m.contains_key(&dir)), "no entry left by a session that never ran");
+    }
+
+    #[test]
+    fn a_camera_with_keyframes_minutes_apart_is_never_stuck() {
+        // A keyframe every 4 min: ffmpeg writes each file's fragment, and starts
+        // the next file, only when the next keyframe comes.
+        let s = |n: u64| std::time::Duration::from_secs(n);
+        let base = stuck_after(10);
+        let dir = stuck_dir("smart");
+        let t0 = std::time::Instant::now();
+        let mut p = SegProgress::new(t0);
+        let name = |i: u32| dir.join(format!("cam-1-seg{i:06}.mp4"));
+        std::fs::write(name(0), vec![0u8; 800]).unwrap(); // its header alone
+        for t in (0..=1500u64).step_by(5) {
+            if t > 0 && t % 240 == 0 {
+                let k = (t / 240) as u32;
+                std::fs::write(name(k - 1), vec![0u8; 50_000]).unwrap();
+                std::fs::write(name(k), vec![0u8; 800]).unwrap();
+            }
+            p.poll(&dir, "cam-1-seg", t0 + s(t));
+            assert_eq!(p.verdict(t0 + s(t), base), Progress::Fine, "at {t} s");
+        }
+        assert_eq!(p.limit(base), s(720));
+        // The camera's next session starts knowing the gap.
+        assert_eq!(learned_gap(&dir), s(240));
+        let mut q = SegProgress { seed: learned_gap(&dir), ..SegProgress::new(t0) };
+        assert_eq!(q.limit(base), s(720));
+        // Until it learns its own: a session with files 10 s apart (a share
+        // that hung once had been taken for a gap) is back to the usual limit,
+        // and the next one starts from that.
+        q.gap = s(10);
+        assert_eq!(q.limit(base), base);
+        learn_gap(&dir, s(10));
+        assert_eq!(learned_gap(&dir), s(10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_camera_with_keyframes_far_apart_gets_a_longer_limit() {
+        let s = |n: u64| std::time::Duration::from_secs(n);
+        let base = stuck_after(10);
+        let dir = stuck_dir("gop");
+        let t0 = std::time::Instant::now();
+        let mut p = SegProgress::new(t0);
+        std::fs::write(dir.join("cam-1-seg000000.mp4"), b"x").unwrap();
+        p.poll(&dir, "cam-1-seg", t0);
+        // New files 60 s apart (a keyframe a minute).
+        std::fs::write(dir.join("cam-1-seg000001.mp4"), b"x").unwrap();
+        p.poll(&dir, "cam-1-seg", t0 + s(60));
+        std::fs::write(dir.join("cam-1-seg000002.mp4"), b"x").unwrap();
+        p.poll(&dir, "cam-1-seg", t0 + s(120));
+        assert_eq!(p.limit(base), s(180));
+        // The file growing, no new one: fine past the base (100 s), stuck at its own limit.
+        for i in 1..=36u64 {
+            std::fs::write(dir.join("cam-1-seg000002.mp4"), vec![0u8; 100 * i as usize]).unwrap();
+            p.poll(&dir, "cam-1-seg", t0 + s(120 + 5 * i));
+            let v = p.verdict(t0 + s(120 + 5 * i), base);
+            assert_eq!(v, if 5 * i < 180 { Progress::Fine } else { Progress::Stuck(s(180)) }, "{i}");
+        }
+        // Never past STUCK_MAX however far apart.
+        let mut q = p;
+        q.gap = s(5000);
+        assert_eq!(q.limit(base), STUCK_MAX);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_motion_recorder_records_sound_only_when_asked() {
         for copy in [true, false] {
-            assert_eq!(recorder_maps(false, copy).join(" "), "-map 0:v:0");
+            assert_eq!(recorder_maps(false, copy, true).join(" "), "-map 0:v:0");
         }
-        assert_eq!(recorder_maps(true, true).join(" "), "-map 0:v:0 -map 0:a:0? -c:a copy");
-        assert_eq!(recorder_maps(true, false).join(" "), "-map 0:v:0 -map 0:a:0? -c:a aac");
+        assert_eq!(recorder_maps(true, true, false).join(" "), "-map 0:v:0 -map 0:a:0? -c:a copy");
+        assert_eq!(recorder_maps(true, false, false).join(" "), "-map 0:v:0 -map 0:a:0? -c:a aac");
+        // G.711 the recorder could not copy: FLAC (a re-encoding recorder makes AAC as before).
+        assert_eq!(recorder_maps(true, true, true).join(" "), "-map 0:v:0 -map 0:a:0? -c:a flac");
+        assert_eq!(recorder_maps(true, false, true).join(" "), "-map 0:v:0 -map 0:a:0? -c:a aac");
+        assert!(copy_codec_refused("[mp4 @ 0x1] Could not find tag for codec pcm_mulaw in stream #1, codec not currently supported in container"));
+        assert!(!copy_codec_refused("rtsp://h/s: Connection refused"));
+        // ffmpeg before 6 takes FLAC in MP4 only when told it may (the segment's own options).
+        let input = || vec!["-i".to_string(), "x".to_string()];
+        let flac = direct_recorder_args(input(), true, true, 10, "o%06d.mp4".into()).join(" ");
+        assert!(flac.contains("movflags=+frag_keyframe+empty_moov+default_base_moof:strict=experimental"), "{flac}");
+        for (audio, f) in [(true, false), (false, true), (false, false)] {
+            let a = direct_recorder_args(input(), audio, f, 10, "o%06d.mp4".into()).join(" ");
+            assert!(!a.contains("strict"), "{a}");
+        }
     }
 
     /// With ffmpeg: a source with sound, recorded with sound off, has no
@@ -2761,7 +3626,7 @@ mod recording_filter_tests {
         let tracks = |src: &std::path::Path, tag: &str, audio: bool| {
             let out = dir.join(format!("{tag}{}-%06d.mp4", audio as u8));
             let input = vec!["-i".to_string(), src.to_string_lossy().into_owned()];
-            let st = std::process::Command::new(&ff).args(direct_recorder_args(input, audio, 10, out.to_string_lossy().into_owned())).status().unwrap();
+            let st = std::process::Command::new(&ff).args(direct_recorder_args(input, audio, false, 10, out.to_string_lossy().into_owned())).status().unwrap();
             assert!(st.success(), "{tag} audio {audio}: the recorder failed");
             let first = dir.join(format!("{tag}{}-000000.mp4", audio as u8));
             let probe = std::process::Command::new(&ff).args(["-hide_banner", "-i"]).arg(&first).output().unwrap();
@@ -2773,6 +3638,95 @@ mod recording_filter_tests {
         assert!(tracks(&src, "aac", true), "no sound with Record audio on");
         // (G.711 with sound on cannot be copied into MP4: as before, not yet handled here.)
         assert!(!tracks(&g711, "g711", false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod hvc1_tests {
+    use super::direct_recorder_args;
+
+    /// The whole sample entry box of type `kind` in `b`.
+    fn entry<'a>(b: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+        let at = b.windows(4).position(|w| w == kind)? - 4;
+        let len = u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+        b.get(at..at + len)
+    }
+
+    /// With ffmpeg: a copying recorder labels an HEVC camera's video hev1
+    /// (Apple's players refuse it). Playback clips made from such
+    /// recordings, and a clip file joined from them, say hvc1, with the same
+    /// entry ffmpeg writes for `-tag:v hvc1`, and still decode.
+    #[test]
+    fn hevc_copied_by_ffmpeg_is_served_as_hvc1() {
+        let ff = crate::ffmpeg_bin::program();
+        let dir = std::env::temp_dir().join(format!("amber-hvc1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.mkv");
+        let made = std::process::Command::new(&ff)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=4", "-c:v", "libx265", "-x265-params", "keyint=10:log-level=error", "-pix_fmt", "yuv420p"])
+            .arg(&src)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ffmpeg with libx265 not available");
+            return;
+        }
+        let out = dir.join("rec-%06d.mp4");
+        let input = vec!["-i".to_string(), src.to_string_lossy().into_owned()];
+        let st = std::process::Command::new(&ff).args(direct_recorder_args(input, false, false, 2, out.to_string_lossy().into_owned())).status().unwrap();
+        assert!(st.success());
+        let first = dir.join("rec-000000.mp4");
+        let rec = std::fs::read(&first).unwrap();
+        assert!(entry(&rec, b"hev1").is_some(), "ffmpeg no longer labels copied HEVC hev1");
+        // What ffmpeg itself writes as hvc1.
+        let tagged = dir.join("tagged.mp4");
+        let st = std::process::Command::new(&ff).args(["-v", "error", "-y", "-i"]).arg(&first).args(["-c", "copy", "-tag:v", "hvc1"]).arg(&tagged).status().unwrap();
+        assert!(st.success());
+        // (Its plain MP4 adds a bitrate box: the decoder setup is what counts.)
+        let want = entry(entry(&std::fs::read(&tagged).unwrap(), b"hvc1").unwrap(), b"hvcC").unwrap().to_vec();
+
+        // A playback clip across the recordings.
+        let mut segs = Vec::new();
+        let mut i = 0;
+        while dir.join(format!("rec-{i:06}.mp4")).is_file() {
+            segs.push(crate::ingest::splice::SourceSegment { path: dir.join(format!("rec-{i:06}.mp4")), start_ms: i * 2000, end_ms: (i + 1) * 2000, low: false, sub: false });
+            i += 1;
+        }
+        let clip = crate::ingest::splice::VirtualClip::plan(&segs, 0, 4000).unwrap().unwrap();
+        let bytes = clip.read_range(0, clip.len()).unwrap();
+        assert!(entry(&bytes, b"hev1").is_none());
+        assert_eq!(entry(entry(&bytes, b"hvc1").unwrap(), b"hvcC").unwrap(), &want[..]);
+        let served = dir.join("served.mp4");
+        std::fs::write(&served, &bytes).unwrap();
+        let st = std::process::Command::new(&ff).args(["-v", "error", "-i"]).arg(&served).args(["-f", "null", "-"]).status().unwrap();
+        assert!(st.success(), "the served clip does not decode");
+
+        // A clip file joined by ffmpeg (its index at the end), relabeled on disk.
+        let joined = dir.join("joined.mp4");
+        let st = std::process::Command::new(&ff).args(["-v", "error", "-y", "-i"]).arg(&first).args(["-c", "copy"]).arg(&joined).status().unwrap();
+        assert!(st.success());
+        let before = std::fs::read(&joined).unwrap();
+        assert!(entry(&before, b"hev1").is_some());
+        // Its time is kept, 2 s later (the clip sweep goes by it; a player's cache sees the change).
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 86_400);
+        std::fs::File::options().write(true).open(&joined).unwrap().set_modified(old).unwrap();
+        assert!(crate::ingest::mp4read::hev1_file_to_hvc1(&joined).unwrap());
+        assert_eq!(std::fs::metadata(&joined).unwrap().modified().unwrap(), old + std::time::Duration::from_secs(2));
+        let after = std::fs::read(&joined).unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(entry(entry(&after, b"hvc1").unwrap(), b"hvcC").unwrap(), &want[..]);
+        assert!(!crate::ingest::mp4read::hev1_file_to_hvc1(&joined).unwrap(), "a second pass changes nothing");
+        let probe = std::process::Command::new(&ff).args(["-v", "error", "-i"]).arg(&joined).args(["-f", "null", "-"]).status().unwrap();
+        assert!(probe.success());
+        // H.264 is left as it is.
+        let h264 = dir.join("h264.mp4");
+        let st = std::process::Command::new(&ff).args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=1", "-c:v", "libx264"]).arg(&h264).status().unwrap();
+        if st.success() {
+            let b = std::fs::read(&h264).unwrap();
+            assert!(!crate::ingest::mp4read::hev1_file_to_hvc1(&h264).unwrap());
+            assert_eq!(std::fs::read(&h264).unwrap(), b);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

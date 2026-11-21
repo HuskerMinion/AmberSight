@@ -941,6 +941,8 @@ fn copy_one(engine: &Arc<Engine>, job: &Job, now: i64) -> Outcome {
     };
     let res = match &src {
         Src::File(p, _) => write_file(&day_dir, &mp4, |f| {
+            // (A saved clip from recordings ffmpeg copied may say hev1: made hvc1 first, as served.)
+            let _ = crate::ingest::mp4read::hev1_file_to_hvc1(p);
             let mut s = std::fs::File::open(p).map_err(|e| WriteErr::Source(e.to_string()))?;
             let mut buf = vec![0u8; 1 << 20];
             loop {

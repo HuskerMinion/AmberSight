@@ -3253,6 +3253,23 @@ pub(crate) fn real_probe_due(name: &str, every_secs: u64) -> bool {
     true
 }
 
+/// [`check_folder`] with a real write, saying also when the write worked:
+/// Some(true) writable, Some(false) refused, None when nothing could be asked
+/// (the folder is not there).
+pub(crate) fn probe_folder(name: &str, seg_dir: &Path, keep_secs: i64) -> Option<bool> {
+    match find_denied(&SYSTEM_PROBES, seg_dir, true) {
+        Verdict::Denied(p) => {
+            note_unwritable(name, &p, keep_secs);
+            Some(false)
+        }
+        Verdict::Writable(p) => {
+            note_writable(name, &p);
+            Some(true)
+        }
+        Verdict::Unknown => None,
+    }
+}
+
 /// Ask about `seg_dir` (cheaply, and by a real write when `real`) and keep
 /// the books: a refusal is noted, a real write that worked drops the note.
 /// Returns the path that refuses.

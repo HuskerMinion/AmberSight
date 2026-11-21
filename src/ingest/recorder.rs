@@ -47,6 +47,36 @@ const MAX_DRIFT_FIX: f64 = 0.0005;
 /// (a file, a test) and is left alone.
 const DRIFT_AFTER_SECS: f64 = 120.0;
 const DRIFT_SANE_SECS: f64 = 30.0;
+/// A camera whose timestamps run far from real time without one jump big
+/// enough for clockjump.rs (8 s ahead every 2 s keyframe group; standing
+/// still between keyframes): a recording never ends later than this much
+/// after the moment its file is closed (dated in the future otherwise; a
+/// pre-roll is anchored at its newest frame, so it never is).
+const END_AHEAD_SECS: f64 = 2.0;
+/// A file open this many lengths of real time ends at the next keyframe,
+/// whatever its timestamps say, and is dated by the time it was open.
+const WALL_ROTATE_LENGTHS: f64 = 3.0;
+/// Tests feed a fresh writer much faster than real time: there the above
+/// waits until it has run this long.
+const WALL_GUARD_AFTER_SECS: f64 = if cfg!(test) { 10.0 } else { 0.0 };
+/// Recordings moved this far in all are worth a warning (a camera's
+/// start-up burst moves them a few seconds, quietly).
+const WALL_WARN_SECS: f64 = 30.0;
+
+/// True when the "timestamps ran off" warning for this camera has not been
+/// logged within 10 minutes (and records that it is being logged now).
+fn wall_warn_due(prefix: &str, now: std::time::Instant) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+    let mut m = LAST.get_or_init(Default::default).lock().unwrap();
+    let key = camera_key(prefix);
+    if m.get(&key).is_some_and(|t| now.duration_since(*t).as_secs() < 600) {
+        return false;
+    }
+    m.insert(key, now);
+    true
+}
 
 /// A file-name prefix without its start-time part, so every writer of one
 /// camera ("porch-1794148581609-rec", "porch-1794148616808-rec") shares a key.
@@ -182,6 +212,8 @@ struct OpenFile {
     bytes: u64,
     video_frames: u64,
     fragments: u32,
+    /// When it was opened (this computer's monotonic clock).
+    opened: std::time::Instant,
 }
 
 pub struct SegmentWriter {
@@ -213,6 +245,9 @@ pub struct SegmentWriter {
     /// The current file ends at this video keyframe (ticks, shared-time-base
     /// seconds) and waits for its audio up to there (AUDIO_WAIT_SECS).
     closing: Option<(i64, f64)>,
+    /// The file being closed was cut by real time (`wall_full`), not by its
+    /// own timestamps.
+    wall_cut: bool,
 }
 
 impl SegmentWriter {
@@ -257,6 +292,7 @@ impl SegmentWriter {
             written: crate::telemetry::write_counter(dir),
             recorded: false,
             closing: None,
+            wall_cut: false,
         })
     }
 
@@ -432,7 +468,7 @@ impl SegmentWriter {
     /// is full): the clean point to end a recording at.
     pub fn would_rotate(&self, ticks: i64) -> bool {
         let t = self.tracks[self.video].secs(ticks);
-        self.file.as_ref().is_some_and(|f| t - f.start >= self.segment_seconds - 0.001)
+        self.file.as_ref().is_some_and(|f| t - f.start >= self.segment_seconds - 0.001 || self.wall_full(f))
     }
 
     pub fn push_video_cts(&mut self, ticks: i64, cts: i32, data: Vec<u8>, is_key: bool) -> std::io::Result<()> {
@@ -454,8 +490,11 @@ impl SegmentWriter {
             && match &self.file {
                 None => true,
                 // 1 ms tolerance: a keyframe exactly on the boundary must cut.
-                Some(f) => t - f.start >= self.segment_seconds - 0.001,
+                Some(f) => t - f.start >= self.segment_seconds - 0.001 || self.wall_full(f),
             };
+        if rotate {
+            self.wall_cut = self.file.as_ref().is_some_and(|f| t - f.start < self.segment_seconds - 0.001);
+        }
         if is_key || long_gop {
             self.flush_fragment(ticks, false, false)?;
         }
@@ -635,16 +674,67 @@ impl SegmentWriter {
             t.next_decode = None;
         }
         let start_ms = self.last_end_ms.take();
-        self.file = Some(OpenFile { path, file, start, start_ms, bytes: init.len() as u64, video_frames: 0, fragments: 0 });
+        self.file = Some(OpenFile { path, file, start, start_ms, bytes: init.len() as u64, video_frames: 0, fragments: 0, opened: std::time::Instant::now() });
         Ok(())
+    }
+
+    /// Live footage only (see the WALL_ consts).
+    fn wall_guarded(&self) -> bool {
+        !self.recorded && self.anchor_instant.elapsed().as_secs_f64() >= WALL_GUARD_AFTER_SECS
+    }
+
+    /// The open file has been open many times its length of real time.
+    fn wall_full(&self, f: &OpenFile) -> bool {
+        self.wall_guarded() && f.opened.elapsed().as_secs_f64() >= WALL_ROTATE_LENGTHS * self.segment_seconds
+    }
+
+    /// Seconds to move segment times so a file closing now, at media time
+    /// `end`, ends close to this computer's clock: never in the future
+    /// (END_AHEAD_SECS), and now when it was cut by real time.
+    fn wall_fix(&self, end: f64, wall_cut: bool) -> f64 {
+        if !self.wall_guarded() {
+            return 0.0;
+        }
+        let real = self.anchor_epoch + self.anchor_instant.elapsed().as_secs_f64();
+        let at = self.wall_k() + end;
+        if at > real + END_AHEAD_SECS || (wall_cut && at < real - END_AHEAD_SECS) {
+            real - at
+        } else {
+            0.0
+        }
     }
 
     fn close_file(&mut self, end: f64) -> std::io::Result<()> {
         if let Some(mut f) = self.file.take() {
             f.file.flush()?;
+            // (Set when the cut was made by real time, and by `finish` for a
+            // file open that long. Not for a file cut by its own timestamps
+            // that only took long, a stall of the network holding its
+            // closing keyframe back: it keeps its media dating.)
+            let wall_cut = std::mem::take(&mut self.wall_cut);
+            // A first file's start as dated before any move: it opened then.
+            let k_before = self.wall_k();
+            let fix = self.wall_fix(end, wall_cut);
+            if fix != 0.0 {
+                self.drift += fix;
+                self.drift_logged = self.drift;
+                // (Once in 10 minutes per camera: such a camera does it at every file.)
+                if self.drift.abs() >= WALL_WARN_SECS && wall_warn_due(&self.prefix, std::time::Instant::now()) {
+                    tracing::warn!(
+                        "{}: the camera's timestamps run {} real time ({:.0} s so far); recordings follow this computer's clock",
+                        self.prefix,
+                        if self.drift < 0.0 { "ahead of" } else { "behind" },
+                        self.drift.abs()
+                    );
+                } else {
+                    tracing::debug!("{}: recordings moved {fix:+.1} s to this computer's clock", self.prefix);
+                }
+            }
             let k = self.wall_k();
             let to_ms = |s: f64| ((k + s) * 1000.0).round() as i64;
-            let end_ms = to_ms(end);
+            // (Never before the previous recording's end: a file that just
+            // closed less than END_AHEAD_SECS ahead is not moved.)
+            let end_ms = to_ms(end).max(f.start_ms.unwrap_or(i64::MIN));
             self.last_end_ms = Some(end_ms);
             self.follow_clock(end, end - f.start);
             let local_ms = ((self.anchor_epoch + end) * 1000.0).round() as i64;
@@ -656,7 +746,19 @@ impl SegmentWriter {
             );
             self.closed.push(SegmentInfo {
                 path: f.path,
-                start_ms: f.start_ms.unwrap_or_else(|| to_ms(f.start)),
+                // A first file: cut by real time, it spans the time it was
+                // open; moved back, it still starts when it opened (its
+                // first frame came then); never after its end.
+                start_ms: f
+                    .start_ms
+                    .unwrap_or_else(|| {
+                        if wall_cut && fix > 0.0 {
+                            end_ms - f.opened.elapsed().as_millis() as i64
+                        } else {
+                            to_ms(f.start).max(((k_before + f.start) * 1000.0).round() as i64)
+                        }
+                    })
+                    .min(end_ms),
                 end_ms,
                 bytes: f.bytes,
                 video_frames: f.video_frames,
@@ -670,6 +772,9 @@ impl SegmentWriter {
     /// the camera is being stopped).
     pub fn finish(&mut self) -> std::io::Result<()> {
         self.end_closing()?;
+        // A file open many times its length (timestamps that stood still)
+        // ends now by real time.
+        self.wall_cut = self.file.as_ref().is_some_and(|f| self.wall_full(f));
         let v = self.video;
         let end_ticks = match self.tracks[v].pending.last() {
             Some(p) => p.ticks + self.tracks[v].last_duration.max(1) as i64,
@@ -1529,6 +1634,91 @@ mod tests {
         let mut w3 = SegmentWriter::new(&dir, "cam-f", vec![video_track()], 10).unwrap();
         w3.follow_clock(600.0, 10.0);
         assert_eq!(w3.drift, 0.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recordings_stay_near_this_computers_clock_when_camera_timestamps_run_wild() {
+        let dir = std::env::temp_dir().join(format!("amber-wall-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now_ms = || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        // Timestamps 8 s ahead every 2 s keyframe group (under the jump
+        // limit), the writer running 60 s: media is 240 s ahead by now.
+        let mut w = SegmentWriter::new(&dir, "cam-ahead", vec![video_track()], 5).unwrap();
+        let back = std::time::Duration::from_secs(60);
+        w.anchor_instant = std::time::Instant::now() - back;
+        w.anchor_epoch -= 60.0;
+        for g in 0..31i64 {
+            for k in 0..20i64 {
+                w.push_video(g * 8 * 90_000 + k * 9000, vec![0, 0, 0, 1, 0x65], k == 0).unwrap();
+            }
+        }
+        let segs = w.take_closed();
+        assert!(!segs.is_empty());
+        // Rows follow one another, none inside the one before.
+        assert!(segs.windows(2).all(|p| p[1].start_ms >= p[0].end_ms && p[1].end_ms >= p[1].start_ms));
+        for s in &segs {
+            assert!(s.end_ms <= now_ms() + 2100, "ends {} ms in the future", s.end_ms - now_ms());
+            assert!(s.start_ms <= s.end_ms);
+        }
+        // Timestamps that stand still: a file open 3 lengths of real time
+        // ends at the next keyframe, dated by the time it was open.
+        let mut w = SegmentWriter::new(&dir, "cam-still", vec![video_track()], 5).unwrap();
+        w.anchor_instant = std::time::Instant::now() - std::time::Duration::from_secs(100);
+        w.anchor_epoch -= 100.0;
+        w.push_video(0, vec![0, 0, 0, 1, 0x65], true).unwrap();
+        w.push_video(1, vec![0, 0, 0, 1, 0x41], false).unwrap();
+        // 16 s of real time pass with the timestamps standing still.
+        w.anchor_instant -= std::time::Duration::from_secs(16);
+        w.anchor_epoch -= 16.0;
+        w.file.as_mut().unwrap().opened -= std::time::Duration::from_secs(16);
+        w.push_video(2, vec![0, 0, 0, 1, 0x65], true).unwrap();
+        let segs = w.take_closed();
+        assert_eq!(segs.len(), 1, "cut by real time");
+        assert!(segs[0].end_ms - segs[0].start_ms >= 15_900, "spans the time it was open: {} ms", segs[0].end_ms - segs[0].start_ms);
+        assert!(segs[0].end_ms >= now_ms() - 2100, "dated {} s back", (now_ms() - segs[0].end_ms) / 1000);
+        // Footage fed in a moment (a fresh writer: tests, a pre-roll burst) is left as it is.
+        let mut w = SegmentWriter::new(&dir, "cam-burst", vec![video_track()], 5).unwrap();
+        for i in 0..200i64 {
+            w.push_video(i * 9000, vec![0, 0, 0, 1, if i % 20 == 0 { 0x65 } else { 0x41 }], i % 20 == 0).unwrap();
+        }
+        let segs = w.take_closed();
+        assert!(segs.iter().all(|s| s.end_ms - s.start_ms >= 4900), "{:?}", segs.iter().map(|s| s.end_ms - s.start_ms).collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_network_stall_does_not_move_recordings_cut_by_their_own_timestamps() {
+        // 10 fps, a keyframe every 2 s, 5 s recordings, fed at real pace; the
+        // network holds the stream back 9.5 s just before the keyframe at 36 s,
+        // then what it held arrives at once. The file open then (30-36 s) took
+        // over three lengths of real time, but it was cut by its timestamps:
+        // every recording keeps its own length (before, 36-42 s was moved to a
+        // zero-length row and its neighbors stretched).
+        let dir = std::env::temp_dir().join(format!("amber-wall-stall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut w = SegmentWriter::new(&dir, "cam-stall", vec![video_track()], 5).unwrap();
+        let adv = |w: &mut SegmentWriter, d: f64| {
+            let d = std::time::Duration::from_secs_f64(d);
+            w.anchor_instant -= d;
+            if let Some(f) = w.file.as_mut() {
+                f.opened -= d;
+            }
+        };
+        for i in 0..600i64 {
+            if i == 360 {
+                adv(&mut w, 9.5); // the stall
+            }
+            if !(360..455).contains(&i) {
+                adv(&mut w, 0.1);
+            }
+            w.push_video(i * 9000, vec![0, 0, 0, 1, if i % 20 == 0 { 0x65 } else { 0x41 }], i % 20 == 0).unwrap();
+        }
+        let segs = w.take_closed();
+        let durs: Vec<i64> = segs.iter().map(|s| s.end_ms - s.start_ms).collect();
+        assert!(segs.len() >= 9, "{durs:?}");
+        assert!(durs.iter().all(|&d| (5900..=6100).contains(&d)), "{durs:?}");
+        assert!(segs.windows(2).all(|p| p[1].start_ms == p[0].end_ms), "{durs:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

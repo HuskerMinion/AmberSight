@@ -3727,6 +3727,30 @@ async fn list_clips(State(engine): State<Arc<Engine>>, axum::Extension(access): 
     Json(serde_json::json!({ "clips": clips }))
 }
 
+/// A saved clip file made from recordings ffmpeg copied from an HEVC camera
+/// says hev1, which Apple's players refuse: relabeled hvc1 in place before
+/// it is served (once per file and size while this runs).
+async fn hvc1_saved_clip(path: &std::path::Path) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static DONE: OnceLock<Mutex<HashSet<(std::path::PathBuf, u64)>>> = OnceLock::new();
+    let Ok(meta) = tokio::fs::metadata(path).await else { return };
+    let key = (path.to_path_buf(), meta.len());
+    let done = DONE.get_or_init(Default::default);
+    if done.lock().unwrap().contains(&key) {
+        return;
+    }
+    let p = path.to_path_buf();
+    // (A file that cannot be changed, a read-only folder, is not tried again either.)
+    if tokio::task::spawn_blocking(move || crate::ingest::mp4read::hev1_file_to_hvc1(&p)).await.is_ok() {
+        let mut d = done.lock().unwrap();
+        if d.len() > 10_000 {
+            d.clear();
+        }
+        d.insert(key);
+    }
+}
+
 async fn clip_file(
     State(engine): State<Arc<Engine>>,
     AxPath(id): AxPath<String>,
@@ -3784,6 +3808,7 @@ async fn clip_file(
                 let r = if low || !path.is_file() {
                     virtual_clip_response(engine, id, false, low, req).await
                 } else {
+                    hvc1_saved_clip(&path).await;
                     match tower::ServiceExt::oneshot(ServeFile::new(path), req).await {
                         Ok(r) => {
                             let mut r = r.into_response();
@@ -3802,6 +3827,7 @@ async fn clip_file(
         // No saved file: assemble the event's video from the recordings.
         return virtual_clip_response(engine, id, download, dl.quality == "low", req).await;
     }
+    hvc1_saved_clip(&path).await;
     // ServeFile streams from disk and handles Range / If-Range / HEAD.
     let mut resp = match tower::ServiceExt::oneshot(ServeFile::new(path), req).await {
         Ok(r) => r.into_response(),
@@ -4532,6 +4558,7 @@ async fn event_clip_burned(engine: &Arc<Engine>, c: crate::engine::playback::Eve
 /// `Engine::event_clip_at`): the file as it is (byte ranges, HEAD), with the
 /// stretch it shows in the same headers a planned window has.
 async fn event_clip_window(c: crate::engine::playback::EventClipAt, name: &str, download: bool, req: Request) -> Response {
+    hvc1_saved_clip(&c.path).await;
     let mut r = match tower::ServiceExt::oneshot(ServeFile::new(&c.path), req).await {
         Ok(r) => r.into_response(),
         Err(_) => return (StatusCode::NOT_FOUND, "no recording covers that window").into_response(),

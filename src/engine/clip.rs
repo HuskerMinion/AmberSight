@@ -583,6 +583,8 @@ pub(super) fn build_clip(
     let _ = std::fs::remove_file(&list);
     match status {
         Ok(s) if s.success() => {
+            // ffmpeg labels copied HEVC hev1, which Apple's players refuse.
+            let _ = crate::ingest::mp4read::hev1_file_to_hvc1(&out);
             if let Some(t) = first_ms {
                 let _ = std::fs::write(out.with_extension("start"), t.to_string());
             }

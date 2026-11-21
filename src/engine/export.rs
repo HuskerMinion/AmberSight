@@ -52,7 +52,9 @@ impl Engine {
     /// An event's clip as it is: its saved file, else assembled from the
     /// recordings with the time as a subtitle track (no conversion).
     fn export_clip_bytes(&self, ev: &Event) -> Option<Vec<u8>> {
-        if let Ok(b) = std::fs::read(self.clip_file_path(&ev.id)) {
+        if let Ok(mut b) = std::fs::read(self.clip_file_path(&ev.id)) {
+            // (A clip saved from recordings ffmpeg copied may say hev1: hvc1 plays on Apple's players.)
+            crate::ingest::mp4read::hev1_to_hvc1(&mut b);
             return Some(b);
         }
         let c = self.virtual_clip(ev).ok().flatten()?;

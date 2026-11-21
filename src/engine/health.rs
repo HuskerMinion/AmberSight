@@ -64,7 +64,14 @@ impl Engine {
                     let last = if run.record_sub { last_rec } else { self.db.last_main_segment_end(&slug(&run.name)).ok().flatten() };
                     let age = last.map(|ms| now - ms / 1000).unwrap_or(i64::MAX);
                     if age > 4 * seg_secs.max(10) {
-                        let w = format!("{} is online but no recording has been written for {}", run.name, ago(age));
+                        // A recorder that keeps stopping at once said why.
+                        let why = st
+                            .last_error
+                            .as_deref()
+                            .filter(|e| e.starts_with("the recorder keeps stopping") && st.last_error_at.unwrap_or(0) >= st.online_since.unwrap_or(i64::MAX))
+                            .map(|e| format!(" ({})", plain_error(e)))
+                            .unwrap_or_default();
+                        let w = format!("{} is online but no recording has been written for {}{why}", run.name, ago(age));
                         problem(format!("norec:{}", h.id), &w);
                         shorts.push(format!("{} is not recording", run.name));
                         warnings.push(w);
@@ -319,12 +326,16 @@ pub fn plain_error(e: &str) -> String {
     if e.starts_with(crate::macnet::BLOCKED_PREFIX) {
         // Already in words, with what to do.
         e.to_string()
+    } else if l.starts_with("the recorder keeps stopping") {
+        "the recorder keeps stopping at once; recording is tried again every 5 min".into()
     } else if l.contains("is on a read-only file system") {
         "its recording folder is on a read-only file system".into()
     } else if l.contains("is not writable by ambersight") {
         "its recording folder is not writable".into()
     } else if l.contains("not reachable") || l.contains("timed out") || l.contains("timeout") || l.contains("no route") || l.contains("unreachable") {
         "not reachable".into()
+    } else if l.starts_with("the recorder stopped") {
+        "the recording stopped; the camera was started over".into()
     } else if l.contains("stream ended") {
         "the video stopped".into()
     } else {
@@ -374,6 +385,9 @@ mod tests {
         assert_eq!(plain_error("Folder Timeout (/r) is not writable by AmberSight (user 1:1) (ffmpeg: 401 Unauthorized)"), "its recording folder is not writable");
         assert_eq!(plain_error("Folder Timeout (/r) is on a read-only file system"), "its recording folder is on a read-only file system");
         assert_eq!(plain_error("RTSP 401 Unauthorized"), "the camera refused the user name or password");
+        assert_eq!(plain_error("the recorder stopped (ffmpeg: Broken pipe); starting the camera over"), "the recording stopped; the camera was started over");
+        assert_eq!(plain_error("the recorder stopped (ffmpeg: Connection timed out); starting the camera over"), "not reachable");
+        assert_eq!(plain_error(&crate::engine::worker::recorder_held_text(Some("Connection timed out"))), "the recorder keeps stopping at once; recording is tried again every 5 min");
         assert_eq!(plain_error("something odd at rtsp://192.0.2.10/x happened"), "something odd at happened");
         // 401 is a status, not part of a port or a number.
         assert_eq!(plain_error("bad answer from 192.0.2.10:5401"), "bad answer from 192.0.2.10:5401");

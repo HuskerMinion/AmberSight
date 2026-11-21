@@ -996,7 +996,10 @@ impl VirtualClip {
         let tracks = header.tracks.clone();
         let clip_start = cands[first].start_ms;
 
-        let mut pieces = vec![Piece::Bytes(low_delay_header(header, &segments[base_seg].path, &cands[first].frag))];
+        let mut init = low_delay_header(header, &segments[base_seg].path, &cands[first].frag);
+        // (A recording ffmpeg copied from an HEVC camera says hev1: served as hvc1, which Apple's players take.)
+        crate::ingest::mp4read::hev1_to_hvc1(&mut init);
+        let mut pieces = vec![Piece::Bytes(init)];
         let mut running_end: Vec<u64> = vec![0; tracks.len()];
         // Per (segment, track): output decode time of that track's first
         // fragment in the segment, and its source tfdt.
@@ -1299,7 +1302,8 @@ impl VirtualClip {
         let init = video_only_init(&src_init, video.id)?;
         // Keyframes only: shown in the order they are decoded, whatever the
         // stream, so the decoder can show each one at once.
-        let init = crate::ingest::sps::low_delay_init(&init).unwrap_or(init);
+        let mut init = crate::ingest::sps::low_delay_init(&init).unwrap_or(init);
+        crate::ingest::mp4read::hev1_to_hvc1(&mut init);
         if picks.is_empty() {
             return Ok(None);
         }

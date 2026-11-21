@@ -126,6 +126,9 @@ pub struct ListedFile {
     pub name: String,
     /// Modified time, ms since the epoch.
     pub mtime_ms: Option<i64>,
+    /// Creation time, ms since the epoch, where the system keeps it (Windows; Linux file
+    /// systems with a birth time; not every share).
+    pub created_ms: Option<i64>,
     pub bytes: i64,
     pub is_file: bool,
 }
@@ -146,10 +149,16 @@ pub fn list_dir_files(dir: &Path, each: &mut dyn FnMut()) -> Option<Vec<ListedFi
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64);
+        let created_ms = meta
+            .as_ref()
+            .and_then(|m| m.created().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
         out.push(ListedFile {
             path: e.path(),
             name,
             mtime_ms,
+            created_ms,
             bytes: meta.as_ref().map_or(0, |m| m.len() as i64),
             is_file: meta.as_ref().is_some_and(|m| m.is_file()),
         });

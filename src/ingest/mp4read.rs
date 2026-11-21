@@ -147,6 +147,152 @@ fn find(b: &[u8], from: usize, to: usize, kind: &[u8; 4]) -> Option<(usize, usiz
     children(b, from, to).into_iter().find(|c| &c.0 == kind).map(|c| (c.1, c.2))
 }
 
+/// An HEVC sample entry (`entry`: the whole box) labeled `hev1`, ffmpeg's
+/// label when it copies a camera's stream into MP4, relabeled `hvc1` in
+/// place: Apple's players (iPhone, Safari, QuickTime) refuse `hev1`. `hvc1`
+/// says the decoder setup is all in the entry, so only an entry holding a
+/// VPS, an SPS and a PPS is relabeled, and those arrays are marked complete,
+/// as ffmpeg's own `-tag:v hvc1` writes them (the same pictures, the same
+/// size). True when it was changed.
+pub fn hev1_entry_to_hvc1(entry: &mut [u8]) -> bool {
+    let Some((kind, hdr, len)) = box_at(entry, 0) else { return false };
+    let end = usize::try_from(len).unwrap_or(usize::MAX).min(entry.len());
+    // VisualSampleEntry: 78 bytes of fields, then its boxes.
+    let first = hdr as usize + 78;
+    if &kind != b"hev1" || first > end {
+        return false;
+    }
+    let Some((cs, ce)) = find(entry, first, end, b"hvcC") else { return false };
+    // hvcC: 22 bytes, the number of arrays, then each array: a byte with the
+    // NAL type (low 6 bits; the top one "complete"), a count, and the units,
+    // each after its 2-byte length.
+    let Some(&arrays) = entry.get(cs + 22) else { return false };
+    let mut at = cs + 23;
+    let mut marks = Vec::new();
+    let mut have = [false; 3];
+    for _ in 0..arrays {
+        let (Some(&t), Some(n)) = (entry.get(at), entry.get(at + 1..at + 3)) else { return false };
+        let n = u16::from_be_bytes([n[0], n[1]]);
+        let mut p = at + 3;
+        for _ in 0..n {
+            let Some(l) = entry.get(p..p + 2) else { return false };
+            p += 2 + u16::from_be_bytes([l[0], l[1]]) as usize;
+        }
+        if p > ce {
+            return false;
+        }
+        // 32, 33, 34: VPS, SPS, PPS.
+        if let Some(k) = ((t & 0x3f) as usize).checked_sub(32).filter(|&k| k < 3) {
+            have[k] |= n > 0;
+            marks.push(at);
+        }
+        at = p;
+    }
+    if !have.iter().all(|&h| h) {
+        return false; // the setup only in the stream: hev1 is right
+    }
+    for m in marks {
+        entry[m] |= 0x80;
+    }
+    entry[4..8].copy_from_slice(b"hvc1");
+    true
+}
+
+/// Every video sample entry labeled `hev1` in `head` (whole top-level boxes
+/// from a file's start, its `moov` among them), relabeled as
+/// [`hev1_entry_to_hvc1`] says. True when one was.
+pub fn hev1_to_hvc1(head: &mut [u8]) -> bool {
+    let mut spots = Vec::new();
+    for (k, ms, me) in children(head, 0, head.len()) {
+        if &k != b"moov" {
+            continue;
+        }
+        for (k, ts, te) in children(head, ms, me) {
+            let Some((ds, de)) = (&k == b"trak").then(|| find(head, ts, te, b"mdia")).flatten() else { continue };
+            let Some((is, ie)) = find(head, ds, de, b"minf") else { continue };
+            let Some((ss, se)) = find(head, is, ie, b"stbl") else { continue };
+            let Some((sd, sde)) = find(head, ss, se, b"stsd") else { continue };
+            // stsd: version, flags and entry count, then the entries.
+            let mut at = sd + 8;
+            while let Some((kind, _, len)) = box_at(&head[..sde], at) {
+                let Some(end) = usize::try_from(len).ok().and_then(|l| at.checked_add(l)).filter(|&e| e <= sde && len >= 8) else { break };
+                if &kind == b"hev1" {
+                    spots.push((at, end));
+                }
+                at = end;
+            }
+        }
+    }
+    let mut any = false;
+    for (s, e) in spots {
+        any |= hev1_entry_to_hvc1(&mut head[s..e]);
+    }
+    any
+}
+
+/// [`hev1_to_hvc1`] for a finished file on disk (a saved clip, its `moov`
+/// at the start or the end): only the changed bytes are written. True when
+/// it was changed.
+pub fn hev1_file_to_hvc1(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().read(true).open(path)?;
+    let file_len = f.metadata()?.len();
+    let mut at = 0u64;
+    let mut h = [0u8; 16];
+    for _ in 0..64 {
+        if at.saturating_add(8) > file_len {
+            return Ok(false);
+        }
+        f.seek(SeekFrom::Start(at))?;
+        let n = (file_len - at).min(16) as usize;
+        f.read_exact(&mut h[..n])?;
+        let (kind, _, len) = box_at(&h[..n], 0).ok_or_else(|| std::io::Error::other("damaged MP4 box"))?;
+        // (Size 0: the box runs to the end of the file.)
+        let len = if h[..4] == [0; 4] { file_len - at } else { len };
+        if len < 8 {
+            return Err(std::io::Error::other("damaged MP4 box"));
+        }
+        if &kind == b"moov" {
+            if len > MAX_MOOV_BYTES || at + len > file_len {
+                return Ok(false);
+            }
+            let mut moov = vec![0u8; len as usize];
+            f.seek(SeekFrom::Start(at))?;
+            f.read_exact(&mut moov)?;
+            let was = moov.clone();
+            if !hev1_to_hvc1(&mut moov) {
+                return Ok(false);
+            }
+            // (Its time is kept, 2 s later: the clip sweep and the offsite copy go
+            // by it, and a player's cached copy, checked by that time, is then
+            // seen to be out of date.)
+            let modified = f.metadata()?.modified().ok();
+            let mut w = std::fs::OpenOptions::new().write(true).open(path)?;
+            // Each changed run in one write, so a reader never sees half a label.
+            let mut i = 0;
+            while i < moov.len() {
+                if was[i] == moov[i] {
+                    i += 1;
+                    continue;
+                }
+                let start = i;
+                while i < moov.len() && was[i] != moov[i] {
+                    i += 1;
+                }
+                w.seek(SeekFrom::Start(at + start as u64))?;
+                w.write_all(&moov[start..i])?;
+            }
+            w.flush()?;
+            if let Some(t) = modified {
+                let _ = w.set_modified(t + std::time::Duration::from_secs(2));
+            }
+            return Ok(true);
+        }
+        at = at.checked_add(len).ok_or_else(|| std::io::Error::other("damaged MP4 box"))?;
+    }
+    Ok(false)
+}
+
 /// Read the sample tables of a complete `moov` box (header included).
 pub fn parse_moov(moov: &[u8]) -> Result<Mp4Index> {
     let (_, hdr, len) = box_at(moov, 0).ok_or_else(|| anyhow!("empty header"))?;
@@ -191,7 +337,9 @@ fn parse_trak(b: &[u8], from: usize, to: usize) -> Result<Option<TrackIndex>> {
     let entries = sd_s + 8;
     let (ek, _, elen) = box_at(b, entries).ok_or_else(|| anyhow!("no sample entry"))?;
     let entry_end = usize::try_from(elen).ok().and_then(|l| entries.checked_add(l)).filter(|&e| e <= sd_e).ok_or_else(|| anyhow!("damaged sample description"))?;
-    let sample_entry = b.get(entries..entry_end).ok_or_else(|| anyhow!("damaged sample description"))?.to_vec();
+    let mut sample_entry = b.get(entries..entry_end).ok_or_else(|| anyhow!("damaged sample description"))?.to_vec();
+    // (A camera's own file may say hev1: copied on as hvc1, which Apple's players take.)
+    hev1_entry_to_hvc1(&mut sample_entry);
     if kind == TrackKind::Video && !matches!(&ek, b"avc1" | b"avc3" | b"hvc1" | b"hev1") {
         bail!("video of a kind AmberSight does not copy ({})", String::from_utf8_lossy(&ek));
     }
@@ -492,6 +640,68 @@ pub(crate) mod tests {
         let at = v.windows(4).position(|w| w == b"avc1").unwrap() - 4;
         v[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(parse_moov(&bx(b"moov", &v)).is_err());
+    }
+
+    /// An hev1 entry: 78 bytes of fields, then an hvcC with arrays of the
+    /// given NAL types (one 3-byte unit each).
+    fn hev1(types: &[u8]) -> Vec<u8> {
+        let mut c = vec![1u8; 22];
+        c.push(types.len() as u8);
+        for &t in types {
+            c.extend_from_slice(&[t, 0, 1, 0, 3, 0x40, 1, 2]);
+        }
+        let mut body = vec![0u8; 78];
+        body.extend_from_slice(&bx(b"hvcC", &c));
+        bx(b"hev1", &body)
+    }
+
+    #[test]
+    fn hev1_with_its_setup_in_the_entry_becomes_hvc1() {
+        let mut e = hev1(&[32, 33, 34, 39]);
+        assert!(hev1_entry_to_hvc1(&mut e));
+        assert_eq!(&e[4..8], b"hvc1");
+        // VPS, SPS and PPS marked complete; the SEI left as it was.
+        let arrays: Vec<u8> = (0..4).map(|i| e[8 + 78 + 8 + 23 + i * 8]).collect();
+        assert_eq!(arrays, vec![0x80 | 32, 0x80 | 33, 0x80 | 34, 39]);
+        // Already hvc1: nothing to do.
+        assert!(!hev1_entry_to_hvc1(&mut e));
+        // No PPS in the entry (it comes in the stream): stays hev1.
+        let mut e = hev1(&[32, 33]);
+        let was = e.clone();
+        assert!(!hev1_entry_to_hvc1(&mut e));
+        assert_eq!(e, was);
+        // A unit running past the box: left alone, no panic.
+        let mut e = hev1(&[32, 33, 34]);
+        let n = e.len();
+        e[n - 4] = 0xff;
+        let was = e.clone();
+        assert!(!hev1_entry_to_hvc1(&mut e));
+        assert_eq!(e, was);
+        for cut in 0..e.len() {
+            let mut short = e[..cut].to_vec();
+            hev1_entry_to_hvc1(&mut short);
+        }
+    }
+
+    #[test]
+    fn a_header_is_relabeled_through_its_moov() {
+        let stsd = |entry: &[u8]| {
+            let mut b = vec![0u8, 0, 0, 0, 0, 0, 0, 1];
+            b.extend_from_slice(entry);
+            bx(b"stsd", &b)
+        };
+        let trak = |entry: &[u8]| bx(b"trak", &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &stsd(entry)))));
+        let moov = bx(b"moov", &[trak(&hev1(&[32, 33, 34])), trak(&bx(b"mp4a", &[0; 28]))].concat());
+        let mut head = [bx(b"ftyp", b"isom\0\0\0\0"), moov].concat();
+        let len = head.len();
+        assert!(hev1_to_hvc1(&mut head));
+        assert_eq!(head.len(), len);
+        assert!(head.windows(4).any(|w| w == b"hvc1") && !head.windows(4).any(|w| w == b"hev1"));
+        assert!(!hev1_to_hvc1(&mut head));
+        for cut in 0..head.len() {
+            let mut short = head[..cut].to_vec();
+            hev1_to_hvc1(&mut short);
+        }
     }
 
     #[test]

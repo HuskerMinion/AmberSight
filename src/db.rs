@@ -3362,15 +3362,15 @@ fn found_from_listing(folder: &str, root: &Path, slug: &str, fallback_secs: u64,
 /// writing time (paths relative to `root`).
 fn found_from_listing_ex(folder: &str, root: &Path, slug: &str, fallback_secs: u64, listing: &[walk::ListedFile], ignore_open: bool) -> (Vec<FoundSegment>, Vec<String>) {
     let mut open = Vec::new();
-    // (prefix, number, path, mtime ms, bytes)
-    let mut files: Vec<(String, u32, std::path::PathBuf, i64, i64)> = Vec::new();
+    // (prefix, number, path, mtime ms, bytes, creation time ms)
+    let mut files: Vec<(String, u32, std::path::PathBuf, i64, i64, Option<i64>)> = Vec::new();
     for e in listing {
         let Some((prefix, num)) = split_segment_name(&e.name) else { continue };
         if !e.is_file {
             continue;
         }
         let Some(mtime_ms) = e.mtime_ms else { continue };
-        files.push((prefix.to_string(), num, e.path.clone(), mtime_ms, e.bytes));
+        files.push((prefix.to_string(), num, e.path.clone(), mtime_ms, e.bytes, e.created_ms));
     }
     files.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
     let fallback_ms = fallback_secs as i64 * 1000;
@@ -3383,7 +3383,7 @@ fn found_from_listing_ex(folder: &str, root: &Path, slug: &str, fallback_secs: u
     let still_open = |end_ms: i64| end_ms > now_ms - fallback_ms - 3000;
     let mut out = Vec::new();
     let mut prev: Option<(&str, u32, i64)> = None;
-    for (prefix, num, path, end_ms, bytes) in &files {
+    for (prefix, num, path, end_ms, bytes, created_ms) in &files {
         let chained = match prev {
             Some((pp, pn, pend)) if pp == prefix && *num == pn + 1 => {
                 let gap = end_ms - pend;
@@ -3402,10 +3402,13 @@ fn found_from_listing_ex(folder: &str, root: &Path, slug: &str, fallback_secs: u
         // event's clip is joined into a file of its own (see clip.rs).
         // (The stamp in the name, seconds or milliseconds, is not used.)
         let kind = if prefix.starts_with(&format!("{slug}-sub-")) { "sub" } else { "legacy" };
+        // A continuous run's first file may hold more than one recording's
+        // length (its recorder stopped starting new files): see first_file_start.
+        let first = if *num == 0 { first_file_start(prefix, slug, *end_ms, *created_ms, fallback_ms) } else { None };
         out.push(FoundSegment {
             camera: slug.to_string(),
             path: relative_path(root, path),
-            start_ms: chained.unwrap_or(end_ms - fallback_ms),
+            start_ms: chained.or(first).unwrap_or(end_ms - fallback_ms),
             end_ms: *end_ms,
             bytes: *bytes,
             folder: folder.to_string(),
@@ -3452,6 +3455,60 @@ pub fn relative_path(data_dir: &Path, path: &Path) -> String {
     }
 }
 
+/// The stamp in a continuous ffmpeg run's name, "<slug>-<ms>-seg" or
+/// "<slug>-sub-<ms>-seg" (seconds in names from before 0.11), in ms: when the
+/// camera's session started. Not for other names: the built-in reader's
+/// "-rec-" files (the stamp is the trigger; they start earlier, by their
+/// pre-roll), battery clips and ffmpeg's motion recordings ("-rec-seg"),
+/// which keep their old dating.
+fn run_stamp_ms(prefix: &str, slug: &str) -> Option<i64> {
+    let rest = prefix.strip_prefix(slug)?.strip_prefix('-')?.strip_suffix("-seg")?;
+    let stamp = rest.strip_prefix("sub-").unwrap_or(rest);
+    if stamp.is_empty() || !stamp.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: i64 = stamp.parse().ok()?;
+    // (Seconds until about the year 5138; milliseconds after 1973.)
+    if n < 100_000_000_000 { n.checked_mul(1000) } else { Some(n) }
+}
+
+/// The start of a continuous run's first file that ended at `end_ms`, when
+/// it can be told: its creation time, where the system keeps one (at least
+/// one recording, `fallback_ms`, before its end, and not before the session's
+/// start, the stamp in its name); else, when the stamp is
+/// plausible (at most [`RUN_START_MAX_MS`] before), the stamp for a file
+/// clearly longer than one recording (`fallback_ms`) and otherwise one
+/// recording's length (not before the stamp). The stamp is taken before the
+/// session's waits and the camera's first picture, so it starts a normal
+/// first file a few seconds early; a clock that jumped forward after it
+/// was taken would make it hours early.
+fn first_file_start(prefix: &str, slug: &str, end_ms: i64, created_ms: Option<i64>, fallback_ms: i64) -> Option<i64> {
+    let stamp = run_stamp_ms(prefix, slug)?;
+    if let Some(c) = created_ms.filter(|c| *c < end_ms && end_ms - c <= CREATED_MAX_MS) {
+        // (ffmpeg creates the file only after reading the stream a moment to
+        // learn it, and what it read goes in: a file created less than one
+        // recording before its end still holds one recording.)
+        let c = c.min(end_ms - fallback_ms);
+        return Some(if stamp < end_ms { c.max(stamp) } else { c });
+    }
+    if stamp >= end_ms || end_ms - stamp > RUN_START_MAX_MS {
+        return None;
+    }
+    // (The fallback, where no creation time is kept (some shares): a first
+    // file that ran more than two recordings from the stamp starts at it.)
+    Some(if end_ms - stamp > fallback_ms * 2 { stamp } else { stamp.max(end_ms - fallback_ms) })
+}
+
+/// The longest a run's first file is taken to run from the stamp in its name:
+/// the stall watch stops a recorder that starts no new file for 30 minutes
+/// at most (plus its looks), so a longer span is a clock that jumped.
+const RUN_START_MAX_MS: i64 = 35 * 60 * 1000;
+
+/// The longest a file is taken to run from its creation time: as from the
+/// stamp (a clock that steps forward while the file is open, a Pi's at boot,
+/// would otherwise make it up to hours long).
+const CREATED_MAX_MS: i64 = RUN_START_MAX_MS;
+
 /// `{...}-seg{NNNNNN}.mp4` -> (name up to and including `seg`, number).
 /// Whether a file name is one of a recorder's segments.
 pub fn is_segment_name(name: &str) -> bool {
@@ -3484,6 +3541,120 @@ mod tests {
         assert!(plan.iter().any(|p| p.contains("SEARCH segments USING INDEX idx_segments_start")), "{plan:?}");
     }
     use super::*;
+
+    #[test]
+    fn only_continuous_runs_have_their_stamp_read() {
+        let run = 1_795_229_818_938i64;
+        assert_eq!(run_stamp_ms(&format!("front-{run}-seg"), "front"), Some(run));
+        assert_eq!(run_stamp_ms(&format!("front-sub-{run}-seg"), "front"), Some(run));
+        assert_eq!(run_stamp_ms(&format!("front_door-{run}-seg"), "front_door"), Some(run));
+        // A slug that ends in digits, or holds "rec" / "sub": only what follows it is read.
+        assert_eq!(run_stamp_ms(&format!("cam-1700000000000-{run}-seg"), "cam-1700000000000"), Some(run));
+        assert_eq!(run_stamp_ms(&format!("x-sub-sub-{run}-seg"), "x-sub"), Some(run));
+        assert_eq!(run_stamp_ms("cam-1-seg", "cam-1"), None);
+        // Seconds (names from before 0.11).
+        assert_eq!(run_stamp_ms(&format!("front-{}-seg", run / 1000), "front"), Some(run / 1000 * 1000));
+        // Not continuous runs: the built-in reader's and ffmpeg's motion files, battery clips.
+        assert_eq!(run_stamp_ms(&format!("front-{run}-rec-seg"), "front"), None);
+        assert_eq!(run_stamp_ms(&format!("front-{run}-rec"), "front"), None);
+        assert_eq!(run_stamp_ms("front-seg", "front"), None);
+        assert_eq!(run_stamp_ms("front-sub-seg", "front"), None);
+        // Another camera's name.
+        assert_eq!(run_stamp_ms(&format!("back-{run}-seg"), "front"), None);
+    }
+
+    #[test]
+    fn a_first_file_starts_at_its_creation_else_at_a_plausible_stamp() {
+        let stamp = 1_795_229_818_000i64;
+        let p = format!("front-{stamp}-seg");
+        let f = |end: i64, created: Option<i64>, seg_ms: i64| first_file_start(&p, "front", end, created, seg_ms);
+        // Default 5 s recordings: the first file was created 7.5 s after the stamp (the
+        // session's waits, the connect) and ran 5 s: 5 s, not 12.5.
+        assert_eq!(f(stamp + 12_500, Some(stamp + 7_500), 5_000), Some(stamp + 7_500));
+        // Created only 3.3 s before its end (ffmpeg read the stream 3 s first, and
+        // that went in): one recording, 5 s.
+        assert_eq!(f(stamp + 12_000, Some(stamp + 8_700), 5_000), Some(stamp + 7_000));
+        // Killed after 90 s: from its creation.
+        assert_eq!(f(stamp + 95_000, Some(stamp + 4_000), 10_000), Some(stamp + 4_000));
+        // Created "before" the stamp (the clock stepped back): never before the stamp.
+        assert_eq!(f(stamp + 9_000, Some(stamp - 60_000), 10_000), Some(stamp));
+        // No creation time: the stamp for a long file, one recording for a normal one.
+        assert_eq!(f(stamp + 95_000, None, 10_000), Some(stamp));
+        assert_eq!(f(stamp + 12_000, None, 10_000), Some(stamp + 2_000));
+        // The clock jumped 5 h forward after the stamp was taken: with a creation time,
+        // the file's own 5 s; without one, nothing from the stamp (one recording's length).
+        let jumped = stamp + 5 * 3600 * 1000;
+        assert_eq!(f(jumped + 5_000, Some(jumped), 5_000), Some(jumped));
+        assert_eq!(f(jumped + 5_000, None, 5_000), None);
+        assert_eq!(f(stamp + RUN_START_MAX_MS + 1, None, 5_000), None);
+        // The clock stepped 90 min forward while the first file was open (a Pi at
+        // boot: stamp and creation on the old clock): not 90 min from its creation.
+        assert_eq!(f(stamp + 90 * 60_000 + 5_000, Some(stamp + 3_000), 5_000), None);
+        // A share that keeps no creation time, 5 s recordings, the first file 12.5 s
+        // after the stamp: the fallback starts it at the stamp (12.5 s).
+        assert_eq!(f(stamp + 12_500, None, 5_000), Some(stamp));
+        // A creation time after the end (a copied file): not used.
+        assert_eq!(f(stamp + 95_000, Some(stamp + 96_000), 10_000), Some(stamp));
+    }
+
+    #[test]
+    fn a_long_first_file_is_indexed_from_its_runs_start() {
+        let root = std::path::Path::new("/data");
+        let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        let run = now - 600_000;
+        let file = |name: String, mtime_ms: i64, created_ms: Option<i64>| walk::ListedFile { path: root.join("cameras/front/segments").join(&name), name, mtime_ms: Some(mtime_ms), created_ms, bytes: 1000, is_file: true };
+        let jump = now - 4 * 3600 * 1000;
+        let listing = vec![
+            // Killed 90 s after its run started (never cut), no creation time kept.
+            file(format!("front-{run}-seg000000.mp4"), run + 90_000, None),
+            // A sub stream run, created 3 s after the stamp.
+            file(format!("front-sub-{run}-seg000000.mp4"), run + 95_000, Some(run + 3_000)),
+            // Motion recordings (ffmpeg's, the built-in reader's with pre-roll): as before.
+            file(format!("front-{}-rec-seg000000.mp4", run + 200_000), run + 204_000, Some(run + 199_000)),
+            // A run going on as usual: its first file one recording long, created 2 s
+            // after the stamp; the next ones chain from it.
+            file(format!("front-{}-seg000000.mp4", run + 300_000), run + 312_000, Some(run + 302_000)),
+            file(format!("front-{}-seg000001.mp4", run + 300_000), run + 322_000, Some(run + 312_000)),
+            // A file with no stamp keeps one recording's length.
+            file("front-seg000000.mp4".to_string(), run + 400_000, None),
+            // The clock jumped 3 h after the stamp: one recording's length, not 3 h.
+            file(format!("front-{jump}-seg000000.mp4"), jump + 3 * 3600 * 1000 + 10_000, None),
+        ];
+        let found = found_from_listing("", root, "front", 10, &listing);
+        let span = |name: &str| found.iter().find(|f| f.path.ends_with(name)).map(|f| (f.start_ms, f.end_ms)).unwrap();
+        let rel = |n: &str| span(n).0 - run;
+        assert_eq!(span(&format!("front-{run}-seg000000.mp4")), (run, run + 90_000));
+        assert_eq!(span(&format!("front-sub-{run}-seg000000.mp4")), (run + 3_000, run + 95_000));
+        assert_eq!(rel(&format!("front-{}-rec-seg000000.mp4", run + 200_000)), 194_000);
+        assert_eq!(span(&format!("front-{}-seg000000.mp4", run + 300_000)), (run + 302_000, run + 312_000));
+        assert_eq!(span(&format!("front-{}-seg000001.mp4", run + 300_000)), (run + 312_000, run + 322_000));
+        assert_eq!(rel("/front-seg000000.mp4"), 390_000);
+        let (s, e) = span(&format!("front-{jump}-seg000000.mp4"));
+        assert_eq!(e - s, 10_000);
+        assert_eq!(found.iter().find(|f| f.path.contains("-sub-")).unwrap().kind, "sub");
+        // The longest recording kept stays a real one.
+        let db = Db::open_in_memory().unwrap();
+        db.insert_found_segments(&found).unwrap();
+        let longest: i64 = db.lock().query_row("SELECT ms FROM seg_longest WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(longest, 92_000);
+    }
+
+    /// The listing reads files' creation time where the system keeps one.
+    #[test]
+    fn the_listing_reads_creation_times() {
+        let dir = std::env::temp_dir().join(format!("amber-created-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("front-1-seg000000.mp4");
+        std::fs::write(&f, b"x").unwrap();
+        let kept = std::fs::metadata(&f).unwrap().created().is_ok();
+        let l = walk::list_dir_files(&dir, &mut || {}).unwrap();
+        assert_eq!(l[0].created_ms.is_some(), kept);
+        if let Some(c) = l[0].created_ms {
+            assert!((c - l[0].mtime_ms.unwrap()).abs() < 5_000);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use std::fs::File;
 
     fn ev(id: &str, cam: &str, start: i64, end: i64, objs: &[&str]) -> Event {
