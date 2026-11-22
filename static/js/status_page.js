@@ -412,8 +412,11 @@ function statusPage(el) {
         const pc = plan[c.name] || {};
         const rec = c.last_recording_end_ms ? ago(c.last_recording_end_ms / 1000) : '-';
         const kept = pc.oldest_ms ? dur(now - pc.oldest_ms / 1000) : '-';
-        const sk = c.clock_skew_s;
-        const clock = sk == null ? '-' : Math.abs(sk) < 2 ? '<span class="muted">' + t('status_page.clock_right', 'right') + '</span>' : '<span' + (Math.abs(sk) > 30 ? ' class="st-bad"' : '') + '>' + (sk > 0 ? '+' : '') + Math.round(sk) + ' s</span>';
+        // (Measured while it streams: none shown for a camera offline. A clock
+        // minutes or years off reads as a duration, not a count of seconds.)
+        const sk = c.online ? c.clock_skew_s : null;
+        const skText = (v) => Math.abs(v) < 120 ? (v > 0 ? '+' : '') + Math.round(v) + ' s' : (v > 0 ? '+' : '-') + dur(Math.abs(v));
+        const clock = sk == null ? '-' : Math.abs(sk) < 2 ? '<span class="muted">' + t('status_page.clock_right', 'right') + '</span>' : '<span' + (Math.abs(sk) > 30 ? ' class="st-bad"' : '') + '>' + skText(sk) + '</span>';
         return '<tr><td><b>' + esc(c.name) + '</b></td><td>' + b + '</td><td class="num">' + clock + '</td><td class="num">' + (f != null && c.online ? f : '-') + '</td>' +
           '<td class="num">' + kbps(pc.kbps) + '</td>' +
           '<td class="num"' + (pc.rough ? ' title="' + t('status_page.rough_title', 'Less than a day of recordings so far: a rough figure') + '"' : '') + '>' + perDay(pc.bytes_per_day) + (pc.rough ? '*' : '') + '</td>' +

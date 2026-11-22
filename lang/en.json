@@ -8201,6 +8201,14 @@
 "Short name",
 "92346acc"
 ],
+"cameras.show_in_apple_home": [
+"Show in Apple Home",
+"00ab4e6a"
+],
+"cameras.show_in_apple_home_hint": [
+"Shown in the Home app with live video, a motion sensor and a snapshot while Apple Home is on (Settings, Connections, Apple Home). Everyone in that Home sees it.",
+"3bfb2272"
+],
 "cameras.show_only_ai_events": [
 "Show only events AI confirms",
 "bfa330f4"
@@ -11565,6 +11573,30 @@
 "<b>When a way fails while running</b>, that camera moves to the next way, or the processor, at once. It tries the failed way again after 15 minutes, then after longer waits (up to 4 hours). A second failure in a row (with no 30 minutes of good running between) makes it leave that way until AmberSight restarts or Hardware decoding or Keep free changes. The NVIDIA card running out of memory is only waited out, never given up for. A way that stopped while the processor then decoded the same stream fine is left alone by every camera for an hour. <b>Per camera</b> shows what each camera uses now and why.",
 "da025aa4"
 ],
+"help.settings_homekit_accounts": [
+"HomeKit does not know AmberSight's accounts: everyone in that Apple Home sees the cameras switched on here. A camera (or bridge) removed in the Home app can be added again with the same setup code (after <b>Pair a device</b>); <b>Remove pairings</b> does the same from here. If the code got out, <b>Reset pairing</b> forgets every paired Apple device and makes a new code: Home then sees new accessories (remove the old ones; rooms, scenes and automations with these cameras are set up again).",
+"b75210bb"
+],
+"help.settings_homekit_adding_to_home": [
+"<b>Adding to Home:</b> Apple devices can pair only while pairing is open. Press <b>Pair a device</b> (for the camera, or for the bridge): for 5 minutes the setup code and QR code show and Home can add it. Pairing closes once a device is added, when you press <b>Stop</b>, or after 5 minutes. While it is open, the page shows the address of the device pairing now. If it is not yours, <b>Stop and start again</b> stops it, keeps that address out until pairing closes, and gives you 5 fresh minutes. Adding people in the Home app (sharing your home) needs none of this.",
+"3ae21608"
+],
+"help.settings_homekit_apple_home_shows": [
+"<b>Apple Home</b> shows the cameras you switch on (Settings &rsaquo; Connections &rsaquo; Apple Home, or <b>Show in Apple Home</b> in the camera's settings) in the Home app, with live video, a motion sensor and a snapshot. Live video is encoded for Home at the size it asks for, on the graphics card when there is one (else on the processor), with the camera's sound as Opus. At most 2 live views per camera and 4 in all, within the <code>[transcode]</code> limits of the settings file.",
+"9a210dde"
+],
+"help.settings_homekit_each_on_its_own": [
+"<b>Each on its own</b> (the default) adds every camera to Apple Home separately, as Apple prefers for cameras: press <b>Pair a device</b> for the camera, then in the Home app tap <b>+</b>, <b>Add Accessory</b> and scan its code, or enter the setup code (the same for all cameras). <b>Behind one bridge</b> adds one bridge with all cameras. Home warns that the accessory is not certified; choose <b>Add Anyway</b>. Apple devices find AmberSight over Bonjour (UDP 5353); each camera (or the bridge) has its own TCP port from 51830 on; allow them in the firewall. In Docker it needs host networking.",
+"f9a0381e"
+],
+"help.settings_homekit_tested": [
+"<b>Tested with an iPhone and a HomePod mini hub</b> (one camera per accessory). If you try another setup, please tell us how it went in GitHub Discussions. No motion notifications? In Home, the camera's <b>Activity Notifications</b> option <b>People</b> sends them only when no one is home: set it to <b>Any Time</b>.",
+"5a9fd376"
+],
+"help.settings_homekit_title": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
 "help.settings_https_extra_names_for": [
 "<b>Extra names for the certificate</b>: the certificate already covers this computer's addresses, its name and localhost; add any other name you open AmberSight by. Names apply without a restart. The certificate authority is limited (so a stolen key could not be used against other sites): names ending in .lan, .local, .home.arpa or .internal, this computer's name, and home-network and Tailscale (100.x) addresses can always be added. Other names, such as a Tailscale name (nvr.tail1234.ts.net), are only covered by a certificate authority made with them: add them before HTTPS is first turned on, or use your own certificate.",
 "8a6c3df6"
@@ -11996,6 +12028,282 @@
 "helperpick.whole_desktop": [
 "Whole desktop",
 "9558b09c"
+],
+"homekit_settings.add_to_apple_home": [
+"Add to Apple Home",
+"108e5e54"
+],
+"homekit_settings.apple_home_homekit": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
+"homekit_settings.behind_one_bridge": [
+"Behind one bridge",
+"29bb7522"
+],
+"homekit_settings.bridge_name": [
+"Bridge name",
+"5e160db3"
+],
+"homekit_settings.bridge_name_hint": [
+"The name Home shows for the bridge (bridged). Empty: this server's name.",
+"f2c61f8a"
+],
+"homekit_settings.bridge_title": [
+"Bridge \"{name}\"",
+"98d31dcb"
+],
+"homekit_settings.cameras_in_apple_home": [
+"Cameras in Apple Home",
+"e25a1955"
+],
+"homekit_settings.cameras_in_home": [
+"Cameras in Home",
+"031b3485"
+],
+"homekit_settings.cameras_shown": [
+"{n, plural, one {# camera is} other {# cameras are}} shown in Apple Home.",
+"fc73a413"
+],
+"homekit_settings.cameras_to_add": [
+"Cameras to add in the Home app",
+"7f590853"
+],
+"homekit_settings.change": [
+"Change",
+"a1de2fdd"
+],
+"homekit_settings.change_mode_body": [
+"The cameras then have to be added to Apple Home again, and the old ones removed there.",
+"2fd1c685"
+],
+"homekit_settings.change_mode_title": [
+"Change how cameras are in Home?",
+"b0c45668"
+],
+"homekit_settings.changing_this": [
+"Changing this means adding the cameras to Apple Home again.",
+"aeb99be8"
+],
+"homekit_settings.could_not_load": [
+"Could not load: ",
+"419029cb"
+],
+"homekit_settings.each_on_its_own": [
+"Each on its own",
+"2b0f617f"
+],
+"homekit_settings.for_seconds": [
+"{n} s",
+"37ea8f6e"
+],
+"homekit_settings.how": [
+"Each camera you switch on below is a HomeKit camera with live video, a motion sensor (Home can notify you of motion) and a snapshot picture. Live video is made for Home at the size it asks for (on the graphics card when there is one, else on the processor; sound as Opus when the camera has sound). By default each camera is added to Apple Home on its own, as Apple prefers for cameras: add each one in the Home app, with the same setup code. <b>Bridged</b> puts them all behind one bridge you add once. Apple devices find AmberSight over Bonjour (mDNS, UDP port 5353), so they must be on the same network (or reach it through a home hub such as a HomePod or Apple TV). <b>HomeKit does not know AmberSight's accounts:</b> everyone in the Apple Home you add them to sees the cameras you switch on here, whatever their AmberSight account may see.",
+"b2d6d188"
+],
+"homekit_settings.in_apple_home": [
+"In Apple Home ({n, plural, one {# Apple device} other {# Apple devices}} paired){live}.",
+"ad0b3f6e"
+],
+"homekit_settings.lead_main": [
+"Shows your cameras in Apple Home, with live video, motion alerts and snapshots.",
+"7ecb4152"
+],
+"homekit_settings.lead_sub": [
+"Leave it off unless you use the Home app.",
+"d4bde183"
+],
+"homekit_settings.live_views": [
+"{n, plural, one {# live view} other {# live views}}",
+"d2a9b570"
+],
+"homekit_settings.loading": [
+"Loading...",
+"17b11033"
+],
+"homekit_settings.more_settings": [
+"More settings",
+"1386530d"
+],
+"homekit_settings.no_camera_shown": [
+"No camera is shown yet: switch on the ones to show.",
+"292b5667"
+],
+"homekit_settings.no_cameras_yet": [
+"No cameras yet.",
+"af38c936"
+],
+"homekit_settings.not_certified": [
+"Home says the accessory is not certified: that is expected, choose <b>Add Anyway</b>. The phone must be on the same network as this server.",
+"2b6d0890"
+],
+"homekit_settings.not_in_apple_home": [
+"Not in Apple Home yet.",
+"879445cc"
+],
+"homekit_settings.off": [
+"Off",
+"0dc6b4aa"
+],
+"homekit_settings.on_bridged": [
+"On. Bridge \"{name}\" on port {port}.",
+"76ddd0f7"
+],
+"homekit_settings.on_not_listening": [
+"On. Not listening yet.",
+"d5a1675a"
+],
+"homekit_settings.on_standalone": [
+"On. Each camera on its own, ports from {port}.",
+"4359894c"
+],
+"homekit_settings.pair_a_device": [
+"Pair a device",
+"e61d9754"
+],
+"homekit_settings.pair_window_bridged": [
+"Apple devices can pair only after you press <b>Pair a device</b>, for 5 minutes. The setup code and QR code show then.",
+"e2949ee9"
+],
+"homekit_settings.pair_window_standalone": [
+"Apple devices can pair only after you press <b>Pair a device</b> for a camera, for 5 minutes. The setup code and QR code show then (the same code for every camera).",
+"90983778"
+],
+"homekit_settings.pairing_closed": [
+"Pairing closed",
+"72f6167d"
+],
+"homekit_settings.pairing_closed_now": [
+"Pairing has closed.",
+"43fab7ed"
+],
+"homekit_settings.pairing_now_other": [
+"Pairing now: <b>{from}</b>{since}. Not your device? Stop it: that address cannot pair again until this window closes.",
+"a3695c11"
+],
+"homekit_settings.pairing_now_this_device": [
+"Pairing now: <b>{from}</b> (this device){since}. It is the device showing this page.",
+"83f3e3b9"
+],
+"homekit_settings.pairing_open_for": [
+"<b>Pairing is open for <span data-left>{time}</span>.</b> It closes when a device is added, or when you stop it.",
+"6d77e80b"
+],
+"homekit_settings.pairing_reset": [
+"Pairing reset",
+"af085a88"
+],
+"homekit_settings.pairings_removed": [
+"Pairings removed",
+"5448acb8"
+],
+"homekit_settings.port_hint": [
+"Default 51830 (Homebridge uses 51826). Standalone cameras use the next ports, one each. Open these TCP ports, UDP 5353 (Bonjour) and UDP 51900-51999 (live video, [homekit] rtp_ports) in the firewall; on Windows AmberSight adds the rule itself when it runs as Administrator.",
+"d75a8404"
+],
+"homekit_settings.port_label": [
+"Port",
+"e2c53cc6"
+],
+"homekit_settings.port_n": [
+"port {port}",
+"41928f2b"
+],
+"homekit_settings.port_range": [
+"Enter a port between 1 and 65535.",
+"82f913bb"
+],
+"homekit_settings.remove": [
+"Remove",
+"21a5901d"
+],
+"homekit_settings.remove_body": [
+"Apple Home loses this camera. It can be added again with the same setup code (press Pair a device first).",
+"42d8db59"
+],
+"homekit_settings.remove_pairings": [
+"Remove pairings",
+"5f34d946"
+],
+"homekit_settings.remove_title": [
+"Remove this camera's pairings?",
+"769a2376"
+],
+"homekit_settings.reset": [
+"Reset",
+"0ac8a560"
+],
+"homekit_settings.reset_body": [
+"Every paired Apple device loses every camera (and the bridge), and a new setup code is made. Home then sees new accessories: remove the old ones there, and set up rooms, scenes and automations again.",
+"690f5f51"
+],
+"homekit_settings.reset_hint": [
+"Every camera (and the bridge) forgets its Apple devices and a new setup code is made. Not needed to add one again: a camera or bridge removed in the Home app can be added again with the same code, after <b>Pair a device</b>.",
+"3db2e524"
+],
+"homekit_settings.reset_pairing": [
+"Reset pairing",
+"603844b4"
+],
+"homekit_settings.reset_title": [
+"Reset HomeKit pairing?",
+"2c0aeca6"
+],
+"homekit_settings.same_switch": [
+"The same switch is in each camera's settings (Audio &amp; text).",
+"79228625"
+],
+"homekit_settings.saved": [
+"Saved",
+"8a6979e4"
+],
+"homekit_settings.scan_code": [
+"In the Home app on an iPhone or iPad: <b>+</b>, <b>Add Accessory</b>, then scan this code, or tap <b>More options</b> and enter the setup code:",
+"fa20a238"
+],
+"homekit_settings.starting": [
+"Starting...",
+"6cac833d"
+],
+"homekit_settings.stop": [
+"Stop",
+"4b7f7705"
+],
+"homekit_settings.stop_and_start_again": [
+"Stop and start again",
+"65f1de90"
+],
+"homekit_settings.stop_pairing_body": [
+"The device at {address} is stopped and cannot pair again until this window closes. Pairing stays open for 5 more minutes for your own device.",
+"399db6bd"
+],
+"homekit_settings.stop_pairing_title": [
+"Stop this pairing?",
+"629009d8"
+],
+"homekit_settings.stopped_in_window": [
+"Stopped in this window: {list}",
+"eaa58303"
+],
+"homekit_settings.stopped_open_again": [
+"Stopped; pairing is open again",
+"45a3161b"
+],
+"homekit_settings.switch_on_camera": [
+"Switch on a camera below: each one is added to Apple Home on its own.",
+"49f10193"
+],
+"homekit_settings.tested_with": [
+"<b>Tested with an iPhone and a HomePod mini hub</b> (one camera per accessory). If you try another setup, please tell us how it went in GitHub Discussions.",
+"00f886ac"
+],
+"homekit_settings.too_many_tries": [
+"Too many wrong setup codes were tried. Pairing is closed until you reset it below.",
+"5166bc09"
+],
+"homekit_settings.waiting_for_device": [
+"Waiting for a device to start pairing...",
+"ecaaeaab"
 ],
 "https_settings.add": [
 "Add",
@@ -13481,6 +13789,10 @@
 "Close the timeline (Esc, Back, T)",
 "6768613c"
 ],
+"livetl.could_not_load": [
+"Could not load, trying again",
+"a051bb96"
+],
 "livetl.drag_end": [
 "Drag to move the end",
 "8dc0972b"
@@ -14381,6 +14693,10 @@
 "Alerts",
 "18996e5e"
 ],
+"palette.set_apple_home": [
+"Apple Home",
+"636f1366"
+],
 "palette.set_audit_log": [
 "Audit log",
 "cb83f9ca"
@@ -15110,8 +15426,8 @@
 "cd86acc3"
 ],
 "settings.connections_desc": [
-"Advanced: share streams, link servers, an external detector and the camera watchdog.",
-"7e745d05"
+"Advanced: share streams, Apple Home, link servers, an external detector and the camera watchdog.",
+"17d4bb1c"
 ],
 "settings.connections_label": [
 "Connections",
@@ -15336,6 +15652,10 @@
 "settings.high": [
 "High",
 "be0a061d"
+],
+"settings.homekit_label": [
+"Apple Home",
+"636f1366"
 ],
 "settings.how_often": [
 "How often",

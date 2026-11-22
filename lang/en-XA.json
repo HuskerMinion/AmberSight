@@ -8202,6 +8202,14 @@
 "[Šhört ñàmé ·]",
 "92346acc"
 ],
+"cameras.show_in_apple_home": [
+"[Šhöw îñ Àpplé Hömé ··]",
+"00ab4e6a"
+],
+"cameras.show_in_apple_home_hint": [
+"[Šhöwñ îñ thé Hömé àpp wîth lîvé vîdéö, à mötîöñ šéñšör àñd à šñàpšhöt whîlé Àpplé Hömé îš öñ (Šéttîñgš, Çöññéçtîöñš, Àpplé Hömé). Évérýöñé îñ thàt Hömé šééš ît. ·····················]",
+"3bfb2272"
+],
 "cameras.show_only_ai_events": [
 "[Šhöw öñlý évéñtš ÀÎ çöñfîrmš ···]",
 "bfa330f4"
@@ -11566,6 +11574,30 @@
 "[<b>Whéñ à wàý fàîlš whîlé rûññîñg</b>, thàt çàmérà mövéš tö thé ñéxt wàý, ör thé pröçéššör, àt öñçé. Ît trîéš thé fàîléd wàý àgàîñ àftér 15 mîñûtéš, théñ àftér löñgér wàîtš (ûp tö 4 höûrš). À šéçöñd fàîlûré îñ à röw (wîth ñö 30 mîñûtéš öf gööd rûññîñg bétwééñ) màkéš ît léàvé thàt wàý ûñtîl ÀmbérŠîght réštàrtš ör Hàrdwàré déçödîñg ör Kéép fréé çhàñgéš. Thé ÑVÎDÎÀ çàrd rûññîñg öût öf mémörý îš öñlý wàîtéd öût, ñévér gîvéñ ûp för. À wàý thàt štöppéd whîlé thé pröçéššör théñ déçödéd thé šàmé štréàm fîñé îš léft àlöñé bý évérý çàmérà för àñ höûr. <b>Pér çàmérà</b> šhöwš whàt éàçh çàmérà ûšéš ñöw àñd whý. ················································································]",
 "da025aa4"
 ],
+"help.settings_homekit_accounts": [
+"[HöméKît döéš ñöt kñöw ÀmbérŠîght'š àççöûñtš: évérýöñé îñ thàt Àpplé Hömé šééš thé çàméràš šwîtçhéd öñ héré. À çàmérà (ör brîdgé) rémövéd îñ thé Hömé àpp çàñ bé àddéd àgàîñ wîth thé šàmé šétûp çödé (àftér <b>Pàîr à dévîçé</b>); <b>Rémövé pàîrîñgš</b> döéš thé šàmé fröm héré. Îf thé çödé göt öût, <b>Réšét pàîrîñg</b> förgétš évérý pàîréd Àpplé dévîçé àñd màkéš à ñéw çödé: Hömé théñ šééš ñéw àççéššörîéš (rémövé thé öld öñéš; röömš, šçéñéš àñd àûtömàtîöñš wîth théšé çàméràš àré šét ûp àgàîñ). ·································································]",
+"b75210bb"
+],
+"help.settings_homekit_adding_to_home": [
+"[<b>Àddîñg tö Hömé:</b> Àpplé dévîçéš çàñ pàîr öñlý whîlé pàîrîñg îš öpéñ. Préšš <b>Pàîr à dévîçé</b> (för thé çàmérà, ör för thé brîdgé): för 5 mîñûtéš thé šétûp çödé àñd QR çödé šhöw àñd Hömé çàñ àdd ît. Pàîrîñg çlöšéš öñçé à dévîçé îš àddéd, whéñ ýöû préšš <b>Štöp</b>, ör àftér 5 mîñûtéš. Whîlé ît îš öpéñ, thé pàgé šhöwš thé àddréšš öf thé dévîçé pàîrîñg ñöw. Îf ît îš ñöt ýöûrš, <b>Štöp àñd štàrt àgàîñ</b> štöpš ît, kéépš thàt àddréšš öût ûñtîl pàîrîñg çlöšéš, àñd gîvéš ýöû 5 fréšh mîñûtéš. Àddîñg péöplé îñ thé Hömé àpp (šhàrîñg ýöûr hömé) ñéédš ñöñé öf thîš. ···········································································]",
+"3ae21608"
+],
+"help.settings_homekit_apple_home_shows": [
+"[<b>Àpplé Hömé</b> šhöwš thé çàméràš ýöû šwîtçh öñ (Šéttîñgš &rsaquo; Çöññéçtîöñš &rsaquo; Àpplé Hömé, ör <b>Šhöw îñ Àpplé Hömé</b> îñ thé çàmérà'š šéttîñgš) îñ thé Hömé àpp, wîth lîvé vîdéö, à mötîöñ šéñšör àñd à šñàpšhöt. Lîvé vîdéö îš éñçödéd för Hömé àt thé šîzé ît àškš för, öñ thé gràphîçš çàrd whéñ théré îš one (élšé öñ thé pröçéššör), wîth thé çàmérà'š šöûñd àš Öpûš. Àt möšt 2 lîvé vîéwš pér çàmérà àñd 4 îñ àll, wîthîñ thé <code>[tràñšçödé]</code> lîmîtš öf thé šéttîñgš fîlé. ································································]",
+"9a210dde"
+],
+"help.settings_homekit_each_on_its_own": [
+"[<b>Éàçh öñ îtš öwñ</b> (thé défàûlt) àddš évérý çàmérà tö Àpplé Hömé šépàràtélý, àš Àpplé préférš för çàméràš: préšš <b>Pàîr à dévîçé</b> för thé çàmérà, théñ îñ thé Hömé àpp tàp <b>+</b>, <b>Àdd Àççéššörý</b> àñd šçàñ îtš çödé, ör éñtér thé šétûp çödé (thé šàmé för àll çàméràš). <b>Béhîñd one brîdgé</b> àddš one brîdgé wîth àll çàméràš. Hömé wàrñš thàt thé àççéššörý îš ñöt çértîfîéd; çhööšé <b>Àdd Àñýwàý</b>. Àpplé dévîçéš fîñd ÀmbérŠîght övér Böñjöûr (ÛDP 5353); éàçh çàmérà (ör thé brîdgé) hàš îtš öwñ TÇP pört fröm 51830 öñ; àllöw thém îñ thé fîréwàll. Îñ Döçkér ît ñéédš höšt ñétwörkîñg. ···············································································]",
+"f9a0381e"
+],
+"help.settings_homekit_tested": [
+"[<b>Téštéd wîth àñ îPhöñé àñd à HöméPöd mîñî hûb</b> (one çàmérà pér àççéššörý). Îf ýöû trý àñöthér šétûp, pléàšé téll ûš höw ît wéñt îñ GîtHûb Dîšçûššîöñš. Ñö mötîöñ ñötîfîçàtîöñš? Îñ Hömé, thé çàmérà'š <b>Àçtîvîtý Ñötîfîçàtîöñš</b> öptîöñ <b>Péöplé</b> šéñdš thém öñlý whéñ ñö one îš hömé: šét ît tö <b>Àñý Tîmé</b>. ··········································]",
+"5a9fd376"
+],
+"help.settings_homekit_title": [
+"[Àpplé Hömé (HöméKît) ··]",
+"f305a52e"
+],
 "help.settings_https_extra_names_for": [
 "[<b>Éxtrà ñàméš för thé çértîfîçàté</b>: thé çértîfîçàté àlréàdý çövérš thîš çömpûtér'š àddréššéš, îtš ñàmé àñd löçàlhöšt; àdd àñý other ñàmé ýöû öpéñ ÀmbérŠîght bý. Ñàméš àpplý wîthöût à réštàrt. Thé çértîfîçàté àûthörîtý îš lîmîtéd (šö à štöléñ kéý çöûld ñöt bé ûšéd àgàîñšt other šîtéš): ñàméš éñdîñg îñ .làñ, .löçàl, .hömé.àrpà ör .îñtérñàl, thîš çömpûtér'š ñàmé, àñd hömé-ñétwörk àñd Tàîlšçàlé (100.x) àddréššéš çàñ àlwàýš bé àddéd. Öthér ñàméš, šûçh àš à Tàîlšçàlé ñàmé (ñvr.tàîl1234.tš.ñét), àré öñlý çövéréd bý à çértîfîçàté àûthörîtý màdé wîth thém: àdd thém béföré HTTPŠ îš fîršt tûrñéd öñ, ör ûšé ýöûr öwñ çértîfîçàté. ···················································································]",
 "8a6c3df6"
@@ -11997,6 +12029,282 @@
 "helperpick.whole_desktop": [
 "[Whölé déšktöp ·]",
 "9558b09c"
+],
+"homekit_settings.add_to_apple_home": [
+"[Àdd tö Àpplé Hömé ··]",
+"108e5e54"
+],
+"homekit_settings.apple_home_homekit": [
+"[Àpplé Hömé (HöméKît) ··]",
+"f305a52e"
+],
+"homekit_settings.behind_one_bridge": [
+"[Béhîñd one brîdgé ··]",
+"29bb7522"
+],
+"homekit_settings.bridge_name": [
+"[Brîdgé ñàmé ·]",
+"5e160db3"
+],
+"homekit_settings.bridge_name_hint": [
+"[Thé ñàmé Hömé šhöwš för thé brîdgé (brîdgéd). Émptý: thîš šérvér'š ñàmé. ·········]",
+"f2c61f8a"
+],
+"homekit_settings.bridge_title": [
+"[Brîdgé \"{name}\" ··]",
+"98d31dcb"
+],
+"homekit_settings.cameras_in_apple_home": [
+"[Çàméràš îñ Àpplé Hömé ··]",
+"e25a1955"
+],
+"homekit_settings.cameras_in_home": [
+"[Çàméràš îñ Hömé ··]",
+"031b3485"
+],
+"homekit_settings.cameras_shown": [
+"[{n, plural, one {# çàmérà îš} other {# çàméràš àré}} šhöwñ îñ Àpplé Hömé. ·········]",
+"fc73a413"
+],
+"homekit_settings.cameras_to_add": [
+"[Çàméràš tö àdd îñ thé Hömé àpp ····]",
+"7f590853"
+],
+"homekit_settings.change": [
+"[Çhàñgé ·]",
+"a1de2fdd"
+],
+"homekit_settings.change_mode_body": [
+"[Thé çàméràš théñ hàvé tö bé àddéd tö Àpplé Hömé àgàîñ, àñd thé öld öñéš rémövéd théré. ···········]",
+"2fd1c685"
+],
+"homekit_settings.change_mode_title": [
+"[Çhàñgé höw çàméràš àré îñ Hömé? ····]",
+"b0c45668"
+],
+"homekit_settings.changing_this": [
+"[Çhàñgîñg thîš méàñš àddîñg thé çàméràš tö Àpplé Hömé àgàîñ. ·······]",
+"aeb99be8"
+],
+"homekit_settings.could_not_load": [
+"[Çöûld ñöt löàd:  ··]",
+"419029cb"
+],
+"homekit_settings.each_on_its_own": [
+"[Éàçh öñ îtš öwñ ··]",
+"2b0f617f"
+],
+"homekit_settings.for_seconds": [
+"[{n} š ·]",
+"37ea8f6e"
+],
+"homekit_settings.how": [
+"[Éàçh çàmérà ýöû šwîtçh öñ bélöw îš à HöméKît çàmérà wîth lîvé vîdéö, à mötîöñ šéñšör (Hömé çàñ ñötîfý ýöû öf mötîöñ) àñd à šñàpšhöt pîçtûré. Lîvé vîdéö îš màdé för Hömé àt thé šîzé ît àškš för (öñ thé gràphîçš çàrd whéñ théré îš one, élšé öñ thé pröçéššör; šöûñd àš Öpûš whéñ thé çàmérà hàš šöûñd). Bý défàûlt éàçh çàmérà îš àddéd tö Àpplé Hömé öñ îtš öwñ, àš Àpplé préférš för çàméràš: àdd éàçh one îñ thé Hömé àpp, wîth thé šàmé šétûp çödé. <b>Brîdgéd</b> pûtš thém àll béhîñd one brîdgé ýöû àdd öñçé. Àpplé dévîçéš fîñd ÀmbérŠîght övér Böñjöûr (mDÑŠ, ÛDP pört 5353), šö théý mûšt bé öñ thé šàmé ñétwörk (ör réàçh ît thröûgh à hömé hûb šûçh àš à HöméPöd ör Àpplé TV). <b>HöméKît döéš ñöt kñöw ÀmbérŠîght'š àççöûñtš:</b> évérýöñé îñ thé Àpplé Hömé ýöû àdd thém tö šééš thé çàméràš ýöû šwîtçh öñ héré, whàtévér théîr ÀmbérŠîght àççöûñt màý šéé. ················································································································]",
+"b2d6d188"
+],
+"homekit_settings.in_apple_home": [
+"[Îñ Àpplé Hömé ({n, plural, one {# Àpplé dévîçé} other {# Àpplé dévîçéš}} pàîréd){live}. ···········]",
+"ad0b3f6e"
+],
+"homekit_settings.lead_main": [
+"[Šhöwš ýöûr çàméràš îñ Àpplé Hömé, wîth lîvé vîdéö, mötîöñ àlértš àñd šñàpšhötš. ··········]",
+"7ecb4152"
+],
+"homekit_settings.lead_sub": [
+"[Léàvé ît öff ûñléšš ýöû ûšé thé Hömé àpp. ·····]",
+"d4bde183"
+],
+"homekit_settings.live_views": [
+"[{n, plural, one {# lîvé vîéw} other {# lîvé vîéwš}} ······]",
+"d2a9b570"
+],
+"homekit_settings.loading": [
+"[Löàdîñg... ·]",
+"17b11033"
+],
+"homekit_settings.more_settings": [
+"[Möré šéttîñgš ·]",
+"1386530d"
+],
+"homekit_settings.no_camera_shown": [
+"[Ñö çàmérà îš šhöwñ ýét: šwîtçh öñ thé öñéš tö šhöw. ······]",
+"292b5667"
+],
+"homekit_settings.no_cameras_yet": [
+"[Ñö çàméràš ýét. ··]",
+"af38c936"
+],
+"homekit_settings.not_certified": [
+"[Hömé šàýš thé àççéššörý îš ñöt çértîfîéd: thàt îš éxpéçtéd, çhööšé <b>Àdd Àñýwàý</b>. Thé phöñé mûšt bé öñ thé šàmé ñétwörk àš thîš šérvér. ··················]",
+"2b6d0890"
+],
+"homekit_settings.not_in_apple_home": [
+"[Ñöt îñ Àpplé Hömé ýét. ··]",
+"879445cc"
+],
+"homekit_settings.off": [
+"[Öff ·]",
+"0dc6b4aa"
+],
+"homekit_settings.on_bridged": [
+"[Öñ. Brîdgé \"{name}\" öñ pört {port}. ····]",
+"76ddd0f7"
+],
+"homekit_settings.on_not_listening": [
+"[Öñ. Ñöt lîštéñîñg ýét. ··]",
+"d5a1675a"
+],
+"homekit_settings.on_standalone": [
+"[Öñ. Éàçh çàmérà öñ îtš öwñ, pörtš fröm {port}. ······]",
+"4359894c"
+],
+"homekit_settings.pair_a_device": [
+"[Pàîr à dévîçé ·]",
+"e61d9754"
+],
+"homekit_settings.pair_window_bridged": [
+"[Àpplé dévîçéš çàñ pàîr öñlý àftér ýöû préšš <b>Pàîr à dévîçé</b>, för 5 mîñûtéš. Thé šétûp çödé àñd QR çödé šhöw théñ. ···············]",
+"e2949ee9"
+],
+"homekit_settings.pair_window_standalone": [
+"[Àpplé dévîçéš çàñ pàîr öñlý àftér ýöû préšš <b>Pàîr à dévîçé</b> för à çàmérà, för 5 mîñûtéš. Thé šétûp çödé àñd QR çödé šhöw théñ (thé šàmé çödé för évérý çàmérà). ·····················]",
+"90983778"
+],
+"homekit_settings.pairing_closed": [
+"[Pàîrîñg çlöšéd ·]",
+"72f6167d"
+],
+"homekit_settings.pairing_closed_now": [
+"[Pàîrîñg hàš çlöšéd. ··]",
+"43fab7ed"
+],
+"homekit_settings.pairing_now_other": [
+"[Pàîrîñg ñöw: <b>{from}</b>{since}. Ñöt ýöûr dévîçé? Štöp ît: thàt àddréšš çàññöt pàîr àgàîñ ûñtîl thîš wîñdöw çlöšéš. ···············]",
+"a3695c11"
+],
+"homekit_settings.pairing_now_this_device": [
+"[Pàîrîñg ñöw: <b>{from}</b> (thîš dévîçé){since}. Ît îš thé dévîçé šhöwîñg thîš pàgé. ···········]",
+"83f3e3b9"
+],
+"homekit_settings.pairing_open_for": [
+"[<b>Pàîrîñg îš öpéñ för <span data-left>{time}</span>.</b> Ît çlöšéš whéñ à dévîçé îš àddéd, ör whéñ ýöû štöp ît. ··············]",
+"6d77e80b"
+],
+"homekit_settings.pairing_reset": [
+"[Pàîrîñg réšét ·]",
+"af085a88"
+],
+"homekit_settings.pairings_removed": [
+"[Pàîrîñgš rémövéd ··]",
+"5448acb8"
+],
+"homekit_settings.port_hint": [
+"[Défàûlt 51830 (Hömébrîdgé ûšéš 51826). Štàñdàlöñé çàméràš ûšé thé ñéxt pörtš, one éàçh. Öpéñ théšé TÇP pörtš, ÛDP 5353 (Böñjöûr) àñd ÛDP 51900-51999 (lîvé vîdéö, [hömékît] rtp_pörtš) îñ thé fîréwàll; öñ Wîñdöwš ÀmbérŠîght àddš thé rûlé îtšélf whéñ ît rûñš àš Àdmîñîštràtör. ····································]",
+"d75a8404"
+],
+"homekit_settings.port_label": [
+"[Pört ·]",
+"e2c53cc6"
+],
+"homekit_settings.port_n": [
+"[pört {port} ·]",
+"41928f2b"
+],
+"homekit_settings.port_range": [
+"[Éñtér à pört bétwééñ 1 àñd 65535. ····]",
+"82f913bb"
+],
+"homekit_settings.remove": [
+"[Rémövé ·]",
+"21a5901d"
+],
+"homekit_settings.remove_body": [
+"[Àpplé Hömé löšéš thîš çàmérà. Ît çàñ bé àddéd àgàîñ wîth thé šàmé šétûp çödé (préšš Pàîr à dévîçé fîršt). ··············]",
+"42d8db59"
+],
+"homekit_settings.remove_pairings": [
+"[Rémövé pàîrîñgš ··]",
+"5f34d946"
+],
+"homekit_settings.remove_title": [
+"[Rémövé thîš çàmérà'š pàîrîñgš? ····]",
+"769a2376"
+],
+"homekit_settings.reset": [
+"[Réšét ·]",
+"0ac8a560"
+],
+"homekit_settings.reset_body": [
+"[Évérý pàîréd Àpplé dévîçé löšéš évérý çàmérà (àñd thé brîdgé), àñd à ñéw šétûp çödé îš màdé. Hömé théñ šééš ñéw àççéššörîéš: rémövé thé öld öñéš théré, àñd šét ûp röömš, šçéñéš àñd àûtömàtîöñš àgàîñ. ··························]",
+"690f5f51"
+],
+"homekit_settings.reset_hint": [
+"[Évérý çàmérà (àñd thé brîdgé) förgétš îtš Àpplé dévîçéš àñd à ñéw šétûp çödé îš màdé. Ñöt ñéédéd tö àdd one àgàîñ: à çàmérà ör brîdgé rémövéd îñ thé Hömé àpp çàñ bé àddéd àgàîñ wîth thé šàmé çödé, àftér <b>Pàîr à dévîçé</b>. ·····························]",
+"3db2e524"
+],
+"homekit_settings.reset_pairing": [
+"[Réšét pàîrîñg ·]",
+"603844b4"
+],
+"homekit_settings.reset_title": [
+"[Réšét HöméKît pàîrîñg? ··]",
+"2c0aeca6"
+],
+"homekit_settings.same_switch": [
+"[Thé šàmé šwîtçh îš îñ éàçh çàmérà'š šéttîñgš (Àûdîö &amp; téxt). ········]",
+"79228625"
+],
+"homekit_settings.saved": [
+"[Šàvéd ·]",
+"8a6979e4"
+],
+"homekit_settings.scan_code": [
+"[Îñ thé Hömé àpp öñ àñ îPhöñé ör îPàd: <b>+</b>, <b>Àdd Àççéššörý</b>, théñ šçàñ thîš çödé, ör tàp <b>Möré öptîöñš</b> àñd éñtér thé šétûp çödé: ···················]",
+"fa20a238"
+],
+"homekit_settings.starting": [
+"[Štàrtîñg... ·]",
+"6cac833d"
+],
+"homekit_settings.stop": [
+"[Štöp ·]",
+"4b7f7705"
+],
+"homekit_settings.stop_and_start_again": [
+"[Štöp àñd štàrt àgàîñ ··]",
+"65f1de90"
+],
+"homekit_settings.stop_pairing_body": [
+"[Thé dévîçé àt {address} îš štöppéd àñd çàññöt pàîr àgàîñ ûñtîl thîš wîñdöw çlöšéš. Pàîrîñg štàýš öpéñ för 5 möré mîñûtéš för ýöûr öwñ dévîçé. ··················]",
+"399db6bd"
+],
+"homekit_settings.stop_pairing_title": [
+"[Štöp thîš pàîrîñg? ··]",
+"629009d8"
+],
+"homekit_settings.stopped_in_window": [
+"[Štöppéd îñ thîš wîñdöw: {list} ····]",
+"eaa58303"
+],
+"homekit_settings.stopped_open_again": [
+"[Štöppéd; pàîrîñg îš öpéñ àgàîñ ····]",
+"45a3161b"
+],
+"homekit_settings.switch_on_camera": [
+"[Šwîtçh öñ à çàmérà bélöw: éàçh one îš àddéd tö Àpplé Hömé öñ îtš öwñ. ·········]",
+"49f10193"
+],
+"homekit_settings.tested_with": [
+"[<b>Téštéd wîth àñ îPhöñé àñd à HöméPöd mîñî hûb</b> (one çàmérà pér àççéššörý). Îf ýöû trý àñöthér šétûp, pléàšé téll ûš höw ît wéñt îñ GîtHûb Dîšçûššîöñš. ····················]",
+"00f886ac"
+],
+"homekit_settings.too_many_tries": [
+"[Töö many wröñg šétûp çödéš wéré trîéd. Pàîrîñg îš çlöšéd ûñtîl ýöû réšét ît bélöw. ··········]",
+"5166bc09"
+],
+"homekit_settings.waiting_for_device": [
+"[Wàîtîñg för à dévîçé tö štàrt pàîrîñg... ·····]",
+"ecaaeaab"
 ],
 "https_settings.add": [
 "[Àdd ·]",
@@ -13482,6 +13790,10 @@
 "[Çlöšé thé tîmélîñé (Éšç, Bàçk, T) ····]",
 "6768613c"
 ],
+"livetl.could_not_load": [
+"[Çöûld ñöt löàd, trýîñg àgàîñ ···]",
+"a051bb96"
+],
 "livetl.drag_end": [
 "[Dràg tö mövé thé éñd ··]",
 "8dc0972b"
@@ -14382,6 +14694,10 @@
 "[Àlértš ·]",
 "18996e5e"
 ],
+"palette.set_apple_home": [
+"[Àpplé Hömé ·]",
+"636f1366"
+],
 "palette.set_audit_log": [
 "[Àûdît lög ·]",
 "cb83f9ca"
@@ -15111,8 +15427,8 @@
 "cd86acc3"
 ],
 "settings.connections_desc": [
-"[Àdvàñçéd: šhàré štréàmš, lîñk šérvérš, àñ éxtérñàl détéçtör àñd thé çàmérà wàtçhdög. ···········]",
-"7e745d05"
+"[Àdvàñçéd: šhàré štréàmš, Àpplé Hömé, lîñk šérvérš, àñ éxtérñàl détéçtör àñd thé çàmérà wàtçhdög. ············]",
+"17d4bb1c"
 ],
 "settings.connections_label": [
 "[Çöññéçtîöñš ·]",
@@ -15337,6 +15653,10 @@
 "settings.high": [
 "[Hîgh ·]",
 "be0a061d"
+],
+"settings.homekit_label": [
+"[Àpplé Hömé ·]",
+"636f1366"
 ],
 "settings.how_often": [
 "[Höw öftéñ ·]",

@@ -43,6 +43,10 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET | `/api/snapshot/:id` | viewer | Latest JPEG |
 | RTSP | `rtsp://host:8554/<camera>[/sub]` | account (Basic) | Shared camera streams for other apps (off by default; separate port) |
 | GET / PUT | `/api/restream` | **admin** | Sharing settings (on/off, port, which cameras) and state |
+| GET / PUT | `/api/homekit` | **admin** | Apple Home (HomeKit): settings, each accessory's pairing state, the pairing window; setup code while it is open |
+| POST | `/api/homekit/pairing` | **admin** | Open, stop or restart the pairing window (Apple devices can pair only while it is open) |
+| POST | `/api/homekit/unpair` | **admin** | One standalone camera forgets its paired Apple devices |
+| POST | `/api/homekit/reset` | **admin** | Forget every paired Apple device; new setup code |
 | POST | `/api/cameras/:id/wake` | viewer | Wake a battery/on-demand camera |
 | GET | `/api/events` | viewer | Event (alert) list with filters and paging |
 | GET | `/api/events/:id/thumb` | viewer | Event thumbnail (JPEG) |
@@ -321,7 +325,7 @@ can do the same to notice that the server was updated, or ignore it.
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
-| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `events_latest` = `GET /api/events?latest_per_camera=1` (the newest event per camera, section 5), `apple_plain_mp4` = to Apple's players (User-Agent `AppleCoreMedia`, or WebKit that is not Chrome or Android) a playback window or an event clip made from recordings is a plain MP4 (one `moov` with the whole sample table; converted answers stay fragmented), so AVFoundation starts without reading every fragment and long windows are fine, `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -1377,6 +1381,115 @@ the same as `GET`. `400` with `{"error": ...}` for an unknown camera name or a p
 already used by the web page or the RTMP input. Turning sharing off, or a camera's share off,
 ends its clients' sessions at once.
 
+### Apple Home (HomeKit) (admin)
+
+The cameras with `homekit = true` show in Apple's Home app with live video, a motion sensor and
+snapshots. It is off by default (`[homekit] enabled`). It has been tested with an iPhone and a
+HomePod mini hub; reports from other setups are welcome in GitHub Discussions. By default each camera is its own HomeKit
+accessory (`[homekit] cameras = "standalone"`: own port from `port + 1` on, own pairing, the same
+setup code for all); `"bridged"` puts them behind one bridge on `port` (default 51830). Apple
+devices talk to them over HomeKit's own protocol, not over this API. These endpoints are for the
+Settings page; they are admin-only, and device tokens get `403`. Everyone in the Apple Home they
+are added to sees the cameras switched on: HomeKit does not know AmberSight's accounts.
+
+Apple devices can pair (HomeKit pair-setup) only while an admin has opened the **pairing window**
+for that accessory with `POST /api/homekit/pairing`: 5 minutes, for one accessory at a time. It
+closes when a pairing succeeds, when it is stopped, or after 5 minutes. While it is closed the
+accessory announces itself as not pairable (Bonjour `sf=0`, so Home does not list it) and refuses
+pair-setup. This applies to pairing again after **Remove pairings**, reset, or removal in the Home
+app too. A paired admin Apple device adding others (sharing the home in the Home app) does not
+need it.
+
+#### `GET /api/homekit` (admin)
+
+```json
+{
+  "enabled": true, "port": 51830, "bind": "[::]", "mode": "standalone", "name": null, "bridge_name": "Home NVR",
+  "listening": true, "error": null, "sessions": 1, "live_streams": 0, "paired": true,
+  "setup_code": "482-91-305",
+  "cameras": [ { "name": "Front Yard", "homekit": true }, { "name": "Garage", "homekit": true } ],
+  "accessories": [
+    { "kind": "camera", "camera": "Front Yard", "name": "Front Yard", "port": 51831, "paired": true,
+      "too_many_tries": false, "controllers": [ { "id": "…", "admin": true } ], "streams": 0,
+      "pairing_open": false },
+    { "kind": "camera", "camera": "Garage", "name": "Garage", "port": 51832, "paired": false,
+      "too_many_tries": false, "controllers": [], "streams": 0, "pairing_open": true,
+      "setup_uri": "X-HM://…", "qr_svg": "<svg ...>" }
+  ],
+  "pairing": { "kind": "camera", "camera": "Garage", "name": "Garage", "seconds_left": 271,
+               "pairing_from": "192.0.2.40", "pairing_for_seconds": 6, "pairing_from_this_device": false,
+               "refused": [] }
+}
+```
+
+`accessories` lists what is announced now: one per camera (`kind: "camera"`), or the bridge
+(`kind: "bridge"`) when bridged. Each has its port, whether it is paired, the paired Apple devices
+(`id`, `admin`) and its live views now (`streams`); `setup_uri` (what its QR code holds, with its
+own category and setup id) and `qr_svg` are there **only** while the pairing window is open for
+it (`pairing_open`). `setup_code` (the one code for all) is there only while the window is open
+for an accessory that can still be paired. `pairing` is `null` while the window is closed; while
+it is open: the accessory, the seconds left, the address of the Apple device pairing now
+(`pairing_from`, `null` while nobody is) and since how long, whether that is the address the
+request came from (`pairing_from_this_device`: the admin pairs the device the page is open on;
+behind a trusted proxy, the visitor's address), and the addresses stopped in this window
+(`refused`). `live_streams` counts live views in all. `name` is the configured bridge name (`null`: the
+server's name, shown as `bridge_name`; Home gets names with only letters, digits, spaces and
+apostrophes, at most 63 bytes). `bind` is the address HomeKit listens on, apart from the web page's
+(`"[::]"`: IPv6 and IPv4). `listening` says whether the ports are open; `error` why not (a port in
+use, or mDNS could not start). When the last admin device removes an accessory in the Home app, it
+can be paired again with the same setup code (in a pairing window). `too_many_tries`: 100 wrong setup codes were tried,
+and pairing it is closed until `POST /api/homekit/reset`.
+
+#### `PUT /api/homekit` (admin)
+
+`{"enabled": true, "name": "Home NVR", "port": 51830, "bind": "[::]", "mode": "standalone", "cameras": {"Front Yard": true}}`.
+All fields are optional; cameras left out keep their setting (`homekit` in the camera's config).
+`mode` is `"standalone"` or `"bridged"` (changing it means adding the cameras to Home again). An
+empty `name` means the server's name. The answer is the same as `GET`. `400` with
+`{"error": ...}` for an unknown field, mode or camera name, a name over 63 bytes, a `bind` that is
+not an address, or a port that is 0 or used by AmberSight already (web page, RTMP input, RTSP
+sharing, 5353; in standalone mode also any of the 64 ports after it). A port another program uses
+shows in `error` once the listener tries it.
+
+#### `POST /api/homekit/pairing` (admin)
+
+The pairing window. The answer is the same as `GET`; each change is written to the audit log.
+
+- `{"action": "open", "camera": "Garage"}`: open it for 5 minutes for that camera (standalone),
+  or `{"action": "open"}` for the bridge (bridged). Opening it again for the same accessory while
+  it is open sets the time left back to 5 minutes from now and keeps the same window: a pair-setup
+  in progress goes on and the stopped addresses stay refused. Opening it after it closed (stopped,
+  paired or past its 5 minutes) starts a new window: a pair-setup begun before cannot finish, and
+  no address is refused. Opening it for another accessory closes it for the first one (one at a
+  time), ending the first one's pair-setup in progress. `400` without a camera in
+  standalone mode, or with one when bridged; `404` when no camera of that name is announced now;
+  `409` when it is already paired (remove its pairings first) or after 100 wrong setup codes
+  (reset first).
+- `{"action": "stop"}`: close it now, ending a pair-setup in progress.
+- `{"action": "restart", "address": "192.0.2.40"}` ("Stop and start again"): end the pair-setup
+  from that address (`pairing_from`), refuse that address until the window closes, and set the
+  time left back to 5 minutes from now. It is the same window: a pair-setup from another address
+  (your own device, taking over) is not ended and can finish. For a device on the network that is
+  not yours, pairing in your window. `409` when the window is closed; `400` without a valid
+  address.
+
+`409` while HomeKit is off. One pair-setup runs at a time; one that has not sent its proof within
+30 s may be taken over by another device. After a wrong setup code everyone waits a little
+(longer with each one); after 100, pairing is closed until reset.
+
+#### `POST /api/homekit/unpair` (admin)
+
+`{"camera": "Garage"}`: that standalone camera forgets its paired Apple devices and ends their
+connections; it can be added again with the same setup code, in a pairing window. `404` when no camera of that name is
+announced on its own now. The answer is the same as `GET`.
+
+#### `POST /api/homekit/reset` (admin)
+
+For a setup code that got out. Every accessory (each camera, and the bridge) forgets every paired
+Apple device and ends their connections, and starts over with a new identity and one new setup
+code. Apple Home sees new accessories: remove the old ones in the Home app, and set up their rooms,
+scenes and automations again. The answer is the same as `GET`.
+
 ### Battery / on-demand cameras: `POST /api/cameras/:id/wake`
 
 Any signed-in user who can see the camera may call this. The body is ignored. Response:
@@ -1537,6 +1650,7 @@ confirmed what was seen. Event times are **epoch seconds** (UTC).
 | `objects` | string | none | Comma-separated labels (up to 20): events with **any** of them (substring match like `object`) |
 | `review` | string | any | Comma-separated verdicts to include: `false_alarm`, `ok`, `none` (not reviewed yet). `any`, or leaving it out, means no filter. Unknown words are ignored. |
 | `ids` | string | none | Comma-separated event ids: only these events (up to 200). Ids that cannot be event ids are skipped; with none left, no events are returned |
+| `latest_per_camera` | bool | false | `1`: only the newest event of each camera, newest first, one per camera at most (camera names in any case count as one camera). Only events that **start** at or after `since`; `since` defaults to 24 hours ago and goes back at most 31 days. `limit` and `offset` are ignored; the other filters apply as usual. Same item shape as the ordinary list. Servers that have it list `events_latest` in `features`. |
 
 All filters combine (AND). A restricted viewer who gives no camera gets their allowed cameras.
 
@@ -3282,6 +3396,14 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.13.0**
+
+- `GET /api/events?latest_per_camera=1`: the newest event of each camera in one short answer
+  (for a camera grid's badges), instead of paging through a busy camera's events. Feature
+  `events_latest`.
+- Apple's players get playback windows and event clips made from recordings as a plain MP4
+  (the same media; feature `apple_plain_mp4`), and FLAC sound marked with one block size.
+
 **New in 0.12.5**
 
 - No API change. `GET /api/playback/picture` finds the picture of every recorded moment of a
@@ -3371,6 +3493,15 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
   `siren_cooldown_minutes`, `siren_night_only`, `labels`).
 - MQTT: `<prefix>/<cam>/light/...` and (opt-in `alerts.mqtt_siren`, which takes the admin's own
   password to turn on) `<prefix>/<cam>/siren/...`, with Home Assistant `light` and `siren` entities.
+- Apple Home (HomeKit), off by default (tested with an iPhone and a HomePod mini hub): cameras with
+  live video, a motion sensor and snapshots, each its own accessory or behind one bridge. New
+  admin `GET` / `PUT /api/homekit`, `POST /api/homekit/pairing` (the pairing window: Apple
+  devices can pair only for 5 minutes after an admin opens it), `POST /api/homekit/unpair` and
+  `POST /api/homekit/reset` (see
+  [Apple Home (HomeKit)](#apple-home-homekit-admin)); not for device tokens. New camera setting
+  `homekit` (`GET /api/cameras` shows it to admins; `PUT /api/cameras/:id`), and a new
+  `[homekit]` section in the settings file (`enabled`, `port` (default 51830), `bind`,
+  `cameras` (`"standalone"` or `"bridged"`), `name`).
 
 **New in 0.11.3**
 

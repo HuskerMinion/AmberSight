@@ -262,7 +262,7 @@ impl VirtualClip {
         }
         let total = pieces.iter().map(|p| p.len()).sum();
         let (start_ms, end_ms) = cut.unwrap_or((self.start_ms, self.end_ms));
-        Ok(VirtualClip { pieces, total, start_ms, end_ms, frame_times: Vec::new(), handover_ms: None, sub: self.sub, frag_wall: Vec::new(), first_cto: 0 })
+        Ok(VirtualClip { pieces, total, start_ms, end_ms, frame_times: Vec::new(), handover_ms: None, sub: self.sub, frag_wall: Vec::new(), first_cto: 0, flac_block: self.flac_block, apple: Default::default() })
     }
 }
 

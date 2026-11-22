@@ -95,6 +95,8 @@ pub struct EventQuery {
     pub objects_any: Vec<String>,
     /// Only these event ids (empty: any).
     pub ids: Vec<String>,
+    /// Only events that start at or after this (`since` is about the end).
+    pub start_from: Option<i64>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -417,6 +419,10 @@ fn event_filter_sql(q: &EventQuery, cols: &str) -> (String, Vec<rusqlite::types:
         let marks = vec!["?"; q.hide_unconfirmed.len()].join(", ");
         sql.push_str(&format!(" AND NOT (unconfirmed = 1 AND camera COLLATE NOCASE IN ({marks}))"));
         args.extend(q.hide_unconfirmed.iter().map(|c| c.clone().into()));
+    }
+    if let Some(from) = q.start_from {
+        sql.push_str(" AND start >= ?");
+        args.push(from.into());
     }
     (sql, args)
 }
@@ -2436,6 +2442,35 @@ impl Db {
             f(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, Option<String>>(4)?.unwrap_or_default(), r.get(5)?);
         }
         Ok(())
+    }
+
+    /// The newest matching event of each camera (camera names compared
+    /// without regard to case), newest first, at most `max` of them. Only the
+    /// id and camera are read per event, on the start index, so give it a
+    /// `start_from` to keep the walk short.
+    pub fn latest_event_per_camera(&self, q: &EventQuery, max: usize) -> Result<Vec<Event>> {
+        let (sql, args) = event_filter_sql(q, "id, camera");
+        let mut ids: Vec<String> = Vec::new();
+        {
+            let conn = self.lock();
+            let mut st = conn.prepare(&format!("{sql} ORDER BY start DESC, id DESC"))?;
+            let mut rows = st.query(params_from_iter(args))?;
+            let mut seen = std::collections::HashSet::new();
+            while let Some(r) = rows.next()? {
+                let cam: String = r.get(1)?;
+                if seen.insert(cam.to_lowercase()) {
+                    ids.push(r.get(0)?);
+                    if ids.len() >= max {
+                        break;
+                    }
+                }
+            }
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let n = ids.len();
+        self.query_events(&EventQuery { ids, limit: n, offset: 0, ..q.clone() })
     }
 
     pub fn query_events(&self, q: &EventQuery) -> Result<Vec<Event>> {

@@ -761,24 +761,35 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     #[cfg(not(unix))]
-    std::fs::write(path, bytes)?;
-    #[cfg(windows)]
     {
-        // Best effort: only SYSTEM and Administrators (the service account
-        // normally is one of them) may read the key.
-        let _ = std::process::Command::new(crate::lockdown::icacls_exe())
-            .arg(path)
-            .args(["/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F"])
-            .output();
-        // And the account running AmberSight, when it is not one of those
-        // (e.g. `ambersight run` as an ordinary user), so it can still save.
-        if let (Ok(domain), Ok(user)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
-            if !user.ends_with('$') && !user.eq_ignore_ascii_case("SYSTEM") {
-                let _ = std::process::Command::new(crate::lockdown::icacls_exe()).arg(path).arg("/grant").arg(format!("{domain}\\{user}:F")).output();
-            }
-        }
+        use std::io::Write;
+        // The file is made empty first and narrowed (Windows) before the
+        // secret goes in, then written and flushed to the disk.
+        drop(std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?);
+        #[cfg(windows)]
+        narrow_acl(path);
+        let mut f = std::fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
     }
     Ok(())
+}
+
+/// Windows, best effort: only SYSTEM and Administrators (the service account
+/// normally is one of them) may read the file, and the account running
+/// AmberSight when it is not one of those (e.g. `ambersight run` as an
+/// ordinary user), so it can still save.
+#[cfg(windows)]
+fn narrow_acl(path: &Path) {
+    let _ = std::process::Command::new(crate::lockdown::icacls_exe())
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F"])
+        .output();
+    if let (Ok(domain), Ok(user)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        if !user.ends_with('$') && !user.eq_ignore_ascii_case("SYSTEM") {
+            let _ = std::process::Command::new(crate::lockdown::icacls_exe()).arg(path).arg("/grant").arg(format!("{domain}\\{user}:F")).output();
+        }
+    }
 }
 
 /// Log (once per run) that this computer's name cannot go into certificates.

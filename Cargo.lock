@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "ambersight"
-version = "0.12.6"
+version = "0.13.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -65,6 +65,7 @@ dependencies = [
  "cfb-mode",
  "chrono",
  "clap",
+ "crypto-bigint 0.7.11",
  "flate2",
  "fs4",
  "futures",
@@ -76,6 +77,7 @@ dependencies = [
  "lettre",
  "libc",
  "md-5 0.11.0",
+ "mdns-sd",
  "ndarray",
  "ort",
  "p256",
@@ -490,6 +492,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
+name = "cmov"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
+
+[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -556,6 +564,12 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "cpubits"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae"
 
 [[package]]
 name = "cpufeatures"
@@ -628,6 +642,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-bigint"
+version = "0.7.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
+dependencies = [
+ "cpubits",
+ "ctutils",
+ "num-traits",
+ "zeroize",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -664,6 +690,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
 dependencies = [
  "cipher",
+]
+
+[[package]]
+name = "ctutils"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
+dependencies = [
+ "cmov",
 ]
 
 [[package]]
@@ -821,7 +856,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
 dependencies = [
  "base16ct",
- "crypto-bigint",
+ "crypto-bigint 0.5.5",
  "digest 0.10.7",
  "ff",
  "generic-array",
@@ -955,6 +990,15 @@ checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
 dependencies = [
  "futures-core",
  "futures-sink",
+ "spin",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
  "spin",
 ]
 
@@ -1513,6 +1557,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "image"
 version = "0.24.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1779,6 +1833,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mdns-sd"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6743ed743ff2bada2b8651ef298d3f98addb0b74844f19cdd57137d8bd0219e"
+dependencies = [
+ "fastrand",
+ "flume 0.12.0",
+ "if-addrs",
+ "log",
+ "mio",
+ "socket-pktinfo",
+ "socket2 0.6.5",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1827,6 +1896,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
+ "log",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -2445,7 +2515,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1568e15fab2d546f940ed3a21f48bbbd1c494c90c99c4481339364a497f94a9"
 dependencies = [
  "bytes",
- "flume",
+ "flume 0.11.1",
  "futures-util",
  "log",
  "thiserror 1.0.69",
@@ -2800,6 +2870,17 @@ name = "smallvec"
 version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
+
+[[package]]
+name = "socket-pktinfo"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "512f5c35377cf69f350b106df2366c3a1df6bd01b047a7a58c8390b70d28838d"
+dependencies = [
+ "libc",
+ "socket2 0.6.5",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "socket2"

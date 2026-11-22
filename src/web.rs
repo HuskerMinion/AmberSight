@@ -120,6 +120,10 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/push/devices", get(crate::push_http::devices))
         .route("/push/test", post(crate::push_http::test))
         .route("/restream", get(crate::restream::http::get).put(crate::restream::http::put))
+        .route("/homekit", get(crate::homekit::api::get).put(crate::homekit::api::put))
+        .route("/homekit/pairing", post(crate::homekit::api::pairing))
+        .route("/homekit/reset", post(crate::homekit::api::reset))
+        .route("/homekit/unpair", post(crate::homekit::api::unpair))
         .route("/presence", get(crate::presence_http::list).post(crate::presence_http::report))
         .route("/presence/:device_id", axum::routing::delete(crate::presence_http::remove))
         .route("/health", get(health))
@@ -1029,6 +1033,8 @@ fn gate(path: &str, method: &axum::http::Method, role: &Role, limited: bool) -> 
 fn admin_only_path(path: &str) -> bool {
     matches!(path, "/settings" | "/logs" | "/health" | "/hwdecode" | "/users" | "/addresses" | "/discover" | "/devices" | "/discover/logins" | "/discover/watch" | "/discover/ignore" | "/helpers" | "/connections" | "/storage/plan" | "/storage/privacy" | "/drives" | "/ai/reviews" | "/sound/status" | "/restream" | "/plates/status" | "/plates/known")
         || path.starts_with("/users/")
+        || path == "/homekit"
+        || path.starts_with("/homekit/")
         || path.starts_with("/storage/missing")
         || path.starts_with("/alert-rules")
         || path.starts_with("/faces")
@@ -1900,7 +1906,7 @@ async fn set_overlay_var_http(
 /// What GET /api/cameras leaves out for anyone not an admin (viewers and
 /// operators alike): logins, folders, event copies, capture helpers, pushed
 /// senders, hardware and the watchdog.
-const HIDDEN_FROM_NON_ADMINS: [&str; 26] = ["via_note", "connect", "baichuan_port", "baichuan_channel", "controls_cfg", "username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
+const HIDDEN_FROM_NON_ADMINS: [&str; 27] = ["homekit", "via_note", "connect", "baichuan_port", "baichuan_channel", "controls_cfg", "username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
 
 /// `GET /api/camera-defaults`: the shared detection and alert settings a
 /// camera uses where it sets none of its own (motion, AI, alert priority and
@@ -2082,6 +2088,8 @@ async fn list_cameras(
             if let (Some(o), serde_json::Value::Object(c)) = (v.as_object_mut(), connect_fields(&cfg)) {
                 o.extend(c);
             }
+            // Shown in Apple Home (admins only).
+            v["homekit"] = cfg.homekit.into();
             // Viewers see what a camera is, not how to reach or impersonate it
             // (a push key is the only secret guarding its stream input).
             if !admin.0 {
@@ -2800,16 +2808,32 @@ async fn update_camera(
     // Renamed: everything that refers to the camera by name follows it, and
     // the camera takes the name in the same step (see rename_and_update_camera).
     let renamed = cur.name != cam.name;
+    let names = (cur.name.clone(), cam.name.clone());
+    if renamed {
+        // (Apple Home: the new name keeps the camera's accessory id from now on.)
+        crate::homekit::rename_begin(&engine, &names.0, &names.1);
+    }
     let merged = merge_password(engine.clone(), id, cam);
     let updated = if renamed {
         let (e, old) = (engine.clone(), cur.name.clone());
         match tokio::task::spawn_blocking(move || e.rename_and_update_camera(id, &old, merged)).await {
             Ok(Ok(done)) => done,
-            _ => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "the camera's recordings could not be moved to the new name, so it was not renamed (see the server log)" }))),
+            _ => {
+                crate::homekit::rename_abort(&engine, &names.0, &names.1);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "the camera's recordings could not be moved to the new name, so it was not renamed (see the server log)" })));
+            }
         }
     } else {
         engine.update_camera(id, merged)
     };
+    if renamed {
+        if updated {
+            // Apple Home keeps showing it as the same accessory (once the rename is saved).
+            crate::homekit::rename_camera(&engine, &names.0, &names.1);
+        } else {
+            crate::homekit::rename_abort(&engine, &names.0, &names.1);
+        }
+    }
     if updated {
         crate::helpers::sync_all(&engine);
         (
@@ -3240,7 +3264,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -3312,6 +3336,10 @@ struct EventQuery {
     /// Event ids, comma separated (export: exactly these).
     #[serde(default)]
     ids: Option<String>,
+    /// `1`: only the newest event of each camera that started at or after
+    /// `since` (default the last 24 hours, at most 31 days back).
+    #[serde(default, deserialize_with = "query_flag")]
+    latest_per_camera: bool,
 }
 fn default_limit() -> usize {
     100
@@ -3391,6 +3419,7 @@ fn event_db_query(q: &EventQuery, access: &Access, visible: Option<Vec<String>>,
         protected_only: matches!(q.protect.as_deref(), Some("1" | "true" | "yes" | "on")),
         objects_any: csv_list(&q.objects, 20),
         ids,
+        start_from: None,
     })
 }
 
@@ -3402,12 +3431,22 @@ async fn events(
     // One page at most this big (the web app asks for up to 500).
     let q = EventQuery { camera: q.camera.filter(|c| !c.is_empty()), limit: q.limit.min(EVENTS_PAGE_MAX), offset: q.offset.min(EVENTS_OFFSET_MAX), ..q };
     let hide = if q.all { Vec::new() } else { engine.hide_unconfirmed_cameras() };
-    let Some(query) = event_db_query(&q, &access, visible_names(&engine, &access), hide, q.limit) else {
+    let Some(mut query) = event_db_query(&q, &access, visible_names(&engine, &access), hide, q.limit) else {
         return Json(serde_json::json!({ "events": [] }));
     };
+    let latest = q.latest_per_camera;
+    if latest {
+        // The walk reads every event of the stretch, so it is kept to a month.
+        let now = chrono::Utc::now().timestamp();
+        let from = q.since.unwrap_or(now - 86_400).max(now - 31 * 86_400);
+        query.since = Some(from);
+        query.start_from = Some(from);
+        query.offset = 0;
+    }
     let e = engine.clone();
     let out = tokio::task::spawn_blocking(move || {
-        let evs = e.db.query_events(&query).unwrap_or_else(|err| {
+        let evs = if latest { e.db.latest_event_per_camera(&query, LATEST_CAMERAS_MAX) } else { e.db.query_events(&query) };
+        let evs = evs.unwrap_or_else(|err| {
             tracing::warn!("event query failed: {err:#}");
             Vec::new()
         });
@@ -3437,6 +3476,8 @@ async fn events(
 }
 
 const EVENTS_PAGE_MAX: usize = 2000;
+/// Most cameras one `latest_per_camera` answer holds.
+const LATEST_CAMERAS_MAX: usize = 500;
 const EVENTS_OFFSET_MAX: usize = 1_000_000;
 
 #[derive(serde::Deserialize)]
@@ -3751,6 +3792,70 @@ async fn hvc1_saved_clip(path: &std::path::Path) {
     }
 }
 
+/// A player of Apple's (iPhone and iPad apps, Safari, QuickTime): they all
+/// play through AVFoundation, which asks for media as `AppleCoreMedia`, or
+/// WebKit on its own (every browser on iPhone, and Safari).
+fn apple_player(h: &axum::http::HeaderMap) -> bool {
+    let ua = h.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+    ua.contains("AppleCoreMedia") || (ua.contains("AppleWebKit") && !["Chrome/", "Chromium/", "Edg/", "Android", "OPR/"].iter().any(|x| ua.contains(x)))
+}
+
+/// A saved clip file served as it is (ServeFile: byte ranges, If-Range,
+/// HEAD), HEVC labeled hvc1 (see [`hvc1_saved_clip`]); to Apple's players
+/// with FLAC sound marked one block size, in the bytes sent only (see
+/// [`crate::ingest::mp4read::flac_file_fixed_block`]). None: no such file.
+async fn serve_saved_clip(path: &std::path::Path, req: Request) -> Option<Response> {
+    hvc1_saved_clip(path).await;
+    let patch = if apple_player(req.headers()) {
+        let p = path.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::ingest::mp4read::flac_file_fixed_block(&p)).await.ok().and_then(|r| r.ok()).flatten()
+    } else {
+        None
+    };
+    let r = tower::ServiceExt::oneshot(ServeFile::new(path), req).await.ok()?.into_response();
+    Some(match patch {
+        Some((at, bytes)) => patched_body(r, at, bytes),
+        None => r,
+    })
+}
+
+/// `r` (a file's bytes: all of them, or the range its Content-Range says)
+/// with the bytes at file offset `at` replaced by `bytes` as they go out.
+fn patched_body(r: Response, at: u64, bytes: [u8; 4]) -> Response {
+    let start = match r.status() {
+        StatusCode::OK => 0,
+        StatusCode::PARTIAL_CONTENT => {
+            // "bytes a-b/total"
+            let Some(a) = r.headers().get(header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes ")).and_then(|v| v.split('-').next()).and_then(|v| v.trim().parse::<u64>().ok()) else {
+                return r;
+            };
+            a
+        }
+        _ => return r,
+    };
+    let (parts, body) = r.into_parts();
+    let mut pos = start;
+    let stream = futures::StreamExt::map(body.into_data_stream(), move |chunk| {
+        chunk.map(|c| {
+            let s = pos;
+            let e = pos + c.len() as u64;
+            pos = e;
+            if at + bytes.len() as u64 <= s || at >= e {
+                return c;
+            }
+            let mut v = c.to_vec();
+            for (k, b) in bytes.iter().enumerate() {
+                let p = at + k as u64;
+                if p >= s && p < e {
+                    v[(p - s) as usize] = *b;
+                }
+            }
+            axum::body::Bytes::from(v)
+        })
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
 async fn clip_file(
     State(engine): State<Arc<Engine>>,
     AxPath(id): AxPath<String>,
@@ -3802,21 +3907,19 @@ async fn clip_file(
         // transcoded (from `start` ms into it). info=1: what, as JSON.
         let src = crate::transcode::http::ClipSrc::Event { id: id.clone(), offset: dl.start.unwrap_or(0).max(0) };
         let ask = ask_of(&req);
-        return match crate::transcode::http::handle(engine.clone(), src, caps, dl.info == "1", ask, dl.quality == "low", user).await {
+        return match crate::transcode::http::handle(engine.clone(), src, caps, dl.info == "1", ask, dl.quality == "low", user, apple_player(req.headers())).await {
             crate::transcode::http::Outcome::Done(r) => r,
             crate::transcode::http::Outcome::Untouched { low, headers } => {
                 let r = if low || !path.is_file() {
                     virtual_clip_response(engine, id, false, low, req).await
                 } else {
-                    hvc1_saved_clip(&path).await;
-                    match tower::ServiceExt::oneshot(ServeFile::new(path), req).await {
-                        Ok(r) => {
-                            let mut r = r.into_response();
+                    match serve_saved_clip(&path, req).await {
+                        Some(mut r) => {
                             r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
                             r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
                             r
                         }
-                        Err(_) => (StatusCode::NOT_FOUND, "clip not found").into_response(),
+                        None => (StatusCode::NOT_FOUND, "clip not found").into_response(),
                     }
                 };
                 with_headers(r, headers)
@@ -3827,11 +3930,8 @@ async fn clip_file(
         // No saved file: assemble the event's video from the recordings.
         return virtual_clip_response(engine, id, download, dl.quality == "low", req).await;
     }
-    hvc1_saved_clip(&path).await;
-    // ServeFile streams from disk and handles Range / If-Range / HEAD.
-    let mut resp = match tower::ServiceExt::oneshot(ServeFile::new(path), req).await {
-        Ok(r) => r.into_response(),
-        Err(_) => return (StatusCode::NOT_FOUND, "clip not found").into_response(),
+    let Some(mut resp) = serve_saved_clip(&path, req).await else {
+        return (StatusCode::NOT_FOUND, "clip not found").into_response();
     };
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
@@ -3925,6 +4025,14 @@ async fn serve_clip(
     download: bool,
     req: Request,
 ) -> Response {
+    // Apple's players: a plain MP4 of the same media (made once per clip:
+    // it reads every fragment's header), FLAC marked one block size.
+    let clip = if apple_player(req.headers()) {
+        let keep = clip.clone();
+        tokio::task::spawn_blocking(move || clip.for_apple()).await.unwrap_or(keep)
+    } else {
+        clip
+    };
     let range = req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     let head = req.method() == axum::http::Method::HEAD;
     let len = clip.len();
@@ -4374,7 +4482,7 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
         };
         let src = crate::transcode::http::ClipSrc::Window { camera: camera.clone(), from, to, start };
         let ask = ask_of(&req);
-        match crate::transcode::http::handle(engine.clone(), src, caps, q.info == "1", ask, low, user.clone()).await {
+        match crate::transcode::http::handle(engine.clone(), src, caps, q.info == "1", ask, low, user.clone(), apple_player(req.headers())).await {
             crate::transcode::http::Outcome::Done(r) => return r,
             crate::transcode::http::Outcome::Untouched { low: l, headers } => {
                 low = l;
@@ -4558,10 +4666,8 @@ async fn event_clip_burned(engine: &Arc<Engine>, c: crate::engine::playback::Eve
 /// `Engine::event_clip_at`): the file as it is (byte ranges, HEAD), with the
 /// stretch it shows in the same headers a planned window has.
 async fn event_clip_window(c: crate::engine::playback::EventClipAt, name: &str, download: bool, req: Request) -> Response {
-    hvc1_saved_clip(&c.path).await;
-    let mut r = match tower::ServiceExt::oneshot(ServeFile::new(&c.path), req).await {
-        Ok(r) => r.into_response(),
-        Err(_) => return (StatusCode::NOT_FOUND, "no recording covers that window").into_response(),
+    let Some(mut r) = serve_saved_clip(&c.path, req).await else {
+        return (StatusCode::NOT_FOUND, "no recording covers that window").into_response();
     };
     if !r.status().is_success() {
         return r;
@@ -6537,6 +6643,53 @@ mod camera_merge_tests {
 }
 
 #[cfg(test)]
+mod apple_flac_tests {
+    use super::*;
+
+    #[test]
+    fn apple_players_are_told_apart_by_their_user_agent() {
+        let h = |ua: &str| {
+            let mut m = axum::http::HeaderMap::new();
+            m.insert(header::USER_AGENT, HeaderValue::from_str(ua).unwrap());
+            apple_player(&m)
+        };
+        assert!(h("AppleCoreMedia/1.0.0.21E236 (iPhone; U; CPU OS 17_4 like Mac OS X; en_us)"));
+        assert!(h("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"));
+        assert!(h("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/123.0 Mobile/15E148 Safari/604.1"), "Chrome on iPhone is WebKit");
+        assert!(!h("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"));
+        assert!(!h("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36 Edg/123.0"));
+        assert!(!h("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Mobile Safari/537.36"));
+        assert!(!h("Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0"));
+        assert!(!h("ExoPlayerLib/2.19.1"));
+        assert!(!apple_player(&axum::http::HeaderMap::new()));
+    }
+
+    #[tokio::test]
+    async fn patched_bytes_land_in_whole_files_and_in_ranges() {
+        let file: Vec<u8> = (0u8..100).collect();
+        let run = |status: StatusCode, range: Option<&'static str>, part: Vec<u8>| async move {
+            let mut b = Response::builder().status(status);
+            if let Some(r) = range {
+                b = b.header(header::CONTENT_RANGE, r);
+            }
+            // In two chunks, split inside the patch.
+            let (x, y) = part.split_at(part.len().min(3));
+            let body = Body::from_stream(futures::stream::iter(vec![Ok::<_, std::io::Error>(axum::body::Bytes::from(x.to_vec())), Ok(axum::body::Bytes::from(y.to_vec()))]));
+            let r = patched_body(b.body(body).unwrap(), 12, [200, 201, 202, 203]);
+            axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec()
+        };
+        let mut want = file.clone();
+        want[12..16].copy_from_slice(&[200, 201, 202, 203]);
+        assert_eq!(run(StatusCode::OK, None, file.clone()).await, want);
+        assert_eq!(run(StatusCode::PARTIAL_CONTENT, Some("bytes 10-19/100"), file[10..20].to_vec()).await, want[10..20].to_vec());
+        assert_eq!(run(StatusCode::PARTIAL_CONTENT, Some("bytes 0-13/100"), file[0..14].to_vec()).await, want[0..14].to_vec(), "a range ending inside the patch");
+        assert_eq!(run(StatusCode::PARTIAL_CONTENT, Some("bytes 14-99/100"), file[14..].to_vec()).await, want[14..].to_vec(), "starting inside it");
+        assert_eq!(run(StatusCode::PARTIAL_CONTENT, Some("bytes 50-59/100"), file[50..60].to_vec()).await, file[50..60].to_vec(), "away from it: as it is");
+        assert_eq!(run(StatusCode::NOT_MODIFIED, None, Vec::new()).await, Vec::<u8>::new());
+    }
+}
+
+#[cfg(test)]
 mod alert_settings_tests {
     use super::*;
 
@@ -7901,7 +8054,7 @@ mod event_filter_tests {
         q
     }
     fn serde_urlencoded_empty() -> EventQuery {
-        EventQuery { offset: 0, limit: 100, camera: None, since: None, until: None, object: None, all: false, cameras: None, protect: None, objects: None, review: None, ids: None }
+        EventQuery { offset: 0, limit: 100, camera: None, since: None, until: None, object: None, all: false, cameras: None, protect: None, objects: None, review: None, ids: None, latest_per_camera: false }
     }
     fn limited(names: &[&str]) -> Access {
         Access(Some(names.iter().map(|n| crate::config::slug(n)).collect()))
@@ -8061,6 +8214,10 @@ mod viewer_write_tests {
         "/push/devices",
         "/push/test",
         "/restream",
+        "/homekit",
+        "/homekit/pairing",
+        "/homekit/reset",
+        "/homekit/unpair",
         "/presence",
         "/presence/:device_id",
         "/health",
@@ -8302,6 +8459,11 @@ mod viewer_write_tests {
         ("/push/test", "POST", "viewer"),
         ("/restream", "GET", "admin"),
         ("/restream", "PUT", "admin"),
+        ("/homekit", "GET", "admin"),
+        ("/homekit", "PUT", "admin"),
+        ("/homekit/pairing", "POST", "admin"),
+        ("/homekit/reset", "POST", "admin"),
+        ("/homekit/unpair", "POST", "admin"),
         ("/presence", "GET", "viewer"),
         ("/presence", "POST", "viewer"),
         ("/presence/:device_id", "DELETE", "viewer"),
@@ -8692,7 +8854,7 @@ mod viewer_write_tests {
 
     #[test]
     fn admin_only_reads() {
-        for p in ["/settings", "/storage/missing", "/storage/missing/scan", "/storage/missing/apply", "/system/restart", "/system", "/update", "/logs", "/users", "/cameras/3/tamper", "/cameras/3/unusual", "/cameras/3/onvif", "/alert-rules", "/alert-rules/preview"] {
+        for p in ["/settings", "/storage/missing", "/storage/missing/scan", "/storage/missing/apply", "/system/restart", "/system", "/update", "/logs", "/users", "/cameras/3/tamper", "/cameras/3/unusual", "/cameras/3/onvif", "/alert-rules", "/alert-rules/preview", "/homekit", "/homekit/reset"] {
             assert!(super::admin_only_path(p), "{p}");
         }
         for p in ["/tls", "/whoami", "/cameras", "/status", "/cameras/3/tamper/ref/day", "/cameras/3/tamper/incidents/7/cur"] {
@@ -9393,6 +9555,59 @@ mod operator_tests {
     }
 
     #[tokio::test]
+    async fn latest_per_camera_gives_each_cameras_newest_alert_only() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        let mut cfg: crate::config::Config = toml::from_str("[[cameras]]\nname = \"Porch\"\nurl = \"rtsp://192.0.2.1/a\"\n[[cameras]]\nname = \"Garage\"\nurl = \"rtsp://192.0.2.2/a\"\nai_hide_unconfirmed = true\n[[cameras]]\nname = \"Shed\"\nurl = \"rtsp://192.0.2.3/a\"\n").unwrap();
+        for (name, admin, cams) in [("ann", true, vec![]), ("lim", false, vec!["Porch".to_string()])] {
+            cfg.server.users.push(crate::config::UserConfig { username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: cams, disabled: false, role: String::new(), perms: Default::default() });
+        }
+        let e = crate::engine::Engine::for_test(cfg);
+        let now = chrono::Utc::now().timestamp();
+        let ev = |id: &str, cam: &str, start: i64| crate::engine::Event { id: id.into(), camera_id: 1, camera: cam.into(), start, end: start + 10, score: 0.5, clip: None, thumb: None, objects: vec!["person".into()], protect: false };
+        // A busy Porch (many newer alerts), one Garage alert, a Shed alert two days old.
+        for i in 0..300 {
+            e.db.insert_event(&ev(&format!("porch-{i}"), "Porch", now - 3000 + i * 10)).unwrap();
+        }
+        e.db.insert_event(&ev("garage-old", "Garage", now - 7200)).unwrap();
+        e.db.insert_event(&ev("garage-new", "garage", now - 3600)).unwrap();
+        e.db.insert_event(&ev("shed-1", "Shed", now - 2 * 86_400)).unwrap();
+        // Unconfirmed on a camera that hides them: not its latest alert.
+        e.db.insert_event(&ev("garage-unc", "Garage", now - 60)).unwrap();
+        e.db.set_event_unconfirmed("garage-unc").unwrap();
+        let app = super::build_router(e.clone());
+        let get = |path: String, who: &'static str| {
+            let req = Request::builder().uri(path).header(header::HOST, "localhost:8090").header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{who}:pw-{who}-1")))).body(Body::empty()).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                assert_eq!(r.status(), StatusCode::OK);
+                let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 22).await.unwrap()).unwrap();
+                v["events"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+            }
+        };
+        let garage = "garage-new";
+        // Default stretch, the last 24 h: newest first, one per camera (names in any case are one camera).
+        assert_eq!(get("/api/events?latest_per_camera=1".into(), "ann").await, vec!["porch-299", garage]);
+        // A longer stretch reaches the Shed; the cameras filter narrows it.
+        assert_eq!(get(format!("/api/events?latest_per_camera=1&since={}", now - 3 * 86_400), "ann").await, vec!["porch-299", garage, "shed-1"]);
+        assert_eq!(get(format!("/api/events?latest_per_camera=1&since={}&cameras=Shed,Garage", now - 3 * 86_400), "ann").await, vec![garage, "shed-1"]);
+        // A limited account sees only its cameras; asking for others gives nothing.
+        // (The test engine runs no cameras, so the account names the ones it asks about.)
+        assert_eq!(get(format!("/api/events?latest_per_camera=1&since={}&cameras=Porch,Garage,Shed", now - 3 * 86_400), "lim").await, vec!["porch-299"]);
+        assert!(get("/api/events?latest_per_camera=1&cameras=Garage".into(), "lim").await.is_empty());
+        // limit and offset do not cut it short.
+        assert_eq!(get("/api/events?latest_per_camera=1&limit=1&offset=5".into(), "ann").await, vec!["porch-299", garage]);
+        // Without the flag: the ordinary listing.
+        assert_eq!(get("/api/events?limit=3".into(), "ann").await.len(), 3);
+        // Advertised.
+        assert!(super::FEATURES.contains(&"events_latest"));
+        assert!(super::FEATURES.contains(&"apple_plain_mp4"));
+    }
+
+    #[tokio::test]
     async fn operators_through_the_whole_stack() {
         use axum::body::Body;
         use axum::http::{header, Request, StatusCode};
@@ -9752,6 +9967,31 @@ mod demo_and_snooze_tests {
         let body = serde_json::json!({ "code": code }).to_string();
         let (s, _, c) = send(&app, Call { body: Some(&body), ..call("POST", "/api/pair") }).await;
         assert_eq!((s, c.is_none()), (StatusCode::UNAUTHORIZED, true));
+    }
+
+    #[tokio::test]
+    async fn only_admins_open_the_homekit_pairing_window() {
+        let (e, app) = site("hk1", "");
+        let open = r#"{"action":"open"}"#;
+        // Viewers and operators: refused; nothing is written to the audit log for them.
+        for who in ["hk1vic", "hk1lim", "hk1otto"] {
+            for (m, p, body) in [("POST", "/api/homekit/pairing", Some(open)), ("POST", "/api/homekit/pairing", Some(r#"{"action":"stop"}"#)), ("GET", "/api/homekit", None)] {
+                let (s, _, _) = send(&app, Call { basic: Some(who.into()), body, ..call(m, p) }).await;
+                assert_eq!(s, StatusCode::FORBIDDEN, "{who} {m} {p}");
+            }
+        }
+        // An admin's device token, even with control rights: refused.
+        let (tok, _) = crate::auth::add_token("hk1ann", "app", true, crate::auth::generation("hk1ann")).unwrap().unwrap();
+        let (s, _, _) = send(&app, Call { bearer: Some(tok), body: Some(open), ..call("POST", "/api/homekit/pairing") }).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(!e.db.audit_rows().iter().any(|r| r.2.contains("homekit")), "{:?}", e.db.audit_rows());
+        // An admin is let through (HomeKit is off here: told so), and it is in the audit log.
+        let (s, b, _) = send(&app, Call { basic: Some("hk1ann".into()), body: Some(open), ..call("POST", "/api/homekit/pairing") }).await;
+        assert_ne!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(e.db.audit_rows().iter().any(|r| r.0 == "hk1ann" && r.2 == "/homekit/pairing"), "{:?}", e.db.audit_rows());
+        // A wrong action or unknown field: refused before anything is done.
+        let (s, _, _) = send(&app, Call { basic: Some("hk1ann".into()), body: Some(r#"{"action":"open","x":1}"#), ..call("POST", "/api/homekit/pairing") }).await;
+        assert!(s.is_client_error() && s != StatusCode::FORBIDDEN, "{s}");
     }
 
     #[tokio::test]

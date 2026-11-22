@@ -8202,6 +8202,14 @@
 "简称",
 "92346acc"
 ],
+"cameras.show_in_apple_home": [
+"在 Apple Home 中显示",
+"00ab4e6a"
+],
+"cameras.show_in_apple_home_hint": [
+"Apple Home 开启期间，会在“家庭”App 中显示，并提供实时画面、移动传感器和快照（设置、连接、Apple Home）。该家庭中的所有人都能看到。",
+"3bfb2272"
+],
 "cameras.show_only_ai_events": [
 "仅显示由AI确认的事件",
 "bfa330f4"
@@ -11566,6 +11574,30 @@
 "<b>当某条路径运行失败时</b>，对应的摄像头会立即切换至下一条路径或处理器。系统会在15分钟后重新尝试该路径，之后间隔更长时间（最长4小时）再试一次。若连续两次失败（且中间无30分钟的正常运行记录），该路径便会被不再使用，直至AmberSight重启或硬件解码、在 NVIDIA 显卡上保留空闲显存设置发生变更。若NVIDIA显卡出现内存不足情况，系统仅会等待其恢复，不会切换其他路径。若某条路径中断，而处理器随后能正常解码同一视频流，则所有摄像头都会在1小时内不再使用该路径。<b>按摄像头查看</b>可了解各摄像头当前使用的路径及其原因。",
 "da025aa4"
 ],
+"help.settings_homekit_accounts": [
+"HomeKit 不识别 AmberSight 的账户：该 Apple Home 中的所有人都能看到此处开启的摄像头。在“家庭”App 中移除的摄像头（或桥接器），可使用相同的设置代码重新添加（先点击<b>配对设备</b>）；在此处点击<b>移除配对</b>效果相同。若代码已泄露，<b>重置配对</b>会让所有已配对的 Apple 设备失效，并生成新代码：“家庭”随后会显示新的配件（请移除旧配件；包含这些摄像头的房间、场景和自动化需要重新设置）。",
+"b75210bb"
+],
+"help.settings_homekit_adding_to_home": [
+"<b>添加到“家庭”：</b>Apple 设备只能在配对开启期间配对。点击<b>配对设备</b>（针对摄像头或桥接器）：设置代码和二维码会显示 5 分钟，期间“家庭”可以添加它。添加设备后、点击<b>停止</b>时或 5 分钟后，配对会关闭。配对开启期间，页面会显示正在配对的设备地址。若该设备不是您的，<b>停止并重新开始</b>会将其停止，在配对关闭前禁止该地址，并为您重新提供 5 分钟。在“家庭”App 中添加成员（共享您的家庭）无需上述操作。",
+"3ae21608"
+],
+"help.settings_homekit_apple_home_shows": [
+"<b>Apple Home</b> 会在“家庭”App 中显示您开启的摄像头（设置 &rsaquo; 连接 &rsaquo; Apple Home，或在摄像头设置中使用<b>在 Apple Home 中显示</b>），并提供实时画面、移动传感器和快照。实时画面会按“家庭”要求的尺寸进行编码，有显卡时使用显卡编码（否则使用处理器），摄像头的声音为 Opus 格式。每个摄像头最多 2 路实时画面，总共最多 4 路，且受设置文件中 <code>[transcode]</code> 限制的约束。",
+"9a210dde"
+],
+"help.settings_homekit_each_on_its_own": [
+"<b>各自独立</b>（默认）会将每个摄像头分别添加到 Apple Home，这也是 Apple 对摄像头的推荐方式：为摄像头点击<b>配对设备</b>，然后在“家庭”App 中点击<b>+</b>、<b>添加配件</b>并扫描其二维码，或输入设置代码（所有摄像头相同）。<b>通过一个桥接器</b>则添加一个包含所有摄像头的桥接器。“家庭”会提示该配件未经认证；请选择<b>仍然添加</b>。Apple 设备通过 Bonjour（UDP 5353）发现 AmberSight；每个摄像头（或桥接器）从 51830 起拥有各自的 TCP 端口；请在防火墙中放行。在 Docker 中需要使用主机网络。",
+"f9a0381e"
+],
+"help.settings_homekit_tested": [
+"<b>已使用 iPhone 和 HomePod mini 中枢测试</b>（每个配件一个摄像头）。若您尝试其他配置，请在 GitHub Discussions 中告诉我们结果。没有收到移动通知？在“家庭”中，摄像头的<b>活动通知</b>选项若为<b>人员</b>，则仅在无人在家时发送：请改为<b>任何时候</b>。",
+"5a9fd376"
+],
+"help.settings_homekit_title": [
+"Apple Home（HomeKit）",
+"f305a52e"
+],
 "help.settings_https_extra_names_for": [
 "<b>证书的额外名称</b>：该证书已涵盖本机的地址、主机名以及 localhost；您还可以添加其他用于访问 AmberSight 的名称。添加后无需重启即可生效。由于证书颁发机构存在限制（以防密钥被盗用至其他网站），因此以 .lan、.local、.home.arpa 或 .internal 结尾的名称、本机主机名以及家庭网络和 Tailscale（100.x 段）地址均可直接添加。至于其他名称，比如 Tailscale 域名（nvr.tail1234.ts.net），则仅能在创建证书时一并加入：务必在首次启用 HTTPS 前完成设置，否则需自行导入证书。",
 "8a6c3df6"
@@ -11997,6 +12029,282 @@
 "helperpick.whole_desktop": [
 "整个桌面",
 "9558b09c"
+],
+"homekit_settings.add_to_apple_home": [
+"添加到 Apple Home",
+"108e5e54"
+],
+"homekit_settings.apple_home_homekit": [
+"Apple Home（HomeKit）",
+"f305a52e"
+],
+"homekit_settings.behind_one_bridge": [
+"通过一个桥接器",
+"29bb7522"
+],
+"homekit_settings.bridge_name": [
+"桥接器名称",
+"5e160db3"
+],
+"homekit_settings.bridge_name_hint": [
+"“家庭”中显示的桥接器名称（桥接模式）。留空则使用此服务器的名称。",
+"f2c61f8a"
+],
+"homekit_settings.bridge_title": [
+"桥接器“{name}”",
+"98d31dcb"
+],
+"homekit_settings.cameras_in_apple_home": [
+"Apple Home 中的摄像头",
+"e25a1955"
+],
+"homekit_settings.cameras_in_home": [
+"“家庭”中的摄像头",
+"031b3485"
+],
+"homekit_settings.cameras_shown": [
+"{n, plural, one {# 个摄像头} other {# 个摄像头}}显示在 Apple Home 中。",
+"fc73a413"
+],
+"homekit_settings.cameras_to_add": [
+"要在“家庭”App 中添加的摄像头",
+"7f590853"
+],
+"homekit_settings.change": [
+"更改",
+"a1de2fdd"
+],
+"homekit_settings.change_mode_body": [
+"之后需要将摄像头重新添加到 Apple Home，并在其中移除旧的摄像头。",
+"2fd1c685"
+],
+"homekit_settings.change_mode_title": [
+"更改摄像头在“家庭”中的呈现方式？",
+"b0c45668"
+],
+"homekit_settings.changing_this": [
+"更改此项后，需要将摄像头重新添加到 Apple Home。",
+"aeb99be8"
+],
+"homekit_settings.could_not_load": [
+"无法加载：",
+"419029cb"
+],
+"homekit_settings.each_on_its_own": [
+"各自独立",
+"2b0f617f"
+],
+"homekit_settings.for_seconds": [
+"{n} 秒",
+"37ea8f6e"
+],
+"homekit_settings.how": [
+"下方开启的每个摄像头都是一个 HomeKit 摄像头，提供实时画面、移动传感器（“家庭”可就移动向您发送通知）和快照图片。实时画面会按“家庭”要求的尺寸生成（有显卡时使用显卡，否则使用处理器；摄像头有声音时为 Opus 格式）。默认情况下，每个摄像头各自添加到 Apple Home，这也是 Apple 对摄像头的推荐方式：在“家庭”App 中逐个添加，使用相同的设置代码。<b>桥接</b>会将它们全部放在一个只需添加一次的桥接器后面。Apple 设备通过 Bonjour（mDNS，UDP 端口 5353）发现 AmberSight，因此它们必须处于同一网络（或通过 HomePod 或 Apple TV 等家庭中枢访问该网络）。<b>HomeKit 不识别 AmberSight 的账户：</b>您添加摄像头的 Apple Home 中的所有人，都能看到此处开启的摄像头，无论其 AmberSight 账户能看到什么。",
+"b2d6d188"
+],
+"homekit_settings.in_apple_home": [
+"在 Apple Home 中（已配对 {n, plural, one {# 台 Apple 设备} other {# 台 Apple 设备}}）{live}。",
+"ad0b3f6e"
+],
+"homekit_settings.lead_main": [
+"在 Apple Home 中显示您的摄像头，并提供实时画面、移动提醒和快照。",
+"7ecb4152"
+],
+"homekit_settings.lead_sub": [
+"除非使用“家庭”App，否则请保持关闭。",
+"d4bde183"
+],
+"homekit_settings.live_views": [
+"{n, plural, one {# 路实时画面} other {# 路实时画面}}",
+"d2a9b570"
+],
+"homekit_settings.loading": [
+"正在加载……",
+"17b11033"
+],
+"homekit_settings.more_settings": [
+"更多设置",
+"1386530d"
+],
+"homekit_settings.no_camera_shown": [
+"尚未显示任何摄像头：请开启要显示的摄像头。",
+"292b5667"
+],
+"homekit_settings.no_cameras_yet": [
+"尚未添加任何摄像头。",
+"af38c936"
+],
+"homekit_settings.not_certified": [
+"“家庭”提示该配件未经认证：这是正常现象，请选择<b>仍然添加</b>。手机必须与此服务器处于同一网络。",
+"2b6d0890"
+],
+"homekit_settings.not_in_apple_home": [
+"尚未加入 Apple Home。",
+"879445cc"
+],
+"homekit_settings.off": [
+"关",
+"0dc6b4aa"
+],
+"homekit_settings.on_bridged": [
+"已开启。桥接器“{name}”，端口 {port}。",
+"76ddd0f7"
+],
+"homekit_settings.on_not_listening": [
+"已开启。尚未开始监听。",
+"d5a1675a"
+],
+"homekit_settings.on_standalone": [
+"已开启。各摄像头独立，端口从 {port} 起。",
+"4359894c"
+],
+"homekit_settings.pair_a_device": [
+"配对设备",
+"e61d9754"
+],
+"homekit_settings.pair_window_bridged": [
+"Apple 设备只有在您点击<b>配对设备</b>后才能配对，时限 5 分钟。设置代码和二维码随后显示。",
+"e2949ee9"
+],
+"homekit_settings.pair_window_standalone": [
+"Apple 设备只有在您为某个摄像头点击<b>配对设备</b>后才能配对，时限 5 分钟。设置代码和二维码随后显示（所有摄像头使用相同的代码）。",
+"90983778"
+],
+"homekit_settings.pairing_closed": [
+"配对已关闭",
+"72f6167d"
+],
+"homekit_settings.pairing_closed_now": [
+"配对已关闭。",
+"43fab7ed"
+],
+"homekit_settings.pairing_now_other": [
+"正在配对：<b>{from}</b>{since}。不是您的设备？请将其停止：在此窗口关闭前，该地址无法再次配对。",
+"a3695c11"
+],
+"homekit_settings.pairing_now_this_device": [
+"正在配对：<b>{from}</b>（此设备）{since}。这是显示此页面的设备。",
+"83f3e3b9"
+],
+"homekit_settings.pairing_open_for": [
+"<b>配对已开启，剩余 <span data-left>{time}</span>。</b>添加设备后或您停止时，配对会关闭。",
+"6d77e80b"
+],
+"homekit_settings.pairing_reset": [
+"配对已重置",
+"af085a88"
+],
+"homekit_settings.pairings_removed": [
+"配对已移除",
+"5448acb8"
+],
+"homekit_settings.port_hint": [
+"默认 51830（Homebridge 使用 51826）。独立摄像头依次使用后续端口，每个一个。请在防火墙中放行这些 TCP 端口、UDP 5353（Bonjour）和 UDP 51900-51999（实时画面，[homekit] rtp_ports）；在 Windows 上，若 AmberSight 以管理员身份运行，会自行添加该规则。",
+"d75a8404"
+],
+"homekit_settings.port_label": [
+"端口",
+"e2c53cc6"
+],
+"homekit_settings.port_n": [
+"端口 {port}",
+"41928f2b"
+],
+"homekit_settings.port_range": [
+"请输入 1 到 65535 之间的端口号。",
+"82f913bb"
+],
+"homekit_settings.remove": [
+"移除",
+"21a5901d"
+],
+"homekit_settings.remove_body": [
+"Apple Home 将失去此摄像头。可使用相同的设置代码重新添加（请先点击“配对设备”）。",
+"42d8db59"
+],
+"homekit_settings.remove_pairings": [
+"移除配对",
+"5f34d946"
+],
+"homekit_settings.remove_title": [
+"移除此摄像头的配对？",
+"769a2376"
+],
+"homekit_settings.reset": [
+"重置",
+"0ac8a560"
+],
+"homekit_settings.reset_body": [
+"所有已配对的 Apple 设备都会失去全部摄像头（和桥接器），并生成新的设置代码。“家庭”随后会显示新的配件：请在其中移除旧配件，并重新设置房间、场景和自动化。",
+"690f5f51"
+],
+"homekit_settings.reset_hint": [
+"每个摄像头（和桥接器）都会忘记其 Apple 设备，并生成新的设置代码。重新添加时无需这样做：在“家庭”App 中移除的摄像头或桥接器，可在点击<b>配对设备</b>后使用相同的代码重新添加。",
+"3db2e524"
+],
+"homekit_settings.reset_pairing": [
+"重置配对",
+"603844b4"
+],
+"homekit_settings.reset_title": [
+"重置 HomeKit 配对？",
+"2c0aeca6"
+],
+"homekit_settings.same_switch": [
+"每个摄像头的设置中都有相同的开关（音频与文字）。",
+"79228625"
+],
+"homekit_settings.saved": [
+"已保存",
+"8a6979e4"
+],
+"homekit_settings.scan_code": [
+"在 iPhone 或 iPad 的“家庭”App 中：点击<b>+</b>、<b>添加配件</b>，然后扫描此二维码，或点击<b>更多选项</b>并输入设置代码：",
+"fa20a238"
+],
+"homekit_settings.starting": [
+"正在启动……",
+"6cac833d"
+],
+"homekit_settings.stop": [
+"停止",
+"4b7f7705"
+],
+"homekit_settings.stop_and_start_again": [
+"停止并重新开始",
+"65f1de90"
+],
+"homekit_settings.stop_pairing_body": [
+"位于 {address} 的设备将被停止，在此窗口关闭前无法再次配对。配对将为您自己的设备再保持开启 5 分钟。",
+"399db6bd"
+],
+"homekit_settings.stop_pairing_title": [
+"停止此次配对？",
+"629009d8"
+],
+"homekit_settings.stopped_in_window": [
+"在此窗口中已停止：{list}",
+"eaa58303"
+],
+"homekit_settings.stopped_open_again": [
+"已停止；配对重新开启",
+"45a3161b"
+],
+"homekit_settings.switch_on_camera": [
+"请开启下方的摄像头：每个摄像头会各自添加到 Apple Home。",
+"49f10193"
+],
+"homekit_settings.tested_with": [
+"<b>已使用 iPhone 和 HomePod mini 中枢测试</b>（每个配件一个摄像头）。若您尝试其他配置，请在 GitHub Discussions 中告诉我们结果。",
+"00f886ac"
+],
+"homekit_settings.too_many_tries": [
+"输错设置代码的次数过多。配对已关闭，请在下方重置后再使用。",
+"5166bc09"
+],
+"homekit_settings.waiting_for_device": [
+"正在等待设备开始配对……",
+"ecaaeaab"
 ],
 "https_settings.add": [
 "添加",
@@ -13482,6 +13790,10 @@
 "关闭时间轴（按 Esc、返回键或 T 键）",
 "6768613c"
 ],
+"livetl.could_not_load": [
+"无法加载，正在重试",
+"a051bb96"
+],
 "livetl.drag_end": [
 "拖动以移动结束点",
 "8dc0972b"
@@ -14382,6 +14694,10 @@
 "警报",
 "18996e5e"
 ],
+"palette.set_apple_home": [
+"Apple Home",
+"636f1366"
+],
 "palette.set_audit_log": [
 "审计日志",
 "cb83f9ca"
@@ -15111,8 +15427,8 @@
 "cd86acc3"
 ],
 "settings.connections_desc": [
-"高级：分享视频流、链接服务器、外部检测器和摄像头看门狗。",
-"7e745d05"
+"高级：分享视频流、Apple Home、链接服务器、外部检测器和摄像头看门狗。",
+"17d4bb1c"
 ],
 "settings.connections_label": [
 "连接",
@@ -15337,6 +15653,10 @@
 "settings.high": [
 "高",
 "be0a061d"
+],
+"settings.homekit_label": [
+"Apple Home",
+"636f1366"
 ],
 "settings.how_often": [
 "频率",

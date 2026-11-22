@@ -8202,6 +8202,14 @@
 "Kort namn",
 "92346acc"
 ],
+"cameras.show_in_apple_home": [
+"Visa i Apple Home",
+"00ab4e6a"
+],
+"cameras.show_in_apple_home_hint": [
+"Visas i Hem-appen med livevideo, en rörelsesensor och en bild så länge Apple Home är på (Inställningar, Anslutningar, Apple Home). Alla i det hemmet ser den.",
+"3bfb2272"
+],
 "cameras.show_only_ai_events": [
 "Visa bara händelser som AI bekräftar",
 "bfa330f4"
@@ -11566,6 +11574,30 @@
 "<b>När ett sätt misslyckas under körning</b> flyttas den kameran direkt till nästa sätt, eller processorn. Det misslyckade sättet provas igen efter 15 minuter, sedan efter längre väntetider (upp till 4 timmar). Ett andra misslyckande i rad (utan 30 minuters bra körning emellan) gör att det lämnar det sättet tills AmberSight startar om eller Hårdvaruavkodning eller Håll ledigt ändras. Att NVIDIA-kortet får slut på minne avvaktas bara, och ges aldrig upp. Ett sätt som stannade medan processorn sedan avkodade samma ström utan problem lämnas ifred av alla kameror i en timme. <b>Per kamera</b> visar vad varje kamera använder nu och varför.",
 "da025aa4"
 ],
+"help.settings_homekit_accounts": [
+"HomeKit känner inte till AmberSights konton: alla i det Apple Home ser de kameror som slås på här. En kamera (eller brygga) som tagits bort i Hem-appen kan läggas till igen med samma installationskod (efter <b>Para ihop en enhet</b>); <b>Ta bort ihopparningar</b> gör detsamma härifrån. Om koden har kommit ut glömmer <b>Återställ ihopparning</b> alla ihopparade Apple-enheter och skapar en ny kod: Hem ser då nya tillbehör (ta bort de gamla; rum, scener och automationer med de här kamerorna ställs in på nytt).",
+"b75210bb"
+],
+"help.settings_homekit_adding_to_home": [
+"<b>Lägga till i Hem:</b> Apple-enheter kan paras ihop bara när ihopparning är öppen. Tryck på <b>Para ihop en enhet</b> (för kameran eller för bryggan): i 5 minuter visas installationskoden och QR-koden och Hem kan lägga till den. Ihopparningen stängs när en enhet har lagts till, när du trycker på <b>Stoppa</b> eller efter 5 minuter. Medan den är öppen visar sidan adressen till enheten som paras ihop just nu. Om den inte är din stoppar <b>Stoppa och starta om</b> den, håller den adressen ute tills ihopparningen stängs och ger dig 5 nya minuter. Att lägga till personer i Hem-appen (dela ditt hem) kräver inget av detta.",
+"3ae21608"
+],
+"help.settings_homekit_apple_home_shows": [
+"<b>Apple Home</b> visar de kameror du slår på (Inställningar &rsaquo; Anslutningar &rsaquo; Apple Home, eller <b>Visa i Apple Home</b> i kamerans inställningar) i Hem-appen, med livevideo, en rörelsesensor och en bild. Livevideon kodas för Hem i den storlek Hem ber om, på grafikkortet när det finns ett (annars på processorn), med kamerans ljud som Opus. Högst 2 livevisningar per kamera och 4 totalt, inom gränserna för <code>[transcode]</code> i inställningsfilen.",
+"9a210dde"
+],
+"help.settings_homekit_each_on_its_own": [
+"<b>Var och en för sig</b> (standard) lägger till varje kamera i Apple Home separat, som Apple föredrar för kameror: tryck på <b>Para ihop en enhet</b> för kameran, tryck sedan i Hem-appen på <b>+</b>, <b>Lägg till tillbehör</b> och skanna dess kod, eller ange installationskoden (samma för alla kameror). <b>Bakom en brygga</b> lägger till en brygga med alla kameror. Hem varnar för att tillbehöret inte är certifierat; välj <b>Lägg till ändå</b>. Apple-enheter hittar AmberSight via Bonjour (UDP 5353); varje kamera (eller bryggan) har en egen TCP-port från 51830 och uppåt; tillåt dem i brandväggen. I Docker krävs värdnätverk.",
+"f9a0381e"
+],
+"help.settings_homekit_tested": [
+"<b>Testat med en iPhone och en HomePod mini som hubb</b> (en kamera per tillbehör). Om du provar en annan konfiguration, berätta gärna hur det gick i GitHub Discussions. Inga rörelsemeddelanden? I Hem skickar kamerans alternativ <b>Aktivitetsmeddelanden</b> med valet <b>Personer</b> dem bara när ingen är hemma: ställ in <b>När som helst</b>.",
+"5a9fd376"
+],
+"help.settings_homekit_title": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
 "help.settings_https_extra_names_for": [
 "<b>Extra namn för certifikatet</b>: certifikatet täcker redan den här datorns adresser, dess namn och localhost; lägg till andra namn du öppnar AmberSight med. Namn gäller utan omstart. Certifikatutfärdaren är begränsad (så att en stulen nyckel inte kan användas mot andra webbplatser): namn som slutar på .lan, .local, .home.arpa eller .internal, den här datorns namn samt adresser i hemnätverket och Tailscale (100.x) kan alltid läggas till. Andra namn, som ett Tailscale-namn (nvr.tail1234.ts.net), täcks bara av en certifikatutfärdare som gjorts med dem: lägg till dem innan HTTPS slås på första gången, eller använd ditt eget certifikat.",
 "8a6c3df6"
@@ -11997,6 +12029,282 @@
 "helperpick.whole_desktop": [
 "Hela skrivbordet",
 "9558b09c"
+],
+"homekit_settings.add_to_apple_home": [
+"Lägg till i Apple Home",
+"108e5e54"
+],
+"homekit_settings.apple_home_homekit": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
+"homekit_settings.behind_one_bridge": [
+"Bakom en brygga",
+"29bb7522"
+],
+"homekit_settings.bridge_name": [
+"Bryggans namn",
+"5e160db3"
+],
+"homekit_settings.bridge_name_hint": [
+"Namnet som Hem visar för bryggan (bryggläge). Tomt: den här serverns namn.",
+"f2c61f8a"
+],
+"homekit_settings.bridge_title": [
+"Brygga ”{name}”",
+"98d31dcb"
+],
+"homekit_settings.cameras_in_apple_home": [
+"Kameror i Apple Home",
+"e25a1955"
+],
+"homekit_settings.cameras_in_home": [
+"Kameror i Hem",
+"031b3485"
+],
+"homekit_settings.cameras_shown": [
+"{n, plural, one {# kamera visas} other {# kameror visas}} i Apple Home.",
+"fc73a413"
+],
+"homekit_settings.cameras_to_add": [
+"Kameror att lägga till i Hem-appen",
+"7f590853"
+],
+"homekit_settings.change": [
+"Ändra",
+"a1de2fdd"
+],
+"homekit_settings.change_mode_body": [
+"Kamerorna måste då läggas till i Apple Home igen och de gamla tas bort där.",
+"2fd1c685"
+],
+"homekit_settings.change_mode_title": [
+"Ändra hur kamerorna finns i Hem?",
+"b0c45668"
+],
+"homekit_settings.changing_this": [
+"Om du ändrar detta måste kamerorna läggas till i Apple Home igen.",
+"aeb99be8"
+],
+"homekit_settings.could_not_load": [
+"Kunde inte ladda: ",
+"419029cb"
+],
+"homekit_settings.each_on_its_own": [
+"Var och en för sig",
+"2b0f617f"
+],
+"homekit_settings.for_seconds": [
+"{n} s",
+"37ea8f6e"
+],
+"homekit_settings.how": [
+"Varje kamera du slår på nedan är en HomeKit-kamera med livevideo, en rörelsesensor (Hem kan meddela dig om rörelse) och en bild. Livevideon görs för Hem i den storlek Hem ber om (på grafikkortet när det finns ett, annars på processorn; ljud som Opus när kameran har ljud). Som standard läggs varje kamera till i Apple Home för sig, som Apple föredrar för kameror: lägg till var och en i Hem-appen, med samma installationskod. <b>Bryggläge</b> lägger dem alla bakom en brygga som du lägger till en gång. Apple-enheter hittar AmberSight via Bonjour (mDNS, UDP-port 5353), så de måste vara på samma nätverk (eller nå det via en hemhubb som en HomePod eller Apple TV). <b>HomeKit känner inte till AmberSights konton:</b> alla i det Apple Home du lägger till dem i ser de kameror du slår på här, oavsett vad deras AmberSight-konto får se.",
+"b2d6d188"
+],
+"homekit_settings.in_apple_home": [
+"I Apple Home ({n, plural, one {# Apple-enhet} other {# Apple-enheter}} ihopparade){live}.",
+"ad0b3f6e"
+],
+"homekit_settings.lead_main": [
+"Visar dina kameror i Apple Home, med livevideo, rörelselarm och bilder.",
+"7ecb4152"
+],
+"homekit_settings.lead_sub": [
+"Lämna det av om du inte använder Hem-appen.",
+"d4bde183"
+],
+"homekit_settings.live_views": [
+"{n, plural, one {# livevy} other {# livevyer}}",
+"d2a9b570"
+],
+"homekit_settings.loading": [
+"Laddar...",
+"17b11033"
+],
+"homekit_settings.more_settings": [
+"Fler inställningar",
+"1386530d"
+],
+"homekit_settings.no_camera_shown": [
+"Ingen kamera visas ännu: slå på de som ska visas.",
+"292b5667"
+],
+"homekit_settings.no_cameras_yet": [
+"Inga kameror ännu.",
+"af38c936"
+],
+"homekit_settings.not_certified": [
+"Hem säger att tillbehöret inte är certifierat: det är väntat, välj <b>Lägg till ändå</b>. Telefonen måste vara på samma nätverk som den här servern.",
+"2b6d0890"
+],
+"homekit_settings.not_in_apple_home": [
+"Inte i Apple Home än.",
+"879445cc"
+],
+"homekit_settings.off": [
+"Av",
+"0dc6b4aa"
+],
+"homekit_settings.on_bridged": [
+"På. Brygga ”{name}” på port {port}.",
+"76ddd0f7"
+],
+"homekit_settings.on_not_listening": [
+"På. Lyssnar inte än.",
+"d5a1675a"
+],
+"homekit_settings.on_standalone": [
+"På. Varje kamera för sig, portar från {port}.",
+"4359894c"
+],
+"homekit_settings.pair_a_device": [
+"Para ihop en enhet",
+"e61d9754"
+],
+"homekit_settings.pair_window_bridged": [
+"Apple-enheter kan paras ihop bara efter att du trycker på <b>Para ihop en enhet</b>, i 5 minuter. Installationskoden och QR-koden visas då.",
+"e2949ee9"
+],
+"homekit_settings.pair_window_standalone": [
+"Apple-enheter kan paras ihop bara efter att du trycker på <b>Para ihop en enhet</b> för en kamera, i 5 minuter. Installationskoden och QR-koden visas då (samma kod för alla kameror).",
+"90983778"
+],
+"homekit_settings.pairing_closed": [
+"Ihopparningen stängd",
+"72f6167d"
+],
+"homekit_settings.pairing_closed_now": [
+"Ihopparningen har stängts.",
+"43fab7ed"
+],
+"homekit_settings.pairing_now_other": [
+"Paras ihop nu: <b>{from}</b>{since}. Inte din enhet? Stoppa den: den adressen kan inte paras ihop igen förrän det här fönstret stängs.",
+"a3695c11"
+],
+"homekit_settings.pairing_now_this_device": [
+"Paras ihop nu: <b>{from}</b> (den här enheten){since}. Det är enheten som visar den här sidan.",
+"83f3e3b9"
+],
+"homekit_settings.pairing_open_for": [
+"<b>Ihopparningen är öppen i <span data-left>{time}</span>.</b> Den stängs när en enhet har lagts till eller när du stoppar den.",
+"6d77e80b"
+],
+"homekit_settings.pairing_reset": [
+"Ihopparningen återställd",
+"af085a88"
+],
+"homekit_settings.pairings_removed": [
+"Ihopparningar borttagna",
+"5448acb8"
+],
+"homekit_settings.port_hint": [
+"Standard 51830 (Homebridge använder 51826). Fristående kameror använder nästa portar, en var. Öppna de här TCP-portarna, UDP 5353 (Bonjour) och UDP 51900-51999 (livevideo, [homekit] rtp_ports) i brandväggen; i Windows lägger AmberSight till regeln själv när det körs som administratör.",
+"d75a8404"
+],
+"homekit_settings.port_label": [
+"Port",
+"e2c53cc6"
+],
+"homekit_settings.port_n": [
+"port {port}",
+"41928f2b"
+],
+"homekit_settings.port_range": [
+"Ange en port mellan 1 och 65535.",
+"82f913bb"
+],
+"homekit_settings.remove": [
+"Ta bort",
+"21a5901d"
+],
+"homekit_settings.remove_body": [
+"Apple Home förlorar den här kameran. Den kan läggas till igen med samma installationskod (tryck först på Para ihop en enhet).",
+"42d8db59"
+],
+"homekit_settings.remove_pairings": [
+"Ta bort ihopparningar",
+"5f34d946"
+],
+"homekit_settings.remove_title": [
+"Ta bort den här kamerans ihopparningar?",
+"769a2376"
+],
+"homekit_settings.reset": [
+"Återställ",
+"0ac8a560"
+],
+"homekit_settings.reset_body": [
+"Varje ihopparad Apple-enhet förlorar alla kameror (och bryggan) och en ny installationskod skapas. Hem ser då nya tillbehör: ta bort de gamla där och ställ in rum, scener och automationer på nytt.",
+"690f5f51"
+],
+"homekit_settings.reset_hint": [
+"Varje kamera (och bryggan) glömmer sina Apple-enheter och en ny installationskod skapas. Behövs inte för att lägga till en igen: en kamera eller brygga som tagits bort i Hem-appen kan läggas till igen med samma kod, efter <b>Para ihop en enhet</b>.",
+"3db2e524"
+],
+"homekit_settings.reset_pairing": [
+"Återställ ihopparning",
+"603844b4"
+],
+"homekit_settings.reset_title": [
+"Återställa HomeKit-ihopparningen?",
+"2c0aeca6"
+],
+"homekit_settings.same_switch": [
+"Samma reglage finns i varje kameras inställningar (Ljud &amp; text).",
+"79228625"
+],
+"homekit_settings.saved": [
+"Sparat",
+"8a6979e4"
+],
+"homekit_settings.scan_code": [
+"I Hem-appen på en iPhone eller iPad: <b>+</b>, <b>Lägg till tillbehör</b>, skanna sedan den här koden, eller tryck på <b>Fler alternativ</b> och ange installationskoden:",
+"fa20a238"
+],
+"homekit_settings.starting": [
+"Startar...",
+"6cac833d"
+],
+"homekit_settings.stop": [
+"Stoppa",
+"4b7f7705"
+],
+"homekit_settings.stop_and_start_again": [
+"Stoppa och starta om",
+"65f1de90"
+],
+"homekit_settings.stop_pairing_body": [
+"Enheten på {address} stoppas och kan inte paras ihop igen förrän det här fönstret stängs. Ihopparningen förblir öppen i 5 minuter till för din egen enhet.",
+"399db6bd"
+],
+"homekit_settings.stop_pairing_title": [
+"Stoppa den här ihopparningen?",
+"629009d8"
+],
+"homekit_settings.stopped_in_window": [
+"Stoppade i det här fönstret: {list}",
+"eaa58303"
+],
+"homekit_settings.stopped_open_again": [
+"Stoppad; ihopparningen är öppen igen",
+"45a3161b"
+],
+"homekit_settings.switch_on_camera": [
+"Slå på en kamera nedan: varje kamera läggs till i Apple Home för sig.",
+"49f10193"
+],
+"homekit_settings.tested_with": [
+"<b>Testat med en iPhone och en HomePod mini som hubb</b> (en kamera per tillbehör). Om du provar en annan konfiguration, berätta gärna hur det gick i GitHub Discussions.",
+"00f886ac"
+],
+"homekit_settings.too_many_tries": [
+"För många felaktiga installationskoder har provats. Ihopparningen är stängd tills du återställer den nedan.",
+"5166bc09"
+],
+"homekit_settings.waiting_for_device": [
+"Väntar på att en enhet ska börja paras ihop...",
+"ecaaeaab"
 ],
 "https_settings.add": [
 "Lägg till",
@@ -13482,6 +13790,10 @@
 "Stäng tidslinjen (Esc, Back, T)",
 "6768613c"
 ],
+"livetl.could_not_load": [
+"Kunde inte läsas in, försöker igen",
+"a051bb96"
+],
 "livetl.drag_end": [
 "Dra för att flytta slutet",
 "8dc0972b"
@@ -14382,6 +14694,10 @@
 "Aviseringar",
 "18996e5e"
 ],
+"palette.set_apple_home": [
+"Apple Home",
+"636f1366"
+],
 "palette.set_audit_log": [
 "Granskningslogg",
 "cb83f9ca"
@@ -15111,8 +15427,8 @@
 "cd86acc3"
 ],
 "settings.connections_desc": [
-"Avancerat: dela strömmar, länka servrar, en extern detektor och kameravakthunden.",
-"7e745d05"
+"Avancerat: dela strömmar, Apple Home, länka servrar, en extern detektor och kameravakten.",
+"17d4bb1c"
 ],
 "settings.connections_label": [
 "Anslutningar",
@@ -15337,6 +15653,10 @@
 "settings.high": [
 "Hög",
 "be0a061d"
+],
+"settings.homekit_label": [
+"Apple Home",
+"636f1366"
 ],
 "settings.how_often": [
 "Hur ofta",

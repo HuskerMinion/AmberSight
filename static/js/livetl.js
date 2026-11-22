@@ -1048,8 +1048,13 @@ function tickVideo(p) {
     // the filmstrip picture of a recorded moment stands in for it.
     let pic = false;
     if (rec) pic = drawStrip(p, ts); else p.cv.hidden = true;
-    const none = !busy && (now < p.failUntil || !rec);
-    const text = none ? (p.waitSince = 0, rec ? t('livetl.no_recording', 'No recording') : noRecText(p.cam.name, ts)) : waitText(p);
+    // A short break in the recording (a camera's reconnect) just before the
+    // next stretch: playing reaches it in a moment, so not "No recording".
+    const nx = !rec && S.playing && !back ? spanAfter(p.cam.name, ts) : null;
+    const soon = !!nx && nx[0] - ts < 3000 * Math.max(1, Math.abs(S.speed));
+    const none = !busy && (now < p.failUntil || (!rec && !soon));
+    // (A recorded moment that could not load is tried again after a pause.)
+    const text = none ? (p.waitSince = 0, rec ? t('livetl.could_not_load', 'Could not load, trying again') : noRecText(p.cam.name, ts)) : soon ? (p.waitSince = 0, t('livetl.loading', 'Loading…')) : waitText(p);
     if (p.msg.textContent !== text) p.msg.textContent = text;
     p.msg.classList.toggle('wait', !none);
     p.msg.hidden = pic;
@@ -1890,7 +1895,9 @@ function initMarkers() {
   const marks = $('tlMarks');
   marks.addEventListener('pointerover', (e) => { const b = e.target.closest('.tlm'); if (b && e.pointerType !== 'touch') showTip(b); });
   marks.addEventListener('pointerout', (e) => { if (e.target.closest('.tlm') && e.pointerType !== 'touch') hideTip(); });
-  marks.addEventListener('focusin', (e) => { const b = e.target.closest('.tlm'); if (b) showTip(b); });
+  // Keyboard focus only: a tap focuses the mark too, and on a phone nothing
+  // takes the focus away, so its preview stayed open over the controls.
+  marks.addEventListener('focusin', (e) => { const b = e.target.closest('.tlm'); if (b && b.matches(':focus-visible')) showTip(b); });
   marks.addEventListener('focusout', hideTip);
   marks.addEventListener('click', (e) => {
     const b = e.target.closest('.tlm');

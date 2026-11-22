@@ -212,7 +212,9 @@ impl Ask {
 /// Handle a request with `caps` (None: `info=1` alone, what is sent as it
 /// is). `info`: answer JSON.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info: bool, ask: Ask, low: bool, user: String) -> Outcome {
+/// `apple`: the request is from an Apple player (AVFoundation): a converted
+/// answer goes only once complete, with its real size (see [`serve`]).
+pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info: bool, ask: Ask, low: bool, user: String, apple: bool) -> Outcome {
     let probe = ask == Ask::Headers;
     super::set_config(&engine.config.lock().unwrap().transcode);
     // A converted answer kept from before (this account, this recording, these caps): a repeat
@@ -220,14 +222,27 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     let cache = super::cache::global().filter(|_| caps.is_some() && !info && !probe);
     let ckey = cache.map(|c| {
         c.set_limits(super::cache::Limits::from_config(&super::config()));
-        cache_key(&user, &src, &caps.clone().unwrap_or_default(), low)
+        cache_key(&user, &src, &caps.clone().unwrap_or_default(), low, apple)
     });
     // Found, or claimed: a second request for the same answer at the same
     // time waits for this one and reads its copy (one conversion, not two).
     let mut claim = None;
     if let (Some(c), Some(k)) = (cache, &ckey) {
-        match c.lookup(k, ask.range(), ask.starts()).await {
-            super::cache::Lookup::Found(e) => return Outcome::Done(serve(&e, ask).await),
+        // (An Apple player's Range from further in is only ever answered from
+        // the copy it began on: never made again, which need not give the same
+        // bytes, and never the recording's own bytes.)
+        let may_start = ask.starts();
+        let mut found = c.lookup(k, ask.range(), may_start).await;
+        if let super::cache::Lookup::Found(e) = &found {
+            // A conversion that failed (or was given up) is made again for an
+            // Apple player, which can only play a whole one.
+            if apple && e.progress().status == super::cache::Status::Failed {
+                c.forget(e);
+                found = c.lookup(k, ask.range(), may_start).await;
+            }
+        }
+        match found {
+            super::cache::Lookup::Found(e) => return Outcome::Done(serve(&e, ask, apple).await),
             super::cache::Lookup::Claim(cl) => claim = Some(cl),
             super::cache::Lookup::Miss => {}
         }
@@ -241,7 +256,12 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         Err(_) => return Outcome::Done((StatusCode::INTERNAL_SERVER_ERROR, "transcode error").into_response()),
     };
     let mut ask = ask;
-    if o.growing {
+    // (Apple's players need the whole answer's size, so theirs is kept and
+    // answered once made, growing or not: each of their Ranges then reads
+    // the same copy. Theirs are kept apart from other players' answers (see
+    // `cache_key`), so no one else is given a copy of a recording that has
+    // grown since.)
+    if o.growing && !apple {
         // A later request would get more: nothing is kept, and a Range from further in is
         // 416. A Range from byte 0 (AVPlayer's bytes=0-1) gets the whole answer, streamed:
         // a 200 that ignores the Range is valid HTTP, and the player can play.
@@ -290,6 +310,10 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     };
     let codec = target.codec;
     let encoders = tokio::task::spawn_blocking(move || super::encoders_for(codec)).await.ok().flatten();
+    // Busy for now (the encoders not yet tested, or no place on them): an
+    // Apple player's Range is told to ask again. The other reasons hold for
+    // good, and the answer sent instead (as it is) is the same every time.
+    let mut transient = false;
     let busy = if super::is_unconverted(&user) {
         // (The demo account: never converted, as when the encoders are busy.)
         Some(Why::BusyFallback)
@@ -298,10 +322,22 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         Some(why)
     } else if encoders.is_none() {
         // The test encodes have not finished yet.
+        transient = true;
         Some(Why::BusyFallback)
     } else if encoders.as_ref().is_some_and(|e| e.is_empty()) {
         Some(Why::Off)
-    } else if matches!(ask, Ask::Resume(_)) && claim.is_none() {
+    } else if apple && !info && !probe && !super::cache::global().is_some_and(|c| c.keeps()) {
+        // No copies kept at all: an Apple player could not be answered whole
+        // and then by Ranges from the same copy; the recording as it is, the
+        // same each time, is sent instead.
+        Some(Why::BusyFallback)
+    } else if apple && matches!(ask, Ask::Resume(None)) {
+        return Outcome::Done(range_not_satisfiable(None));
+    } else if apple && matches!(ask, Ask::Resume(_)) && claim.is_none() {
+        // From byte 0: another request is making it (this one waited, then
+        // missed). Further in: the copy it began on is gone. Ask again.
+        return Outcome::Done(self::busy("this video is being converted for the device; ask again", 2));
+    } else if matches!(ask, Ask::Resume(_)) && claim.is_none() && !apple {
         // This answer would be converted, a conversion has no byte positions
         // and no copy is kept to answer from. Sending the untouched file's
         // bytes from that offset would break a player that began on the
@@ -309,12 +345,19 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         // player fails cleanly and the app asks again with start=.
         return Outcome::Done(no_byte_positions());
     } else if !super::user_has_room(&user) || encoders.as_deref().and_then(super::would_reserve).is_none() {
+        transient = true;
         Some(Why::BusyFallback)
     } else {
         None
     };
     let encoders = encoders.unwrap_or_default();
     if let Some(w) = busy {
+        if apple && transient && !info && !probe {
+            // (An Apple player is never sent the answer as it is while busy
+            // for now: a later request could get the converted copy and mix
+            // the two. Busy for good, it is sent as it is every time.)
+            return Outcome::Done(self::busy("the encoders are busy; ask again", 2));
+        }
         let (low, plan, sub) = fallback(w).await;
         return untouched(low, plan, sub.as_ref().unwrap_or(&o));
     }
@@ -340,6 +383,9 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     // not use up its starts.
     let reserved = super::user_lease(&user).and_then(|l| super::reserve(&encoders).map(|r| (l, r))).filter(|_| super::may_start(&user));
     let Some((lease, (encoders, slot))) = reserved else {
+        if apple {
+            return Outcome::Done(self::busy("the encoders are busy; ask again", 2));
+        }
         let (low, plan, sub) = fallback(Why::BusyFallback).await;
         return untouched(low, plan, sub.as_ref().unwrap_or(&o));
     };
@@ -347,6 +393,27 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
     let plan = Plan { source: o.desc.clone(), target: Some(target), encoder: enc_name, why: Some(why), sent: None };
     let clip_headers = o.clip_headers(true);
     let (_, sent_ms) = o.media(true);
+    let mut hs: Vec<(String, String)> = vec![
+        ("content-type".into(), "video/mp4".into()),
+        ("cache-control".into(), "no-store".into()),
+        ("accept-ranges".into(), "none".into()),
+        ("x-as-duration-ms".into(), o.duration_ms.to_string()),
+        ("x-as-media-duration-ms".into(), sent_ms.to_string()),
+    ];
+    hs.extend(plan.headers().into_iter().chain(clip_headers).map(|(k, v)| (k.to_string(), v)));
+    // Written to a kept copy as it is made; this answer reads from it too.
+    let source = match &src {
+        ClipSrc::Event { id, .. } => super::cache::event_source(id),
+        ClipSrc::Window { camera, .. } => format!("camera:{camera}"),
+    };
+    let entry = claim.and_then(|cl| cl.create(hs.clone(), &source));
+    if apple && entry.is_none() {
+        // No room for a copy now (every kept answer in use): busy for now, so
+        // ask again (sent as it is, a later try could get the converted copy
+        // and mix the two).
+        drop((lease, encoders, slot));
+        return Outcome::Done(self::busy("the server is busy converting; ask again", 2));
+    }
     let job = Job {
         input: o.input,
         target,
@@ -367,24 +434,13 @@ pub async fn handle(engine: Arc<Engine>, src: ClipSrc, caps: Option<Caps>, info:
         subs: None,
         keep_times: false,
     };
-    let first_wait = super::file::first_byte_wait(&job);
-    let mut hs: Vec<(String, String)> = vec![
-        ("content-type".into(), "video/mp4".into()),
-        ("cache-control".into(), "no-store".into()),
-        ("accept-ranges".into(), "none".into()),
-        ("x-as-duration-ms".into(), o.duration_ms.to_string()),
-        ("x-as-media-duration-ms".into(), sent_ms.to_string()),
-    ];
-    hs.extend(plan.headers().into_iter().chain(clip_headers).map(|(k, v)| (k.to_string(), v)));
-    // Written to a kept copy as it is made; this answer reads from it too.
-    let source = match &src {
-        ClipSrc::Event { id, .. } => super::cache::event_source(id),
-        ClipSrc::Window { camera, .. } => format!("camera:{camera}"),
-    };
-    if let Some(entry) = claim.and_then(|cl| cl.create(hs.clone(), &source)) {
-        entry.set_first_wait(first_wait);
+    if let Some(entry) = entry {
+        entry.set_first_wait(super::file::first_byte_wait(&job));
+        if apple {
+            entry.keep();
+        }
         super::file::start_cached(job, entry.clone());
-        return Outcome::Done(serve(&entry, ask).await);
+        return Outcome::Done(serve(&entry, ask, apple).await);
     }
     if matches!(ask, Ask::Resume(_)) {
         // No room for a copy: a Range cannot be answered from a stream.
@@ -405,6 +461,9 @@ fn download_cut(clip_start: i64, clip_end: i64, from: i64, to: i64) -> (i64, i64
     let b = to.clamp(a, clip_end);
     (a - clip_start, b - a)
 }
+
+/// How long an Apple player's request waits for its conversion to finish.
+const APPLE_WHOLE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Busy: 503, and when to ask again.
 fn busy(why: &'static str, retry_s: u32) -> Response {
@@ -560,15 +619,16 @@ pub async fn download_event(engine: Arc<Engine>, id: String, user: String, opts:
 }
 
 /// Everything that changes the converted output, hashed: the account, the recording, the
-/// caps (in a fixed order), the quality.
-fn cache_key(user: &str, src: &ClipSrc, caps: &Caps, low: bool) -> String {
+/// caps (in a fixed order), the quality; and whether it is for an Apple player, whose
+/// answers are kept apart (made whole first, kept even of a recording still growing).
+fn cache_key(user: &str, src: &ClipSrc, caps: &Caps, low: bool, apple: bool) -> String {
     let what = match src {
         ClipSrc::Window { camera, from, to, start } => format!("w|{camera}|{from}|{to}|{start}"),
         ClipSrc::Event { id, offset } => format!("e|{id}|{offset}"),
     };
     let mut c: Vec<String> = caps.0.iter().map(|c| format!("{:?}", c)).collect();
     c.sort();
-    super::cache::key(&[user, &what, &c.join(";"), if low { "low" } else { "main" }])
+    super::cache::key(&[user, &what, &c.join(";"), if low { "low" } else { "main" }, if apple { "apple" } else { "" }])
 }
 
 fn no_byte_positions() -> Response {
@@ -605,7 +665,12 @@ fn range_not_satisfiable(total: Option<u64>) -> Response {
 /// `bytes N-M/*` with Content-Length; when not, `bytes N-*/*` with no length, and the body
 /// still ends after byte M (or earlier, if the conversion ends first). Once it is done:
 /// `bytes N-M/total` and Content-Length.
-async fn serve(e: &std::sync::Arc<super::cache::Entry>, ask: Ask) -> Response {
+///
+/// `apple`: Apple's players (AVFoundation) cannot play a ranged answer whose
+/// total size is not given (they never load it), nor a 200 that ignores
+/// their Range: they are answered once the conversion is done, as from a
+/// finished file, with the conversion not held back meanwhile.
+async fn serve(e: &std::sync::Arc<super::cache::Entry>, ask: Ask, apple: bool) -> Response {
     use super::cache::Status;
     let (from, to, ranged) = match ask {
         Ask::Resume(Some((f, t))) => (f, t, true),
@@ -619,8 +684,18 @@ async fn serve(e: &std::sync::Arc<super::cache::Entry>, ask: Ask) -> Response {
     // Counted as a reader while it waits (the conversion is neither given up nor held back
     // short of where this request starts), and the hold passes to the body. Its first byte,
     // not its end: `bytes=N-<huge>` must not lift the pacing.
-    let hold = e.hold(from);
-    let p = if ranged { e.wait_past(need, e.wait_limit(e.progress().written)).await } else { e.progress() };
+    let hold = e.hold(if apple { u64::MAX / 2 } else { from });
+    let p = if apple {
+        let p = e.wait_past(u64::MAX, APPLE_WHOLE_WAIT).await;
+        if p.status != Status::Done {
+            return busy("still converting this video for the device", 2);
+        }
+        p
+    } else if ranged {
+        e.wait_past(need, e.wait_limit(e.progress().written)).await
+    } else {
+        e.progress()
+    };
     let mut b = Response::builder();
     for (k, v) in e.headers.iter().filter(|(k, _)| !k.eq_ignore_ascii_case("accept-ranges")) {
         b = b.header(k.as_str(), v.as_str());
@@ -686,6 +761,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apple_players_get_a_conversion_once_it_is_whole_with_its_size() {
+        let dir = std::env::temp_dir().join(format!("amber-tcache-apple-{}", std::process::id()));
+        let c = Cache::new(dir.clone(), Limits { entry_max: 1 << 20, total_max: 1 << 20, expire: Duration::from_secs(60) });
+        let hs = vec![("content-type".to_string(), "video/mp4".to_string()), ("accept-ranges".to_string(), "none".to_string())];
+        let data: Vec<u8> = (0..100u8).collect();
+        let finish_later = |e: std::sync::Arc<crate::transcode::cache::Entry>, d: Vec<u8>| {
+            // In 10-byte writes, held back by the pacing unless a reader wants it all.
+            tokio::task::spawn_blocking(move || {
+                for ch in d.chunks(10) {
+                    std::thread::sleep(Duration::from_millis(5));
+                    assert!(e.write(ch));
+                }
+                e.finish();
+            })
+        };
+        // AVPlayer's first probe, mid-conversion: answered when done, with the total.
+        let e = c.create(&crate::transcode::cache::key(&["a"]), hs.clone()).unwrap();
+        e.set_ahead(10);
+        let w = finish_later(e.clone(), data.clone());
+        let r = serve(&e, Ask::Resume(Some((0, Some(1)))), true).await;
+        w.await.unwrap();
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(hdr(&r, "content-range").as_deref(), Some("bytes 0-1/100"));
+        assert_eq!(hdr(&r, "content-length").as_deref(), Some("2"));
+        assert_eq!(hdr(&r, "accept-ranges").as_deref(), Some("bytes"));
+        assert_eq!(body(r).await, vec![0, 1]);
+        // Then the rest, and the whole: from the same copy.
+        let r = serve(&e, Ask::Resume(Some((2, None))), true).await;
+        assert_eq!((hdr(&r, "content-range").as_deref(), hdr(&r, "content-length").as_deref()), (Some("bytes 2-99/100"), Some("98")));
+        assert_eq!(body(r).await, data[2..].to_vec());
+        let r = serve(&e, Ask::Start, true).await;
+        assert_eq!((r.status(), hdr(&r, "content-length").as_deref()), (StatusCode::OK, Some("100")));
+        // A conversion that fails: no half answer.
+        let f = c.create(&crate::transcode::cache::key(&["b"]), hs.clone()).unwrap();
+        assert!(f.write(&data[..20]));
+        f.fail();
+        assert_eq!(serve(&f, Ask::Resume(Some((0, Some(1)))), true).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn ranges_are_answered_from_the_kept_copy() {
         let dir = std::env::temp_dir().join(format!("amber-tcache-http-{}", std::process::id()));
         let c = Cache::new(dir.clone(), Limits { entry_max: 1 << 20, total_max: 1 << 20, expire: Duration::from_secs(60) });
@@ -695,7 +811,7 @@ mod tests {
         assert!(e.write(&data[..40]));
 
         // Mid-conversion: an open range inside what is written is a 206 without a length.
-        let r = serve(&e, Ask::Resume(Some((10, None)))).await;
+        let r = serve(&e, Ask::Resume(Some((10, None))), false).await;
         assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&r, "content-range").as_deref(), Some("bytes 10-*/*"));
         assert!(hdr(&r, "content-length").is_none());
@@ -713,31 +829,31 @@ mod tests {
         w.await.unwrap();
 
         // Finished: real Content-Range and length.
-        let r = serve(&e, Ask::Resume(Some((90, None)))).await;
+        let r = serve(&e, Ask::Resume(Some((90, None))), false).await;
         assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&r, "content-range").as_deref(), Some("bytes 90-99/100"));
         assert_eq!(hdr(&r, "content-length").as_deref(), Some("10"));
         assert_eq!(body(r).await, data[90..].to_vec());
-        let r = serve(&e, Ask::Resume(Some((20, Some(29))))).await;
+        let r = serve(&e, Ask::Resume(Some((20, Some(29)))), false).await;
         assert_eq!(hdr(&r, "content-range").as_deref(), Some("bytes 20-29/100"));
         assert_eq!(body(r).await, data[20..30].to_vec());
         // Past the end: 416 with the size.
-        let r = serve(&e, Ask::Resume(Some((100, None)))).await;
+        let r = serve(&e, Ask::Resume(Some((100, None))), false).await;
         assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(hdr(&r, "content-range").as_deref(), Some("bytes */100"));
         // A repeat from the start: 200 with the length.
-        let r = serve(&e, Ask::Start).await;
+        let r = serve(&e, Ask::Start, false).await;
         assert_eq!((r.status(), hdr(&r, "content-length").as_deref()), (StatusCode::OK, Some("100")));
         assert_eq!(body(r).await, data);
         // A form not supported.
-        assert_eq!(serve(&e, Ask::Resume(None)).await.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(serve(&e, Ask::Resume(None), false).await.status(), StatusCode::RANGE_NOT_SATISFIABLE);
 
         // A failed conversion: past what was written is 416 at once, not a hang.
         let f = c.create(&crate::transcode::cache::key(&["f"]), vec![]).unwrap();
         f.write(&data[..10]);
         f.fail();
         let t0 = std::time::Instant::now();
-        let r = serve(&f, Ask::Resume(Some((50, None)))).await;
+        let r = serve(&f, Ask::Resume(Some((50, None))), false).await;
         assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert!(t0.elapsed() < Duration::from_secs(2));
         let _ = std::fs::remove_dir_all(&dir);
@@ -752,15 +868,15 @@ mod tests {
         let data: Vec<u8> = (0..50u8).collect();
         assert!(e.write(&data));
         // Answered from the copy: ranges work, and it says so.
-        let r = serve(&e, Ask::Start).await;
+        let r = serve(&e, Ask::Start, false).await;
         assert_eq!(hdr(&r, "accept-ranges").as_deref(), Some("bytes"));
         assert_eq!(r.headers().get_all("accept-ranges").iter().count(), 1);
         // A bounded range still being written, its end there: 206 with a length.
-        let r = serve(&e, Ask::Resume(Some((0, Some(1))))).await;
+        let r = serve(&e, Ask::Resume(Some((0, Some(1)))), false).await;
         assert_eq!((r.status(), hdr(&r, "content-range").as_deref(), hdr(&r, "content-length").as_deref()), (StatusCode::PARTIAL_CONTENT, Some("bytes 0-1/*"), Some("2")));
         assert_eq!(body(r).await, vec![0, 1]);
         // The largest end there is: no wrap to 0 (the body runs to the end).
-        let r = serve(&e, Ask::Resume(Some((10, Some(u64::MAX))))).await;
+        let r = serve(&e, Ask::Resume(Some((10, Some(u64::MAX)))), false).await;
         assert_eq!((r.status(), hdr(&r, "content-range").as_deref()), (StatusCode::PARTIAL_CONTENT, Some("bytes 10-*/*")));
         let e2 = e.clone();
         tokio::spawn(async move {
@@ -768,7 +884,7 @@ mod tests {
             e2.finish();
         });
         assert_eq!(body(r).await, data[10..].to_vec());
-        let r = serve(&e, Ask::Resume(Some((10, Some(u64::MAX))))).await;
+        let r = serve(&e, Ask::Resume(Some((10, Some(u64::MAX)))), false).await;
         assert_eq!(hdr(&r, "content-range").as_deref(), Some("bytes 10-49/50"));
         assert_eq!(body(r).await, data[10..].to_vec());
         let _ = std::fs::remove_dir_all(&dir);
@@ -782,7 +898,7 @@ mod tests {
         e.set_first_wait(Duration::from_secs(60));
         // AVPlayer's first request while the first try is slow to start.
         let e2 = e.clone();
-        let r = tokio::spawn(async move { serve(&e2, Ask::Resume(Some((0, Some(1))))).await });
+        let r = tokio::spawn(async move { serve(&e2, Ask::Resume(Some((0, Some(1)))), false).await });
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!r.is_finished());
         assert!(!e.abandoned(Duration::ZERO), "a reader while it waits");
@@ -802,7 +918,7 @@ mod tests {
         let c = Cache::new(dir.clone(), Limits { entry_max: 1 << 30, total_max: 1 << 30, expire: Duration::from_secs(60) });
         let e = c.create(&crate::transcode::cache::key(&["p"]), vec![]).unwrap();
         assert!(e.write(&[0; 10]));
-        let r = serve(&e, Ask::Resume(Some((5, Some(u64::MAX))))).await;
+        let r = serve(&e, Ask::Resume(Some((5, Some(u64::MAX)))), false).await;
         assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(e.wanted(), 5, "from its first byte, not its end");
         drop(r);
@@ -819,7 +935,7 @@ mod tests {
         // bytes=5-(5 + 2 * AHEAD): answered once the writer is as far as pacing lets it
         // (5 + AHEAD), not after the wait.
         let e2 = e.clone();
-        let r = tokio::spawn(async move { serve(&e2, Ask::Resume(Some((5, Some(5 + 2 * AHEAD))))).await });
+        let r = tokio::spawn(async move { serve(&e2, Ask::Resume(Some((5, Some(5 + 2 * AHEAD)))), false).await });
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!r.is_finished(), "waits for the bytes it can get");
         let e3 = e.clone();
@@ -863,8 +979,9 @@ mod tests {
         let a = Caps::parse("h264:1920x1080,hevc:3840x2160@30").unwrap();
         let b = Caps::parse("hevc:3840x2160@30,h264:1920x1080").unwrap();
         let s = ClipSrc::Event { id: "e1".into(), offset: 0 };
-        assert_eq!(cache_key("bob", &s, &a, false), cache_key("bob", &s, &b, false));
-        assert_ne!(cache_key("bob", &s, &a, false), cache_key("amy", &s, &a, false));
-        assert_ne!(cache_key("bob", &s, &a, false), cache_key("bob", &s, &a, true));
+        assert_eq!(cache_key("bob", &s, &a, false, false), cache_key("bob", &s, &b, false, false));
+        assert_ne!(cache_key("bob", &s, &a, false, false), cache_key("amy", &s, &a, false, false));
+        assert_ne!(cache_key("bob", &s, &a, false, false), cache_key("bob", &s, &a, true, false));
+        assert_ne!(cache_key("bob", &s, &a, false, false), cache_key("bob", &s, &a, false, true), "Apple players' answers are kept apart");
     }
 }

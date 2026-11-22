@@ -8202,6 +8202,14 @@
 "Korte naam",
 "92346acc"
 ],
+"cameras.show_in_apple_home": [
+"Tonen in Apple Home",
+"00ab4e6a"
+],
+"cameras.show_in_apple_home_hint": [
+"Wordt in de Woning-app getoond met live video, een bewegingssensor en een afbeelding zolang Apple Home aan staat (Instellingen, Verbindingen, Apple Home). Iedereen in die woning ziet de camera.",
+"3bfb2272"
+],
 "cameras.show_only_ai_events": [
 "Alleen gebeurtenissen tonen die de AI bevestigt",
 "bfa330f4"
@@ -11566,6 +11574,30 @@
 "<b>Als een manier tijdens het draaien uitvalt</b>, gaat die camera meteen over op de volgende manier, of op de processor. Na 15 minuten probeert hij de uitgevallen manier opnieuw, daarna na steeds langere wachttijden (tot 4 uur). Valt hij een tweede keer achter elkaar uit (zonder 30 minuten goed draaien ertussen), dan laat hij die manier vallen tot AmberSight opnieuw start of Hardware decoding of Vrije ruimte houden wordt gewijzigd. Als de NVIDIA-kaart geen geheugen meer heeft, wordt alleen gewacht en nooit opgegeven. Een manier die stopte terwijl de processor dezelfde stream wel goed decodeerde, wordt een uur lang door elke camera overgeslagen. <b>Per camera</b> laat zien wat elke camera nu gebruikt en waarom.",
 "da025aa4"
 ],
+"help.settings_homekit_accounts": [
+"HomeKit kent de accounts van AmberSight niet: iedereen in die Apple Home ziet de camera’s die hier aan staan. Een camera (of bridge) die in de Woning-app is verwijderd, kan met dezelfde setupcode opnieuw worden toegevoegd (na <b>Apparaat koppelen</b>); <b>Koppelingen verwijderen</b> doet hetzelfde vanaf hier. Als de code in verkeerde handen is gevallen, vergeet <b>Koppeling resetten</b> elk gekoppeld Apple-apparaat en maakt een nieuwe code: de Woning-app ziet dan nieuwe accessoires (verwijder de oude; kamers, scènes en automatiseringen met deze camera’s stel je opnieuw in).",
+"b75210bb"
+],
+"help.settings_homekit_adding_to_home": [
+"<b>Toevoegen aan Woning:</b> Apple-apparaten kunnen alleen koppelen als het koppelen open staat. Druk op <b>Apparaat koppelen</b> (voor de camera, of voor de bridge): 5 minuten lang worden de setupcode en QR-code getoond en kan de Woning-app het toevoegen. Het koppelen sluit zodra een apparaat is toegevoegd, als je op <b>Stoppen</b> drukt of na 5 minuten. Zolang het open staat, toont de pagina het adres van het apparaat dat nu koppelt. Als het niet van jou is, stopt <b>Stoppen en opnieuw beginnen</b> het, houdt dat adres buiten tot het koppelen sluit en geeft je 5 nieuwe minuten. Mensen toevoegen in de Woning-app (je woning delen) heeft hier niets van nodig.",
+"3ae21608"
+],
+"help.settings_homekit_apple_home_shows": [
+"<b>Apple Home</b> toont de camera’s die je aanzet (Instellingen &rsaquo; Verbindingen &rsaquo; Apple Home, of <b>Tonen in Apple Home</b> in de instellingen van de camera) in de Woning-app, met live video, een bewegingssensor en een afbeelding. Live video wordt voor Woning gecodeerd op de grootte die de app vraagt, op de videokaart als die er is (anders op de processor), met het geluid van de camera als Opus. Maximaal 2 live weergaven per camera en 4 in totaal, binnen de <code>[transcode]</code>-limieten van het instellingenbestand.",
+"9a210dde"
+],
+"help.settings_homekit_each_on_its_own": [
+"<b>Elk apart</b> (de standaard) voegt elke camera afzonderlijk toe aan Apple Home, zoals Apple dat voor camera’s verkiest: druk op <b>Apparaat koppelen</b> voor de camera, tik dan in de Woning-app op <b>+</b>, <b>Voeg accessoire toe</b> en scan de code, of voer de setupcode in (voor alle camera’s dezelfde). <b>Achter één bridge</b> voegt één bridge met alle camera’s toe. Woning waarschuwt dat het accessoire niet gecertificeerd is; kies <b>Voeg toch toe</b>. Apple-apparaten vinden AmberSight via Bonjour (UDP 5353); elke camera (of de bridge) heeft vanaf 51830 een eigen TCP-poort; sta ze toe in de firewall. In Docker is hostnetwerk nodig.",
+"f9a0381e"
+],
+"help.settings_homekit_tested": [
+"<b>Getest met een iPhone en een HomePod mini als hub</b> (één camera per accessoire). Als je een andere opzet probeert, laat dan in GitHub Discussions weten hoe het ging. Geen bewegingsmeldingen? In Woning stuurt de optie <b>Personen</b> bij de <b>Activiteitsmeldingen</b> van de camera ze alleen als er niemand thuis is: zet die op <b>Altijd</b>.",
+"5a9fd376"
+],
+"help.settings_homekit_title": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
 "help.settings_https_extra_names_for": [
 "<b>Extra namen voor het certificaat</b>: het certificaat dekt al de adressen, de naam en localhost van deze computer; voeg eventuele andere namen toe waarmee je AmberSight opent. De namen worden direct toegepast zonder herstart. De certificaatautoriteit is beperkt (zodat een gestolen sleutel niet voor andere sites gebruikt kan worden): namen die eindigen op .lan, .local, .home.arpa of .internal, de naam van deze computer, en adressen uit het thuisnetwerk en Tailscale (100.x) mogen altijd worden toegevoegd. Andere namen, zoals een Tailscale-naam (nvr.tail1234.ts.net), worden alleen gedekt door een certificaatautoriteit die specifiek voor die namen is aangemaakt: voeg ze toe voordat je HTTPS voor het eerst aanzet, of gebruik je eigen certificaat.",
 "8a6c3df6"
@@ -11997,6 +12029,282 @@
 "helperpick.whole_desktop": [
 "Volledige desktop",
 "9558b09c"
+],
+"homekit_settings.add_to_apple_home": [
+"Toevoegen aan Apple Home",
+"108e5e54"
+],
+"homekit_settings.apple_home_homekit": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
+"homekit_settings.behind_one_bridge": [
+"Achter één bridge",
+"29bb7522"
+],
+"homekit_settings.bridge_name": [
+"Naam van de bridge",
+"5e160db3"
+],
+"homekit_settings.bridge_name_hint": [
+"De naam die Woning voor de bridge toont (met bridge). Leeg: de naam van deze server.",
+"f2c61f8a"
+],
+"homekit_settings.bridge_title": [
+"Bridge ‘{name}’",
+"98d31dcb"
+],
+"homekit_settings.cameras_in_apple_home": [
+"Camera’s in Apple Home",
+"e25a1955"
+],
+"homekit_settings.cameras_in_home": [
+"Camera’s in Woning",
+"031b3485"
+],
+"homekit_settings.cameras_shown": [
+"{n, plural, one {# camera wordt} other {# camera’s worden}} getoond in Apple Home.",
+"fc73a413"
+],
+"homekit_settings.cameras_to_add": [
+"Camera’s om toe te voegen in de Woning-app",
+"7f590853"
+],
+"homekit_settings.change": [
+"Wijzigen",
+"a1de2fdd"
+],
+"homekit_settings.change_mode_body": [
+"De camera’s moeten dan opnieuw aan Apple Home worden toegevoegd en de oude daar worden verwijderd.",
+"2fd1c685"
+],
+"homekit_settings.change_mode_title": [
+"Wijzigen hoe camera’s in Woning staan?",
+"b0c45668"
+],
+"homekit_settings.changing_this": [
+"Als je dit wijzigt, moet je de camera’s opnieuw aan Apple Home toevoegen.",
+"aeb99be8"
+],
+"homekit_settings.could_not_load": [
+"Kon niet laden: ",
+"419029cb"
+],
+"homekit_settings.each_on_its_own": [
+"Elk apart",
+"2b0f617f"
+],
+"homekit_settings.for_seconds": [
+"{n} s",
+"37ea8f6e"
+],
+"homekit_settings.how": [
+"Elke camera die je hieronder aanzet, is een HomeKit-camera met live video, een bewegingssensor (Woning kan je bij beweging een melding sturen) en een afbeelding. Live video wordt voor Woning gemaakt op de grootte die de app vraagt (op de videokaart als die er is, anders op de processor; geluid als Opus als de camera geluid heeft). Standaard wordt elke camera apart aan Apple Home toegevoegd, zoals Apple dat voor camera’s verkiest: voeg ze elk toe in de Woning-app, met dezelfde setupcode. <b>Met bridge</b> zet ze allemaal achter één bridge die je maar één keer toevoegt. Apple-apparaten vinden AmberSight via Bonjour (mDNS, UDP-poort 5353), dus ze moeten op hetzelfde netwerk zitten (of er via een thuishub zoals een HomePod of Apple TV bij kunnen). <b>HomeKit kent de accounts van AmberSight niet:</b> iedereen in de Apple Home waaraan je ze toevoegt, ziet de camera’s die je hier aanzet, wat het AmberSight-account ook mag zien.",
+"b2d6d188"
+],
+"homekit_settings.in_apple_home": [
+"In Apple Home ({n, plural, one {# Apple-apparaat} other {# Apple-apparaten}} gekoppeld){live}.",
+"ad0b3f6e"
+],
+"homekit_settings.lead_main": [
+"Toont je camera’s in Apple Home, met live video, bewegingsmeldingen en afbeeldingen.",
+"7ecb4152"
+],
+"homekit_settings.lead_sub": [
+"Laat het uit staan, tenzij je de Woning-app gebruikt.",
+"d4bde183"
+],
+"homekit_settings.live_views": [
+"{n, plural, one {# live weergave} other {# live weergaven}}",
+"d2a9b570"
+],
+"homekit_settings.loading": [
+"Laden...",
+"17b11033"
+],
+"homekit_settings.more_settings": [
+"Meer instellingen",
+"1386530d"
+],
+"homekit_settings.no_camera_shown": [
+"Er wordt nog geen camera getoond: zet de camera’s aan die je wilt tonen.",
+"292b5667"
+],
+"homekit_settings.no_cameras_yet": [
+"Nog geen camera’s.",
+"af38c936"
+],
+"homekit_settings.not_certified": [
+"Woning meldt dat het accessoire niet gecertificeerd is: dat is normaal, kies <b>Voeg toch toe</b>. De telefoon moet op hetzelfde netwerk zitten als deze server.",
+"2b6d0890"
+],
+"homekit_settings.not_in_apple_home": [
+"Nog niet in Apple Home.",
+"879445cc"
+],
+"homekit_settings.off": [
+"Uit",
+"0dc6b4aa"
+],
+"homekit_settings.on_bridged": [
+"Aan. Bridge ‘{name}’ op poort {port}.",
+"76ddd0f7"
+],
+"homekit_settings.on_not_listening": [
+"Aan. Luistert nog niet.",
+"d5a1675a"
+],
+"homekit_settings.on_standalone": [
+"Aan. Elke camera apart, poorten vanaf {port}.",
+"4359894c"
+],
+"homekit_settings.pair_a_device": [
+"Apparaat koppelen",
+"e61d9754"
+],
+"homekit_settings.pair_window_bridged": [
+"Apple-apparaten kunnen alleen koppelen nadat je op <b>Apparaat koppelen</b> hebt gedrukt, 5 minuten lang. De setupcode en QR-code worden dan getoond.",
+"e2949ee9"
+],
+"homekit_settings.pair_window_standalone": [
+"Apple-apparaten kunnen alleen koppelen nadat je voor een camera op <b>Apparaat koppelen</b> hebt gedrukt, 5 minuten lang. De setupcode en QR-code worden dan getoond (dezelfde code voor elke camera).",
+"90983778"
+],
+"homekit_settings.pairing_closed": [
+"Koppelen gesloten",
+"72f6167d"
+],
+"homekit_settings.pairing_closed_now": [
+"Het koppelen is gesloten.",
+"43fab7ed"
+],
+"homekit_settings.pairing_now_other": [
+"Koppelt nu: <b>{from}</b>{since}. Niet jouw apparaat? Stop het: dat adres kan niet opnieuw koppelen tot dit venster sluit.",
+"a3695c11"
+],
+"homekit_settings.pairing_now_this_device": [
+"Koppelt nu: <b>{from}</b> (dit apparaat){since}. Het is het apparaat dat deze pagina toont.",
+"83f3e3b9"
+],
+"homekit_settings.pairing_open_for": [
+"<b>Koppelen staat nog <span data-left>{time}</span> open.</b> Het sluit zodra een apparaat is toegevoegd, of als je het stopt.",
+"6d77e80b"
+],
+"homekit_settings.pairing_reset": [
+"Koppeling gereset",
+"af085a88"
+],
+"homekit_settings.pairings_removed": [
+"Koppelingen verwijderd",
+"5448acb8"
+],
+"homekit_settings.port_hint": [
+"Standaard 51830 (Homebridge gebruikt 51826). Losse camera’s gebruiken de volgende poorten, elk één. Open deze TCP-poorten, UDP 5353 (Bonjour) en UDP 51900-51999 (live video, [homekit] rtp_ports) in de firewall; op Windows voegt AmberSight de regel zelf toe als het als beheerder draait.",
+"d75a8404"
+],
+"homekit_settings.port_label": [
+"Poort",
+"e2c53cc6"
+],
+"homekit_settings.port_n": [
+"poort {port}",
+"41928f2b"
+],
+"homekit_settings.port_range": [
+"Voer een poortnummer in tussen 1 en 65535.",
+"82f913bb"
+],
+"homekit_settings.remove": [
+"Verwijderen",
+"21a5901d"
+],
+"homekit_settings.remove_body": [
+"Apple Home verliest deze camera. Hij kan met dezelfde setupcode opnieuw worden toegevoegd (druk eerst op Apparaat koppelen).",
+"42d8db59"
+],
+"homekit_settings.remove_pairings": [
+"Koppelingen verwijderen",
+"5f34d946"
+],
+"homekit_settings.remove_title": [
+"De koppelingen van deze camera verwijderen?",
+"769a2376"
+],
+"homekit_settings.reset": [
+"Resetten",
+"0ac8a560"
+],
+"homekit_settings.reset_body": [
+"Elk gekoppeld Apple-apparaat verliest elke camera (en de bridge) en er wordt een nieuwe setupcode gemaakt. Woning ziet dan nieuwe accessoires: verwijder de oude daar en stel kamers, scènes en automatiseringen opnieuw in.",
+"690f5f51"
+],
+"homekit_settings.reset_hint": [
+"Elke camera (en de bridge) vergeet zijn Apple-apparaten en er wordt een nieuwe setupcode gemaakt. Niet nodig om er opnieuw een toe te voegen: een camera of bridge die in de Woning-app is verwijderd, kan met dezelfde code opnieuw worden toegevoegd, na <b>Apparaat koppelen</b>.",
+"3db2e524"
+],
+"homekit_settings.reset_pairing": [
+"Koppeling resetten",
+"603844b4"
+],
+"homekit_settings.reset_title": [
+"HomeKit-koppeling resetten?",
+"2c0aeca6"
+],
+"homekit_settings.same_switch": [
+"Dezelfde schakelaar staat in de instellingen van elke camera (Audio &amp; tekst).",
+"79228625"
+],
+"homekit_settings.saved": [
+"Opgeslagen",
+"8a6979e4"
+],
+"homekit_settings.scan_code": [
+"In de Woning-app op een iPhone of iPad: <b>+</b>, <b>Voeg accessoire toe</b>, scan dan deze code, of tik op <b>Meer opties</b> en voer de setupcode in:",
+"fa20a238"
+],
+"homekit_settings.starting": [
+"Starten...",
+"6cac833d"
+],
+"homekit_settings.stop": [
+"Stoppen",
+"4b7f7705"
+],
+"homekit_settings.stop_and_start_again": [
+"Stoppen en opnieuw beginnen",
+"65f1de90"
+],
+"homekit_settings.stop_pairing_body": [
+"Het apparaat op {address} wordt gestopt en kan niet opnieuw koppelen tot dit venster sluit. Het koppelen blijft nog 5 minuten open voor je eigen apparaat.",
+"399db6bd"
+],
+"homekit_settings.stop_pairing_title": [
+"Dit koppelen stoppen?",
+"629009d8"
+],
+"homekit_settings.stopped_in_window": [
+"Gestopt in dit venster: {list}",
+"eaa58303"
+],
+"homekit_settings.stopped_open_again": [
+"Gestopt; koppelen staat weer open",
+"45a3161b"
+],
+"homekit_settings.switch_on_camera": [
+"Zet hieronder een camera aan: elke camera wordt apart aan Apple Home toegevoegd.",
+"49f10193"
+],
+"homekit_settings.tested_with": [
+"<b>Getest met een iPhone en een HomePod mini als hub</b> (één camera per accessoire). Als je een andere opzet probeert, laat dan in GitHub Discussions weten hoe het ging.",
+"00f886ac"
+],
+"homekit_settings.too_many_tries": [
+"Er zijn te veel verkeerde setupcodes geprobeerd. Koppelen blijft gesloten tot je het hieronder reset.",
+"5166bc09"
+],
+"homekit_settings.waiting_for_device": [
+"Wachten tot een apparaat begint te koppelen...",
+"ecaaeaab"
 ],
 "https_settings.add": [
 "Toevoegen",
@@ -13482,6 +13790,10 @@
 "Sluit de tijdlijn (Esc, Terug, T)",
 "6768613c"
 ],
+"livetl.could_not_load": [
+"Laden mislukt, opnieuw proberen",
+"a051bb96"
+],
 "livetl.drag_end": [
 "Sleep om het einde te verplaatsen",
 "8dc0972b"
@@ -14382,6 +14694,10 @@
 "Meldingen",
 "18996e5e"
 ],
+"palette.set_apple_home": [
+"Apple Home",
+"636f1366"
+],
 "palette.set_audit_log": [
 "Auditlog",
 "cb83f9ca"
@@ -15111,8 +15427,8 @@
 "cd86acc3"
 ],
 "settings.connections_desc": [
-"Geavanceerd: streams delen, servers koppelen, een externe detector en de camera-watchdog.",
-"7e745d05"
+"Geavanceerd: streams delen, Apple Home, servers koppelen, een externe detector en de camerawatchdog.",
+"17d4bb1c"
 ],
 "settings.connections_label": [
 "Verbindingen",
@@ -15337,6 +15653,10 @@
 "settings.high": [
 "Hoog",
 "be0a061d"
+],
+"settings.homekit_label": [
+"Apple Home",
+"636f1366"
 ],
 "settings.how_often": [
 "Hoe vaak",

@@ -205,6 +205,9 @@ pub fn readable_error(e: &str) -> String {
         "the camera is not reachable; check that it is on and that its address is right".into()
     } else if l.contains("connection reset") || l.contains("broken pipe") {
         "the camera closed the connection".into()
+    } else if l.contains("damaged packet from camera") {
+        // (The packet's own fault, e.g. "FU-A has start bit unset", stays in the log.)
+        "the camera sent a damaged video packet (often a weak Wi-Fi link); reconnected at once".into()
     } else if let Some(n) = status.first() {
         format!("the camera turned the request down (RTSP {n})")
     } else {
@@ -2110,6 +2113,9 @@ mod tests {
         let auth = "the camera refused the user name or password";
         assert_eq!(readable_error("DESCRIBE failed: 401 response to DESCRIBE CSeq=3: Received Unauthorized after trying digest auth\n\nconn: x\nmsg: y"), auth);
         assert_eq!(readable_error("the camera refused the user name or password (check them in the camera's settings)"), auth);
+        // A damaged packet: said plainly, not the RTSP library's words.
+        let d = readable_error(&format!("{:#}", anyhow::Error::new(DamagedPacket("FU-A has start bit unset while no frag in progress".into()))));
+        assert!(d.starts_with("the camera sent a damaged video packet") && !d.contains("FU-A"), "{d}");
         let busy = "the camera is busy or has too many connections";
         assert_eq!(readable_error("DESCRIBE failed: 503 response to DESCRIBE CSeq=3: Unexpected RTSP response status\n\nconn: x"), busy);
         assert_eq!(readable_error("SETUP failed: 453 response to SETUP CSeq=4: Not Enough Bandwidth"), busy);

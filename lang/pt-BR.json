@@ -8202,6 +8202,14 @@
 "Nome curto",
 "92346acc"
 ],
+"cameras.show_in_apple_home": [
+"Mostrar no Apple Home",
+"00ab4e6a"
+],
+"cameras.show_in_apple_home_hint": [
+"Aparece no app Casa com vídeo ao vivo, um sensor de movimento e uma imagem enquanto o Apple Home estiver ativado (Configurações, Conexões, Apple Home). Todos que estão nessa casa a veem.",
+"3bfb2272"
+],
 "cameras.show_only_ai_events": [
 "Mostrar apenas eventos confirmados pela IA",
 "bfa330f4"
@@ -11566,6 +11574,30 @@
 "<b>Quando um caminho falha durante a execução</b>, a câmera passa imediatamente para o próximo caminho ou processador. O caminho falho é tentado novamente após 15 minutos, e depois após intervalos maiores (até 4 horas). Uma segunda falha consecutiva (sem 30 minutos de funcionamento normal entre elas) faz com que o caminho seja abandonado até que o AmberSight seja reiniciado ou as opções Hardware decoding e Keep free sejam alteradas. Se a placa NVIDIA ficar sem memória, apenas se aguarda até que ela se recupere; ela nunca é trocada. Um caminho que parou enquanto o processador decodificava o mesmo fluxo sem problemas é ignorado por todas as câmeras por uma hora. <b>Por câmera</b> mostra o que cada câmera está usando no momento e o motivo.",
 "da025aa4"
 ],
+"help.settings_homekit_accounts": [
+"O HomeKit não conhece as contas do AmberSight: todos nesse Apple Home veem as câmeras ativadas aqui. Uma câmera (ou ponte) removida no app Casa pode ser adicionada de novo com o mesmo código de configuração (depois de <b>Parear um dispositivo</b>); <b>Remover pareamentos</b> faz o mesmo daqui. Se o código vazou, <b>Redefinir pareamento</b> esquece todos os dispositivos Apple pareados e cria um código novo: o Casa então vê acessórios novos (remova os antigos; cômodos, cenas e automações com essas câmeras são configurados de novo).",
+"b75210bb"
+],
+"help.settings_homekit_adding_to_home": [
+"<b>Adicionar ao Casa:</b> dispositivos Apple só podem parear enquanto o pareamento está aberto. Pressione <b>Parear um dispositivo</b> (para a câmera ou para a ponte): por 5 minutos o código de configuração e o código QR aparecem e o Casa pode adicioná-lo. O pareamento fecha quando um dispositivo é adicionado, quando você pressiona <b>Parar</b> ou após 5 minutos. Enquanto está aberto, a página mostra o endereço do dispositivo que está pareando agora. Se não for seu, <b>Parar e começar de novo</b> o interrompe, mantém esse endereço de fora até o pareamento fechar e dá a você 5 minutos novos. Adicionar pessoas no app Casa (compartilhar sua casa) não precisa de nada disso.",
+"3ae21608"
+],
+"help.settings_homekit_apple_home_shows": [
+"O <b>Apple Home</b> mostra as câmeras que você ativar (Configurações &rsaquo; Conexões &rsaquo; Apple Home, ou <b>Mostrar no Apple Home</b> nas configurações da câmera) no app Casa, com vídeo ao vivo, um sensor de movimento e uma imagem. O vídeo ao vivo é codificado para o Casa no tamanho que ele pede, na placa de vídeo quando há uma (senão no processador), com o som da câmera em Opus. No máximo 2 visualizações ao vivo por câmera e 4 no total, dentro dos limites de <code>[transcode]</code> do arquivo de configurações.",
+"9a210dde"
+],
+"help.settings_homekit_each_on_its_own": [
+"<b>Cada uma separada</b> (o padrão) adiciona cada câmera ao Apple Home separadamente, como a Apple prefere para câmeras: pressione <b>Parear um dispositivo</b> na câmera e, no app Casa, toque em <b>+</b>, <b>Adicionar Acessório</b> e escaneie o código dela, ou digite o código de configuração (o mesmo para todas as câmeras). <b>Atrás de uma ponte</b> adiciona uma ponte com todas as câmeras. O Casa avisa que o acessório não é certificado; escolha <b>Adicionar Mesmo Assim</b>. Os dispositivos Apple encontram o AmberSight por Bonjour (UDP 5353); cada câmera (ou a ponte) tem sua própria porta TCP a partir de 51830; libere-as no firewall. No Docker é preciso usar a rede do host.",
+"f9a0381e"
+],
+"help.settings_homekit_tested": [
+"<b>Testado com um iPhone e um HomePod mini como hub</b> (uma câmera por acessório). Se você tentar outra configuração, conte como foi no GitHub Discussions. Sem notificações de movimento? No Casa, a opção <b>Notificações de Atividade</b> da câmera, <b>Pessoas</b>, só as envia quando não há ninguém em casa: defina como <b>A Qualquer Momento</b>.",
+"5a9fd376"
+],
+"help.settings_homekit_title": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
 "help.settings_https_extra_names_for": [
 "<b>Nomes extras para o certificado</b>: o certificado já cobre os endereços deste computador, seu nome e localhost; adicione quaisquer outros nomes pelos quais você acessa o AmberSight. Os nomes entram em vigor sem necessidade de reinicialização. A autoridade de certificação é limitada (para evitar que uma chave roubada seja usada em outros sites): nomes terminados em .lan, .local, .home.arpa ou .internal, o nome deste computador e endereços da rede doméstica e do Tailscale (100.x) podem ser adicionados a qualquer momento. Outros nomes, como um nome do Tailscale (nvr.tail1234.ts.net), só são cobertos por uma autoridade de certificação criada com eles: adicione-os antes de ativar o HTTPS pela primeira vez ou use seu próprio certificado.",
 "8a6c3df6"
@@ -11997,6 +12029,282 @@
 "helperpick.whole_desktop": [
 "Área de trabalho inteira",
 "9558b09c"
+],
+"homekit_settings.add_to_apple_home": [
+"Adicionar ao Apple Home",
+"108e5e54"
+],
+"homekit_settings.apple_home_homekit": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
+"homekit_settings.behind_one_bridge": [
+"Atrás de uma ponte",
+"29bb7522"
+],
+"homekit_settings.bridge_name": [
+"Nome da ponte",
+"5e160db3"
+],
+"homekit_settings.bridge_name_hint": [
+"O nome que o Casa mostra para a ponte (com ponte). Vazio: o nome deste servidor.",
+"f2c61f8a"
+],
+"homekit_settings.bridge_title": [
+"Ponte “{name}”",
+"98d31dcb"
+],
+"homekit_settings.cameras_in_apple_home": [
+"Câmeras no Apple Home",
+"e25a1955"
+],
+"homekit_settings.cameras_in_home": [
+"Câmeras no Casa",
+"031b3485"
+],
+"homekit_settings.cameras_shown": [
+"{n, plural, one {# câmera é mostrada} many {# de câmeras são mostradas} other {# câmeras são mostradas}} no Apple Home.",
+"fc73a413"
+],
+"homekit_settings.cameras_to_add": [
+"Câmeras para adicionar no app Casa",
+"7f590853"
+],
+"homekit_settings.change": [
+"Alterar",
+"a1de2fdd"
+],
+"homekit_settings.change_mode_body": [
+"Será preciso adicionar as câmeras ao Apple Home de novo e remover as antigas lá.",
+"2fd1c685"
+],
+"homekit_settings.change_mode_title": [
+"Alterar como as câmeras ficam no Casa?",
+"b0c45668"
+],
+"homekit_settings.changing_this": [
+"Alterar isso significa adicionar as câmeras ao Apple Home de novo.",
+"aeb99be8"
+],
+"homekit_settings.could_not_load": [
+"Não foi possível carregar: ",
+"419029cb"
+],
+"homekit_settings.each_on_its_own": [
+"Cada uma separada",
+"2b0f617f"
+],
+"homekit_settings.for_seconds": [
+"{n} s",
+"37ea8f6e"
+],
+"homekit_settings.how": [
+"Cada câmera que você ativar abaixo é uma câmera HomeKit com vídeo ao vivo, um sensor de movimento (o Casa pode avisar você sobre movimento) e uma imagem. O vídeo ao vivo é preparado para o Casa no tamanho que ele pede (na placa de vídeo quando há uma, senão no processador; som em Opus quando a câmera tem som). Por padrão, cada câmera é adicionada ao Apple Home separadamente, como a Apple prefere para câmeras: adicione cada uma no app Casa, com o mesmo código de configuração. <b>Com ponte</b> coloca todas atrás de uma ponte que você adiciona uma vez só. Os dispositivos Apple encontram o AmberSight por Bonjour (mDNS, porta UDP 5353), então precisam estar na mesma rede (ou chegar a ela por um hub doméstico, como um HomePod ou Apple TV). <b>O HomeKit não conhece as contas do AmberSight:</b> todos no Apple Home em que você as adicionar veem as câmeras que você ativar aqui, seja qual for o que a conta deles no AmberSight possa ver.",
+"b2d6d188"
+],
+"homekit_settings.in_apple_home": [
+"No Apple Home ({n, plural, one {# dispositivo Apple pareado} many {# de dispositivos Apple pareados} other {# dispositivos Apple pareados}}){live}.",
+"ad0b3f6e"
+],
+"homekit_settings.lead_main": [
+"Mostra suas câmeras no Apple Home, com vídeo ao vivo, alertas de movimento e imagens.",
+"7ecb4152"
+],
+"homekit_settings.lead_sub": [
+"Deixe desativado, a menos que você use o app Casa.",
+"d4bde183"
+],
+"homekit_settings.live_views": [
+"{n, plural, one {# visualização ao vivo} many {# de visualizações ao vivo} other {# visualizações ao vivo}}",
+"d2a9b570"
+],
+"homekit_settings.loading": [
+"Carregando...",
+"17b11033"
+],
+"homekit_settings.more_settings": [
+"Mais configurações",
+"1386530d"
+],
+"homekit_settings.no_camera_shown": [
+"Nenhuma câmera é mostrada ainda: ative as que quiser mostrar.",
+"292b5667"
+],
+"homekit_settings.no_cameras_yet": [
+"Nenhuma câmera ainda.",
+"af38c936"
+],
+"homekit_settings.not_certified": [
+"O Casa avisa que o acessório não é certificado: é o esperado, escolha <b>Adicionar Mesmo Assim</b>. O celular precisa estar na mesma rede que este servidor.",
+"2b6d0890"
+],
+"homekit_settings.not_in_apple_home": [
+"Ainda não está no Apple Home.",
+"879445cc"
+],
+"homekit_settings.off": [
+"Desativado",
+"0dc6b4aa"
+],
+"homekit_settings.on_bridged": [
+"Ativado. Ponte “{name}” na porta {port}.",
+"76ddd0f7"
+],
+"homekit_settings.on_not_listening": [
+"Ativado. Ainda não está escutando.",
+"d5a1675a"
+],
+"homekit_settings.on_standalone": [
+"Ativado. Cada câmera separada, portas a partir de {port}.",
+"4359894c"
+],
+"homekit_settings.pair_a_device": [
+"Parear um dispositivo",
+"e61d9754"
+],
+"homekit_settings.pair_window_bridged": [
+"Dispositivos Apple só podem parear depois que você pressionar <b>Parear um dispositivo</b>, por 5 minutos. O código de configuração e o código QR aparecem então.",
+"e2949ee9"
+],
+"homekit_settings.pair_window_standalone": [
+"Dispositivos Apple só podem parear depois que você pressionar <b>Parear um dispositivo</b> em uma câmera, por 5 minutos. O código de configuração e o código QR aparecem então (o mesmo código para todas as câmeras).",
+"90983778"
+],
+"homekit_settings.pairing_closed": [
+"Pareamento fechado",
+"72f6167d"
+],
+"homekit_settings.pairing_closed_now": [
+"O pareamento foi fechado.",
+"43fab7ed"
+],
+"homekit_settings.pairing_now_other": [
+"Pareando agora: <b>{from}</b>{since}. Não é seu dispositivo? Interrompa: esse endereço não poderá parear de novo até esta janela fechar.",
+"a3695c11"
+],
+"homekit_settings.pairing_now_this_device": [
+"Pareando agora: <b>{from}</b> (este dispositivo){since}. É o dispositivo que mostra esta página.",
+"83f3e3b9"
+],
+"homekit_settings.pairing_open_for": [
+"<b>O pareamento está aberto por <span data-left>{time}</span>.</b> Ele fecha quando um dispositivo é adicionado ou quando você o interrompe.",
+"6d77e80b"
+],
+"homekit_settings.pairing_reset": [
+"Pareamento redefinido",
+"af085a88"
+],
+"homekit_settings.pairings_removed": [
+"Pareamentos removidos",
+"5448acb8"
+],
+"homekit_settings.port_hint": [
+"Padrão 51830 (o Homebridge usa 51826). As câmeras independentes usam as portas seguintes, uma cada. Libere estas portas TCP, UDP 5353 (Bonjour) e UDP 51900-51999 (vídeo ao vivo, [homekit] rtp_ports) no firewall; no Windows o AmberSight adiciona a regra sozinho quando roda como Administrador.",
+"d75a8404"
+],
+"homekit_settings.port_label": [
+"Porta",
+"e2c53cc6"
+],
+"homekit_settings.port_n": [
+"porta {port}",
+"41928f2b"
+],
+"homekit_settings.port_range": [
+"Digite uma porta entre 1 e 65535.",
+"82f913bb"
+],
+"homekit_settings.remove": [
+"Remover",
+"21a5901d"
+],
+"homekit_settings.remove_body": [
+"O Apple Home perde esta câmera. Ela pode ser adicionada de novo com o mesmo código de configuração (pressione Parear um dispositivo antes).",
+"42d8db59"
+],
+"homekit_settings.remove_pairings": [
+"Remover pareamentos",
+"5f34d946"
+],
+"homekit_settings.remove_title": [
+"Remover os pareamentos desta câmera?",
+"769a2376"
+],
+"homekit_settings.reset": [
+"Redefinir",
+"0ac8a560"
+],
+"homekit_settings.reset_body": [
+"Todo dispositivo Apple pareado perde todas as câmeras (e a ponte) e um novo código de configuração é criado. O Casa então vê acessórios novos: remova os antigos lá e configure cômodos, cenas e automações de novo.",
+"690f5f51"
+],
+"homekit_settings.reset_hint": [
+"Cada câmera (e a ponte) esquece seus dispositivos Apple e um novo código de configuração é criado. Não é necessário para adicionar uma de novo: uma câmera ou ponte removida no app Casa pode ser adicionada outra vez com o mesmo código, depois de <b>Parear um dispositivo</b>.",
+"3db2e524"
+],
+"homekit_settings.reset_pairing": [
+"Redefinir pareamento",
+"603844b4"
+],
+"homekit_settings.reset_title": [
+"Redefinir o pareamento do HomeKit?",
+"2c0aeca6"
+],
+"homekit_settings.same_switch": [
+"A mesma chave está nas configurações de cada câmera (Áudio &amp; texto).",
+"79228625"
+],
+"homekit_settings.saved": [
+"Salvo",
+"8a6979e4"
+],
+"homekit_settings.scan_code": [
+"No app Casa de um iPhone ou iPad: <b>+</b>, <b>Adicionar Acessório</b>, depois escaneie este código, ou toque em <b>Mais Opções</b> e digite o código de configuração:",
+"fa20a238"
+],
+"homekit_settings.starting": [
+"Iniciando...",
+"6cac833d"
+],
+"homekit_settings.stop": [
+"Parar",
+"4b7f7705"
+],
+"homekit_settings.stop_and_start_again": [
+"Parar e começar de novo",
+"65f1de90"
+],
+"homekit_settings.stop_pairing_body": [
+"O dispositivo em {address} é interrompido e não pode parear de novo até esta janela fechar. O pareamento continua aberto por mais 5 minutos para o seu próprio dispositivo.",
+"399db6bd"
+],
+"homekit_settings.stop_pairing_title": [
+"Parar este pareamento?",
+"629009d8"
+],
+"homekit_settings.stopped_in_window": [
+"Interrompidos nesta janela: {list}",
+"eaa58303"
+],
+"homekit_settings.stopped_open_again": [
+"Interrompido; o pareamento está aberto de novo",
+"45a3161b"
+],
+"homekit_settings.switch_on_camera": [
+"Ative uma câmera abaixo: cada uma é adicionada ao Apple Home separadamente.",
+"49f10193"
+],
+"homekit_settings.tested_with": [
+"<b>Testado com um iPhone e um HomePod mini como hub</b> (uma câmera por acessório). Se você tentar outra configuração, conte como foi no GitHub Discussions.",
+"00f886ac"
+],
+"homekit_settings.too_many_tries": [
+"Foram tentados códigos de configuração errados demais. O pareamento está fechado até você redefini-lo abaixo.",
+"5166bc09"
+],
+"homekit_settings.waiting_for_device": [
+"Aguardando um dispositivo começar a parear...",
+"ecaaeaab"
 ],
 "https_settings.add": [
 "Adicionar",
@@ -13482,6 +13790,10 @@
 "Fechar a linha do tempo (Esc, Voltar, T)",
 "6768613c"
 ],
+"livetl.could_not_load": [
+"Não foi possível carregar, tentando de novo",
+"a051bb96"
+],
 "livetl.drag_end": [
 "Arraste para mover o fim",
 "8dc0972b"
@@ -14382,6 +14694,10 @@
 "Alertas",
 "18996e5e"
 ],
+"palette.set_apple_home": [
+"Apple Home",
+"636f1366"
+],
 "palette.set_audit_log": [
 "Auditoria",
 "cb83f9ca"
@@ -15111,8 +15427,8 @@
 "cd86acc3"
 ],
 "settings.connections_desc": [
-"Avançado: compartilhar streams, vincular servidores, um detector externo e o monitoramento das câmeras.",
-"7e745d05"
+"Avançado: compartilhar streams, Apple Home, vincular servidores, um detector externo e o watchdog das câmeras.",
+"17d4bb1c"
 ],
 "settings.connections_label": [
 "Conexões",
@@ -15337,6 +15653,10 @@
 "settings.high": [
 "Alto",
 "be0a061d"
+],
+"settings.homekit_label": [
+"Apple Home",
+"636f1366"
 ],
 "settings.how_often": [
 "Com que frequência",

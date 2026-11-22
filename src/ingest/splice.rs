@@ -191,6 +191,7 @@ struct ParsedSegment {
 }
 
 mod export;
+mod flat;
 mod index;
 pub use index::{checked_through, forget, layout_count, moved, open_index, remember, set_checked_through, upgrade_chunk, upgrade_done, upgrade_plan, UpgradePlan};
 
@@ -885,6 +886,9 @@ enum Piece {
     /// A fragment copied from `path`, with numbers in its moof replaced:
     /// (offset in the fragment, big-endian value, width 4 or 8 bytes).
     Fragment { path: PathBuf, offset: u64, len: u64, patches: Vec<(u32, u64, u8)> },
+    /// A `free` box of this size (header, then zeros): a fragment's moof in a
+    /// clip laid out for Apple's players (see `flat`).
+    Free { len: u64 },
 }
 
 impl Piece {
@@ -893,6 +897,7 @@ impl Piece {
             Piece::Bytes(b) => b.len() as u64,
             Piece::Slice { len, .. } => *len,
             Piece::Fragment { len, .. } => *len,
+            Piece::Free { len } => *len,
         }
     }
 }
@@ -927,6 +932,13 @@ pub struct VirtualClip {
     frag_wall: Vec<(i64, i64)>,
     /// The first video sample's composition offset (B-frames), track timescale.
     first_cto: i32,
+    /// FLAC sound (G.711 recorded by the built-in reader): the most samples
+    /// one of its first frames holds, for [`VirtualClip::for_apple`].
+    flac_block: Option<u16>,
+    /// This clip laid out for Apple's players, made once (shared by its
+    /// copies, e.g. the one kept in the playback cache); None when it cannot
+    /// be (it is then sent as it is).
+    apple: std::sync::Arc<std::sync::OnceLock<Option<VirtualClip>>>,
 }
 
 impl VirtualClip {
@@ -999,6 +1011,11 @@ impl VirtualClip {
         let mut init = low_delay_header(header, &segments[base_seg].path, &cands[first].frag);
         // (A recording ffmpeg copied from an HEVC camera says hev1: served as hvc1, which Apple's players take.)
         crate::ingest::mp4read::hev1_to_hvc1(&mut init);
+        let flac_block = if crate::ingest::mp4read::flac_streaminfo_at(&init).is_some() {
+            tracks.iter().find(|t| !t.video).and_then(|a| flac_block(&segments[base_seg].path, &cands[first].frag, a.id))
+        } else {
+            None
+        };
         let mut pieces = vec![Piece::Bytes(init)];
         let mut running_end: Vec<u64> = vec![0; tracks.len()];
         // Per (segment, track): output decode time of that track's first
@@ -1079,7 +1096,7 @@ impl VirtualClip {
         }
         let total = pieces.iter().map(|p| p.len()).sum();
         let sub = segments[base_seg].sub;
-        Ok(Some(VirtualClip { pieces, total, start_ms: clip_start.round() as i64, end_ms: end_ms.round() as i64, frame_times: Vec::new(), handover_ms: None, sub, frag_wall, first_cto }))
+        Ok(Some(VirtualClip { pieces, total, start_ms: clip_start.round() as i64, end_ms: end_ms.round() as i64, frame_times: Vec::new(), handover_ms: None, sub, frag_wall, first_cto, flac_block, apple: Default::default() }))
     }
 
     /// What this clip looks like, to plan its window the same way again
@@ -1336,7 +1353,7 @@ impl VirtualClip {
         let end_ms = switch_at.map_or(last + step, |w| w.max(last + 1.0));
         let frame_times = picks.iter().map(|p| p.3.round() as i64).collect();
         let sub = segments.iter().any(|s| s.path == keys[first].path && s.sub);
-        Ok(Some(VirtualClip { pieces, total, start_ms: t0.round() as i64, end_ms: end_ms.round() as i64, frame_times, handover_ms: switch_at.map(|w| w.round() as i64), sub, frag_wall: Vec::new(), first_cto: 0 }))
+        Ok(Some(VirtualClip { pieces, total, start_ms: t0.round() as i64, end_ms: end_ms.round() as i64, frame_times, handover_ms: switch_at.map(|w| w.round() as i64), sub, frag_wall: Vec::new(), first_cto: 0, flac_block: None, apple: Default::default() }))
     }
 
     pub fn len(&self) -> u64 {
@@ -1344,17 +1361,114 @@ impl VirtualClip {
     }
 
     /// A clip made elsewhere (a reversed copy), served like the others.
+    /// The clip as Apple's players (iPhone, Safari, QuickTime) take it: a
+    /// FLAC track's header says one block size (see
+    /// [`crate::ingest::mp4read::flac_fixed_block`]), else they drop the sound
+    /// and stop after 5 s. Other players get the clip as it is.
+    ///
+    /// Also laid out as a plain MP4 (see `flat`): AVFoundation reads every
+    /// fragment of a fragmented one before it starts. Made once per clip;
+    /// it reads every fragment's moof, so call it off the async runtime.
+    pub fn for_apple(self) -> VirtualClip {
+        use std::sync::{Mutex, OnceLock};
+        // Kept a while by what the clip is made of: a window planned again
+        // (the playback cache is short), or an event clip made per request,
+        // is laid out once.
+        type Kept = Mutex<std::collections::VecDeque<(u64, std::time::Instant, Option<VirtualClip>)>>;
+        static KEPT: OnceLock<Kept> = OnceLock::new();
+        let memo = self.apple.clone();
+        let flat = memo
+            .get_or_init(|| {
+                let fp = self.fingerprint();
+                let kept = KEPT.get_or_init(Default::default);
+                {
+                    // (Used again: to the back, the last to go.)
+                    let mut k = kept.lock().unwrap();
+                    if let Some(i) = k.iter().position(|e| e.0 == fp) {
+                        let mut e = k.remove(i).unwrap();
+                        e.1 = std::time::Instant::now();
+                        let c = e.2.clone();
+                        k.push_back(e);
+                        return c;
+                    }
+                }
+                // (A recording damaged in a way not foreseen: sent as it is.)
+                let made = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.flattened())) {
+                    Ok(Ok(c)) => Some(c),
+                    Ok(Err(e)) => {
+                        tracing::debug!("playback for Apple players: sent fragmented ({e:#})");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!("playback for Apple players: a clip could not be laid out; sent fragmented");
+                        None
+                    }
+                };
+                let mut k = kept.lock().unwrap();
+                k.retain(|e| e.1.elapsed() < std::time::Duration::from_secs(30 * 60));
+                // At most 64 MB of headers kept (a 2-hour 4K window's is a few MB).
+                let head = |c: &Option<VirtualClip>| c.as_ref().and_then(|c| c.pieces.first()).map_or(0, |p| p.len());
+                let mut held: u64 = k.iter().map(|e| head(&e.2)).sum::<u64>() + head(&made);
+                while held > 64 << 20 {
+                    let Some(e) = k.pop_front() else { break };
+                    held -= head(&e.2);
+                }
+                k.push_back((fp, std::time::Instant::now(), made.clone()));
+                made
+            })
+            .clone();
+        // (Laid out from another copy of the same pieces: this clip's own
+        // times and stream with it.)
+        let (start_ms, end_ms, frame_times, handover_ms, sub, flac_block) = (self.start_ms, self.end_ms, self.frame_times.clone(), self.handover_ms, self.sub, self.flac_block);
+        let mut c = match flat {
+            Some(mut f) => {
+                (f.start_ms, f.end_ms, f.frame_times, f.handover_ms, f.sub, f.flac_block) = (start_ms, end_ms, frame_times, handover_ms, sub, flac_block);
+                f
+            }
+            None => self,
+        };
+        if let (Some(b), Some(Piece::Bytes(init))) = (c.flac_block, c.pieces.first_mut()) {
+            crate::ingest::mp4read::flac_fixed_block(init, b);
+        }
+        c
+    }
+
+    /// What the clip is made of, hashed: its pieces (files, places,
+    /// patches, bytes).
+    fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.total.hash(&mut h);
+        for p in &self.pieces {
+            match p {
+                Piece::Bytes(b) => (0u8, b).hash(&mut h),
+                Piece::Slice { path, offset, len } => (1u8, path, offset, len).hash(&mut h),
+                Piece::Fragment { path, offset, len, patches } => (2u8, path, offset, len, patches).hash(&mut h),
+                Piece::Free { len } => (3u8, len).hash(&mut h),
+            }
+        }
+        h.finish()
+    }
+
     pub fn from_bytes(bytes: Vec<u8>, start_ms: i64, end_ms: i64, sub: bool) -> VirtualClip {
         let total = bytes.len() as u64;
-        VirtualClip { pieces: vec![Piece::Bytes(bytes)], total, start_ms, end_ms, frame_times: Vec::new(), handover_ms: None, sub, frag_wall: Vec::new(), first_cto: 0 }
+        VirtualClip { pieces: vec![Piece::Bytes(bytes)], total, start_ms, end_ms, frame_times: Vec::new(), handover_ms: None, sub, frag_wall: Vec::new(), first_cto: 0, flac_block: None, apple: Default::default() }
     }
 
     /// Bytes [start, end) of the clip.
     pub fn read_range(&self, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
+        self.read_range_from(0, 0, start, end)
+    }
+
+    /// `read_range`, beginning the walk at piece `first`, which starts at
+    /// `pos` (at or before `start`).
+    fn read_range_from(&self, first: usize, mut pos: u64, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
         let end = end.min(self.total);
         let mut out = Vec::with_capacity(end.saturating_sub(start) as usize);
-        let mut pos = 0u64;
-        for p in &self.pieces {
+        for p in self.pieces.iter().skip(first) {
+            if pos >= end {
+                break;
+            }
             let (ps, pe) = (pos, pos + p.len());
             pos = pe;
             if pe <= start || ps >= end {
@@ -1377,6 +1491,15 @@ impl VirtualClip {
                     f.read_exact(&mut buf)?;
                     apply_patches(&mut buf, a, patches);
                     out.extend_from_slice(&buf);
+                }
+                Piece::Free { len } => {
+                    debug_assert!(*len >= 8 && *len <= u64::from(u32::MAX));
+                    let mut hdr = [0u8; 8];
+                    hdr[..4].copy_from_slice(&(*len as u32).to_be_bytes());
+                    hdr[4..].copy_from_slice(b"free");
+                    for i in a..b {
+                        out.push(if i < 8 { hdr[i as usize] } else { 0 });
+                    }
                 }
             }
         }
@@ -1546,6 +1669,31 @@ struct FlacFix {
 /// The largest moof read to check FLAC durations (a real one is a few KB).
 const MAX_FLAC_MOOF: usize = 16 << 20;
 
+/// The most samples a FLAC frame of track `track_id` holds in fragment `frag`.
+fn flac_block(path: &Path, frag: &FragmentInfo, track_id: u32) -> Option<u16> {
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(frag.offset)).ok()?;
+    let mut sz = [0u8; 4];
+    f.read_exact(&mut sz).ok()?;
+    let moof_len = u32::from_be_bytes(sz) as usize;
+    if moof_len < 16 || moof_len > MAX_FLAC_MOOF || moof_len as u64 > frag.len {
+        return None;
+    }
+    f.seek(SeekFrom::Start(frag.offset)).ok()?;
+    let mut moof = vec![0u8; moof_len];
+    f.read_exact(&mut moof).ok()?;
+    let (_, blocks) = flac_frames_from(&moof, track_id, false, |start, n| {
+        if start as u64 + n as u64 > frag.len {
+            return None;
+        }
+        let mut buf = vec![0u8; n];
+        f.seek(SeekFrom::Start(frag.offset + start as u64)).ok()?;
+        f.read_exact(&mut buf).ok()?;
+        Some(buf)
+    })?;
+    blocks.into_iter().max().and_then(|b| u16::try_from(b).ok())
+}
+
 fn flac_fix(path: &Path, frag: &FragmentInfo, track_id: u32, timescale: u32) -> Option<FlacFix> {
     let mut f = std::fs::File::open(path).ok()?;
     f.seek(SeekFrom::Start(frag.offset)).ok()?;
@@ -1572,7 +1720,37 @@ fn flac_fix(path: &Path, frag: &FragmentInfo, track_id: u32, timescale: u32) -> 
 /// `read(from, len)` gives bytes of the fragment (offsets from its moof).
 /// `gap`: a sample lasting this much longer than its samples is a real gap.
 /// None: nothing to change.
-fn flac_fix_from(moof: &[u8], track_id: u32, gap: u64, mut read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<FlacFix> {
+fn flac_fix_from(moof: &[u8], track_id: u32, gap: u64, read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<FlacFix> {
+    let (durs, blocks) = flac_frames_from(moof, track_id, true, read)?;
+    // Timed by its samples (or by an RTP clock that matches them), a sample
+    // never lasts less than it holds, and the fragment lasts about what it
+    // holds: a longer sample is sound left out (lost packets), kept. A
+    // fragment with a shorter sample, or lasting over 1.1 times its samples
+    // (real gaps left out), was timed by a camera's wrong steps.
+    let shorter = durs.iter().zip(&blocks).any(|(d, b)| d.1 < *b);
+    let (rec, held) = durs.iter().zip(&blocks).filter(|(d, b)| d.1 <= **b + gap).fold((0u64, 0u64), |(r, h), (d, b)| (r + d.1, h + b));
+    let long = held > 0 && rec as f64 > held as f64 * 1.1;
+    if !shorter && !long {
+        return None;
+    }
+    let mut patches = Vec::new();
+    let mut total = 0u64;
+    for (k, &block) in blocks.iter().enumerate() {
+        let (pos, d) = durs[k];
+        // Longer than its samples by more than `gap`: a real gap, kept.
+        let want = if d > block + gap { d } else { block };
+        if want != d {
+            patches.push((pos as u32, want, 4u8));
+        }
+        total += want;
+    }
+    (!patches.is_empty()).then_some(FlacFix { patches, total })
+}
+
+/// A fragment's FLAC samples of track `track_id`: each one's (position of its
+/// duration field, duration) and the samples its frame holds. `even_none`:
+/// None when every duration is the same (nothing read).
+fn flac_frames_from(moof: &[u8], track_id: u32, even_none: bool, mut read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<(Vec<(usize, u64)>, Vec<u64>)> {
     for (kind, s, e) in children(moof, 8, moof.len()).ok()? {
         if &kind != b"traf" {
             continue;
@@ -1632,7 +1810,7 @@ fn flac_fix_from(moof: &[u8], track_id: u32, gap: u64, mut read: impl FnMut(usiz
             }
         }
         // All of one length: what new recordings write (nothing to read).
-        if durs.iter().all(|d| d.1 == durs[0].1) {
+        if even_none && durs.iter().all(|d| d.1 == durs[0].1) {
             return None;
         }
         let all: usize = sizes.iter().sum();
@@ -1647,29 +1825,7 @@ fn flac_fix_from(moof: &[u8], track_id: u32, gap: u64, mut read: impl FnMut(usiz
             at += n;
             blocks.push(crate::ingest::g711::flac_block_size(frame)? as u64);
         }
-        // Timed by its samples (or by an RTP clock that matches them), a sample
-        // never lasts less than it holds, and the fragment lasts about what it
-        // holds: a longer sample is sound left out (lost packets), kept. A
-        // fragment with a shorter sample, or lasting over 1.1 times its samples
-        // (real gaps left out), was timed by a camera's wrong steps.
-        let shorter = durs.iter().zip(&blocks).any(|(d, b)| d.1 < *b);
-        let (rec, held) = durs.iter().zip(&blocks).filter(|(d, b)| d.1 <= **b + gap).fold((0u64, 0u64), |(r, h), (d, b)| (r + d.1, h + b));
-        let long = held > 0 && rec as f64 > held as f64 * 1.1;
-        if !shorter && !long {
-            return None;
-        }
-        let mut patches = Vec::new();
-        let mut total = 0u64;
-        for (k, &block) in blocks.iter().enumerate() {
-            let (pos, d) = durs[k];
-            // Longer than its samples by more than `gap`: a real gap, kept.
-            let want = if d > block + gap { d } else { block };
-            if want != d {
-                patches.push((pos as u32, want, 4u8));
-            }
-            total += want;
-        }
-        return (!patches.is_empty()).then_some(FlacFix { patches, total });
+        return Some((durs, blocks));
     }
     None
 }
@@ -2253,6 +2409,252 @@ mod tests {
         assert_eq!(c.frame_times[0] - t0, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// Serve a real recording ($AS_SEG, its start in ms after the camera's
+    /// name) as a window, as is and for Apple, into $AS_OUT (for AVFoundation
+    /// checks on a Mac).
+    #[test]
+    #[ignore]
+    fn write_apple_window_from_a_recording() {
+        let (Ok(seg), Ok(out)) = (std::env::var("AS_SEG"), std::env::var("AS_OUT")) else { return };
+        let seg = std::path::PathBuf::from(seg);
+        let name = seg.file_name().unwrap().to_string_lossy().to_string();
+        let start: i64 = name.split('-').find_map(|p| p.parse().ok().filter(|&n: &i64| n > 1_000_000_000_000)).unwrap();
+        let segs = vec![SourceSegment { path: seg.clone(), start_ms: start, end_ms: start + 600_000, low: false, sub: false }];
+        let clip = VirtualClip::plan(&segs, start, start + 600_000).unwrap().unwrap();
+        let out = std::path::PathBuf::from(out);
+        clip.write_file(&out.join(format!("plain-{name}"))).unwrap();
+        let apple = clip.for_apple();
+        eprintln!("flac block {:?}", apple.flac_block);
+        apple.write_file(&out.join(format!("apple-{name}"))).unwrap();
+    }
+
+    /// Damaged recordings never crash the layout for Apple's players: each
+    /// of these broken copies of a real file is laid out or turned down.
+    #[test]
+    fn a_damaged_clip_is_laid_out_or_turned_down_never_a_crash() {
+        let dir = std::env::temp_dir().join(format!("amber-splice-flatfuzz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("a.mp4");
+        let Ok(o) = std::process::Command::new(crate::ffmpeg_bin::program())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10", "-f", "lavfi", "-i", "sine", "-t", "2"])
+            .args(["-c:v", "libx264", "-bf", "2", "-g", "5", "-c:a", "aac", "-movflags", "frag_keyframe+empty_moov+default_base_moof"])
+            .arg(&src)
+            .output()
+        else {
+            eprintln!("no ffmpeg here: skipped");
+            return;
+        };
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let good = std::fs::read(&src).unwrap();
+        // Where the media is: those bytes are left alone (they are not read).
+        let mdat: Vec<(usize, usize)> = {
+            let mut v = Vec::new();
+            let mut at = 0;
+            while at + 8 <= good.len() {
+                let n = u32::from_be_bytes(good[at..at + 4].try_into().unwrap()) as usize;
+                if &good[at + 4..at + 8] == b"mdat" {
+                    v.push((at + 8, at + n));
+                }
+                at += n.max(8);
+            }
+            v
+        };
+        assert!(VirtualClip::from_bytes(good.clone(), 0, 2000, false).flattened().is_ok());
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut ok, mut no) = (0, 0);
+        for round in 0..3000 {
+            let mut b = good.clone();
+            for _ in 0..1 + next() % 4 {
+                let at = (next() % b.len() as u64) as usize;
+                if mdat.iter().any(|&(s, e)| at >= s && at < e) {
+                    continue;
+                }
+                b[at] = match next() % 4 {
+                    0 => 0,
+                    1 => 0xff,
+                    2 => next() as u8,
+                    _ => 0x7f,
+                };
+            }
+            if round % 7 == 0 {
+                let cut = (next() % b.len() as u64) as usize;
+                b.truncate(cut.max(1));
+            }
+            match VirtualClip::from_bytes(b, 0, 2000, false).flattened() {
+                Ok(_) => ok += 1,
+                Err(_) => no += 1,
+            }
+        }
+        assert!(ok > 0 && no > 0, "{ok} laid out, {no} turned down");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real H.264 and AAC recordings (ffmpeg's fragmented MP4, B-frames and
+    /// all) planned as a window and laid out for Apple's players: a plain MP4
+    /// (no fragments left) whose every decoded picture and sound packet is
+    /// the same as the fragmented clip's, read with byte ranges as players do.
+    #[test]
+    fn apple_players_get_the_same_media_as_a_plain_mp4() {
+        let dir = std::env::temp_dir().join(format!("amber-splice-flat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let Ok(o) = std::process::Command::new(crate::ffmpeg_bin::program())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000", "-t", "18"])
+            .args(["-c:v", "libx264", "-g", "25", "-bf", "2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "segment", "-segment_time", "6", "-reset_timestamps", "1"])
+            .args(["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"])
+            .arg(dir.join("seg%03d.mp4"))
+            .output()
+        else {
+            eprintln!("no ffmpeg here: skipped");
+            return;
+        };
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let t0 = 1_700_000_000_000i64;
+        let segs: Vec<SourceSegment> = (0..3).map(|i| SourceSegment { path: dir.join(format!("seg{i:03}.mp4")), start_ms: t0 + i * 6000, end_ms: t0 + (i + 1) * 6000, low: false, sub: false }).collect();
+        let clip = VirtualClip::plan(&segs, t0, t0 + 18_000).unwrap().unwrap();
+        let apple = clip.clone().for_apple();
+        // Read as a player does, in ranges.
+        let read = |c: &VirtualClip, name: &str| {
+            let mut all = Vec::new();
+            let mut at = 0;
+            while at < c.len() {
+                let next = (at + 65_521).min(c.len());
+                all.extend(c.read_range(at, next).unwrap());
+                at = next;
+            }
+            let p = dir.join(name);
+            std::fs::write(&p, &all).unwrap();
+            (p, all)
+        };
+        let (frag, _) = read(&clip, "frag.mp4");
+        let (flat, bytes) = read(&apple, "flat.mp4");
+        // No fragment is left: one moov, no mvex, and the moofs are free boxes.
+        let top: Vec<[u8; 4]> = {
+            let mut v = Vec::new();
+            let mut at = 0usize;
+            while at + 8 <= bytes.len() {
+                let n = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+                v.push(bytes[at + 4..at + 8].try_into().unwrap());
+                at += n.max(8);
+            }
+            v
+        };
+        assert_eq!(&top[..2], &[*b"ftyp", *b"moov"]);
+        assert!(!top.contains(b"moof") && !top.contains(b"sidx") && top.contains(b"mdat"), "{:?}", top.iter().map(|k| String::from_utf8_lossy(k).to_string()).collect::<Vec<_>>());
+        assert!(!bytes.windows(4).any(|w| w == b"mvex"));
+        // ffmpeg reads it as an ordinary MP4 and decodes the very same media.
+        let md5 = |p: &std::path::Path, sel: &str| {
+            let o = std::process::Command::new(crate::ffmpeg_bin::program())
+                .args(["-v", "error", "-i"]).arg(p)
+                .args(["-map", sel, "-f", "framemd5", "-"])
+                .output().unwrap();
+            assert!(o.status.success() && o.stderr.is_empty(), "{}", String::from_utf8_lossy(&o.stderr));
+            // Packet lines: stream, dts, pts, duration, size, hash.
+            String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.starts_with('#')).map(|l| l.to_string()).collect::<Vec<_>>()
+        };
+        let (fv, av) = (md5(&frag, "0:v"), md5(&flat, "0:v"));
+        assert!(fv.len() > 400, "{} pictures", fv.len());
+        assert_eq!(fv, av, "every picture the same, at the same time");
+        let (fa, aa) = (md5(&frag, "0:a"), md5(&flat, "0:a"));
+        assert!(fa.len() > 200, "{} sound frames", fa.len());
+        assert_eq!(fa, aa, "every sound frame the same, at the same time");
+        // Made once: a copy of the clip gets the same layout.
+        assert_eq!(clip.clone().for_apple().len(), apple.len());
+        // An export with an exact start and end (edit lists) keeps its cut
+        // for Apple's players: the same pictures and sound, no more.
+        let clock = |ms: i64| format!("{ms}");
+        let cut = clip.clone().for_download(Some((t0 + 2_500, t0 + 9_300)), "Cam", &clock).unwrap();
+        let (cut_frag, _) = read(&cut, "cut-frag.mp4");
+        let (cut_flat, _) = read(&cut.clone().for_apple(), "cut-flat.mp4");
+        let _ = cut_frag; // (ffmpeg plays a fragmented file's edit lists no more than the file's start)
+        // ffmpeg applies a plain MP4's edit lists: 6.8 s at 25 fps, give or take a picture.
+        let cv = md5(&cut_flat, "0:v");
+        assert!((168..=172).contains(&cv.len()), "{} pictures in 6.8 s", cv.len());
+        let probe = std::process::Command::new(crate::ffmpeg_bin::program().with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" }))
+            .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(&cut_flat)
+            .output();
+        if let Some(o) = probe.ok().filter(|o| o.status.success()) {
+            let d: f64 = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0.0);
+            assert!((d - 6.8).abs() < 0.1, "export lasts {d} s");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apple_players_get_flac_marked_one_block_size_and_others_the_clip_as_is() {
+        use crate::ingest::g711::{flac_frame, flac_sample_entry};
+        use crate::ingest::mp4read::{flac_file_fixed_block, flac_streaminfo_at};
+        let dir = std::env::temp_dir().join(format!("amber-splice-apple-flac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let audio = TrackInfo { kind: TrackKind::Audio, timescale: 8000, sample_entry: flac_sample_entry(8000), width: 0, height: 0 };
+        let mut w = SegmentWriter::new(&dir, "cam-1", vec![video_track(), audio], 3).unwrap();
+        let (mut n, mut packets) = (0u64, 0u64);
+        for i in 0..100i64 {
+            w.push_video(i * 9000, vec![(i % 251) as u8; 40], i % 10 == 0).unwrap();
+            while (packets as i64) * 40 <= (i + 1) * 100 {
+                w.push_audio(n as i64, flac_frame(&[0i16; 320], n, 8000));
+                n += 320;
+                packets += 1;
+            }
+        }
+        w.finish().unwrap();
+        let segs: Vec<SourceSegment> =
+            w.take_closed().into_iter().map(|s| SourceSegment { path: s.path, start_ms: s.start_ms, end_ms: s.end_ms, low: false, sub: false }).collect();
+        let t0 = segs[0].start_ms;
+        let clip = VirtualClip::plan(&segs, t0, t0 + 20_000).unwrap().unwrap();
+        let sizes = |c: &VirtualClip| {
+            let head = c.read_range(0, 4096.min(c.len())).unwrap();
+            let at = flac_streaminfo_at(&head).unwrap();
+            (u16::from_be_bytes([head[at], head[at + 1]]), u16::from_be_bytes([head[at + 2], head[at + 3]]))
+        };
+        assert_eq!(sizes(&clip), (16, 65535), "others: as recorded");
+        let apple = clip.clone().for_apple();
+        assert_eq!(sizes(&apple), (320, 320), "Apple: the camera's packet size");
+        assert_eq!(sizes(&clip), (16, 65535), "the clip kept for others is not changed");
+        // ffmpeg (browsers' and the app's decoders follow the frames) plays the
+        // changed clip's sound to the end.
+        let out = dir.join("apple.mp4");
+        apple.write_file(&out).unwrap();
+        let Ok(o) = std::process::Command::new(crate::ffmpeg_bin::program())
+            .args(["-v", "error", "-i"]).arg(&out)
+            .args(["-map", "0:a", "-f", "s16le", "-"])
+            .output()
+        else {
+            eprintln!("no ffmpeg here: the decode and saved-clip parts skipped");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        // (The test's video is not real pictures: only the sound's messages count.)
+        let err = String::from_utf8_lossy(&o.stderr).to_lowercase();
+        assert!(o.status.success() && !err.contains("flac"), "{err}");
+        let secs = o.stdout.len() as f64 / 2.0 / 8000.0;
+        assert!(secs > 9.0, "decoded {secs} s of sound");
+        // A saved clip (ffmpeg copies the recording's sound, as for an event
+        // clip; real pictures in place of the test's):
+        // found in the file, the bytes to send in its place.
+        let plain = dir.join("plain.mp4");
+        clip.write_file(&plain).unwrap();
+        let saved = dir.join("saved.mp4");
+        let st = std::process::Command::new(crate::ffmpeg_bin::program())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=10", "-i"]).arg(&plain)
+            .args(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-c:a", "copy", "-movflags", "+faststart"]).arg(&saved)
+            .stderr(std::process::Stdio::null())
+            .status().unwrap();
+        assert!(st.success());
+        let (at, bytes) = flac_file_fixed_block(&saved).unwrap().expect("a FLAC track to mark");
+        assert_eq!(bytes, [1, 64, 1, 64]);
+        let file = std::fs::read(&saved).unwrap();
+        assert_eq!(&file[at as usize..at as usize + 4], &[0, 16, 255, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn flac_audio_is_served_with_the_length_of_its_samples() {
         use crate::ingest::g711::{flac_frame, flac_sample_entry};

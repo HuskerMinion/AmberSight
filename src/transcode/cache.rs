@@ -245,6 +245,9 @@ pub struct Entry {
     first_wait_ms: AtomicU64,
     /// How long a reader waits for more once bytes have come (ms).
     stall_ms: AtomicU64,
+    /// Kept for its readers' later Ranges even past the total cap while it
+    /// is made (Apple's players: see `Entry::keep`).
+    keep: AtomicBool,
 }
 
 impl Drop for Entry {
@@ -323,6 +326,7 @@ impl Claim {
             owner: Arc::downgrade(inner),
             entry_max: l.entry_max,
             counted: AtomicU64::new(0),
+            keep: AtomicBool::new(false),
             listed: AtomicBool::new(true),
             wanted: AtomicU64::new(0),
             ahead: AtomicU64::new(AHEAD),
@@ -360,6 +364,12 @@ impl Cache {
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
         Cache(Arc::new(Inner { dir, state: Mutex::new(State { map: HashMap::new(), total: 0, dead: Vec::new() }), seq: AtomicU64::new(0), limits: Mutex::new(limits) }))
+    }
+
+    /// Whether its limits let it keep any answer at all.
+    pub fn keeps(&self) -> bool {
+        let l = *self.0.limits.lock().unwrap();
+        l.total_max > 0 && l.entry_max > 0
     }
 
     pub fn set_limits(&self, l: Limits) {
@@ -441,6 +451,12 @@ impl Cache {
         }
     }
 
+    /// Drop this kept answer (its readers finish): the next request for its
+    /// key makes it again.
+    pub fn forget(&self, e: &Entry) {
+        self.0.lock().unlist(e);
+    }
+
     /// Drop every kept answer made from `source` (its readers finish).
     pub fn drop_source(&self, source: &str) {
         let mut st = self.0.lock();
@@ -487,13 +503,22 @@ impl Inner {
         }
         let c = e.counted.fetch_add(n, Ordering::SeqCst) + n;
         st.total += n;
-        if c > e.entry_max || (st.total > l.total_max && !st.make_room(l.total_max, Some(e))) {
+        if c > e.entry_max || (st.total > l.total_max && !st.make_room(l.total_max, Some(e)) && !e.keep.load(Ordering::SeqCst)) {
             st.unlist(e);
         }
     }
 }
 
 impl Entry {
+    /// Not left out of the cache for the total cap while it is made (it is
+    /// over the total for a while instead; the oldest idle answers go first
+    /// as usual): an Apple player gets the whole answer first, then asks for
+    /// it again by Ranges, which must read this same copy (another
+    /// conversion of it need not be the same bytes).
+    pub fn keep(&self) {
+        self.keep.store(true, Ordering::SeqCst);
+    }
+
     pub fn progress(&self) -> Progress {
         *self.tx.borrow()
     }
@@ -538,7 +563,7 @@ impl Entry {
     }
 
     #[cfg(test)]
-    fn set_ahead(&self, n: u64) {
+    pub(crate) fn set_ahead(&self, n: u64) {
         self.ahead.store(n, Ordering::SeqCst);
     }
 
@@ -932,6 +957,29 @@ mod tests {
         assert!(a.write(&[1; 20]));
         assert!(full.create(&key(&["b"]), vec![]).is_none(), "nothing to evict");
         let _ = std::fs::remove_dir_all(&full.0.dir);
+        let _ = std::fs::remove_dir_all(&c.0.dir);
+    }
+
+    #[test]
+    fn an_apple_players_copy_stays_past_the_total_and_a_forgotten_one_is_made_again() {
+        let c = Cache::new(dir("keep"), lim(100, 20, 600));
+        let a = c.create(&key(&["held"]), vec![]).unwrap();
+        assert!(a.write(&[1; 15]));
+        // Kept for an Apple player: over the total with nothing idle to evict,
+        // it stays listed (its later Ranges read this same copy).
+        let k = c.create(&key(&["apple"]), vec![]).unwrap();
+        k.keep();
+        let _r = a.read_from(0, None);
+        assert!(k.write(&[2; 15]));
+        assert!(k.listed() && c.find(&key(&["apple"]), None).is_some());
+        // (Over the total, no new answer is kept meanwhile: those stream.)
+        assert!(c.create(&key(&["plain"]), vec![]).is_none());
+        // A kept copy that failed is forgotten: the next request may make it.
+        k.fail();
+        c.forget(&k);
+        assert!(c.find(&key(&["apple"]), None).is_none());
+        drop(_r);
+        assert!(c.find(&key(&["apple"]), None).is_none(), "made again on the next request");
         let _ = std::fs::remove_dir_all(&c.0.dir);
     }
 

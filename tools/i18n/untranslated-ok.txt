@@ -169,3 +169,5 @@ account.js:btn danger
 core.js:-> 401 (sign in)
 livetl.js:(pointer: coarse)
 livetl.js:(any-pointer: fine)
+palette.js:homekit apple home iphone ipad siri bridge homebridge pairing setup code qr live video
+help.js:homekit apple home iphone ipad homepod apple tv hub bridge homebridge scrypted pairing pair a device pairing window stop and start again setup code qr motion snapshot live video uncertified bonjour mdns 51830 standalone bridged

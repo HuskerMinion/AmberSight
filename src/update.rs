@@ -194,10 +194,25 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     }
 }
 
-/// Is version `latest` newer than `current`?
+/// The running version as numbers, and whether it is a pre-release:
+/// "0.12.0-homekit.1" is ((0, 12, 0), true). A pre-release sorts below its
+/// release (as in semver), so a preview copy is offered 0.12.0 when it comes.
+fn parse_current(s: &str) -> Option<((u64, u64, u64), bool)> {
+    let s = s.trim();
+    let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+    let s = s.split('+').next()?;
+    match s.split_once('-') {
+        Some((base, pre)) if !pre.is_empty() => parse_version(base).map(|v| (v, true)),
+        Some(_) => None,
+        None => parse_version(s).map(|v| (v, false)),
+    }
+}
+
+/// Is version `latest` newer than `current`? `latest` must be a plain
+/// release: pre-releases are never offered. `current` may be a pre-release.
 pub fn is_newer(latest: &str, current: &str) -> bool {
-    match (parse_version(latest), parse_version(current)) {
-        (Some(l), Some(c)) => l > c,
+    match (parse_version(latest), parse_current(current)) {
+        (Some(l), Some((c, pre))) => l > c || (pre && l == c),
         _ => false,
     }
 }
@@ -1252,7 +1267,15 @@ mod tests {
         assert!(!is_newer("0.0.9", "0.1.0"));
         assert!(!is_newer("v9.0.0-rc1", "0.1.0"));
         assert!(!is_newer("nonsense", "0.1.0"));
-        assert!(parse_version(CURRENT).is_some());
+        // A preview copy is offered its release and anything after it, never
+        // an older release or another pre-release.
+        assert!(is_newer("0.12.0", "0.12.0-homekit.1"));
+        assert!(is_newer("v0.12.1", "0.12.0-homekit.1"));
+        assert!(!is_newer("0.11.3", "0.12.0-homekit.1"));
+        assert!(!is_newer("0.12.0-homekit.2", "0.12.0-homekit.1"));
+        assert!(!is_newer("0.12.0-homekit.1", "0.11.3"));
+        assert!(!is_newer("0.12.0", "0.12.0-"));
+        assert!(parse_current(CURRENT).is_some());
     }
 
     #[test]

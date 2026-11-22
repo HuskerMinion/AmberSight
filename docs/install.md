@@ -1065,6 +1065,84 @@ seconds per recording. Tested on a Reolink Argus 2; other battery models are not
 
 ---
 
+## Apple Home (HomeKit)
+
+AmberSight can show cameras in the Home app on an iPhone, iPad or Mac, with live video, a motion
+sensor (Home can notify you of motion) and a snapshot.
+
+**Tested with an iPhone and a HomePod mini as the home hub: pairing, snapshots, live video with sound, motion notifications, and viewing away from home through the hub.** That round used one camera per accessory on a Linux server; bridged mode, Windows,
+macOS, Docker and an Apple TV hub have not been tried with real Apple devices yet. If you try
+them, please tell us how it went in GitHub Discussions.
+
+No motion notifications? In the Home app, open the camera's settings, **Status and
+Notifications**, **Activity Notifications**: the **People** option sends them only when no one
+(or only some people) is home. Set it to **Any Time** to get every one.
+
+1. Settings, Connections, **Apple Home**: turn on **Apple Home (HomeKit)** and switch on the
+   cameras to show (or use **Show in Apple Home** in a camera's settings).
+2. Press **Pair a device** next to the camera (or the bridge). Pairing is open for 5 minutes, and
+   the setup code and QR code show.
+3. In the Home app: **+**, **Add Accessory**, and scan the code shown in Settings (or enter the
+   setup code). By default each camera is added on its own, with the same setup code for all;
+   **Behind one bridge** in the same page adds them all at once instead. Home says the accessory is
+   not certified; choose **Add Anyway**.
+
+Apple devices can pair only while pairing is open. It closes once a device is added, when you
+press **Stop**, or after 5 minutes; until then Home does not list AmberSight as an accessory to
+add. While it is open, the page shows the address of the device pairing now. If that is not your
+phone or tablet, press **Stop and start again**: that pairing ends, the address cannot pair again
+until pairing closes, and you get 5 fresh minutes. Sharing your home with other people in the Home
+app needs none of this.
+
+The Apple device must be on the same network (away from home, through a home hub: a HomePod or
+Apple TV). AmberSight is found over Bonjour (mDNS, UDP port 5353). Each camera on its own listens on
+its own TCP port: 51831, 51832, ... (`[homekit] port` is 51830, which the bridge uses when
+cameras are bridged; Homebridge uses 51826, so both can run on one computer). Live video goes to
+the Apple device over UDP (SRTP), and the Apple device sends RTCP back to a UDP port of
+`[homekit] rtp_ports` (default 51900-51999, two per live view). Allow these in the firewall:
+
+- **Windows:** while HomeKit is on, the AmberSight service adds an inbound rule
+  "AmberSight HomeKit" for `ambersight.exe` that opens only HomeKit's ports: TCP for the bridge or
+  the cameras on their own that run now, UDP 5353 and the `rtp_ports` range (all network profiles,
+  like the "AmberSight NVR" rule for the web page; it never opens the web page's port). It follows
+  the ports as cameras are added or removed, is removed when HomeKit is turned off or AmberSight
+  is uninstalled, and a rule left behind (AmberSight was killed) is removed at the next start.
+  When AmberSight does not run as Administrator (for example `ambersight run` from an ordinary
+  prompt), it cannot add the rule: the Apple Home page then lists the ports and gives the commands
+  to run as Administrator, for example
+  `netsh advfirewall firewall add rule name="AmberSight HomeKit" dir=in action=allow program="C:\Program Files\AmberSight NVR\ambersight.exe" protocol=TCP localport=51831-51832`
+  and the same with `protocol=UDP localport=5353,51900-51999`.
+- **Linux, ufw:** `sudo ufw allow 51830:51894/tcp`, `sudo ufw allow 5353/udp` and
+  `sudo ufw allow 51900:51999/udp`.
+- **Linux, firewalld:** `sudo firewall-cmd --permanent --add-port=51830-51894/tcp
+  --add-port=51900-51999/udp --add-service=mdns`, then `sudo firewall-cmd --reload`.
+- **macOS:** allow AmberSight when macOS asks (System Settings, Network, Firewall).
+
+AmberSight answers mDNS next to the system's own (Avahi, Bonjour on macOS, Windows).
+
+Live video is encoded for Home at the size and bit rate it asks for, on the graphics card when
+there is one (else on the processor: about a third of a core for 1280x720), with the camera's sound
+as Opus. At most 2 live views per camera and 4 in all, within `[transcode]`'s limits. A camera read
+by ffmpeg instead of the built-in reader (privacy masks, burned-in text, ...) is read once more for
+each live view in Home, with its privacy masks and text drawn in, so Home never shows what a mask
+hides (masks are placed by fraction of the picture, on the main or sub stream alike, as in the live
+view; if a camera's sub stream is cropped differently from its main stream, check the Home view);
+changing a camera's masks, text or address ends its live views in Home at once; this costs an extra camera connection and a little more processor time, and a capture
+device (which opens only once) has no live video in Home. Each live view's encryption keys
+(SRTP) are passed to ffmpeg on its command line, so other accounts on the same computer can see
+them while it runs (they are never written to the log); on a computer you share with people you do
+not trust, keep that in mind.
+
+HomeKit does not know AmberSight's accounts: everyone in that Apple Home sees the cameras switched
+on there. A camera removed in the Home app can be added again with the same setup code, after
+**Pair a device**. If the setup
+code got out, **Reset pairing** in the same page forgets every paired Apple device and makes a new
+code; Home then sees new accessories, so their rooms, scenes and automations start over.
+
+HomeKit listens on all addresses (`[homekit] bind = "[::]"`, IPv6 and IPv4), apart from the web
+page's `[server] bind`; set one address to limit it. It is announced only on real network
+interfaces (not Docker, VM or VPN ones such as Tailscale).
+
 ## Updating
 
 ### From the web page (the built-in updater)

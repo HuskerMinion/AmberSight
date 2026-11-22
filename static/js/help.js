@@ -277,6 +277,22 @@ const TOPICS = [
     '</p><p>' +
     t('help.settings_share_only_tcp_is', 'Only TCP is offered, which Home Assistant, Scrypted, VLC and ffmpeg use or fall back to. The shared video is the camera\'s own picture, without AmberSight\'s drawn text. For Home Assistant\'s Generic Camera also use the <b>Snapshot</b> address as the still image (with the same account in the authentication fields), or the <b>MJPEG</b> address. If a camera is switched off or offline, its shared stream is simply not there until it is back.') +
     '</p>'],
+  ['settings-homekit', 'Settings', t('help.settings_homekit_title', 'Apple Home (HomeKit)'), 'homekit apple home iphone ipad homepod apple tv hub bridge homebridge scrypted pairing pair a device pairing window stop and start again setup code qr motion snapshot live video uncertified bonjour mdns 51830 standalone bridged',
+    '<p>' +
+    t('help.settings_homekit_tested', '<b>Tested with an iPhone and a HomePod mini hub</b> (one camera per accessory). If you try another setup, please tell us how it went in GitHub Discussions. No motion notifications? In Home, the camera\'s <b>Activity Notifications</b> option <b>People</b> sends them only when no one is home: set it to <b>Any Time</b>.') +
+    '</p>' +
+    '<p>' +
+    t('help.settings_homekit_apple_home_shows', '<b>Apple Home</b> shows the cameras you switch on (Settings &rsaquo; Connections &rsaquo; Apple Home, or <b>Show in Apple Home</b> in the camera\'s settings) in the Home app, with live video, a motion sensor and a snapshot. Live video is encoded for Home at the size it asks for, on the graphics card when there is one (else on the processor), with the camera\'s sound as Opus. At most 2 live views per camera and 4 in all, within the <code>[transcode]</code> limits of the settings file.') +
+    '</p>' +
+    '<p>' +
+    t('help.settings_homekit_adding_to_home', '<b>Adding to Home:</b> Apple devices can pair only while pairing is open. Press <b>Pair a device</b> (for the camera, or for the bridge): for 5 minutes the setup code and QR code show and Home can add it. Pairing closes once a device is added, when you press <b>Stop</b>, or after 5 minutes. While it is open, the page shows the address of the device pairing now. If it is not yours, <b>Stop and start again</b> stops it, keeps that address out until pairing closes, and gives you 5 fresh minutes. Adding people in the Home app (sharing your home) needs none of this.') +
+    '</p>' +
+    '<p>' +
+    t('help.settings_homekit_each_on_its_own', '<b>Each on its own</b> (the default) adds every camera to Apple Home separately, as Apple prefers for cameras: press <b>Pair a device</b> for the camera, then in the Home app tap <b>+</b>, <b>Add Accessory</b> and scan its code, or enter the setup code (the same for all cameras). <b>Behind one bridge</b> adds one bridge with all cameras. Home warns that the accessory is not certified; choose <b>Add Anyway</b>. Apple devices find AmberSight over Bonjour (UDP 5353); each camera (or the bridge) has its own TCP port from 51830 on; allow them in the firewall. In Docker it needs host networking.') +
+    '</p>' +
+    '<p>' +
+    t('help.settings_homekit_accounts', 'HomeKit does not know AmberSight\'s accounts: everyone in that Apple Home sees the cameras switched on here. A camera (or bridge) removed in the Home app can be added again with the same setup code (after <b>Pair a device</b>); <b>Remove pairings</b> does the same from here. If the code got out, <b>Reset pairing</b> forgets every paired Apple device and makes a new code: Home then sees new accessories (remove the old ones; rooms, scenes and automations with these cameras are set up again).') +
+    '</p>'],
   ['settings-https', 'Settings', t('help.settings_https_title', 'HTTPS'), 'https tls ssl certificate encrypted secure restart tailscale name own certificate trust http redirect',
     '<p>' +
     t('help.settings_https_use_https_encrypts', '<b>Use HTTPS</b> encrypts the connection. AmberSight makes its own certificate; nothing is published anywhere. Each device trusts it once (account menu, <b>Trust this server</b>); until then the browser warns that the connection is not private. Browsers only allow notifications, the microphone and keep screen awake on a trusted HTTPS page. Plain http:// addresses on the same port then redirect to https://.') +

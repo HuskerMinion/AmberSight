@@ -230,18 +230,16 @@ pub fn hev1_to_hvc1(head: &mut [u8]) -> bool {
     any
 }
 
-/// [`hev1_to_hvc1`] for a finished file on disk (a saved clip, its `moov`
-/// at the start or the end): only the changed bytes are written. True when
-/// it was changed.
-pub fn hev1_file_to_hvc1(path: &std::path::Path) -> std::io::Result<bool> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    let mut f = std::fs::OpenOptions::new().read(true).open(path)?;
+/// A finished MP4 file's `moov` box (where it starts, its bytes), found
+/// among its first 64 top-level boxes; None when it has none or it is too big.
+fn read_moov(f: &mut std::fs::File) -> std::io::Result<Option<(u64, Vec<u8>)>> {
+    use std::io::{Read, Seek, SeekFrom};
     let file_len = f.metadata()?.len();
     let mut at = 0u64;
     let mut h = [0u8; 16];
     for _ in 0..64 {
         if at.saturating_add(8) > file_len {
-            return Ok(false);
+            return Ok(None);
         }
         f.seek(SeekFrom::Start(at))?;
         let n = (file_len - at).min(16) as usize;
@@ -254,43 +252,157 @@ pub fn hev1_file_to_hvc1(path: &std::path::Path) -> std::io::Result<bool> {
         }
         if &kind == b"moov" {
             if len > MAX_MOOV_BYTES || at + len > file_len {
-                return Ok(false);
+                return Ok(None);
             }
             let mut moov = vec![0u8; len as usize];
             f.seek(SeekFrom::Start(at))?;
             f.read_exact(&mut moov)?;
-            let was = moov.clone();
-            if !hev1_to_hvc1(&mut moov) {
-                return Ok(false);
-            }
-            // (Its time is kept, 2 s later: the clip sweep and the offsite copy go
-            // by it, and a player's cached copy, checked by that time, is then
-            // seen to be out of date.)
-            let modified = f.metadata()?.modified().ok();
-            let mut w = std::fs::OpenOptions::new().write(true).open(path)?;
-            // Each changed run in one write, so a reader never sees half a label.
-            let mut i = 0;
-            while i < moov.len() {
-                if was[i] == moov[i] {
-                    i += 1;
-                    continue;
-                }
-                let start = i;
-                while i < moov.len() && was[i] != moov[i] {
-                    i += 1;
-                }
-                w.seek(SeekFrom::Start(at + start as u64))?;
-                w.write_all(&moov[start..i])?;
-            }
-            w.flush()?;
-            if let Some(t) = modified {
-                let _ = w.set_modified(t + std::time::Duration::from_secs(2));
-            }
-            return Ok(true);
+            return Ok(Some((at, moov)));
         }
         at = at.checked_add(len).ok_or_else(|| std::io::Error::other("damaged MP4 box"))?;
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// For a finished file on disk (a saved clip) with FLAC sound: where its
+/// STREAMINFO block sizes are and the 4 bytes [`flac_fixed_block`] would
+/// put there (the most samples one of its first 64 frames holds), for
+/// serving it to Apple's players. None: nothing to change.
+pub fn flac_file_fixed_block(path: &std::path::Path) -> std::io::Result<Option<(u64, [u8; 4])>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let Some((at, moov)) = read_moov(&mut f)? else { return Ok(None) };
+    let Some((si, ss, se)) = flac_track(&moov) else { return Ok(None) };
+    if moov[si..si + 2] == moov[si + 2..si + 4] {
+        return Ok(None); // one block size already (ffmpeg's own FLAC)
+    }
+    // The frames of its first chunk (at most 64): where the chunk starts
+    // (stco or co64), how many it holds (stsc) and their sizes (stsz).
+    let boxes = children(&moov, ss, se);
+    let get = |k: &[u8; 4]| boxes.iter().find(|c| &c.0 == k).map(|c| (c.1, c.2));
+    let chunk = match (get(b"stco"), get(b"co64")) {
+        (Some((s, _)), _) if be32(&moov, s + 4).unwrap_or(0) > 0 => be32(&moov, s + 8).map(u64::from),
+        (_, Some((s, _))) if be32(&moov, s + 4).unwrap_or(0) > 0 => be32(&moov, s + 8).zip(be32(&moov, s + 12)).map(|(h, l)| (u64::from(h) << 32) | u64::from(l)),
+        _ => None,
+    };
+    let per_chunk = get(b"stsc").filter(|&(s, _)| be32(&moov, s + 4).unwrap_or(0) > 0).and_then(|(s, _)| be32(&moov, s + 12));
+    let Some(((chunk, per_chunk), (zs, ze))) = chunk.zip(per_chunk).zip(get(b"stsz")) else { return Ok(None) };
+    let fixed = be32(&moov, zs + 4).unwrap_or(0);
+    let count = be32(&moov, zs + 8).unwrap_or(0).min(per_chunk).min(64) as usize;
+    let mut frames = Vec::new();
+    let mut at_frame = chunk;
+    for i in 0..count {
+        let size = if fixed > 0 { fixed } else { match be32(&moov, zs + 12 + i * 4) { Some(n) if zs + 16 + i * 4 <= ze => n, _ => break } };
+        if size > 1 << 16 {
+            break;
+        }
+        let mut b = vec![0u8; size as usize];
+        f.seek(SeekFrom::Start(at_frame))?;
+        if f.read_exact(&mut b).is_err() {
+            break;
+        }
+        frames.push(b);
+        at_frame += u64::from(size);
+    }
+    let Some(block) = flac_largest_block(frames) else { return Ok(None) };
+    let b = block.to_be_bytes();
+    Ok(Some((at + si as u64, [b[0], b[1], b[0], b[1]])))
+}
+
+/// Where the STREAMINFO of a FLAC audio track (`fLaC` sample entry, its
+/// `dfLa`) starts in `head` (whole top-level boxes, the `moov` among them):
+/// the offset of its two block-size fields (min, then max; 2 bytes each).
+pub fn flac_streaminfo_at(head: &[u8]) -> Option<usize> {
+    flac_track(head).map(|t| t.0)
+}
+
+/// [`flac_streaminfo_at`], and where that track's sample table (`stbl`
+/// contents) is.
+fn flac_track(head: &[u8]) -> Option<(usize, usize, usize)> {
+    for (k, ms, me) in children(head, 0, head.len()) {
+        if &k != b"moov" {
+            continue;
+        }
+        for (k, ts, te) in children(head, ms, me) {
+            let Some((ds, de)) = (&k == b"trak").then(|| find(head, ts, te, b"mdia")).flatten() else { continue };
+            let Some((is, ie)) = find(head, ds, de, b"minf") else { continue };
+            let Some((ss, se)) = find(head, is, ie, b"stbl") else { continue };
+            let Some((sd, sde)) = find(head, ss, se, b"stsd") else { continue };
+            let mut at = sd + 8;
+            while let Some((kind, hdr, len)) = box_at(&head[..sde], at) {
+                let Some(end) = usize::try_from(len).ok().and_then(|l| at.checked_add(l)).filter(|&e| e <= sde && len >= 8) else { break };
+                // AudioSampleEntry: 28 bytes of fields, then its boxes.
+                if &kind == b"fLaC" {
+                    if let Some((fs, fe)) = find(head, at + hdr as usize + 28, end, b"dfLa") {
+                        // dfLa: version and flags, then FLAC metadata blocks:
+                        // the first, STREAMINFO (type 0), 34 bytes.
+                        let t = *head.get(fs + 4)?;
+                        let n = u32::from_be_bytes([0, *head.get(fs + 5)?, *head.get(fs + 6)?, *head.get(fs + 7)?]);
+                        if t & 0x7f == 0 && n >= 34 && fs + 8 + 34 <= fe {
+                            return Some((fs + 8, ss, se));
+                        }
+                    }
+                }
+                at = end;
+            }
+        }
+    }
+    None
+}
+
+/// A FLAC track's STREAMINFO set to say every frame holds `block` samples
+/// (min = max): Apple's players (iPhone, Safari, QuickTime) drop a FLAC track
+/// whose block sizes differ (AmberSight's say 16 to 65535, as a camera's
+/// packets may be any size) and then end the video after 5 s. The frames
+/// themselves are not changed. True when there was such a track.
+pub fn flac_fixed_block(head: &mut [u8], block: u16) -> bool {
+    let Some(at) = flac_streaminfo_at(head) else { return false };
+    head[at..at + 2].copy_from_slice(&block.to_be_bytes());
+    head[at + 2..at + 4].copy_from_slice(&block.to_be_bytes());
+    true
+}
+
+/// The most samples one of the first `n` FLAC frames (MP4 samples) of a
+/// track holds, read from the frames themselves.
+pub fn flac_largest_block(frames: impl IntoIterator<Item = Vec<u8>>) -> Option<u16> {
+    frames.into_iter().filter_map(|f| crate::ingest::g711::flac_block_size(&f)).max().and_then(|b| u16::try_from(b).ok())
+}
+
+/// [`hev1_to_hvc1`] for a finished file on disk (a saved clip, its `moov`
+/// at the start or the end): only the changed bytes are written. True when
+/// it was changed.
+pub fn hev1_file_to_hvc1(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().read(true).open(path)?;
+    let Some((at, mut moov)) = read_moov(&mut f)? else { return Ok(false) };
+    let was = moov.clone();
+    if !hev1_to_hvc1(&mut moov) {
+        return Ok(false);
+    }
+    // (Its time is kept, 2 s later: the clip sweep and the offsite copy go
+    // by it, and a player's cached copy, checked by that time, is then
+    // seen to be out of date.)
+    let modified = f.metadata()?.modified().ok();
+    let mut w = std::fs::OpenOptions::new().write(true).open(path)?;
+    // Each changed run in one write, so a reader never sees half a label.
+    let mut i = 0;
+    while i < moov.len() {
+        if was[i] == moov[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < moov.len() && was[i] != moov[i] {
+            i += 1;
+        }
+        w.seek(SeekFrom::Start(at + start as u64))?;
+        w.write_all(&moov[start..i])?;
+    }
+    w.flush()?;
+    if let Some(t) = modified {
+        let _ = w.set_modified(t + std::time::Duration::from_secs(2));
+    }
+    Ok(true)
 }
 
 /// Read the sample tables of a complete `moov` box (header included).

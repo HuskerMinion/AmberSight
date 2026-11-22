@@ -38,6 +38,7 @@ const SETTINGS = [
   ['users/https', t('palette.set_https', 'HTTPS'), t('palette.sec_users_security', 'Users & security'), 'secure certificate tls ssl remote access tailscale padlock'],
   ['users/displays', t('palette.set_displays', 'Displays'), t('palette.sec_users_security', 'Users & security'), 'wall tv tablet kiosk display mode pair code monitor'],
   ['connections/share', t('palette.set_share_streams', 'Share streams'), t('palette.sec_connections', 'Connections'), 'rtsp restream home assistant vlc frigate scrypted'],
+  ['connections/homekit', t('palette.set_apple_home', 'Apple Home'), t('palette.sec_connections', 'Connections'), 'homekit apple home iphone ipad siri bridge homebridge pairing setup code qr live video'],
   ['connections/servers', t('palette.set_servers', 'Servers'), t('palette.sec_connections', 'Connections'), 'other site link servers second location cabin'],
   ['connections/detector', t('palette.set_external_detector', 'External detector'), t('palette.sec_connections', 'Connections'), 'custom detector hook codeproject'],
   ['connections/watchdog', t('palette.set_watchdog', 'Watchdog'), t('palette.sec_connections', 'Connections'), 'reboot camera power cycle frozen camera smart plug offline'],

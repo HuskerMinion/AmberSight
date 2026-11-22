@@ -8202,6 +8202,14 @@
 "Nome breve",
 "92346acc"
 ],
+"cameras.show_in_apple_home": [
+"Mostra in Apple Home",
+"00ab4e6a"
+],
+"cameras.show_in_apple_home_hint": [
+"Viene mostrata nell’app Casa con video in diretta, un sensore di movimento e un’immagine mentre Apple Home è attivo (Impostazioni, Connessioni, Apple Home). La vedono tutti in quella casa.",
+"3bfb2272"
+],
 "cameras.show_only_ai_events": [
 "Mostra solo gli eventi confermati dall’AI",
 "bfa330f4"
@@ -11566,6 +11574,30 @@
 "<b>Quando un metodo fallisce durante il funzionamento</b>, quella telecamera passa subito al metodo successivo, o al processore. Dopo 15 minuti riprova il metodo fallito, poi dopo attese sempre più lunghe (fino a 4 ore). Un secondo fallimento di seguito (senza 30 minuti di funzionamento regolare in mezzo) fa abbandonare quel metodo finché AmberSight non si riavvia o non cambiano Decodifica hardware o Lascia libera la scheda NVIDIA. Se la scheda NVIDIA esaurisce la memoria, si aspetta soltanto che si liberi, senza mai rinunciarci. Un metodo che si è fermato mentre il processore decodificava senza problemi lo stesso stream viene lasciato stare da tutte le telecamere per un’ora. <b>Per telecamera</b> mostra cosa usa ora ogni telecamera e perché.",
 "da025aa4"
 ],
+"help.settings_homekit_accounts": [
+"HomeKit non conosce gli account di AmberSight: tutti in quella Apple Home vedono le telecamere attivate qui. Una telecamera (o bridge) rimossa nell’app Casa può essere aggiunta di nuovo con lo stesso codice di configurazione (dopo <b>Abbina un dispositivo</b>); <b>Rimuovi gli abbinamenti</b> fa lo stesso da qui. Se il codice è trapelato, <b>Reimposta abbinamento</b> fa dimenticare tutti i dispositivi Apple abbinati e crea un nuovo codice: Casa vede allora nuovi accessori (rimuovi quelli vecchi; stanze, scene e automazioni con queste telecamere vanno configurate di nuovo).",
+"b75210bb"
+],
+"help.settings_homekit_adding_to_home": [
+"<b>Aggiunta a Casa:</b> i dispositivi Apple possono abbinarsi solo quando l’abbinamento è aperto. Premi <b>Abbina un dispositivo</b> (per la telecamera o per il bridge): per 5 minuti compaiono il codice di configurazione e il codice QR e Casa può aggiungerla. L’abbinamento si chiude quando viene aggiunto un dispositivo, quando premi <b>Ferma</b> o dopo 5 minuti. Finché è aperto, la pagina mostra l’indirizzo del dispositivo che si sta abbinando. Se non è il tuo, <b>Ferma e ricomincia</b> lo ferma, tiene fuori quell’indirizzo fino alla chiusura dell’abbinamento e ti dà 5 minuti nuovi. Aggiungere persone nell’app Casa (condividere la tua casa) non richiede nulla di tutto questo.",
+"3ae21608"
+],
+"help.settings_homekit_apple_home_shows": [
+"<b>Apple Home</b> mostra nell’app Casa le telecamere che attivi (Impostazioni &rsaquo; Connessioni &rsaquo; Apple Home, oppure <b>Mostra in Apple Home</b> nelle impostazioni della telecamera), con video in diretta, un sensore di movimento e un’immagine. Il video in diretta viene codificato per Casa alla dimensione richiesta, sulla scheda grafica se presente (altrimenti sul processore), con l’audio della telecamera in Opus. Al massimo 2 visualizzazioni in diretta per telecamera e 4 in tutto, entro i limiti <code>[transcode]</code> del file di impostazioni.",
+"9a210dde"
+],
+"help.settings_homekit_each_on_its_own": [
+"<b>Ciascuna per conto suo</b> (predefinito) aggiunge ogni telecamera ad Apple Home separatamente, come Apple preferisce per le telecamere: premi <b>Abbina un dispositivo</b> per la telecamera, poi nell’app Casa tocca <b>+</b>, <b>Aggiungi accessorio</b> e inquadra il suo codice, oppure inserisci il codice di configurazione (lo stesso per tutte le telecamere). <b>Dietro un solo bridge</b> aggiunge un bridge con tutte le telecamere. Casa avvisa che l’accessorio non è certificato; scegli <b>Aggiungi comunque</b>. I dispositivi Apple trovano AmberSight tramite Bonjour (UDP 5353); ogni telecamera (o il bridge) ha una propria porta TCP a partire da 51830; consentile nel firewall. In Docker serve la rete host.",
+"f9a0381e"
+],
+"help.settings_homekit_tested": [
+"<b>Provato con un iPhone e un hub HomePod mini</b> (una telecamera per accessorio). Se provi un’altra configurazione, raccontaci com’è andata nelle GitHub Discussions. Nessuna notifica di movimento? In Casa, l’opzione <b>Notifiche attività</b> della telecamera impostata su <b>Persone</b> le invia solo quando nessuno è a casa: impostala su <b>Sempre</b>.",
+"5a9fd376"
+],
+"help.settings_homekit_title": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
 "help.settings_https_extra_names_for": [
 "<b>Nomi aggiuntivi per il certificato</b>: il certificato copre già gli indirizzi di questo computer, il suo nome e localhost; puoi aggiungere altri nomi con cui apri AmberSight. I nomi si applicano senza bisogno di un riavvio. L’autorità di certificazione è limitata (per evitare che una chiave rubata venga usata per altri siti): possono essere aggiunti sempre i nomi che terminano in .lan, .local, .home.arpa o .internal, il nome di questo computer, nonché gli indirizzi della rete domestica e di Tailscale (100.x). Altri nomi, come quelli di Tailscale (nvr.tail1234.ts.net), sono coperti solo da un certificato creato appositamente: aggiungili prima di attivare HTTPS, oppure usa il tuo certificato.",
 "8a6c3df6"
@@ -11997,6 +12029,282 @@
 "helperpick.whole_desktop": [
 "Intero desktop",
 "9558b09c"
+],
+"homekit_settings.add_to_apple_home": [
+"Aggiungi ad Apple Home",
+"108e5e54"
+],
+"homekit_settings.apple_home_homekit": [
+"Apple Home (HomeKit)",
+"f305a52e"
+],
+"homekit_settings.behind_one_bridge": [
+"Dietro un solo bridge",
+"29bb7522"
+],
+"homekit_settings.bridge_name": [
+"Nome del bridge",
+"5e160db3"
+],
+"homekit_settings.bridge_name_hint": [
+"Il nome che Casa mostra per il bridge (con bridge). Vuoto: il nome di questo server.",
+"f2c61f8a"
+],
+"homekit_settings.bridge_title": [
+"Bridge “{name}”",
+"98d31dcb"
+],
+"homekit_settings.cameras_in_apple_home": [
+"Telecamere in Apple Home",
+"e25a1955"
+],
+"homekit_settings.cameras_in_home": [
+"Telecamere in Casa",
+"031b3485"
+],
+"homekit_settings.cameras_shown": [
+"{n, plural, one {# telecamera è mostrata} many {# di telecamere sono mostrate} other {# telecamere sono mostrate}} in Apple Home.",
+"fc73a413"
+],
+"homekit_settings.cameras_to_add": [
+"Telecamere da aggiungere nell’app Casa",
+"7f590853"
+],
+"homekit_settings.change": [
+"Cambia",
+"a1de2fdd"
+],
+"homekit_settings.change_mode_body": [
+"Le telecamere dovranno poi essere aggiunte di nuovo ad Apple Home e quelle vecchie rimosse da lì.",
+"2fd1c685"
+],
+"homekit_settings.change_mode_title": [
+"Cambiare come sono le telecamere in Casa?",
+"b0c45668"
+],
+"homekit_settings.changing_this": [
+"Cambiare questa opzione significa aggiungere di nuovo le telecamere ad Apple Home.",
+"aeb99be8"
+],
+"homekit_settings.could_not_load": [
+"Impossibile caricare: ",
+"419029cb"
+],
+"homekit_settings.each_on_its_own": [
+"Ciascuna per conto suo",
+"2b0f617f"
+],
+"homekit_settings.for_seconds": [
+"{n} s",
+"37ea8f6e"
+],
+"homekit_settings.how": [
+"Ogni telecamera che attivi qui sotto è una telecamera HomeKit con video in diretta, un sensore di movimento (Casa può avvisarti del movimento) e un’immagine. Il video in diretta viene preparato per Casa alla dimensione richiesta (sulla scheda grafica se presente, altrimenti sul processore; audio in Opus se la telecamera ha l’audio). Di default ogni telecamera viene aggiunta ad Apple Home per conto suo, come Apple preferisce per le telecamere: aggiungile una per una nell’app Casa, con lo stesso codice di configurazione. <b>Dietro un solo bridge</b> le raggruppa tutte dietro un bridge che aggiungi una volta sola. I dispositivi Apple trovano AmberSight tramite Bonjour (mDNS, porta UDP 5353), quindi devono essere nella stessa rete (o raggiungerla tramite un hub domestico come un HomePod o un’Apple TV). <b>HomeKit non conosce gli account di AmberSight:</b> tutti quelli nell’Apple Home a cui le aggiungi vedono le telecamere che attivi qui, qualunque cosa possa vedere il loro account AmberSight.",
+"b2d6d188"
+],
+"homekit_settings.in_apple_home": [
+"In Apple Home ({n, plural, one {# dispositivo Apple abbinato} many {# di dispositivi Apple abbinati} other {# dispositivi Apple abbinati}}){live}.",
+"ad0b3f6e"
+],
+"homekit_settings.lead_main": [
+"Mostra le tue telecamere in Apple Home, con video in diretta, avvisi di movimento e immagini.",
+"7ecb4152"
+],
+"homekit_settings.lead_sub": [
+"Lascialo disattivato, a meno che tu non usi l’app Casa.",
+"d4bde183"
+],
+"homekit_settings.live_views": [
+"{n, plural, one {# visualizzazione in diretta} many {# di visualizzazioni in diretta} other {# visualizzazioni in diretta}}",
+"d2a9b570"
+],
+"homekit_settings.loading": [
+"Caricamento...",
+"17b11033"
+],
+"homekit_settings.more_settings": [
+"Altre impostazioni",
+"1386530d"
+],
+"homekit_settings.no_camera_shown": [
+"Nessuna telecamera mostrata per ora: attiva quelle da mostrare.",
+"292b5667"
+],
+"homekit_settings.no_cameras_yet": [
+"Ancora nessuna telecamera.",
+"af38c936"
+],
+"homekit_settings.not_certified": [
+"Casa dice che l’accessorio non è certificato: è normale, scegli <b>Aggiungi comunque</b>. Il telefono deve essere nella stessa rete di questo server.",
+"2b6d0890"
+],
+"homekit_settings.not_in_apple_home": [
+"Non ancora in Apple Home.",
+"879445cc"
+],
+"homekit_settings.off": [
+"Disattivato",
+"0dc6b4aa"
+],
+"homekit_settings.on_bridged": [
+"Attivo. Bridge “{name}” sulla porta {port}.",
+"76ddd0f7"
+],
+"homekit_settings.on_not_listening": [
+"Attivo. Non è ancora in ascolto.",
+"d5a1675a"
+],
+"homekit_settings.on_standalone": [
+"Attivo. Ogni telecamera per conto suo, porte a partire da {port}.",
+"4359894c"
+],
+"homekit_settings.pair_a_device": [
+"Abbina un dispositivo",
+"e61d9754"
+],
+"homekit_settings.pair_window_bridged": [
+"I dispositivi Apple possono abbinarsi solo dopo che premi <b>Abbina un dispositivo</b>, per 5 minuti. Compaiono allora il codice di configurazione e il codice QR.",
+"e2949ee9"
+],
+"homekit_settings.pair_window_standalone": [
+"I dispositivi Apple possono abbinarsi solo dopo che premi <b>Abbina un dispositivo</b> per una telecamera, per 5 minuti. Compaiono allora il codice di configurazione e il codice QR (lo stesso codice per ogni telecamera).",
+"90983778"
+],
+"homekit_settings.pairing_closed": [
+"Abbinamento chiuso",
+"72f6167d"
+],
+"homekit_settings.pairing_closed_now": [
+"L’abbinamento si è chiuso.",
+"43fab7ed"
+],
+"homekit_settings.pairing_now_other": [
+"Abbinamento in corso: <b>{from}</b>{since}. Non è il tuo dispositivo? Fermalo: quell’indirizzo non potrà più abbinarsi finché questa finestra non si chiude.",
+"a3695c11"
+],
+"homekit_settings.pairing_now_this_device": [
+"Abbinamento in corso: <b>{from}</b> (questo dispositivo){since}. È il dispositivo che mostra questa pagina.",
+"83f3e3b9"
+],
+"homekit_settings.pairing_open_for": [
+"<b>L’abbinamento è aperto per <span data-left>{time}</span>.</b> Si chiude quando viene aggiunto un dispositivo o quando lo fermi.",
+"6d77e80b"
+],
+"homekit_settings.pairing_reset": [
+"Abbinamento reimpostato",
+"af085a88"
+],
+"homekit_settings.pairings_removed": [
+"Abbinamenti rimossi",
+"5448acb8"
+],
+"homekit_settings.port_hint": [
+"Predefinita 51830 (Homebridge usa 51826). Le telecamere singole usano le porte successive, una ciascuna. Apri nel firewall queste porte TCP, UDP 5353 (Bonjour) e UDP 51900-51999 (video in diretta, [homekit] rtp_ports); su Windows AmberSight aggiunge la regola da solo quando viene eseguito come amministratore.",
+"d75a8404"
+],
+"homekit_settings.port_label": [
+"Porta",
+"e2c53cc6"
+],
+"homekit_settings.port_n": [
+"porta {port}",
+"41928f2b"
+],
+"homekit_settings.port_range": [
+"Inserisci una porta compresa tra 1 e 65535.",
+"82f913bb"
+],
+"homekit_settings.remove": [
+"Rimuovi",
+"21a5901d"
+],
+"homekit_settings.remove_body": [
+"Apple Home perde questa telecamera. Può essere aggiunta di nuovo con lo stesso codice di configurazione (premi prima Abbina un dispositivo).",
+"42d8db59"
+],
+"homekit_settings.remove_pairings": [
+"Rimuovi gli abbinamenti",
+"5f34d946"
+],
+"homekit_settings.remove_title": [
+"Rimuovere gli abbinamenti di questa telecamera?",
+"769a2376"
+],
+"homekit_settings.reset": [
+"Reimposta",
+"0ac8a560"
+],
+"homekit_settings.reset_body": [
+"Ogni dispositivo Apple abbinato perde ogni telecamera (e il bridge) e viene creato un nuovo codice di configurazione. Casa vede allora nuovi accessori: rimuovi lì quelli vecchi e configura di nuovo stanze, scene e automazioni.",
+"690f5f51"
+],
+"homekit_settings.reset_hint": [
+"Ogni telecamera (e il bridge) dimentica i suoi dispositivi Apple e viene creato un nuovo codice di configurazione. Non serve per aggiungerne uno di nuovo: una telecamera o un bridge rimosso nell’app Casa può essere aggiunto di nuovo con lo stesso codice, dopo <b>Abbina un dispositivo</b>.",
+"3db2e524"
+],
+"homekit_settings.reset_pairing": [
+"Reimposta abbinamento",
+"603844b4"
+],
+"homekit_settings.reset_title": [
+"Reimpostare l’abbinamento HomeKit?",
+"2c0aeca6"
+],
+"homekit_settings.same_switch": [
+"Lo stesso interruttore si trova nelle impostazioni di ogni telecamera (Audio &amp; testo).",
+"79228625"
+],
+"homekit_settings.saved": [
+"Salvato",
+"8a6979e4"
+],
+"homekit_settings.scan_code": [
+"Nell’app Casa su un iPhone o iPad: <b>+</b>, <b>Aggiungi accessorio</b>, poi inquadra questo codice, oppure tocca <b>Altre opzioni</b> e inserisci il codice di configurazione:",
+"fa20a238"
+],
+"homekit_settings.starting": [
+"Avvio...",
+"6cac833d"
+],
+"homekit_settings.stop": [
+"Ferma",
+"4b7f7705"
+],
+"homekit_settings.stop_and_start_again": [
+"Ferma e ricomincia",
+"65f1de90"
+],
+"homekit_settings.stop_pairing_body": [
+"Il dispositivo all’indirizzo {address} viene fermato e non potrà più abbinarsi finché questa finestra non si chiude. L’abbinamento resta aperto per altri 5 minuti per il tuo dispositivo.",
+"399db6bd"
+],
+"homekit_settings.stop_pairing_title": [
+"Fermare questo abbinamento?",
+"629009d8"
+],
+"homekit_settings.stopped_in_window": [
+"Fermati in questa finestra: {list}",
+"eaa58303"
+],
+"homekit_settings.stopped_open_again": [
+"Fermato; l’abbinamento è di nuovo aperto",
+"45a3161b"
+],
+"homekit_settings.switch_on_camera": [
+"Attiva una telecamera qui sotto: ognuna viene aggiunta ad Apple Home per conto suo.",
+"49f10193"
+],
+"homekit_settings.tested_with": [
+"<b>Provato con un iPhone e un hub HomePod mini</b> (una telecamera per accessorio). Se provi un’altra configurazione, raccontaci com’è andata nelle GitHub Discussions.",
+"00f886ac"
+],
+"homekit_settings.too_many_tries": [
+"Sono stati provati troppi codici di configurazione errati. L’abbinamento è chiuso finché non lo reimposti qui sotto.",
+"5166bc09"
+],
+"homekit_settings.waiting_for_device": [
+"In attesa che un dispositivo avvii l’abbinamento...",
+"ecaaeaab"
 ],
 "https_settings.add": [
 "Aggiungi",
@@ -13482,6 +13790,10 @@
 "Chiudi la timeline (Esc, Indietro, T)",
 "6768613c"
 ],
+"livetl.could_not_load": [
+"Impossibile caricare, nuovo tentativo",
+"a051bb96"
+],
 "livetl.drag_end": [
 "Trascina per spostare la fine",
 "8dc0972b"
@@ -14382,6 +14694,10 @@
 "Avvisi",
 "18996e5e"
 ],
+"palette.set_apple_home": [
+"Apple Home",
+"636f1366"
+],
 "palette.set_audit_log": [
 "Log di audit",
 "cb83f9ca"
@@ -15111,8 +15427,8 @@
 "cd86acc3"
 ],
 "settings.connections_desc": [
-"Avanzato: condividi gli stream, collega i server, un rilevatore esterno e il controllo automatico delle telecamere.",
-"7e745d05"
+"Avanzate: condivisione stream, Apple Home, collegamento server, un rilevatore esterno e il watchdog delle telecamere.",
+"17d4bb1c"
 ],
 "settings.connections_label": [
 "Connessioni",
@@ -15337,6 +15653,10 @@
 "settings.high": [
 "Alta",
 "be0a061d"
+],
+"settings.homekit_label": [
+"Apple Home",
+"636f1366"
 ],
 "settings.how_often": [
 "Con quale frequenza",
