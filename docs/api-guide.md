@@ -103,6 +103,7 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | POST | `/api/push/unsubscribe` | viewer (own) | Stop notifications on a device |
 | GET | `/api/push/devices` | viewer (own) | The account's devices with notifications on |
 | POST | `/api/push/test` | viewer (own) | Send a test notification to the account's devices |
+| GET (WebSocket) | `/api/alerts/ws[?since=<id>]` | viewer (own; not device tokens) | The account's notifications over a connection the app keeps open, no push service needed |
 | GET / POST | `/api/me/snooze` | viewer (own; device tokens too) | This account's snoozes / snooze one camera's push notifications for this account, 1–1440 minutes |
 | GET | `/api/tls` | viewer | HTTPS mode, certificate names, CA fingerprint, expiry |
 | GET / POST | `/api/settings` (`server` section) | **admin** | HTTPS on/off, extra certificate names, own certificate files |
@@ -325,7 +326,7 @@ can do the same to notice that the server was updated, or ignore it.
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
-| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `events_latest` = `GET /api/events?latest_per_camera=1` (the newest event per camera, section 5), `apple_plain_mp4` = to Apple's players (User-Agent `AppleCoreMedia`, or WebKit that is not Chrome or Android) a playback window or an event clip made from recordings is a plain MP4 (one `moov` with the whole sample table; converted answers stay fragmented), so AVFoundation starts without reading every fragment and long windows are fine, `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `events_latest` = `GET /api/events?latest_per_camera=1` (the newest event per camera, section 5), `apple_plain_mp4` = to Apple's players (User-Agent `AppleCoreMedia`, or WebKit that is not Chrome or Android) a playback window or an event clip made from recordings is a plain MP4 (one `moov` with the whole sample table; converted answers stay fragmented), so AVFoundation starts without reading every fragment and long windows are fine, `alerts_ws` = notifications over `GET /api/alerts/ws` (section 5, Notifications over a WebSocket), `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -459,7 +460,7 @@ can watch, but not change anything that would stay or reach other visitors` for
 | Refused | Why |
 |---|---|
 | everything under `/api/me/` except `GET /api/me/snooze` (password, two-step, device tokens, `GET /api/me/account`, signing devices out, snooze writes) | The account is shared: its sessions would show other visitors |
-| `POST /api/push/subscribe`, `POST /api/push/test` | Notifications |
+| `POST /api/push/subscribe`, `POST /api/push/test`, `GET /api/alerts/ws` | Notifications |
 | `POST /api/presence`, `DELETE /api/presence/:id` | Presence |
 | `POST /api/signals` | Signals |
 | `POST /api/links/:id/open` | Switching to a linked server |
@@ -2296,8 +2297,8 @@ loosely; check their documentation for the version you use.
    `/#settings/system/status`); an app can ignore it.
 
 8. **Test**: `POST /api/push/test` (body `{}`) sends a test notification (`type` `test`) to all
-   of the account's devices, browsers and apps, and answers
-   `{"devices": 2, "sent": 2, "failed": 0, "removed": 0}`. The web app's **Send a test** button
+   of the account's devices, browsers and apps (and apps connected over `/api/alerts/ws`), and answers
+   `{"devices": 2, "sockets": 1, "sent": 3, "failed": 0, "removed": 0}` (`sockets`: those apps). The web app's **Send a test** button
    does the same. At most one test every 10 seconds per account: sooner gets **429** with
    `Retry-After` (seconds) and `a test notification was just sent; try again in N seconds`.
 
@@ -2438,6 +2439,70 @@ the rest) are not per account and are not affected: to stop those, pause the cam
 disabling the account removes them. Every role may snooze the cameras it can see, and device
 tokens may too (the viewer scope is enough). On a server without accounts a snooze applies to
 every device.
+
+### Notifications over a WebSocket (no push service)
+
+Feature `alerts_ws`. An app that can keep a connection open (on Android, a foreground service)
+can get the account's notifications straight from the server, with no distributor app and no
+push server: open a WebSocket to `GET /api/alerts/ws` and keep it open. Each message is the
+same JSON an app gets through UnifiedPush ([The message](#the-message)), with an `id` added.
+
+- **Who gets what** is exactly as for push devices, worked out by the same code at every
+  message: camera alerts go to accounts that may see the camera, system messages to admins;
+  a snoozed camera, a paused camera, alerts off, the alert schedule, notify-only objects,
+  ignore areas, throttling and a camera whose alert settings leave out "push" all apply. The
+  buttons in `actions` are those the account may use. `POST /api/push/test` reaches it too.
+- **Sign in** as for the other calls: the session cookie (`as_session`) or a password in HTTP
+  Basic. Device tokens are refused (**403**), and so are the demo account and displays.
+  Without a valid sign-in the upgrade answers **401**: sign in again and reconnect.
+- **When the session ends** (signed out, expired, or ended in Settings) the server closes the
+  socket with close code **4401** (`session ended; sign in again`). When the account is
+  disabled, deleted or changed, the connection is dropped. Either way, reconnect, and if that
+  answers 401, sign in again.
+- A socket is not a device: it does not count against the 25 devices of an account and is
+  not listed in `GET /api/push/devices`. At most 25 sockets per account (**429** beyond that;
+  when many are opened at once, the extra ones may instead be accepted and closed at once with
+  code **4429**). On a server without accounts the 25 are for the whole server.
+- **Keepalive:** the server sends a WebSocket ping every 30 seconds (clients answer pongs
+  themselves). A connection the server hears nothing from (no pong, no message) for 75
+  seconds is closed within about 10 seconds after that. The app may also send `{"type":"ping"}`; the server answers
+  `{"type":"pong"}`. If you hear nothing for about 70 seconds, reconnect.
+- An app that cannot keep up (64 messages waiting, or a frame not taken within 10 seconds) is
+  disconnected; reconnect with `since`.
+
+**Messages.** The first message after connecting is always:
+
+```json
+{"type": "hello", "v": 1, "last_id": 1763842211123, "replayed": 2, "complete": true, "ping_s": 30}
+```
+
+then the `replayed` messages sent again (see below), then each new message as it happens:
+
+```json
+{"id": 1763842211124, "v": 1, "type": "event", "title": "Porch: person", "body": "...",
+ "camera": "Porch", "camera_id": 0, "event_id": "...", "labels": ["person"],
+ "at_ms": 1763842210000, "sent_ms": 1763842211124, "thumb": "/api/events/.../thumb",
+ "url": "/?alert=0&cam=Porch&at=1763842210000", "tag": "cam-porch", "urgent": true,
+ "actions": [{"action": "snooze", "title": "Snooze 1 h", "minutes": 60}]}
+```
+
+`type` is `event`, `camera`, `problem`, `notice` or `test` as in UnifiedPush messages, plus
+`hello` and `pong` on the socket only. Ignore types you do not know.
+
+**Ids and missed messages.** `id` is a number that only grows, also across server restarts
+(it is about the time in milliseconds). Keep the last `id` you handled and reconnect with
+`GET /api/alerts/ws?since=<id>`: the server first sends again every message after it that
+this account gets, from the last 10 minutes (at most 500 messages, across all accounts), with
+their original `id`, `at_ms` and `sent_ms` (the time it was first sent). Ids arrive in
+order on a connection, so the last one you handled is also the highest. Who gets a message
+again is decided at the reconnect, with the account's access then. The test button's message
+(`type` `test`) is not sent again. Drop any id you have
+already shown (if the phone also has UnifiedPush registered, the same alert can come both ways:
+the UnifiedPush copy has no `id`, so match on `event_id` and `tag`). `complete` is **false**
+when messages after `since` may be gone: older than 10 minutes, sent while no app had been
+connected for 10 minutes, or before the server restarted. Then fetch what you missed from
+`GET /api/events` (newest first) since the last alert you showed. Without `since`, nothing is
+sent again and `complete` is true.
 
 ### Unusual events
 
@@ -3395,6 +3460,13 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.13.1**
+
+- `GET /api/alerts/ws`: the account's notifications over a WebSocket the app keeps open, with
+  replay after the last id seen, so an app needs no push service (feature `alerts_ws`; see
+  [Notifications over a WebSocket](#notifications-over-a-websocket-no-push-service)).
+  `POST /api/push/test` answers `sockets` too.
 
 **New in 0.13.0**
 

@@ -277,12 +277,15 @@ pub async fn test(State(engine): State<Arc<Engine>>, axum::Extension(caller): ax
             .into_response();
     }
     let subs = engine.db.push_list(Some(&caller.0)).unwrap_or_default();
-    if subs.is_empty() {
-        return Json(serde_json::json!({ "devices": 0, "sent": 0, "failed": 0, "removed": 0 })).into_response();
+    // (Apps connected over /api/alerts/ws get it too, counted in "sockets".)
+    let sockets = crate::alerts_ws::taking(&caller.0);
+    if subs.is_empty() && sockets == 0 {
+        return Json(serde_json::json!({ "devices": 0, "sockets": 0, "sent": 0, "failed": 0, "removed": 0 })).into_response();
     }
     let n = subs.len();
     let site = crate::links::own_name(&engine);
     let eng = engine.clone();
+    let user = caller.0.clone();
     let r = tokio::task::spawn_blocking(move || {
         let m = crate::push::Message {
             title: format!("{site}: test"),
@@ -292,11 +295,14 @@ pub async fn test(State(engine): State<Arc<Engine>>, axum::Extension(caller): ax
             kind: crate::push::MsgType::Test,
             ..Default::default()
         };
-        crate::push::send_to(&eng, &subs, &m)
+        let on_sockets = crate::alerts_ws::publish_to_user(&eng, &user, &m);
+        let mut r = if subs.is_empty() { Default::default() } else { crate::push::send_to(&eng, &subs, &m) };
+        r.sent += on_sockets;
+        r
     })
     .await
     .unwrap_or_default();
-    Json(serde_json::json!({ "devices": n, "sent": r.sent, "failed": r.failed, "removed": r.removed })).into_response()
+    Json(serde_json::json!({ "devices": n, "sockets": sockets, "sent": r.sent, "failed": r.failed, "removed": r.removed })).into_response()
 }
 
 #[cfg(test)]

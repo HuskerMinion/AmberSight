@@ -119,6 +119,7 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/push/unsubscribe", post(crate::push_http::unsubscribe))
         .route("/push/devices", get(crate::push_http::devices))
         .route("/push/test", post(crate::push_http::test))
+        .route("/alerts/ws", get(crate::alerts_ws::alerts_ws))
         .route("/restream", get(crate::restream::http::get).put(crate::restream::http::put))
         .route("/homekit", get(crate::homekit::api::get).put(crate::homekit::api::put))
         .route("/homekit/pairing", post(crate::homekit::api::pairing))
@@ -1055,7 +1056,7 @@ fn admin_only_path(path: &str) -> bool {
 const DEMO_SIGN_IN_ONLY: &str = "this is the demo account: it is signed in to with demo sign-in only";
 
 /// The answer to the demo account for what it may not do.
-const DEMO_REFUSED: &str = "this is a demo account: it can watch, but not change anything that would stay or reach other visitors";
+pub const DEMO_REFUSED: &str = "this is a demo account: it can watch, but not change anything that would stay or reach other visitors";
 
 /// What the demo account (`[server] demo_user`) may not do, though it is a
 /// viewer: anything about the account (password, two-step, device tokens, its
@@ -1071,7 +1072,7 @@ fn demo_refused(path: &str, method: &axum::http::Method, query: Option<&str>) ->
     let q = |k: &str| query.map(|q| url::form_urlencoded::parse(q.as_bytes()).filter(|(n, _)| n == k).map(|(_, v)| v.into_owned()).collect::<Vec<_>>()).unwrap_or_default();
     let fitted_download = path == "/playback" && q("download").iter().any(|v| v == "1" || v == "true") && q("caps").iter().any(|c| !c.is_empty());
     (path.starts_with("/me/") && (write || path != "/me/snooze"))
-        || matches!(path, "/push/subscribe" | "/push/test" | "/export")
+        || matches!(path, "/push/subscribe" | "/push/test" | "/export" | "/alerts/ws")
         || (write && (path == "/presence" || path.starts_with("/presence/") || path == "/signals" || path == "/ui/prefs" || path.starts_with("/ui/orders/")))
         || matches!(parts.as_slice(), ["links", _, "open"] | ["cameras", _, "wake"])
         || fitted_download
@@ -3264,7 +3265,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4", "alerts_ws"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -8213,6 +8214,7 @@ mod viewer_write_tests {
         "/push/unsubscribe",
         "/push/devices",
         "/push/test",
+        "/alerts/ws",
         "/restream",
         "/homekit",
         "/homekit/pairing",
@@ -8457,6 +8459,7 @@ mod viewer_write_tests {
         ("/push/unsubscribe", "POST", "viewer"),
         ("/push/devices", "GET", "viewer"),
         ("/push/test", "POST", "viewer"),
+        ("/alerts/ws", "GET", "viewer"),
         ("/restream", "GET", "admin"),
         ("/restream", "PUT", "admin"),
         ("/homekit", "GET", "admin"),
@@ -10182,7 +10185,7 @@ mod demo_and_snooze_tests {
         assert!(!dl("camera=Porch&from=1&to=2&download=1"), "an untouched download");
         assert!(!dl("camera=Porch&from=1&to=2&caps=h264:1920x1080"), "playback (converted answers are refused by the transcoder)");
         assert!(no("/cameras/2/wake", &Method::POST));
-        for (p, m) in [("/me/snooze", Method::POST), ("/me/account", Method::GET), ("/me/password", Method::POST), ("/export", Method::GET), ("/export", Method::HEAD), ("/links/x/open", Method::POST), ("/ui/prefs", Method::PUT), ("/ui/orders/x", Method::PUT), ("/presence", Method::POST), ("/signals", Method::POST), ("/push/subscribe", Method::POST), ("/push/test", Method::POST)] {
+        for (p, m) in [("/me/snooze", Method::POST), ("/me/account", Method::GET), ("/me/password", Method::POST), ("/export", Method::GET), ("/export", Method::HEAD), ("/links/x/open", Method::POST), ("/ui/prefs", Method::PUT), ("/ui/orders/x", Method::PUT), ("/presence", Method::POST), ("/signals", Method::POST), ("/push/subscribe", Method::POST), ("/push/test", Method::POST), ("/alerts/ws", Method::GET)] {
             assert!(no(p, &m), "{p} {m}");
         }
         for (p, m) in [("/me/snooze", Method::GET), ("/ui/prefs", Method::GET), ("/cameras", Method::GET), ("/live/1/ws", Method::GET), ("/events", Method::GET), ("/clips/x-1", Method::GET), ("/push/unsubscribe", Method::POST), ("/presence", Method::GET), ("/signals", Method::GET), ("/links", Method::GET), ("/ui/diag", Method::POST)] {

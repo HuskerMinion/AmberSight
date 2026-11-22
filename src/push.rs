@@ -514,6 +514,7 @@ pub fn device_name(ua: &str) -> String {
 }
 
 /// Who a message is for.
+#[derive(Clone, Debug)]
 pub enum Audience {
     /// System problems: admin accounts only.
     Admins,
@@ -726,6 +727,16 @@ fn app_payload_for(m: &Message, rights: Rights) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The message as an app connected over `/api/alerts/ws` gets it: the app's
+/// push message (above) with the message's `id` and when it was first sent.
+pub fn socket_payload(m: &Message, rights: Rights, id: u64, sent_ms: i64) -> String {
+    let mut v: serde_json::Value = serde_json::from_slice(&app_payload_for(m, rights)).unwrap_or_else(|_| serde_json::json!({}));
+    v["id"] = id.into();
+    // (When it was first sent: the same in a copy sent again.)
+    v["sent_ms"] = sent_ms.into();
+    v.to_string()
+}
+
 /// The Urgency header (RFC 8030): alerts and problems wake the phone,
 /// other news can wait for its next wake-up.
 fn urgency(kind: &str, m: &Message) -> &'static str {
@@ -758,18 +769,22 @@ fn subject(alerts: &crate::config::AlertConfig) -> String {
 
 /// Whether any browser has notifications on (the "push" channel is set up).
 pub fn any_subscribed() -> bool {
-    engine().is_some_and(|e| e.db.push_list(None).is_ok_and(|l| !l.is_empty()))
+    crate::alerts_ws::listening() || engine().is_some_and(|e| e.db.push_list(None).is_ok_and(|l| !l.is_empty()))
 }
 
-/// Send to every device that should get it. Blocking (run it on a
-/// background thread). None when no device is signed up for it.
+/// Send to every device that should get it, and to the apps connected
+/// over `/api/alerts/ws` (alerts_ws.rs: the same audience). Blocking (run it
+/// on a background thread). None when no device is signed up for it.
 pub fn send(aud: &Audience, m: &Message) -> Option<Report> {
     let engine = engine()?;
-    let subs = recipients(&engine, aud)?;
+    let on_sockets = crate::alerts_ws::publish(&engine, aud, m);
+    let subs = recipients(&engine, aud).unwrap_or_default();
     if subs.is_empty() {
-        return None;
+        return (on_sockets > 0).then(|| Report { sent: on_sockets, ..Default::default() });
     }
-    Some(send_to(&engine, &subs, m))
+    let mut r = send_to(&engine, &subs, m);
+    r.sent += on_sockets;
+    Some(r)
 }
 
 /// The devices that get a message for `aud`: of accounts that may have it,

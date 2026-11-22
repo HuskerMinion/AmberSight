@@ -1,4 +1,5 @@
 mod ai;
+mod alerts_ws;
 mod ai_card;
 mod tls;
 mod dualserve;
