@@ -2608,6 +2608,14 @@ impl Db {
     }
 
     /// Newest first: (ts, user, ip, action, detail, status).
+    /// When arming last changed (epoch s; the audit log's "shield: ..." lines).
+    pub fn last_shield_change(&self) -> Result<Option<i64>> {
+        let conn = self.lock();
+        let mut st = conn.prepare("SELECT ts FROM audit WHERE action LIKE 'shield: %' ORDER BY id DESC LIMIT 1")?;
+        let mut rows = st.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn recent_audit(&self, limit: usize) -> Result<Vec<(i64, String, String, String, String, u16)>> {
         let conn = self.lock();
         let mut st = conn.prepare("SELECT ts, user, ip, action, detail, status FROM audit ORDER BY id DESC LIMIT ?1")?;
@@ -2729,6 +2737,14 @@ impl Db {
             params![format!("{so}|"), format!("{sn}|")],
         )?;
         tx.execute("UPDATE OR REPLACE ui_kv SET key = ?2 WHERE scope = 'card_fill_mode' AND key = ?1", params![so, sn])?;
+        // ... and so do catching up from a battery camera's card or its hub (tried, and its mode).
+        for scope in ["card_catchup", "hub_catchup_tries"] {
+            tx.execute(
+                "UPDATE OR REPLACE ui_kv SET key = ?2 || substr(key, length(?1) + 1) WHERE scope = ?3 AND substr(key, 1, length(?1)) = ?1",
+                params![format!("{so}|"), format!("{sn}|"), scope],
+            )?;
+        }
+        tx.execute("UPDATE OR REPLACE ui_kv SET key = ?2 WHERE scope = 'card_catchup_mode' AND key = ?1", params![so, sn])?;
         tx.commit()?;
         Ok(())
     }

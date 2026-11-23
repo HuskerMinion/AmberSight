@@ -81,7 +81,7 @@ pub struct Status {
 
 static STATUS: StdMutex<Option<HashMap<String, Status>>> = StdMutex::new(None);
 
-fn set_status(name: &str, f: impl FnOnce(&mut Status)) {
+pub(super) fn set_status(name: &str, f: impl FnOnce(&mut Status)) {
     let mut g = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     f(g.get_or_insert_with(Default::default).entry(name.to_string()).or_default());
 }
@@ -91,7 +91,7 @@ pub fn status(name: &str) -> Option<Status> {
     STATUS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(name).cloned())
 }
 
-fn clear_status(name: &str) {
+pub(super) fn clear_status(name: &str) {
     if let Some(m) = STATUS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         m.remove(name);
     }
@@ -254,16 +254,32 @@ pub fn note_all(engine: &Engine) {
     let handles: Vec<Arc<CameraHandle>> = engine.cameras.read().unwrap().iter().flatten().cloned().collect();
     for h in handles {
         let cfg = h.cfg.read().unwrap().clone();
-        if cfg.battery_uid().is_some() {
-            super::card_fill::note_mode_in(&engine.db, MODE_SCOPE, &cfg.name, records_events(engine, &h, &cfg), now);
+        if cfg.battery_uid().is_some() || cfg.hub_channel().is_some() {
+            let on = records_events(engine, &h, &cfg);
+            // A camera on a hub seen for the first time: its recordings of the
+            // look-back hours are on the hub already, so it counts as
+            // recording events since then, or since arming last changed
+            // (the weekly schedule's profiles are still looked at per minute).
+            if on && cfg.hub_channel().is_some() && super::card_fill::read_mode_in(&engine.db, MODE_SCOPE, &slug(&cfg.name)).is_none() {
+                let shield_ms = engine.db.last_shield_change().ok().flatten().map(|s| s * 1000);
+                let _ = engine.db.ui_put(MODE_SCOPE, &slug(&cfg.name), &format!("on|{}", first_seen_since(now, shield_ms)));
+                continue;
+            }
+            super::card_fill::note_mode_in(&engine.db, MODE_SCOPE, &cfg.name, on, now);
         }
     }
+}
+
+/// Since when a hub camera seen for the first time counts as recording
+/// events: the look-back hours, or since arming last changed when later.
+pub(super) fn first_seen_since(now_ms: i64, shield_change_ms: Option<i64>) -> i64 {
+    (now_ms - LOOK_BACK_MS).max(shield_change_ms.unwrap_or(i64::MIN))
 }
 
 /// Whether the camera recorded events all through [from, to] as far as can
 /// be known: so since before it began (armed, recording on), and the weekly
 /// schedule's profile kept recording on for each of its minutes.
-fn meant_recording(engine: &Engine, cfg: &CameraConfig, from_ms: i64, to_ms: i64) -> bool {
+pub(super) fn meant_recording(engine: &Engine, cfg: &CameraConfig, from_ms: i64, to_ms: i64) -> bool {
     let gap = Gap { from_ms, to_ms };
     if !super::card_fill::mode_allows(super::card_fill::read_mode_in(&engine.db, MODE_SCOPE, &slug(&cfg.name)), gap) {
         return false;
@@ -308,7 +324,7 @@ fn take_push(name: &str, now_ms: i64) -> Option<i64> {
 // ---- the loop ----
 
 /// One check at a time on this server (also what shutdown waits for).
-static BUSY: StdMutex<()> = StdMutex::new(());
+pub(super) static BUSY: StdMutex<()> = StdMutex::new(());
 
 /// At shutdown (after card_fill::begin_stop): wait up to `wait` for a check
 /// under way to end; true when it did.
@@ -491,12 +507,12 @@ fn resume_at(left: Option<i64>, complete: bool, last_end: Option<i64>, from: i64
     .max(from)
 }
 
-fn segments_dir(engine: &Engine, cfg: &CameraConfig) -> std::path::PathBuf {
+pub(super) fn segments_dir(engine: &Engine, cfg: &CameraConfig) -> std::path::PathBuf {
     let (_, folder_root) = engine.record_folder(cfg);
     folder_root.join("cameras").join(slug(&cfg.name)).join("segments")
 }
 
-fn clock_text(ms: i64) -> String {
+pub(super) fn clock_text(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default()
 }
 
@@ -656,7 +672,7 @@ fn check(engine: &Arc<Engine>, h: &Arc<CameraHandle>, cfg: &CameraConfig, client
 /// What was tried before for the recording `gap`, matched as already_handled
 /// matches (within 2 s: the camera's clock offset is read to the second for
 /// each listing); of several, the one with the most failed tries.
-fn earlier_try(tried: &[Attempt], gap: Gap) -> Option<Attempt> {
+pub(super) fn earlier_try(tried: &[Attempt], gap: Gap) -> Option<Attempt> {
     tried
         .iter()
         .filter(|a| a.from_ms <= gap.from_ms + 2_000 && a.to_ms >= gap.to_ms - 2_000 && a.from_ms >= gap.from_ms - 2_000 && a.to_ms <= gap.to_ms + 2_000)
@@ -666,7 +682,7 @@ fn earlier_try(tried: &[Attempt], gap: Gap) -> Option<Attempt> {
 
 /// What importing one recording did.
 #[derive(Debug, PartialEq)]
-enum Imported {
+pub(super) enum Imported {
     /// A new event, with its recording.
     Event,
     /// The recording, for an event that had none.
@@ -745,17 +761,27 @@ fn import(engine: &Arc<Engine>, h: &Arc<CameraHandle>, cfg: &CameraConfig, clien
     if kept == 0 {
         return Ok(Imported::Nothing("recorded here meanwhile".into()));
     }
+    Ok(make_event(engine, h, cfg, from_ms, to_ms, video_only, segment_seconds, &dir))
+}
+
+/// The event of a recording just imported into `dir` (from a card or a hub)
+/// over [from_ms, to_ms]: a new event with its thumbnail and AI check, or,
+/// when `video_only`, the recording given to the event that had none.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn make_event(engine: &Arc<Engine>, h: &Arc<CameraHandle>, cfg: &CameraConfig, from_ms: i64, to_ms: i64, video_only: bool, segment_seconds: u64, dir: &std::path::Path) -> Imported {
+    let name = cfg.name.clone();
+    let slug_name = slug(&name);
     engine.wait_for_indexing(std::time::Duration::from_secs(10));
     let (start_s, end_s) = (from_ms.div_euclid(1000), (to_ms + 999).div_euclid(1000));
     if video_only {
         // The event that had no recording plays it now.
         set_clip_of_events(engine, &name, start_s, end_s);
         info!("camera '{name}': added the camera's recording from {} to its event", clock_text(from_ms));
-        return Ok(Imported::Video);
+        return Imported::Video;
     }
     let id = format!("{slug_name}-{start_s}");
     if engine.db.get_event(&id).ok().flatten().is_some() {
-        return Ok(Imported::Video);
+        return Imported::Video;
     }
     let (thumb, ai) = look_at(engine, cfg, from_ms, to_ms);
     let motion_cfg = engine.config.lock().unwrap().motion.for_camera(cfg);
@@ -773,12 +799,12 @@ fn import(engine: &Arc<Engine>, h: &Arc<CameraHandle>, cfg: &CameraConfig, clien
         ai,
         &motion_cfg,
         &slug_name,
-        &dir,
+        dir,
         &engine.data_dir.join("clips"),
         &engine.data_dir.join("thumbs"),
         Some(super::clip::CardImport { notify }),
     );
-    Ok(Imported::Event)
+    Imported::Event
 }
 
 /// The epoch ms of the downloaded recording's header start, read on the

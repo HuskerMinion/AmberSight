@@ -1497,9 +1497,19 @@ impl CameraConfig {
         }
     }
 
-    /// Whether catching up from the card is on (battery cameras only).
+    /// A battery camera behind a Reolink hub: the hub channel it is on (its
+    /// recordings are kept on the hub, engine/hub_catchup.rs).
+    pub fn hub_channel(&self) -> Option<u32> {
+        if !self.on_demand || self.battery_uid().is_some() || crate::ingest::baichuan::is_baichuan_url(&self.url) {
+            return None;
+        }
+        self.reolink_channel
+    }
+
+    /// Whether catching up from the card (a battery camera's own, or its
+    /// hub's storage) is on.
     pub fn catch_up_on(&self) -> bool {
-        self.battery_uid().is_some() && self.catch_up_from_card.unwrap_or(true)
+        (self.battery_uid().is_some() || self.hub_channel().is_some()) && self.catch_up_from_card.unwrap_or(true)
     }
 
     /// Minutes between catch-up checks (0: only after a start, a reconnect or

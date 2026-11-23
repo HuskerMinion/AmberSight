@@ -5,6 +5,7 @@ pub(crate) mod ai_gpu;
 mod battery_clips;
 pub mod card_fill;
 pub mod card_catchup;
+pub mod hub_catchup;
 mod alerts;
 pub mod notify;
 pub mod health;
@@ -577,6 +578,10 @@ impl Engine {
         {
             let eng = engine.clone();
             thread::spawn(move || card_catchup::card_catchup_loop(eng));
+        }
+        {
+            let eng = engine.clone();
+            thread::spawn(move || hub_catchup::hub_catchup_loop(eng));
         }
         {
             let eng = engine.clone();
@@ -1245,6 +1250,7 @@ impl Engine {
             // ... nor what filling holes from its card tried.
             card_fill::forget_camera(&self.db, name);
             card_catchup::forget_camera(&self.db, name);
+            hub_catchup::forget_camera(&self.db, name);
             // ... nor its plate reading or alert rules.
             let mut c = self.config.lock().unwrap();
             c.lpr.cameras.retain(|l| &l.name != name);

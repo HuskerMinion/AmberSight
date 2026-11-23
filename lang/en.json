@@ -7081,6 +7081,14 @@
 "When a push is missed (push off in the Reolink app, Wi-Fi or DNS trouble) or AmberSight was down, the camera still records to its card. Its recordings of the last 12 hours that AmberSight has no event for are imported as events, marked \"from card\". Events older than a few minutes send no notification. Each look wakes the camera.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Import missed events from the hub",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"The hub keeps every recording the camera makes, but tells AmberSight only of those the camera's AI calls a person, vehicle or animal. A minute after the camera goes back to sleep, and every 15 minutes, its recordings of the last 12 hours that AmberSight has no event for are imported as events, marked \"from card\". Events older than a few minutes send no notification. Looking does not wake the camera.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} is restarting ({method})",
 "310d0479"

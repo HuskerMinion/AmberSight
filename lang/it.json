@@ -7082,6 +7082,14 @@
 "Quando una notifica push viene persa (push disattivato nell’app Reolink, problemi di Wi-Fi o DNS) oppure AmberSight era fermo, la telecamera registra comunque sulla sua scheda. Le sue registrazioni delle ultime 12 ore per cui AmberSight non ha alcun evento vengono importate come eventi, contrassegnati come «da scheda». Gli eventi più vecchi di qualche minuto non inviano notifiche. Ogni controllo risveglia la telecamera.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Importa gli eventi mancanti dall’hub",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"L’hub conserva ogni registrazione della telecamera, ma segnala ad AmberSight solo quelle che l’IA della telecamera riconosce come persona, veicolo o animale. Un minuto dopo che la telecamera torna a dormire, e ogni 15 minuti, le sue registrazioni delle ultime 12 ore per cui AmberSight non ha alcun evento vengono importate come eventi, contrassegnati come «da scheda». Gli eventi più vecchi di qualche minuto non inviano notifiche. Il controllo non risveglia la telecamera.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} si sta riavviando ({method})",
 "310d0479"

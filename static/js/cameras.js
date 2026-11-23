@@ -1086,6 +1086,13 @@ function catchUpHtml(c) {
   const st = c.card_catchup_status;
   const every = String(c.catch_up_every != null ? c.catch_up_every : 60);
   const opts = catchUpOptions(every);
+  if (c.catch_up_source === 'hub') {
+    // A camera behind a hub: its recordings are on the hub, and looking never wakes it (engine/hub_catchup.rs).
+    return swHtml('data-catchup', !!c.catch_up_from_card, t('cameras.import_missed_hub', 'Import missed events from the hub'),
+      t('cameras.import_missed_hub_desc', 'The hub keeps every recording the camera makes, but tells AmberSight only of those the camera\'s AI calls a person, vehicle or animal. A minute after the camera goes back to sleep, and every 15 minutes, its recordings of the last 12 hours that AmberSight has no event for are imported as events, marked "from card". Events older than a few minutes send no notification. Looking does not wake the camera.')) +
+      '<input type="hidden" data-k="catch_up_every" value="' + esc(every) + '">' +
+      '<div class="hint cs-cfst" aria-live="polite">' + (st && st.text ? esc(st.text) : '') + '</div>';
+  }
   return swHtml('data-catchup', !!c.catch_up_from_card, t('cameras.import_missed', "Import missed events from the camera's card"),
     t('cameras.import_missed_desc', 'When a push is missed (push off in the Reolink app, Wi-Fi or DNS trouble) or AmberSight was down, the camera still records to its card. Its recordings of the last 12 hours that AmberSight has no event for are imported as events, marked "from card". Events older than a few minutes send no notification. Each look wakes the camera.')) +
     field(t('cameras.look_at_card', 'Look at the card'), sel('catch_up_every', opts, every),

@@ -7082,6 +7082,14 @@
 "Quando um push é perdido (push desativado no app da Reolink, problemas de Wi-Fi ou DNS) ou o AmberSight estava fora do ar, a câmera continua gravando no cartão. As gravações das últimas 12 horas para as quais o AmberSight não tem nenhum evento são importadas como eventos, marcados como “do cartão”. Eventos com mais de alguns minutos não enviam notificação. Cada verificação acorda a câmera.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Importar eventos perdidos do hub",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"O hub guarda todas as gravações da câmera, mas só avisa o AmberSight sobre as que a IA da câmera reconhece como pessoa, veículo ou animal. Um minuto depois que a câmera volta a dormir, e a cada 15 minutos, as gravações das últimas 12 horas para as quais o AmberSight não tem nenhum evento são importadas como eventos, marcados como “do cartão”. Eventos com mais de alguns minutos não enviam notificação. A verificação não acorda a câmera.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} está reiniciando ({method})",
 "310d0479"

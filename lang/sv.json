@@ -7082,6 +7082,14 @@
 "När en push missas (push av i Reolink-appen, Wi-Fi- eller DNS-problem) eller AmberSight var nere spelar kameran ändå in på sitt kort. Dess inspelningar från de senaste 12 timmarna som AmberSight saknar händelse för importeras som händelser, markerade ”från kort”. Händelser som är äldre än några minuter skickar ingen avisering. Varje titt väcker kameran.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Importera missade händelser från hubben",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"Hubben sparar varje inspelning från kameran, men meddelar AmberSight bara dem som kamerans AI ser som en person, ett fordon eller ett djur. En minut efter att kameran somnat igen, och var 15:e minut, importeras dess inspelningar från de senaste 12 timmarna som AmberSight saknar händelse för som händelser, markerade ”från kort”. Händelser som är äldre än några minuter skickar ingen avisering. Att titta väcker inte kameran.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} startar om ({method})",
 "310d0479"

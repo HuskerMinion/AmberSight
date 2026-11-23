@@ -301,6 +301,10 @@ fn spawn_reolink_poller(engine: Arc<Engine>, handle: Arc<CameraHandle>, cfg: &Ca
                                 source: String::new(),
                             });
                         }
+                        // (A battery camera's wakes: its hub's recordings are looked at after each, see hub_catchup.rs.)
+                        if last.as_ref().map(|l| l.sleeping) != Some(s.sleeping) {
+                            super::hub_catchup::sleep_state(&name, s.sleeping, chrono::Utc::now().timestamp_millis());
+                        }
                         st.device_sleeping = s.sleeping;
                         last = Some(s);
                     }

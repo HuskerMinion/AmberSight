@@ -1927,8 +1927,10 @@ mod tests {
     fn sender_report_mid_file_applies_from_next_file_only() {
         let (_, plain) = run("plain-b", None, 10, 130);
         let (segs, sr) = run("sr-b", Some(65), 10, 130);
-        // First file was already written with arrival alignment.
-        assert!(sr[0].abs_diff(plain[0]) < 100, "{} vs {}", sr[0], plain[0]);
+        // First file was already written with arrival alignment (up to 50 ms
+        // of scheduling delay apart: a loaded Windows machine running the
+        // whole suite was seen 7 ms apart, over a tighter bound).
+        assert!(sr[0].abs_diff(plain[0]) < 800, "{} vs {}", sr[0], plain[0]);
         // The next file uses the report. The frame that started 100 ms before
         // the cut is in the first file (the file waits for audio up to its
         // end), so the next one, at the cut, is 120 ms (1920 ticks) into the

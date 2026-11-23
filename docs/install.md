@@ -1063,6 +1063,24 @@ The card has no file list these cameras answer, so AmberSight asks the camera fo
 one at a time from a moment on, reading only each one's first bytes; a look of 12 hours takes a few
 seconds per recording. Tested on a Reolink Argus 2; other battery models are not tested yet.
 
+### Battery cameras behind a Reolink hub
+
+A battery camera paired with a Reolink Home Hub records each trigger of its motion sensor to the
+hub. The hub tells AmberSight only about the triggers the camera's own AI calls a person, vehicle
+or animal (for a battery camera the hub's plain motion flag stays off), so other recordings would
+be on the hub with no event in AmberSight. AmberSight looks at the hub's recordings of the camera a
+minute after the camera goes back to sleep, and every 15 minutes, and imports each one of the last
+12 hours it has no event or recording for, the same way as from a battery camera's card (marked
+"from card", with its picture and AI check; one older than 5 minutes sends no alert). Looking does
+not wake the camera: the recordings are on the hub. It is on by default for a camera on a hub
+channel with **Battery camera** on (Settings > Cameras > the camera > Recording, **Import missed
+events from the hub**; `catch_up_from_card = false` turns it off; `catch_up_every = 0` leaves out
+the 15-minute looks). Recordings from times the camera was disarmed, not recording or with motion
+off are left on the hub. When AmberSight first sees such a camera it does not know how it was set
+before, so it counts it as recording events for the last 12 hours (or since arming last changed,
+when that is later); the weekly schedule's profiles are still followed. The camera's sound is kept
+only when its **Audio** setting is on. Tested with a battery camera on a Reolink Home Hub.
+
 ---
 
 ## Apple Home (HomeKit)

@@ -7082,6 +7082,14 @@
 "Als een push niet aankomt (push uit in de Reolink-app, problemen met Wi-Fi of DNS) of AmberSight uit was, neemt de camera nog steeds op zijn kaart op. Zijn opnames van de laatste 12 uur waarvoor AmberSight geen gebeurtenis heeft, worden als gebeurtenissen geïmporteerd, gemarkeerd als “van kaart”. Gebeurtenissen die al een paar minuten oud zijn, sturen geen notificatie. Elke keer kijken maakt de camera wakker.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Gemiste gebeurtenissen importeren van de hub",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"De hub bewaart elke opname van de camera, maar meldt AmberSight alleen de opnames die de AI van de camera als persoon, voertuig of dier herkent. Een minuut nadat de camera weer slaapt, en elke 15 minuten, worden zijn opnames van de laatste 12 uur waarvoor AmberSight geen gebeurtenis heeft als gebeurtenissen geïmporteerd, gemarkeerd als “van kaart”. Gebeurtenissen die al een paar minuten oud zijn, sturen geen notificatie. Kijken maakt de camera niet wakker.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} wordt herstart ({method})",
 "310d0479"

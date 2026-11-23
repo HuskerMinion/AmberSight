@@ -35,7 +35,16 @@ pub struct ReolinkClient {
     /// For recording downloads: no total time limit (a big file takes a
     /// while), but each wait for the camera is limited.
     dl_agent: ureq::Agent,
+    /// The one recording a device sent whole when part of it was asked (a
+    /// Reolink hub ignores Range): parts of it are served from here.
+    whole: Option<(String, Vec<u8>)>,
+    /// What all downloads brought (see bytes_read).
+    read_total: u64,
 }
+
+/// A recording sent whole instead of the part asked is kept in memory up to
+/// this size (a battery camera's recording on a hub: a few MB to tens).
+pub const MAX_WHOLE_BYTES: u64 = 96 << 20;
 
 /// Tokens last an hour; renew a little early.
 const TOKEN_LIFE: Duration = Duration::from_secs(50 * 60);
@@ -73,7 +82,7 @@ impl ReolinkClient {
             .http_status_as_error(false)
             .build()
             .new_agent();
-        ReolinkClient { base: format!("https://{host}"), user: user.into(), pass: pass.into(), token: None, agent, login_blocked_until: None, dl_agent }
+        ReolinkClient { base: format!("https://{host}"), user: user.into(), pass: pass.into(), token: None, agent, login_blocked_until: None, dl_agent, whole: None, read_total: 0 }
     }
 
     /// A client for a full base address ("https://host:port"), e.g. when
@@ -210,6 +219,7 @@ impl ReolinkClient {
 
     /// Best-effort sign-out (devices allow only a few sessions).
     pub fn logout(&mut self) {
+        self.whole = None;
         if let Some((t, _)) = self.token.take() {
             let _ = self.post("Logout", Some(&t), &json!([{ "cmd": "Logout", "param": {} }]));
         }
@@ -271,6 +281,14 @@ pub fn is_unreachable(e: &anyhow::Error) -> bool {
 /// A value as written in an address's query (percent-encoded).
 fn query_part(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+/// A recording's path in a query: as query_part, but its slashes (and
+/// `-_.`) as they are. A Reolink hub hangs up, unanswered, on a download
+/// whose path has its slashes as %2F; cameras take either.
+fn path_part(s: &str) -> String {
+    const SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC.remove(b'/').remove(b'-').remove(b'_').remove(b'.');
+    percent_encoding::utf8_percent_encode(s, SET).to_string()
 }
 
 /// Most recordings one search may list: a two-hour hole holds about a
@@ -421,10 +439,20 @@ impl ReolinkClient {
     /// Bytes of a card recording: all of it, or `range` (first, last
     /// inclusive).
     pub fn download(&mut self, name: &str, range: Option<(u64, u64)>) -> Result<Vec<u8>> {
+        self.download_max(name, range, 2 << 30)
+    }
+
+    /// As `download`; a whole file (`range` None) is at most `max` bytes.
+    pub fn download_max(&mut self, name: &str, range: Option<(u64, u64)>, max: u64) -> Result<Vec<u8>> {
         use std::io::Read;
+        if let (Some((a, b)), Some((n, bytes))) = (range, self.whole.as_ref()) {
+            if n == name {
+                return Ok(part_of(bytes, a, b));
+            }
+        }
         let t = self.login()?;
         let leaf = name.rsplit('/').next().unwrap_or(name);
-        let url = format!("{}/cgi-bin/api.cgi?cmd=Download&source={}&output={}&token={}", self.base, query_part(name), query_part(leaf), query_part(&t));
+        let url = format!("{}/cgi-bin/api.cgi?cmd=Download&source={}&output={}&token={}", self.base, path_part(name), path_part(leaf), query_part(&t));
         let mut req = self.dl_agent.get(&url);
         if let Some((a, b)) = range {
             req = req.header("Range", &format!("bytes={a}-{b}"));
@@ -435,18 +463,75 @@ impl ReolinkClient {
             self.token = None;
             bail!("the camera refused the download (HTTP {status})");
         }
-        if range.is_some() && status == 200 {
-            // A camera that ignores Range sends the whole file: not what was asked.
-            bail!("the camera does not serve part of a recording");
+        // (The length the device says, when it says one: what came must be all of it.)
+        let declared: Option<u64> = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
+        let whole = range.is_none() || status == 200;
+        let limit = match range {
+            // A device that ignores Range (a Reolink hub) sends the whole
+            // file: kept, when not too big, and the parts served from it.
+            Some(_) if status == 200 => MAX_WHOLE_BYTES,
+            Some((a, b)) => b.saturating_sub(a).saturating_add(1),
+            None => max,
+        };
+        if declared.is_some_and(|d| d > limit) {
+            bail!("the recording is too big to download ({} MB)", declared.unwrap_or(0) >> 20);
         }
-        let limit = range.map(|(a, b)| b.saturating_sub(a).saturating_add(1)).unwrap_or(2 << 30);
         let mut body = Vec::new();
-        resp.body_mut().with_config().limit(limit.saturating_add(1)).reader().read_to_end(&mut body).map_err(|e| anyhow!("download: {}", self.scrub(e.to_string())))?;
+        let r = resp.body_mut().with_config().limit(limit.saturating_add(1)).reader().read_to_end(&mut body);
+        self.read_total += body.len() as u64;
+        match declared {
+            // With a length: cut short is an error.
+            Some(d) => {
+                r.map_err(|e| anyhow!("download: {}", self.scrub(e.to_string())))?;
+                if body.len() as u64 != d {
+                    bail!("the download was cut short ({} of {d} bytes)", body.len());
+                }
+            }
+            // Without one, a whole file ends where the connection does
+            // (what came is checked as a video after); a part needs a length.
+            None if whole => ended_ok(r, &body).map_err(|e| anyhow!("download: {}", self.scrub(e.to_string())))?,
+            None => {
+                r.map_err(|e| anyhow!("download: {}", self.scrub(e.to_string())))?;
+            }
+        }
         if body.len() as u64 > limit {
-            bail!("the camera sent more than was asked");
+            bail!("the camera sent more than was asked, or the recording is too big");
+        }
+        if let (Some((a, b)), 200) = (range, status) {
+            let part = part_of(&body, a, b);
+            // Kept for the next parts only when the device said its length
+            // (and all of it came): with none, a copy cut short could not be told.
+            if declared.is_some() {
+                self.whole = Some((name.to_string(), body));
+            }
+            return Ok(part);
         }
         Ok(body)
     }
+
+    /// Bytes downloaded by this client so far (a whole file sent for a part
+    /// counts in full).
+    pub fn bytes_read(&self) -> u64 {
+        self.read_total
+    }
+}
+
+/// A whole recording read to its end: a Reolink hub closes the connection
+/// after the last byte without TLS's close message, which counts as the
+/// end when something came (what is read is checked as a video after).
+fn ended_ok(r: std::io::Result<usize>, body: &[u8]) -> std::io::Result<()> {
+    match r {
+        Ok(_) => Ok(()),
+        Err(e) if !body.is_empty() && (e.kind() == std::io::ErrorKind::UnexpectedEof || e.to_string().contains("close_notify")) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Bytes a..=b of a recording held whole (what is there of them).
+fn part_of(bytes: &[u8], a: u64, b: u64) -> Vec<u8> {
+    let len = bytes.len() as u64;
+    let (a, end) = (a.min(len), b.saturating_add(1).min(len));
+    bytes[a as usize..end.max(a) as usize].to_vec()
 }
 
 /// Pull the channel's state out of a batch answer.
@@ -524,6 +609,50 @@ pub fn parse_battery(answer: &Value) -> Option<(u8, bool)> {
         _ => false,
     };
     Some((pct as u8, charging))
+}
+
+#[cfg(test)]
+mod whole_tests {
+    /// Lab check (ignored): AS_HUB, AS_HUB_USER, AS_HUB_PASS; downloads the
+    /// newest recording of channel 0 whole and prints its size.
+    #[test]
+    #[ignore]
+    fn lab_hub_download() {
+        let (Ok(host), Ok(user), Ok(pass)) = (std::env::var("AS_HUB"), std::env::var("AS_HUB_USER"), std::env::var("AS_HUB_PASS")) else { return };
+        let mut c = super::ReolinkClient::with_base(&format!("https://{host}"), &user, &pass);
+        let now = c.camera_clock().unwrap();
+        let files = c.search(0, "main", now - chrono::Duration::hours(6), now).unwrap();
+        let f = files.last().expect("a recording");
+        eprintln!("file {} listed {} bytes", f.name.rsplit('/').next().unwrap_or(""), f.size);
+        match c.download(&f.name, None) {
+            Ok(b) => eprintln!("whole: {} bytes, box {:?}", b.len(), String::from_utf8_lossy(&b[4.min(b.len())..8.min(b.len())])),
+            Err(e) => eprintln!("whole: error {e:#}"),
+        }
+        for (i, g) in files.iter().rev().take(3).enumerate() {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let t0 = std::time::Instant::now();
+            match c.download(&g.name, None) {
+                Ok(b) => eprintln!("again {i}: {} bytes in {:?}", b.len(), t0.elapsed()),
+                Err(e) => eprintln!("again {i}: error {e:#}"),
+            }
+        }
+        c.logout();
+    }
+
+    #[test]
+    fn a_whole_recording_ends_where_the_connection_does() {
+        let eof = || Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "peer closed connection without sending TLS close_notify"));
+        assert!(super::ended_ok(eof(), b"data").is_ok());
+        assert!(super::ended_ok(eof(), b"").is_err(), "nothing came");
+        assert!(super::ended_ok(Err(std::io::Error::other("reset")), b"data").is_err());
+        assert!(super::ended_ok(Ok(4), b"data").is_ok());
+        assert_eq!(super::part_of(b"abcdef", 2, 3), b"cd");
+        assert_eq!(super::part_of(b"abc", 2, 10), b"c");
+        assert!(super::part_of(b"abc", 5, 10).is_empty());
+        // A hub's recording path keeps its slashes; the rest is escaped.
+        assert_eq!(super::path_part("Mp4Record/2026-11-22/RecM05_20261122_1.mp4"), "Mp4Record/2026-11-22/RecM05_20261122_1.mp4");
+        assert_eq!(super::path_part("a b&c=d?/e"), "a%20b%26c%3Dd%3F/e");
+    }
 }
 
 #[cfg(test)]

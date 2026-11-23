@@ -302,7 +302,7 @@ pub enum Outcome {
 /// the second, cut off (never rounded), so a single reading is up to a second
 /// behind. Reading until the second changes catches it at the start of a
 /// second, to within one round trip.
-fn measure_clock(client: &mut ReolinkClient) -> Result<CardClock> {
+pub fn measure_clock(client: &mut ReolinkClient) -> Result<CardClock> {
     let first = client.camera_clock()?;
     let mut last = (first, chrono::Utc::now().timestamp_millis());
     for _ in 0..14 {
@@ -417,8 +417,10 @@ fn read_index(client: &mut ReolinkClient, f: &CardFile, budget: &mut Budget) -> 
             bail!("the allowance for this hole ran out");
         }
         let to = want.min(f.size).saturating_sub(1);
+        let before = client.bytes_read();
         head = client.download(&f.name, Some((0, to))).context("reading the start of the recording")?;
-        budget.spend(head.len() as u64);
+        // (All that came: a device that ignores Range sends the whole file.)
+        budget.spend(client.bytes_read() - before);
         match mp4read::find_moov(&head)? {
             MoovAt::Found { offset, size } => {
                 let end = offset.checked_add(size).filter(|&e| e <= f.size).ok_or_else(|| anyhow!("the recording's index runs past its end"))?;
@@ -613,6 +615,7 @@ fn fetch(client: &mut ReolinkClient, name: &str, lo: u64, hi: u64, budget: &mut 
             return Err(OutOfBudget.into());
         }
         let to = at.saturating_add(REQUEST_BYTES).min(hi) - 1;
+        let before = client.bytes_read();
         let part = match client.download(name, Some((at, to))) {
             Ok(p) => p,
             Err(_) => {
@@ -620,7 +623,7 @@ fn fetch(client: &mut ReolinkClient, name: &str, lo: u64, hi: u64, budget: &mut 
                 client.download(name, Some((at, to)))?
             }
         };
-        budget.spend(part.len() as u64);
+        budget.spend(client.bytes_read() - before);
         if (part.len() as u64) < (to - at + 1).min(MIN_PROGRESS) {
             bail!("the camera sent too little ({} bytes)", part.len());
         }
@@ -792,6 +795,8 @@ mod tests {
         trickle: bool,
         /// After this many downloads, it stops answering them.
         drop_after: Option<usize>,
+        /// Ignores Range and sends the whole file (a Reolink hub does).
+        whole_only: bool,
     }
 
     /// A camera's web interface on a local port: sign-in, clock, search and
@@ -867,7 +872,7 @@ mod tests {
                     if q.drop_after.is_some_and(|n| downloads > n) {
                         continue; // hangs up without an answer
                     }
-                    match range.and_then(|r| r.split_once('-').map(|(a, b)| (a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap()))) {
+                    match range.filter(|_| !q.whole_only).and_then(|r| r.split_once('-').map(|(a, b)| (a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap()))) {
                         Some((a, b)) => {
                             let b = b.min(mp4.len() - 1);
                             let b = if q.trickle && a > 0 { a } else { b };
@@ -923,6 +928,30 @@ mod tests {
         // Only part of each file was asked for, in byte ranges.
         let asked = cam.requests.lock().unwrap().iter().filter(|l| l.contains("cmd=Download")).count();
         assert!(asked >= 4, "{asked} downloads");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// A device that ignores Range (a Reolink hub) and sends the whole file:
+    /// filled all the same, each file downloaded once.
+    #[test]
+    fn a_device_that_sends_whole_files_fills_too() {
+        let zone = -7 * 3_600_000i64;
+        let t0 = (chrono::Utc::now().timestamp() - 600) * 1000;
+        let card = |ms: i64| chrono::DateTime::from_timestamp_millis(ms + zone).unwrap().naive_utc();
+        let files = vec![(card(t0), card(t0 + 10_000), "Mp4Record/2026-11-22/RecM05_20261122_101721_101731_0_1400_x.mp4".to_string())];
+        let cam = fake_camera_with(zone, 0, files, card_mp4(), Quirks { whole_only: true, ..Default::default() });
+        let dir = std::env::temp_dir().join(format!("amber-cardfill-whole-{}", std::process::id())).join("segments");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let mut client = ReolinkClient::with_base(&format!("http://127.0.0.1:{}", cam.port), "u", "p");
+        let job = Job { gap: Gap { from_ms: t0, to_ms: t0 + 10_000 }, channel: 0, stream: "main", audio: true, dir: &dir, stem: "side", segment_seconds: 60, time_limit: MAX_GAP_TIME };
+        let out = match fill(&mut client, &job, &|| false).unwrap() {
+            Outcome::Filled(f) => f,
+            Outcome::NothingOnCard(w) => panic!("nothing: {w}"),
+        };
+        assert_eq!(out.segments.len(), 1);
+        assert!(out.segments[0].video_frames >= 150, "{}", out.segments[0].video_frames);
+        let asked = cam.requests.lock().unwrap().iter().filter(|l| l.contains("cmd=Download")).count();
+        assert_eq!(asked, 1, "downloaded once, the parts served from it");
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 

@@ -7082,6 +7082,14 @@
 "Wenn ein Push verpasst wird (Push in der Reolink-App aus, WLAN- oder DNS-Probleme) oder AmberSight nicht lief, nimmt die Kamera trotzdem auf ihre Karte auf. Ihre Aufnahmen der letzten 12 Stunden, zu denen AmberSight kein Ereignis hat, werden als Ereignisse importiert und mit „von Karte“ markiert. Ereignisse, die älter als einige Minuten sind, senden keine Benachrichtigung. Jedes Nachsehen weckt die Kamera.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Verpasste Ereignisse vom Hub importieren",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"Der Hub behält jede Aufnahme der Kamera, meldet AmberSight aber nur die, die die KI der Kamera als Person, Fahrzeug oder Tier erkennt. Eine Minute, nachdem die Kamera wieder eingeschlafen ist, und alle 15 Minuten werden ihre Aufnahmen der letzten 12 Stunden, zu denen AmberSight kein Ereignis hat, als Ereignisse importiert und mit „von Karte“ markiert. Ereignisse, die älter als einige Minuten sind, senden keine Benachrichtigung. Das Nachsehen weckt die Kamera nicht.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} startet neu ({method})",
 "310d0479"

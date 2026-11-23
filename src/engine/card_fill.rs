@@ -137,7 +137,7 @@ impl Drop for Session {
 /// Sign in to the camera's web API over HTTPS; plain HTTP only when nothing
 /// answers on the HTTPS port (not after a refused sign-in or a certificate
 /// problem, so the password is not sent unencrypted for those).
-fn connect(t: &Target) -> anyhow::Result<Session> {
+pub(super) fn connect(t: &Target) -> anyhow::Result<Session> {
     connect_to(&[format!("https://{}", t.host), format!("http://{}", t.host)], &t.user, &t.pass)
 }
 

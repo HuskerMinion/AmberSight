@@ -3461,6 +3461,13 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.13.2**
+
+- Battery cameras behind a Reolink hub: events AmberSight missed are imported from the hub's
+  recordings (`from_card: true`, as for a battery camera's card); `GET /api/cameras` (admin) has
+  `catch_up_from_card`, `catch_up_every` and `card_catchup_status` for them too, and
+  `catch_up_source` (`"hub"` or `"card"`).
+
 **New in 0.13.1**
 
 - `GET /api/alerts/ws`: the account's notifications over a WebSocket the app keeps open, with
@@ -3649,7 +3656,9 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
   last_import, last_imported, imported}`, times in epoch ms; `null` until the first look); `GET
   /api/health` cameras have `card_catchup`. An imported event older than 5 minutes sends no alert;
   its AI review's `alert.why` is `"from_card"`. Its recording files are named
-  `<camera>-card-<ms>-rec-seg…` and count in `card_spans`.
+  `<camera>-card-<ms>-rec-seg…` and count in `card_spans`. A battery camera behind a Reolink hub
+  (Battery camera on, a hub channel) is caught up the same way from the hub's recordings: `GET
+  /api/cameras` has `catch_up_source`: `"hub"` for it (`"card"` for a battery camera's own card).
 - Cameras on the ffmpeg pipeline that record all the time: `GET /api/playback` (also fast,
   reverse and `/api/playback/picture`) and time-lapses now play their main-stream recordings.
   Before, those were only in `GET /api/recordings` spans and the calendar, so playback answered

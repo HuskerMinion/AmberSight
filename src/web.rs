@@ -1907,7 +1907,7 @@ async fn set_overlay_var_http(
 /// What GET /api/cameras leaves out for anyone not an admin (viewers and
 /// operators alike): logins, folders, event copies, capture helpers, pushed
 /// senders, hardware and the watchdog.
-const HIDDEN_FROM_NON_ADMINS: [&str; 27] = ["homekit", "via_note", "connect", "baichuan_port", "baichuan_channel", "controls_cfg", "username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
+const HIDDEN_FROM_NON_ADMINS: [&str; 28] = ["catch_up_source", "homekit", "via_note", "connect", "baichuan_port", "baichuan_channel", "controls_cfg", "username", "uid", "fill_from_card", "card_fill_status", "catch_up_from_card", "catch_up_every", "card_catchup_status", "folder", "copy_events_to", "copy_events_keep_days", "copy_events_only_confirmed", "copy_events_status", "capture", "capture_status", "push_sender", "hwaccel", "decode", "has_password", "watchdog", "transport", "ffmpeg_why"];
 
 /// `GET /api/camera-defaults`: the shared detection and alert settings a
 /// camera uses where it sets none of its own (motion, AI, alert priority and
@@ -2075,8 +2075,10 @@ async fn list_cameras(
             v["fill_from_card"] = cfg.fill_from_card.into();
             v["card_fill_status"] = if cfg.fill_from_card { serde_json::json!(crate::engine::card_fill::status(&cfg.name)) } else { serde_json::Value::Null };
             // Battery cameras: events caught up from the camera's own card (admins only).
-            if cfg.battery_uid().is_some() {
+            if cfg.battery_uid().is_some() || cfg.hub_channel().is_some() {
                 v["catch_up_from_card"] = cfg.catch_up_on().into();
+                // Where it looks: the camera's own card, or its hub's recordings (engine/hub_catchup.rs).
+                v["catch_up_source"] = if cfg.hub_channel().is_some() { "hub" } else { "card" }.into();
                 v["catch_up_every"] = cfg.catch_up_minutes().into();
                 v["card_catchup_status"] = if cfg.catch_up_on() { serde_json::json!(crate::engine::card_catchup::status(&cfg.name)) } else { serde_json::Value::Null };
             }

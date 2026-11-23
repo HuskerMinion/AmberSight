@@ -7082,6 +7082,14 @@
 "Gdy powiadomienie push zostanie pominięte (push wyłączony w aplikacji Reolink, kłopoty z Wi-Fi lub DNS) albo AmberSight nie działał, kamera nadal nagrywa na swoją kartę. Jej nagrania z ostatnich 12 godzin, dla których AmberSight nie ma zdarzenia, są importowane jako zdarzenia oznaczone „z karty”. Zdarzenia starsze niż kilka minut nie wysyłają powiadomień. Każde sprawdzenie budzi kamerę.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Importuj pominięte zdarzenia z huba",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"Hub przechowuje każde nagranie kamery, ale zgłasza AmberSight tylko te, które AI kamery rozpoznaje jako osobę, pojazd lub zwierzę. Minutę po tym, jak kamera znów zaśnie, i co 15 minut jej nagrania z ostatnich 12 godzin, dla których AmberSight nie ma zdarzenia, są importowane jako zdarzenia oznaczone „z karty”. Zdarzenia starsze niż kilka minut nie wysyłają powiadomień. Sprawdzanie nie budzi kamery.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} uruchamia się ponownie ({method})",
 "310d0479"

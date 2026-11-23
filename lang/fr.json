@@ -7082,6 +7082,14 @@
 "Quand une notification push est manquée (push désactivé dans l’application Reolink, problème de Wi-Fi ou de DNS) ou qu’AmberSight était arrêté, la caméra enregistre quand même sur sa carte. Ses enregistrements des 12 dernières heures pour lesquels AmberSight n’a aucun événement sont importés comme événements, marqués « depuis la carte ». Les événements vieux de plus de quelques minutes n’envoient aucune notification. Chaque consultation réveille la caméra.",
 "1c6be4b9"
 ],
+"cameras.import_missed_hub": [
+"Importer les événements manqués depuis le hub",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"Le hub garde chaque enregistrement de la caméra, mais ne signale à AmberSight que ceux que l’IA de la caméra reconnaît comme une personne, un véhicule ou un animal. Une minute après que la caméra s’est rendormie, et toutes les 15 minutes, ses enregistrements des 12 dernières heures pour lesquels AmberSight n’a aucun événement sont importés comme événements, marqués « depuis la carte ». Les événements vieux de plus de quelques minutes n’envoient aucune notification. La consultation ne réveille pas la caméra.",
+"bb2cc90f"
+],
 "cameras.is_restarting": [
 "{name} redémarre ({method})",
 "310d0479"
