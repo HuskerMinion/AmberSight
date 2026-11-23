@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn request_body_layout() {
-        let body = video_request_body("jeff", "99rm250");
+        let body = video_request_body("user", "secret");
         assert_eq!(body.len(), 4 + 4 + 4 + 161);
         assert_eq!(&body[0..4], &0u32.to_le_bytes());
         assert_eq!(&body[4..8], b"FOSC");
@@ -517,12 +517,12 @@ mod tests {
         assert_eq!(block_len, 161);
         let block = &body[12..];
         assert_eq!(block[0], 0x00, "flag byte");
-        // username field: "jeff" then nulls to 64
-        assert_eq!(&block[1..5], b"jeff");
+        // username field: "user" then nulls to 64
+        assert_eq!(&block[1..5], b"user");
         assert!(block[5..65].iter().all(|&b| b == 0));
         // password field starts at offset 65
-        assert_eq!(&block[65..72], b"99rm250");
-        assert!(block[72..129].iter().all(|&b| b == 0));
+        assert_eq!(&block[65..71], b"secret");
+        assert!(block[71..129].iter().all(|&b| b == 0));
     }
 
     fn annexb(nals: &[&[u8]]) -> Vec<u8> {
