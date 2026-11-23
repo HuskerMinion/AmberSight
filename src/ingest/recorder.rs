@@ -842,6 +842,10 @@ enum Reader {
     /// setting): converted video and AAC audio arrive on a channel; the
     /// handle stops the stream when dropped.
     Wired(super::baichuan::wired::WiredPreview),
+    /// A Foscam camera over its native `SERVERPUSH` protocol: converted video
+    /// arrives on a channel; the handle stops the stream when dropped. Video
+    /// only (no audio yet).
+    Foscam(Box<super::foscam::FoscamStream>),
 }
 
 /// A playing stream (RTSP, or HTTP-FLV) with its video and optional audio.
@@ -1088,6 +1092,13 @@ impl OpenStream {
                     }
                     return Some(Ok(self.settle_params(item)));
                 }
+                Reader::Foscam(h) => {
+                    let item = match h.rx.recv().await? {
+                        Ok(i) => i,
+                        Err(e) => return Some(Err(anyhow::anyhow!(e))),
+                    };
+                    return Some(Ok(self.settle_params(item)));
+                }
             }
         }
     }
@@ -1152,6 +1163,7 @@ impl OpenStream {
             }
             Reader::Baichuan(h) => Ok(h.video_params()),
             Reader::Wired(h) => Ok(h.video_params()),
+            Reader::Foscam(h) => Ok(h.video_params()),
         }
     }
 
@@ -1169,6 +1181,7 @@ impl OpenStream {
             Reader::Flv(f) => f.audio_config().map(|asc| AudioCodec::Aac { config: asc.to_vec() }),
             Reader::Baichuan(_) => None,
             Reader::Wired(h) => h.audio_config().map(|config| AudioCodec::Aac { config }),
+            Reader::Foscam(_) => None,
         }
     }
 
@@ -1218,6 +1231,7 @@ impl OpenStream {
                     clock_rate: rate,
                 })
             }
+            Reader::Foscam(_) => None,
         }
     }
 }
@@ -1285,6 +1299,10 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
     if super::flv::is_flv_url(&src.url) {
         let f = super::flv::FlvStream::open(&src.url, &src.username, &src.password).await?;
         return Ok(opened(Reader::Flv(Box::new(f))));
+    }
+    if super::foscam::is_foscam_url(&src.url) {
+        let f = super::foscam::FoscamStream::open(&src.url, &src.username, &src.password).await?;
+        return Ok(opened(Reader::Foscam(Box::new(f))));
     }
     if let Some(key) = super::push::push_key(&src.url) {
         let r = super::push::take_stream(key, std::time::Duration::from_secs(15))

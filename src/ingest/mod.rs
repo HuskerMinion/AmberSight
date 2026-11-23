@@ -9,6 +9,7 @@ pub mod clockjump;
 pub mod decode;
 pub mod dts;
 pub mod flv;
+pub mod foscam;
 pub mod push;
 pub mod fmp4;
 pub mod g711;

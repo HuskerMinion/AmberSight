@@ -30,6 +30,10 @@ pub(super) fn wants_native(cfg: &CameraConfig) -> bool {
     if crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
         return true;
     }
+    // Foscam (SERVERPUSH) frames come from our own client, never ffmpeg.
+    if crate::ingest::foscam::is_foscam_url(&cfg.url) {
+        return true;
+    }
     // Baichuan TCP (or Auto) is the built-in reader's alone.
     if super::connect_way::mode_of(cfg) != super::connect_way::Mode::Rtsp && !cfg.overlay {
         return true;
@@ -965,7 +969,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // (baichuan://) has no ffmpeg fallback either: ffmpeg cannot open it,
         // and a camera that will not preview — e.g. older firmware — must keep
         // retrying the native client, not spin on ffmpeg.)
-        if !end.reached_play && gave_up && mode == super::connect_way::Mode::Rtsp && cfg.ingest != "native" && !crate::ingest::flv::is_flv_url(&cfg.url) && !crate::ingest::push::is_push_url(&cfg.url) && !crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
+        if !end.reached_play && gave_up && mode == super::connect_way::Mode::Rtsp && cfg.ingest != "native" && !crate::ingest::flv::is_flv_url(&cfg.url) && !crate::ingest::push::is_push_url(&cfg.url) && !crate::ingest::baichuan::is_baichuan_url(&cfg.url) && !crate::ingest::foscam::is_foscam_url(&cfg.url) {
             warn!(
                 "camera '{}': built-in RTSP reader could not play this camera ({why}); switching to ffmpeg ingest",
                 cfg.name

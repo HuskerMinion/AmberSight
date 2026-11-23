@@ -486,6 +486,14 @@ post_roll = 10          # seconds of footage after the trigger
 # # idle_timeout = 30
 # # record_motion_only = true
 
+# # A Foscam camera reached over its native SERVERPUSH protocol. Video only:
+# # no audio, no sub stream yet.
+# # [[cameras]]
+# # name = "Foscam"
+# # url = "foscam://192.168.1.50:88"
+# # username = ""
+# # password = ""
+
 # # Local sources (encoded to H.264 by ffmpeg; list them with GET /api/devices):
 # # url = "device://USB Video?size=1920x1080&fps=30&audio=Microphone (USB Audio)"  # Windows (dshow)
 # # url = "device:///dev/video0?size=1280x720&fps=15"   # Linux (v4l2)

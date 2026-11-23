@@ -305,11 +305,14 @@ cameras. Amcrest cameras are a Dahua design.
 
 ### Foscam
 
-**Not tested by us.** Foscam documents these paths:
+Two ways to connect:
 
-- **Paths:** main `/videoMain`, sub `/videoSub`. On most of these models RTSP uses the camera's
+- **RTSP (direct):** main `/videoMain`, sub `/videoSub`. On most models RTSP uses the camera's
   HTTP port (88 by default); Foscam lists a few models (C1, C1 Lite, FI9800P) on port 554.
-- **Source:** [Foscam FAQ](https://www.foscam.com/faqs/view.html?id=81).
+  **Not tested by us.** Source: [Foscam FAQ](https://www.foscam.com/faqs/view.html?id=81).
+- **SERVERPUSH (native protocol):** for cameras whose live video is served over Foscam's own
+  `SERVERPUSH` protocol, set the address to `foscam://host:88` and put the user name and password
+  in the camera's sign-in fields. Video only for now (no audio, no sub stream).
 
 ### Ubiquiti UniFi Protect
 
