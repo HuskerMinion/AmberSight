@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Alle operatorrechten, ook voor de sirene",
-"832b8c61"
+"Alle operatorrechten, ook voor de sirene en herstarten",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Alle gebruikers",
@@ -3758,6 +3758,10 @@
 "PTZ-camera’s bewegen, naar presets gaan, klikken om te richten",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Camera's herstarten (uit tenzij je het aanvinkt: een camera is een minuut of twee offline en neemt niets op terwijl hij herstart; nooit vanaf een apparaattoken)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "De sirene van een camera laten afgaan (uit tenzij je het aanvinkt; nooit vanaf een apparaattoken)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Alles staat standaard aangevinkt. Presets opslaan, andere instellingen, gebruikers en opslag blijven bij beheerders.",
-"38aa7bf4"
+"Standaard aangevinkt, behalve de sirene en camera's herstarten. Posities opslaan, andere instellingen, gebruikers en opslag blijven voor beheerders.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Telefooninloggen",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"De gebruikelijke operatorrechten (geen sirene)",
-"033cb0f2"
+"De gebruikelijke operatorrechten (geen sirene, geen herstarts)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "alleen bekijken",

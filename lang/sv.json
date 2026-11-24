@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Alla operatörsrättigheter, även sirenen",
-"832b8c61"
+"Alla operatörsrättigheter, även sirenen och omstarter",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Alla användare",
@@ -3758,6 +3758,10 @@
 "Flytta PTZ-kameror, gå till förinställningar, klicka för att sikta",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Starta om kameror (av om du inte kryssar i det: en kamera är offline i en minut eller två och spelar inte in något medan den startar om; aldrig från en enhetstoken)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Låta en kameras siren ljuda (av om du inte kryssar i det; aldrig från en enhetstoken)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Allt ikryssat som standard. Att spara förinställningar, andra inställningar, användare och lagring är förbehållet admins.",
-"38aa7bf4"
+"Ikryssat som standard, utom sirenen och omstart av kameror. Spara positioner, andra inställningar, användare och lagring stannar hos administratörer.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Telefoninloggning",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"De vanliga operatörsrättigheterna (ingen siren)",
-"033cb0f2"
+"De vanliga operatörsrättigheterna (ingen siren, inga omstarter)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "bara titta",

@@ -126,7 +126,7 @@ function tileMenu(ev, c, anchor) {
   items.push(['play', t('live.clips', 'Clips'), () => { if (inFull) closeFull(); openClipsFor(c); }]);
   items.push(['expand', t('live.dbl_menu', 'Double-click opens: {what}...', { what: dblOpens(c) === 'timeline' ? t('live.timeline', 'Timeline') : t('live.full_view', 'Full view') }), () => dblClickDlg(c)]);
   }
-  if ((can('pause') || can('camera_detection')) && !c.remote) {
+  if ((can('pause') || can('camera_detection') || (can('reboot') && canReboot(c)) || state.isAdmin) && !c.remote) {
     sep();
     if (can('pause')) {
       if (c.alerts_paused) items.push(['play', t('live.resume_notifications', 'Resume notifications (paused {text})', { text: pausedText(c) }), () => resumeAlerts(c)]);
@@ -136,8 +136,9 @@ function tileMenu(ev, c, anchor) {
       if (!inFull) items.push(['zone', t('live.draw_motion_zone', 'Draw a motion zone'), () => { setSelected(c.id); import('./zones.js').then(m => m.openZoneEditor(c.id)); }]);
       items.push(['gear', state.isAdmin ? t('live.camera_settings', 'Camera settings...') : t('live.detection_alert_settings', 'Detection and alert settings...'), () => openCameraDialog(c.id)]);
     }
+    // Admins, and operators an admin let reboot cameras.
+    if (can('reboot') && canReboot(c)) items.push(['power', t('live.reboot_camera', 'Reboot camera...'), () => rebootDlg(c)]);
     if (state.isAdmin) {
-      if (canReboot(c)) items.push(['power', t('live.reboot_camera', 'Reboot camera...'), () => rebootDlg(c)]);
       items.push([c.enabled === false ? 'play' : 'pause', c.enabled === false ? t('live.enable_camera', 'Enable camera') : t('live.disable_camera', 'Disable camera'), () => setCameraEnabled(c.id, c.enabled === false)]);
     }
   }

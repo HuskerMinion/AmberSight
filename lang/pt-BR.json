@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Todos os direitos de operador, inclusive o da sirene",
-"832b8c61"
+"Todos os direitos de operador, inclusive o da sirene e o de reiniciar",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Todos os usuários",
@@ -3758,6 +3758,10 @@
 "Mover câmeras PTZ, ir a posições predefinidas, clicar para direcionar",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Reiniciar câmeras (desativado, a menos que você marque: uma câmera fica offline por um ou dois minutos e não grava nada enquanto reinicia; nunca por um token de dispositivo)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Acionar a sirene de uma câmera (desativado, a menos que você marque; nunca por um token de dispositivo)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Tudo marcado por padrão. Salvar posições predefinidas, as outras configurações, os usuários e o armazenamento ficam com os administradores.",
-"38aa7bf4"
+"Marcado por padrão, exceto a sirene e reiniciar câmeras. Salvar posições, outras configurações, usuários e armazenamento ficam com os administradores.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Acesso pelo celular",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"Os direitos usuais do operador (sem sirene)",
-"033cb0f2"
+"Os direitos usuais do operador (sem sirene, sem reiniciar)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "apenas visualização",

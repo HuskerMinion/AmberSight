@@ -822,7 +822,7 @@ function confirmDlg(title, html, yes, go, fail) {
     try { await go(); } catch (e) { fail(e); }
   };
 }
-// "Reboot camera..." in a camera's menu (admins).
+// "Reboot camera..." in a camera menu (admins, and operators allowed to reboot cameras).
 export function rebootDlg(c) {
   confirmDlg(t('cameras.reboot_camera', 'Reboot camera'), t('cameras.restart_now_q', 'Restart <b>{name}</b> now? Its video stops for a minute or two while it starts up again.', { name: esc(c.name) }), t('cameras.restart', 'Restart'), async () => {
     toast(t('cameras.restarting', 'Restarting {name}...', { name: c.name }));
@@ -830,7 +830,8 @@ export function rebootDlg(c) {
     toast(t('cameras.is_restarting', '{name} is restarting ({method})', { name: c.name, method: r.method }));
   }, (e) => msgDlg(t('cameras.could_not_restart', 'Could not restart {name}: {why}', { name: c.name, why: errText(e) })));
 }
-export const canReboot = (c) => !c.remote && isNetCam(c) && !(c.watchdog && c.watchdog.reboot === 'none');
+// (reboot_off: the server's own answer; operators don't get the watchdog settings.)
+export const canReboot = (c) => !c.remote && isNetCam(c) && !(c.watchdog && c.watchdog.reboot === 'none') && !c.reboot_off;
 
 // null = everything; undefined = not on this form (several cameras at once: left alone).
 function readAlertLabels(d) {

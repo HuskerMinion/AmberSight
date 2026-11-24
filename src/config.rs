@@ -108,11 +108,15 @@ pub struct OperatorPerms {
     /// Sound a camera's siren. Off unless an admin turns it on.
     #[serde(default = "no")]
     pub siren: bool,
+    /// Restart a camera they may see. Off unless an admin turns it on: the
+    /// camera is offline for a minute or so and its recording has a gap.
+    #[serde(default = "no")]
+    pub reboot: bool,
 }
 
 impl Default for OperatorPerms {
     fn default() -> Self {
-        OperatorPerms { ptz: true, talk_clip: true, arm: true, events: true, camera_detection: true, lights: true, siren: false }
+        OperatorPerms { ptz: true, talk_clip: true, arm: true, events: true, camera_detection: true, lights: true, siren: false, reboot: false }
     }
 }
 
@@ -138,8 +142,8 @@ pub fn account_warnings(text: &str) -> Vec<String> {
             Some(r) => out.push(format!("account {name} has role = \"{r}\", which is not one: it is a viewer (the role can be \"operator\")")),
         }
         if let Some(p) = u.get("perms").and_then(|x| x.as_table()) {
-            for k in p.keys().filter(|k| !matches!(k.as_str(), "ptz" | "talk_clip" | "arm" | "events" | "camera_detection")) {
-                out.push(format!("account {name}: \"{k}\" in perms is not a right (ptz, talk_clip, arm, events, camera_detection); it does nothing"));
+            for k in p.keys().filter(|k| !matches!(k.as_str(), "ptz" | "talk_clip" | "arm" | "events" | "camera_detection" | "lights" | "siren" | "reboot")) {
+                out.push(format!("account {name}: \"{k}\" in perms is not a right (ptz, talk_clip, arm, events, camera_detection, lights, siren, reboot); it does nothing"));
             }
         }
     }
@@ -3230,6 +3234,21 @@ mod operator_config_tests {
         let w = super::account_warnings("[[server.users]]\nusername = \"a\"\npassword = \"x\"\nrole = \"operator\"\n[[server.users]]\nusername = \"b\"\npassword = \"x\"\nadmin = false\nrole = \"boss\"\nperms = { arms = false, ptz = false }\n[[server.users]]\nusername = \"c\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\nperms = { arm = false }\n");
         assert_eq!(w.len(), 3, "{w:?}");
         assert!(w[0].contains("account a") && w[1].contains("\"boss\"") && w[2].contains("\"arms\""), "{w:?}");
+    }
+
+    #[test]
+    fn restarting_cameras_is_off_unless_turned_on() {
+        // A saved operator from before the right existed: off, like the siren.
+        let cfg: Config = toml::from_str("[[server.users]]\nusername = \"o\"\npassword = \"x\"\nadmin = false\nrole = \"operator\"\nperms = { arm = false }\n").unwrap();
+        assert!(!cfg.server.users[0].perms.reboot && !cfg.server.users[0].perms.siren);
+        assert!(!OperatorPerms::default().reboot, "a new operator");
+        // Turned on: written, read back, and not warned about as a hand edit.
+        let mut cfg = cfg;
+        cfg.server.users[0].perms.reboot = true;
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.server.users[0].perms.reboot, "{text}");
+        assert!(super::account_warnings(&text).is_empty(), "{:?}", super::account_warnings(&text));
     }
 
     #[test]

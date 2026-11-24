@@ -22,15 +22,17 @@ const PERMS = [
   ['camera_detection', t('admin_system.perm_detection', 'Change detection and alert settings of their cameras (zones, sensitivity, AI, alert times)')],
   ['lights', t('admin_system.perm_lights', 'Turn a camera’s spotlight on for a while, and off')],
   ['siren', t('admin_system.perm_siren', 'Sound a camera’s siren (off unless you tick it; never from a device token)')],
+  ['reboot', t('admin_system.perm_reboot', 'Reboot cameras (off unless you tick it: a camera is offline for a minute or two and records nothing while it restarts; never from a device token)')],
 ];
-// Every right is on for a new operator except the siren.
-const ALL_PERMS = Object.fromEntries(PERMS.map(([k]) => [k, k !== 'siren']));
+// Every right is on for a new operator except the siren and rebooting cameras.
+const OFF_BY_DEFAULT = ['siren', 'reboot'];
+const ALL_PERMS = Object.fromEntries(PERMS.map(([k]) => [k, !OFF_BY_DEFAULT.includes(k)]));
 // (A server before operators sends no role.)
 const roleOf = (u) => u.role || (u.admin ? 'admin' : 'viewer');
 function permsText(p) {
   const on = PERMS.filter(([k]) => (p && p[k] != null ? p[k] : ALL_PERMS[k]));
-  if (on.length === PERMS.length) return t('admin_system.all_operator_rights', 'All operator rights, the siren too');
-  if (PERMS.every(([k]) => on.some(([x]) => x === k) === ALL_PERMS[k])) return t('admin_system.usual_operator_rights', 'The usual operator rights (no siren)');
+  if (on.length === PERMS.length) return t('admin_system.all_operator_rights', 'All operator rights, the siren and reboots too');
+  if (PERMS.every(([k]) => on.some(([x]) => x === k) === ALL_PERMS[k])) return t('admin_system.usual_operator_rights', 'The usual operator rights (no siren, no reboots)');
   return on.length ? on.map(([, label]) => label).join('; ') : t('admin_system.no_operator_rights', 'No operator rights ticked');
 }
 
@@ -117,7 +119,7 @@ function usersPage(el) {
       '<fieldset class="us-role"><legend class="sec">' + t('admin_system.role', 'Role') + '</legend>' + ROLES.map(([v, label, h]) =>
         '<label class="asys-chk"><input type="radio" name="ufRole" value="' + v + '"' + (role0 === v ? ' checked' : '') + (lock ? ' disabled' : '') + '> <span><b>' + label + '</b> <span class="muted">' + h + '</span></span></label>').join('') + '</fieldset>' +
       (lock && u.admin ? '<div class="hint">' + (first ? t('admin_system.first_is_admin', 'The first account is always an admin.') : me ? t('admin_system.cannot_remove_own_admin', 'You cannot remove your own admin rights.') : t('admin_system.last_admin', 'This is the last admin; make another user an admin first.')) + '</div>' : '') +
-      '<div id="ufPermsBox"><div class="sec">' + t('admin_system.operator_may', 'What this operator may do') + '</div><div class="hint">' + t('admin_system.perms_default', 'Everything ticked by default. Saving presets, other settings, users and storage stay with admins.') + '</div>' +
+      '<div id="ufPermsBox"><div class="sec">' + t('admin_system.operator_may', 'What this operator may do') + '</div><div class="hint">' + t('admin_system.perms_default', 'Ticked by default, except the siren and restarting cameras. Saving presets, other settings, users and storage stay with admins.') + '</div>' +
       PERMS.map(([k, label]) => '<label class="asys-chk"><input type="checkbox" data-perm="' + k + '"' + (perms0[k] ? ' checked' : '') + '> ' + label + '</label>').join('') + '</div>' +
       (!isNew ? '<div id="ufAcct"></div>' : '') +
       '<div id="ufCamsBox"><div class="sec">' + t('admin_system.cams_may_see', 'Cameras this user may see') + '</div><div class="hint">' + t('admin_system.cams_none_all', 'None ticked = all cameras. An operator controls only these too.') + '</div>' +

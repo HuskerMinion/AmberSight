@@ -993,6 +993,8 @@ fn operator_route(path: &str, method: &axum::http::Method) -> Option<Perm> {
         ("POST", ["cameras", id, "ptz"] | ["cameras", id, "ptz", "aim"]) if cam(id) => Some(Perm::Ptz),
         // Lights or siren; the handler checks which (controls/http.rs).
         ("POST", ["cameras", id, "controls"]) if cam(id) => Some(Perm::Controls),
+        // Restarting one camera (limited accounts: one they may see, camera_allowed).
+        ("POST", ["cameras", id, "reboot"]) if cam(id) => Some(Perm::Reboot),
         ("POST", ["clips", "record"]) => Some(Perm::TalkClip),
         ("POST", ["shield"] | ["profile"]) => Some(Perm::Arm),
         ("POST", ["cameras", id, "pause"]) if cam(id) => Some(Perm::Arm),
@@ -2104,13 +2106,21 @@ async fn list_cameras(
                     }
                 }
             }
+            // No way to restart it from here (set so, behind a hub, not a
+            // network camera): the camera menu has no Reboot item. (Operators
+            // don't get its watchdog settings to tell.)
+            v["reboot_off"] = (crate::camreboot::pick_method(&cfg) == crate::camreboot::Method::None).into();
             v
         })
         .collect();
     let mut list = list;
     // Shown linked servers' cameras (not for camera-limited accounts).
     if !access.limited() {
-        list.extend(crate::remote::ui_cameras(&engine));
+        // (A linked server's camera is restarted there, not from here.)
+        list.extend(crate::remote::ui_cameras(&engine).into_iter().map(|mut c| {
+            c["reboot_off"] = true.into();
+            c
+        }));
     }
     Json(serde_json::json!({ "cameras": list, "overlay_vars": serde_json::Value::Object(engine.overlay_vars_json()) }))
 }
@@ -3270,7 +3280,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4", "alerts_ws"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4", "alerts_ws", "camera_reboot"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -7563,16 +7573,63 @@ async fn timesync_all(State(engine): State<Arc<Engine>>) -> Response {
     Json(serde_json::json!({ "results": results })).into_response()
 }
 
-/// `POST /api/cameras/:id/reboot` (admin): restart the camera now through
-/// its own interface (ONVIF, Reolink, Dahua/Amcrest or Hikvision).
-async fn camera_reboot(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>, axum::Extension(caller): axum::Extension<Caller>) -> Response {
+/// When each camera was last asked to restart here (see `reboot_slot`).
+static REBOOTED: std::sync::Mutex<Vec<(usize, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+/// A camera is restarted at most once a minute from here: a double tap, or
+/// an operator asking again and again, would keep it offline. Err: seconds
+/// to wait. (A restart that fails gives its turn back: `reboot_failed`.)
+const REBOOT_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn reboot_slot(done: &mut Vec<(usize, std::time::Instant)>, id: usize, now: std::time::Instant) -> Result<(), u64> {
+    done.retain(|(_, at)| now.saturating_duration_since(*at) < REBOOT_GAP);
+    if let Some((_, at)) = done.iter().find(|(c, _)| *c == id) {
+        return Err((REBOOT_GAP - now.saturating_duration_since(*at)).as_secs().max(1));
+    }
+    done.push((id, now));
+    Ok(())
+}
+
+fn reboot_failed(done: &mut Vec<(usize, std::time::Instant)>, id: usize) {
+    done.retain(|(c, _)| *c != id);
+}
+
+/// `POST /api/cameras/:id/reboot` (admins, and operators with the "reboot"
+/// right for a camera they may see): restart the camera now through its own
+/// interface (ONVIF, Reolink, Dahua/Amcrest or Hikvision).
+async fn camera_reboot(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usize>, axum::Extension(caller): axum::Extension<Caller>, axum::Extension(role): axum::Extension<Role>, token: Option<axum::Extension<TokenUsed>>) -> Response {
+    // (The sign-in layer already refuses both; checked here too, as for the siren.)
+    if token.is_some() {
+        return api_error(StatusCode::FORBIDDEN, "restarting a camera needs a password sign-in (not a device token)");
+    }
+    if !role.may(Perm::Reboot) {
+        return api_error(StatusCode::FORBIDDEN, "this account may not restart cameras: an admin can allow it in Settings, Users");
+    }
     if engine.camera(id).is_none() {
         return api_error(StatusCode::NOT_FOUND, "no such camera");
     }
-    match tokio::task::spawn_blocking(move || engine.reboot_camera_now(id, &caller.0)).await {
+    if let Err(wait) = reboot_slot(&mut REBOOTED.lock().unwrap(), id, std::time::Instant::now()) {
+        let mut r = api_error(StatusCode::TOO_MANY_REQUESTS, format!("this camera was just restarted: try again in {wait} s"));
+        r.headers_mut().insert(header::RETRY_AFTER, wait.into());
+        return r;
+    }
+    // (A restart that fails gives its turn back from inside: it still runs
+    // to the end when the request that asked for it is dropped.)
+    let restart = move || {
+        let r = engine.reboot_camera_now(id, &caller.0);
+        if r.is_err() {
+            reboot_failed(&mut REBOOTED.lock().unwrap(), id);
+        }
+        r
+    };
+    match tokio::task::spawn_blocking(restart).await {
         Ok(Ok(how)) => Json(serde_json::json!({ "ok": true, "method": how })).into_response(),
         Ok(Err(e)) => api_error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => {
+            // (The restart panicked: it did not happen.)
+            reboot_failed(&mut REBOOTED.lock().unwrap(), id);
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
     }
 }
 
@@ -8383,7 +8440,7 @@ mod viewer_write_tests {
         ("/cameras/:id/ptz", "POST", "operator:ptz"),
         ("/cameras/:id/timesync", "POST", "admin"),
         ("/timesync/all", "POST", "admin"),
-        ("/cameras/:id/reboot", "POST", "admin"),
+        ("/cameras/:id/reboot", "POST", "operator:reboot"),
         ("/cameras/:id/controls", "GET", "viewer"),
         ("/cameras/:id/controls", "POST", "operator:controls"),
         ("/cameras/:id/powercycle", "POST", "admin"),
@@ -8613,7 +8670,8 @@ mod viewer_write_tests {
     }
 
     fn perms_without(p: &str) -> crate::config::OperatorPerms {
-        let mut x = crate::config::OperatorPerms::default();
+        // (From every right on, also those off by default.)
+        let mut x = crate::config::OperatorPerms { siren: true, reboot: true, ..Default::default() };
         match p {
             "ptz" => x.ptz = false,
             "talk_clip" => x.talk_clip = false,
@@ -8622,6 +8680,7 @@ mod viewer_write_tests {
             "camera_detection" => x.camera_detection = false,
             "lights" => x.lights = false,
             "siren" => x.siren = false,
+            "reboot" => x.reboot = false,
             // Lights or siren: neither.
             "controls" => {
                 x.lights = false;
@@ -8652,7 +8711,7 @@ mod viewer_write_tests {
         for (route, m, _) in ROLE_TABLE {
             assert!(pairs.iter().any(|p| p.0 == *route && p.1 == *m), "{route} {m} is no route");
         }
-        let none = crate::config::OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false, lights: false, siren: false };
+        let none = crate::config::OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false, lights: false, siren: false, reboot: false };
         let sample = |route: &str| route.split('/').map(|p| if p.starts_with(':') { "1" } else { p }).collect::<Vec<_>>().join("/");
         for (route, m, who) in ROLE_TABLE {
             let p = sample(route);
@@ -8664,7 +8723,9 @@ mod viewer_write_tests {
             assert_eq!(ok(Role::Operator(none)), viewer, "{route} {m}: operator with no rights");
             match who.strip_prefix("operator:") {
                 Some(right) => {
-                    assert!(ok(Role::Operator(Default::default())), "{route} {m}: operator");
+                    // (Default rights, and the ones that are off by default.)
+                    let all = crate::config::OperatorPerms { siren: true, reboot: true, ..Default::default() };
+                    assert!(ok(Role::Operator(all)), "{route} {m}: operator");
                     assert!(!ok(Role::Operator(perms_without(right))), "{route} {m}: operator without {right}");
                     for other in ["ptz", "talk_clip", "arm", "events", "camera_detection"].into_iter().filter(|o| o != &right) {
                         assert!(ok(Role::Operator(perms_without(other))), "{route} {m}: operator without {other} only");
@@ -8698,7 +8759,6 @@ mod viewer_write_tests {
             ("/cameras/1", Method::POST),
             ("/cameras", Method::POST),
             ("/cameras/1/enable", Method::POST),
-            ("/cameras/1/reboot", Method::POST),
             ("/cameras/1/spots/forget", Method::POST),
             ("/cameras/1/tamper/reference", Method::POST),
             ("/events//protect", Method::POST),
@@ -8731,6 +8791,11 @@ mod viewer_write_tests {
             assert!(gate(p, &Method::POST, &op, true).is_ok(), "{p} limited");
         }
         assert!(gate("/cameras/1", &Method::PUT, &op, true).is_ok());
+        // Restarting cameras is off for an operator until an admin turns it on.
+        assert!(gate("/cameras/1/reboot", &Method::POST, &op, false).is_err());
+        let rb = Role::Operator(crate::config::OperatorPerms { reboot: true, ..Default::default() });
+        assert!(gate("/cameras/1/reboot", &Method::POST, &rb, true).is_ok());
+        assert!(gate("/cameras/1/powercycle", &Method::POST, &rb, false).is_err(), "the power switch stays the admin's");
     }
 
     #[test]
@@ -9743,6 +9808,100 @@ mod operator_tests {
         ] {
             assert_eq!(call(m, p, "otto", None, b).await.0, StatusCode::FORBIDDEN, "{m} {p}");
         }
+    }
+
+    #[test]
+    fn a_camera_is_restarted_at_most_once_a_minute() {
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+        let mut done = Vec::new();
+        assert_eq!(super::reboot_slot(&mut done, 3, at(0)), Ok(()));
+        assert_eq!(super::reboot_slot(&mut done, 3, at(1)), Err(59), "a double tap");
+        assert_eq!(super::reboot_slot(&mut done, 4, at(1)), Ok(()), "another camera");
+        assert_eq!(super::reboot_slot(&mut done, 3, at(59)), Err(1));
+        assert_eq!(super::reboot_slot(&mut done, 3, at(60)), Ok(()), "a minute on");
+        // A restart that failed gives its turn back.
+        super::reboot_failed(&mut done, 4);
+        assert_eq!(super::reboot_slot(&mut done, 4, at(61)), Ok(()));
+        assert_eq!(done.len(), 2, "old entries go");
+    }
+
+    #[tokio::test]
+    async fn operators_restart_cameras_only_with_the_right() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        let mut cfg: crate::config::Config = toml::from_str("").unwrap();
+        let rb = crate::config::OperatorPerms { reboot: true, ..Default::default() };
+        for (name, admin, role, perms, cams) in [
+            ("rb-ann", true, "", Default::default(), vec![]),
+            ("rb-ron", false, "operator", rb, vec![]),
+            ("rb-olaf", false, "operator", Default::default(), vec![]),
+            ("rb-lim", false, "operator", rb, vec!["Porch".to_string()]),
+        ] {
+            cfg.server.users.push(crate::config::UserConfig { username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: cams, disabled: false, role: role.into(), perms });
+        }
+        let e = crate::engine::Engine::for_test(cfg);
+        // Two cameras with no way to be restarted: the handler answers at
+        // once (502, nothing is asked of a network) when it is reached.
+        for name in ["Porch", "Garage"] {
+            e.add_test_camera(name).cfg.write().unwrap().url = "usb:0".into();
+        }
+        // A network camera (never asked: only listed).
+        e.add_test_camera("Gate").cfg.write().unwrap().url = "rtsp://192.0.2.1:554/stream".into();
+        let app = super::build_router(e.clone());
+        let send = |method: &str, path: &str, auth: String, body: &str| {
+            let req = Request::builder().method(method).uri(path).header(header::HOST, "localhost:8090").header(header::CONTENT_TYPE, "application/json").header(header::AUTHORIZATION, auth).body(Body::from(body.to_string())).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let s = r.status();
+                let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+                (s, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+        let basic = |who: &str| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{who}:pw-{who}-1")));
+        let reached = |r: &(StatusCode, String)| r.0 == StatusCode::BAD_GATEWAY && r.1.contains("restarted remotely");
+        // Admins, and operators with the right.
+        let r = send("POST", "/api/cameras/0/reboot", basic("rb-ann"), "").await;
+        assert!(reached(&r), "admin: {r:?}");
+        let r = send("POST", "/api/cameras/1/reboot", basic("rb-ron"), "").await;
+        assert!(reached(&r), "operator with the right: {r:?}");
+        // The restart is logged with who asked.
+        assert!(e.db.audit_rows().iter().any(|(u, a, d)| u == "rb-ron" && a == "camera restart" && d.starts_with("Garage")), "{:?}", e.db.audit_rows());
+        // Without the right: refused before anything is tried.
+        let (s, b) = send("POST", "/api/cameras/0/reboot", basic("rb-olaf"), "").await;
+        assert!(s == StatusCode::FORBIDDEN && b.contains("may not"), "{s} {b}");
+        // Limited to the Porch: that camera only.
+        let r = send("POST", "/api/cameras/0/reboot", basic("rb-lim"), "").await;
+        assert!(reached(&r), "limited, its own camera: {r:?}");
+        assert_eq!(send("POST", "/api/cameras/1/reboot", basic("rb-lim"), "").await.0, StatusCode::NOT_FOUND, "a camera it cannot see");
+        // Never from a device token, even one with control rights.
+        let (tok, _) = crate::auth::add_token("rb-ron", "app", true, crate::auth::generation("rb-ron")).unwrap().unwrap();
+        assert_eq!(send("POST", "/api/cameras/0/reboot", format!("Bearer {tok}"), "").await.0, StatusCode::FORBIDDEN);
+        // The power switch stays the admin's.
+        assert_eq!(send("POST", "/api/cameras/0/powercycle", basic("rb-ron"), "").await.0, StatusCode::FORBIDDEN);
+        // whoami and the sign-in answer say so.
+        let perm = |b: String| serde_json::from_str::<serde_json::Value>(&b).unwrap()["perms"]["reboot"].as_bool();
+        for (who, want) in [("rb-ann", true), ("rb-ron", true), ("rb-olaf", false), ("rb-lim", true)] {
+            assert_eq!(perm(send("GET", "/api/whoami", basic(who), "").await.1), Some(want), "{who}");
+        }
+        assert_eq!(perm(send("GET", "/api/whoami", format!("Bearer {tok}"), "").await.1), Some(false), "a device token");
+        let body = r#"{"username":"rb-ron","password":"pw-rb-ron-1"}"#;
+        assert_eq!(perm(send("POST", "/api/login", basic("rb-ron"), body).await.1), Some(true), "sign-in answer");
+        assert!(super::FEATURES.contains(&"camera_reboot"));
+        // The camera list says which cameras can't be restarted from here
+        // (operators don't get the watchdog settings to tell).
+        let (s, b) = send("GET", "/api/cameras", basic("rb-ron"), "").await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let list: serde_json::Value = serde_json::from_str(&b).unwrap();
+        let off = |name: &str| list["cameras"].as_array().unwrap().iter().find(|c| c["name"] == name).map(|c| c["reboot_off"].clone());
+        assert_eq!(off("Porch"), Some(serde_json::Value::Bool(true)), "not a network camera");
+        assert_eq!(off("Gate"), Some(serde_json::Value::Bool(false)), "a network camera");
+        e.camera(2).unwrap().cfg.write().unwrap().watchdog = Some(crate::config::CameraWatchdog { reboot: Some("Off".into()), ..Default::default() });
+        let list: serde_json::Value = serde_json::from_str(&send("GET", "/api/cameras", basic("rb-ron"), "").await.1).unwrap();
+        assert_eq!(list["cameras"].as_array().unwrap().iter().find(|c| c["name"] == "Gate").map(|c| c["reboot_off"].clone()), Some(serde_json::Value::Bool(true)), "set never to be restarted (any spelling the server takes)");
     }
 }
 

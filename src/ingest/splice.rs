@@ -956,6 +956,9 @@ impl VirtualClip {
             start_ms: f64,
             end_ms: f64,
             sync: bool,
+            /// Fragments right after it in its segment without video (the
+            /// sound recorded after a segment's last picture): served with it.
+            tail: Vec<FragmentInfo>,
         }
         let mut parsed = Vec::new();
         let mut cands: Vec<Cand> = Vec::new();
@@ -972,12 +975,22 @@ impl VirtualClip {
                 parsed.push(None);
                 continue;
             };
+            let first_cand = cands.len();
             for frag in &p.fragments {
-                let Some(vt) = frag.trafs.iter().find(|t| t.track_id == video.id) else { continue };
+                let Some(vt) = frag.trafs.iter().find(|t| t.track_id == video.id) else {
+                    // Sound only (a segment's last fragment holds the sound
+                    // recorded after its last picture): left out, a player
+                    // would find frames missing there (Android's FLAC decoder
+                    // gives up on the whole clip).
+                    if cands.len() > first_cand && !frag.trafs.is_empty() {
+                        cands.last_mut().unwrap().tail.push(frag.clone());
+                    }
+                    continue;
+                };
                 let ts = video.timescale.max(1) as f64;
                 let start = s.start_ms as f64 + vt.tfdt as f64 * 1000.0 / ts;
                 let end = start + vt.duration as f64 * 1000.0 / ts;
-                cands.push(Cand { seg: i, frag: frag.clone(), start_ms: start, end_ms: end, sync: vt.first_is_sync });
+                cands.push(Cand { seg: i, frag: frag.clone(), start_ms: start, end_ms: end, sync: vt.first_is_sync, tail: Vec::new() });
             }
             parsed.push(Some(p));
         }
@@ -1032,6 +1045,8 @@ impl VirtualClip {
         let mut index: Vec<(u64, u64, u64, bool)> = Vec::new();
         let mut first_cto = 0i32;
         let mut frag_wall: Vec<(i64, i64)> = Vec::new();
+        // Candidates written (each one index entry).
+        let mut written = 0usize;
         for c in cands.iter().skip(first) {
             if c.start_ms >= to_ms as f64 {
                 break;
@@ -1039,59 +1054,71 @@ impl VirtualClip {
             if hid[c.seg] != hid[base_seg] {
                 break; // different codec header: cannot continue in one file
             }
-            let mut patches = Vec::with_capacity(1 + c.frag.trafs.len());
-            seq += 1;
-            patches.push((c.frag.seq_pos as u32, seq as u64, 4u8));
-            for t in &c.frag.trafs {
-                let Some(ti) = tracks.iter().position(|m| m.id == t.track_id) else { continue };
-                let ts = tracks[ti].timescale.max(1) as f64;
-                let (out_base, src_base) = *seg_base.entry((c.seg, t.track_id)).or_insert_with(|| {
-                    // Place the segment by wall clock (keeps audio and video
-                    // aligned and preserves real gaps), never overlapping
-                    // what was already written for this track.
-                    let wall = segments[c.seg].start_ms as f64 + t.tfdt as f64 * 1000.0 / ts;
-                    let want = ((wall - clip_start).max(0.0) * ts / 1000.0).round() as u64;
-                    (want.max(running_end[ti]), t.tfdt)
-                });
-                // FLAC audio whose recorded durations are not its samples'
-                // (see flac_fix): served with the samples' lengths, and later
-                // decode times moved by what that changed (real gaps stay).
-                // Samples all of one length need nothing (new recordings).
-                let fix = if audio_flac && !tracks[ti].video && !t.even { flac_fix(&segments[c.seg].path, &c.frag, t.track_id, tracks[ti].timescale) } else { None };
-                let shift = flac_shift.entry((c.seg, t.track_id)).or_insert(0);
-                let src_off = (t.tfdt.saturating_sub(src_base) as i64).saturating_add(*shift).max(0) as u64;
-                let duration = match &fix {
-                    Some(fx) => {
-                        patches.extend(fx.patches.iter().copied());
-                        *shift = shift.saturating_add(fx.total as i64 - t.duration as i64);
-                        fx.total
+            for (k, frag) in std::iter::once(&c.frag).chain(&c.tail).enumerate() {
+                let mut patches = Vec::with_capacity(1 + frag.trafs.len());
+                seq += 1;
+                patches.push((frag.seq_pos as u32, seq as u64, 4u8));
+                for t in &frag.trafs {
+                    let Some(ti) = tracks.iter().position(|m| m.id == t.track_id) else { continue };
+                    let ts = tracks[ti].timescale.max(1) as f64;
+                    let (out_base, src_base) = *seg_base.entry((c.seg, t.track_id)).or_insert_with(|| {
+                        // Place the segment by wall clock (keeps audio and video
+                        // aligned and preserves real gaps), never overlapping
+                        // what was already written for this track.
+                        let wall = segments[c.seg].start_ms as f64 + t.tfdt as f64 * 1000.0 / ts;
+                        let want = ((wall - clip_start).max(0.0) * ts / 1000.0).round() as u64;
+                        (want.max(running_end[ti]), t.tfdt)
+                    });
+                    // FLAC audio whose recorded durations are not its samples'
+                    // (see flac_fix): served with the samples' lengths, and later
+                    // decode times moved by what that changed (real gaps stay).
+                    // Samples all of one length need nothing (new recordings),
+                    // except a sound-only fragment's: often one sample, its
+                    // length is the camera's step.
+                    let fix = if audio_flac && !tracks[ti].video && (!t.even || k > 0) { flac_fix(&segments[c.seg].path, frag, t.track_id, tracks[ti].timescale, k > 0) } else { None };
+                    let shift = flac_shift.entry((c.seg, t.track_id)).or_insert(0);
+                    let src_off = (t.tfdt.saturating_sub(src_base) as i64).saturating_add(*shift).max(0) as u64;
+                    let duration = match &fix {
+                        Some(fx) => {
+                            patches.extend(fx.patches.iter().copied());
+                            *shift = shift.saturating_add(fx.total as i64 - t.duration as i64);
+                            fx.total
+                        }
+                        None => t.duration,
+                    };
+                    let out = (out_base + src_off).max(running_end[ti]);
+                    patches.push((t.tfdt_pos as u32, out, 8u8));
+                    running_end[ti] = out + duration;
+                    if Some(ti) == vid {
+                        if index.is_empty() {
+                            first_cto = t.first_cto;
+                        }
+                        index.push((c.frag.len, out, t.duration, c.sync));
                     }
-                    None => t.duration,
-                };
-                let out = (out_base + src_off).max(running_end[ti]);
-                patches.push((t.tfdt_pos as u32, out, 8u8));
-                running_end[ti] = out + duration;
-                if Some(ti) == vid {
-                    if index.is_empty() {
-                        first_cto = t.first_cto;
-                    }
-                    index.push((c.frag.len, out, t.duration, c.sync));
                 }
+                if k > 0 {
+                    // (The index's entry for the fragment before it covers its bytes too.)
+                    if let Some(last) = index.last_mut() {
+                        last.0 += frag.len;
+                    }
+                }
+                // (A sound-only fragment plays no time of its own in the export's captions.)
+                frag_wall.push(if k == 0 { (c.start_ms.round() as i64, c.end_ms.round() as i64) } else { (c.end_ms.round() as i64, c.end_ms.round() as i64) });
+                pieces.push(Piece::Fragment {
+                    path: segments[c.seg].path.clone(),
+                    offset: frag.offset,
+                    len: frag.len,
+                    patches,
+                });
             }
             end_ms = c.end_ms;
-            frag_wall.push((c.start_ms.round() as i64, c.end_ms.round() as i64));
-            pieces.push(Piece::Fragment {
-                path: segments[c.seg].path.clone(),
-                offset: c.frag.offset,
-                len: c.frag.len,
-                patches,
-            });
+            written += 1;
         }
         // A segment index right after the header: where each fragment is and
         // how long it plays, so a player can jump to the moment it wants
         // instead of reading through the clip fragment by fragment (each a
         // separate request over the network).
-        if let (Some(v), true) = (vid, index.len() == pieces.len() - 1 && !index.is_empty() && index.len() < 65_536) {
+        if let (Some(v), true) = (vid, index.len() == written && !index.is_empty() && index.len() < 65_536) {
             pieces.insert(1, Piece::Bytes(sidx(tracks[v].id, tracks[v].timescale, &index, first_cto)));
         }
         let total = pieces.iter().map(|p| p.len()).sum();
@@ -1694,7 +1721,8 @@ fn flac_block(path: &Path, frag: &FragmentInfo, track_id: u32) -> Option<u16> {
     blocks.into_iter().max().and_then(|b| u16::try_from(b).ok())
 }
 
-fn flac_fix(path: &Path, frag: &FragmentInfo, track_id: u32, timescale: u32) -> Option<FlacFix> {
+/// `even_too`: also read a fragment whose samples all have one length.
+fn flac_fix(path: &Path, frag: &FragmentInfo, track_id: u32, timescale: u32, even_too: bool) -> Option<FlacFix> {
     let mut f = std::fs::File::open(path).ok()?;
     f.seek(SeekFrom::Start(frag.offset)).ok()?;
     let mut sz = [0u8; 4];
@@ -1706,7 +1734,7 @@ fn flac_fix(path: &Path, frag: &FragmentInfo, track_id: u32, timescale: u32) -> 
     f.seek(SeekFrom::Start(frag.offset)).ok()?;
     let mut moof = vec![0u8; moof_len];
     f.read_exact(&mut moof).ok()?;
-    flac_fix_from(&moof, track_id, u64::from(timescale) / 2, |start, n| {
+    flac_fix_reading(&moof, track_id, u64::from(timescale) / 2, !even_too, |start, n| {
         if start as u64 + n as u64 > frag.len {
             return None;
         }
@@ -1720,8 +1748,14 @@ fn flac_fix(path: &Path, frag: &FragmentInfo, track_id: u32, timescale: u32) -> 
 /// `read(from, len)` gives bytes of the fragment (offsets from its moof).
 /// `gap`: a sample lasting this much longer than its samples is a real gap.
 /// None: nothing to change.
+#[cfg(test)]
 fn flac_fix_from(moof: &[u8], track_id: u32, gap: u64, read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<FlacFix> {
-    let (durs, blocks) = flac_frames_from(moof, track_id, true, read)?;
+    flac_fix_reading(moof, track_id, gap, true, read)
+}
+
+/// `flac_fix_from`; `even_none`: nothing read when every sample has one length.
+fn flac_fix_reading(moof: &[u8], track_id: u32, gap: u64, even_none: bool, read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<FlacFix> {
+    let (durs, blocks) = flac_frames_from(moof, track_id, even_none, read)?;
     // Timed by its samples (or by an RTP clock that matches them), a sample
     // never lasts less than it holds, and the fragment lasts about what it
     // holds: a longer sample is sound left out (lost packets), kept. A
@@ -2564,7 +2598,14 @@ mod tests {
         assert_eq!(fv, av, "every picture the same, at the same time");
         let (fa, aa) = (md5(&frag, "0:a"), md5(&flat, "0:a"));
         assert!(fa.len() > 200, "{} sound frames", fa.len());
-        assert_eq!(fa, aa, "every sound frame the same, at the same time");
+        // (The clip's last sound frame is the recording's last, shortened
+        // by the encoder (duration 256 of 1024): some ffmpeg builds play all
+        // of it from the fragmented file and only the 256 from the plain one.
+        // Every other frame, and when that one starts, must match.)
+        assert_eq!(fa.len(), aa.len(), "as many sound frames");
+        assert_eq!(fa[..fa.len() - 1], aa[..aa.len() - 1], "every sound frame the same, at the same time");
+        let start = |l: &str| -> Vec<String> { l.split(',').take(3).map(|x| x.trim().to_string()).collect() };
+        assert_eq!(start(&fa[fa.len() - 1]), start(&aa[aa.len() - 1]), "the last sound frame starts at the same time");
         // Made once: a copy of the clip gets the same layout.
         assert_eq!(clip.clone().for_apple().len(), apple.len());
         // An export with an exact start and end (edit lists) keeps its cut
@@ -2711,6 +2752,69 @@ mod tests {
         assert!(a_sum > 0);
         let (a_s, v_s) = (a_sum as f64 / 8000.0, v_sum as f64 / 90000.0);
         assert!((a_s - v_s).abs() < 0.2, "audio {a_s} s, video {v_s} s");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_keeps_the_sound_after_a_segments_last_picture() {
+        // Each segment ends with a fragment of only sound (what was heard
+        // after its last picture). Left out, the frames' sample numbers jump
+        // where the next segment starts, and Android's FLAC decoder makes up
+        // the missing frame, then gives up on the clip.
+        use crate::ingest::g711::{flac_block_size, flac_frame, flac_sample_entry};
+        let dir = std::env::temp_dir().join(format!("amber-splice-flac-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let audio = TrackInfo { kind: TrackKind::Audio, timescale: 8000, sample_entry: flac_sample_entry(8000), width: 0, height: 0 };
+        let mut w = SegmentWriter::new(&dir, "cam-1", vec![video_track(), audio], 3).unwrap();
+        let (mut n, mut packets) = (0u64, 0u64);
+        for i in 0..100i64 {
+            w.push_video(i * 9000, vec![(i % 251) as u8; 40], i % 10 == 0).unwrap();
+            // (Sound reaches the recorder after the pictures, as from cameras.)
+            while (packets as i64) * 40 <= i * 100 - 150 {
+                w.push_audio(n as i64, flac_frame(&[0i16; 320], n, 8000));
+                n += 320;
+                packets += 1;
+            }
+        }
+        w.finish().unwrap();
+        let segs: Vec<SourceSegment> =
+            w.take_closed().into_iter().map(|s| SourceSegment { path: s.path, start_ms: s.start_ms, end_ms: s.end_ms, low: false, sub: false }).collect();
+        assert!(segs.len() >= 3);
+        let tails = segs.iter().filter(|sg| parse_segment(&sg.path).unwrap().fragments.iter().any(|f| f.trafs.iter().all(|t| t.track_id != 1))).count();
+        assert!(tails >= 2, "test data: segments ending with sound only ({tails})");
+        let t0 = segs[0].start_ms;
+        let clip = VirtualClip::plan(&segs, t0, t0 + 20_000).unwrap().unwrap();
+        let bytes = clip.read_range(0, clip.len()).unwrap();
+        // The frames' sample numbers (the test's pictures never hold 0xff).
+        let mut frames = Vec::new();
+        for at in 0..bytes.len().saturating_sub(10) {
+            if bytes[at] == 0xff && bytes[at + 1] == 0xf9 && bytes[at + 2] >> 4 == 0b0111 && bytes[at + 3] == 0b0000_1000 {
+                let b0 = bytes[at + 4];
+                let lead = b0.leading_ones() as usize;
+                let mut num = u64::from(if lead == 0 { b0 } else { b0 & (0x7f >> lead) });
+                for k in 1..lead {
+                    num = (num << 6) | u64::from(bytes[at + 4 + k] & 0x3f);
+                }
+                frames.push((num, u64::from(flac_block_size(&bytes[at..]).unwrap())));
+            }
+        }
+        assert!(frames.len() > 200, "{} frames", frames.len());
+        for w in frames.windows(2) {
+            assert_eq!(w[1].0, w[0].0 + w[0].1, "the frame after {:?} starts where it ends", w[0]);
+        }
+        // The index still covers every byte of the clip.
+        let p = parse_segment_file(&{
+            let out = dir.join("served.mp4");
+            clip.write_file(&out).unwrap();
+            out
+        })
+        .unwrap();
+        assert!(p.fragments.iter().any(|f| f.trafs.iter().all(|t| t.track_id != 1)), "sound-only fragments served");
+        let at = bytes.windows(4).position(|w| w == b"sidx").expect("an index") - 4;
+        let refs = u16::from_be_bytes([bytes[at + 38], bytes[at + 39]]) as usize;
+        let sidx_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let covered: u64 = (0..refs).map(|r| u64::from(u32::from_be_bytes(bytes[at + 40 + 12 * r..at + 44 + 12 * r].try_into().unwrap()) & 0x7fff_ffff)).sum();
+        assert_eq!(at as u64 + sidx_len as u64 + covered, clip.len(), "the index's fragments end where the clip ends");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -112,13 +112,14 @@ pub struct PermsReq {
     camera_detection: Option<bool>,
     lights: Option<bool>,
     siren: Option<bool>,
+    reboot: Option<bool>,
 }
 
 impl From<PermsReq> for crate::config::OperatorPerms {
     fn from(p: PermsReq) -> Self {
         let on = |x: Option<bool>| x.unwrap_or(true);
-        // (The siren is off unless asked for.)
-        crate::config::OperatorPerms { ptz: on(p.ptz), talk_clip: on(p.talk_clip), arm: on(p.arm), events: on(p.events), camera_detection: on(p.camera_detection), lights: on(p.lights), siren: p.siren.unwrap_or(false) }
+        // (The siren and restarting cameras are off unless asked for.)
+        crate::config::OperatorPerms { ptz: on(p.ptz), talk_clip: on(p.talk_clip), arm: on(p.arm), events: on(p.events), camera_detection: on(p.camera_detection), lights: on(p.lights), siren: p.siren.unwrap_or(false), reboot: p.reboot.unwrap_or(false) }
     }
 }
 
@@ -224,7 +225,7 @@ fn operator_gain(cfg: &crate::config::Config, name: &str, w: &Wanted, disabled: 
     }
     let old = target.map(|u| u.perms).unwrap_or_default();
     let new = w.perms.unwrap_or(old);
-    let gained = (new.ptz && !old.ptz) || (new.talk_clip && !old.talk_clip) || (new.arm && !old.arm) || (new.events && !old.events) || (new.camera_detection && !old.camera_detection) || (new.lights && !old.lights) || (new.siren && !old.siren);
+    let gained = (new.ptz && !old.ptz) || (new.talk_clip && !old.talk_clip) || (new.arm && !old.arm) || (new.events && !old.events) || (new.camera_detection && !old.camera_detection) || (new.lights && !old.lights) || (new.siren && !old.siren) || (new.reboot && !old.reboot);
     // More cameras: limits taken away, or a camera added to them.
     let old_cams = target.map(|u| u.cameras.clone()).unwrap_or_default();
     let wider = w.cameras.as_ref().is_some_and(|c| (c.is_empty() && !old_cams.is_empty()) || (!old_cams.is_empty() && c.iter().any(|x| !old_cams.contains(x))));
@@ -861,13 +862,15 @@ mod tests {
         };
         let needs = |name: &str, x: Wanted, disabled: Option<bool>| needs_proof(&cfg, "boss", name, &x, false, disabled);
         let no_arm = Some(OperatorPerms { arm: false, ..Default::default() });
-        let none = Some(OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false, lights: false, siren: false });
+        let none = Some(OperatorPerms { ptz: false, talk_clip: false, arm: false, events: false, camera_detection: false, lights: false, siren: false, reboot: false });
         assert!(needs("new", w(Some("operator"), None, None), None), "a new operator");
         assert!(needs("new", w(Some("operator"), None, none), None), "even with no rights: it is made an operator");
         assert!(needs("view", w(Some("operator"), None, None), None), "a viewer made an operator");
         assert!(needs("op", w(None, None, Some(OperatorPerms::default())), None), "a right turned on");
         assert!(needs("opoff", w(None, None, None), Some(false)), "a disabled operator enabled");
         assert!(!needs("op", w(None, None, no_arm), None), "the same rights");
+        // Restarting cameras is a right like the others (off by default).
+        assert!(needs("op", w(None, None, Some(OperatorPerms { arm: false, reboot: true, ..Default::default() })), None), "restarting cameras turned on");
         assert!(!needs("op", w(None, None, none), None), "rights taken away");
         assert!(!needs("op", w(Some("viewer"), None, None), None), "made a viewer");
         assert!(!needs("op", w(None, None, None), Some(true)), "disabled");

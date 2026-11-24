@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Tutti i permessi di operatore, compreso quello per la sirena",
-"832b8c61"
+"Tutti i permessi di operatore, compresi la sirena e i riavvii",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Tutti gli utenti",
@@ -3758,6 +3758,10 @@
 "Muovi le telecamere PTZ, vai ai preset e clicca per mirare",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Riavvia le telecamere (disattivato se non lo selezioni: una telecamera resta offline per un minuto o due e non registra nulla mentre si riavvia; mai da un token di dispositivo)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Attiva la sirena di una telecamera (disattivata se non la selezioni; mai da un token di dispositivo)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Tutto è selezionato per impostazione predefinita. Salvare i preset, le altre impostazioni, gli utenti e l’archiviazione resta agli amministratori.",
-"38aa7bf4"
+"Spuntato per impostazione predefinita, tranne la sirena e il riavvio delle telecamere. Salvare posizioni, altre impostazioni, utenti e archiviazione restano agli amministratori.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Accesso dal telefono",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"I soliti permessi di operatore (senza sirena)",
-"033cb0f2"
+"I soliti permessi di operatore (senza sirena, senza riavvii)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "solo visualizzazione",

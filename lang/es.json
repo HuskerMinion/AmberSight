@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Todos los derechos de operador, también la sirena",
-"832b8c61"
+"Todos los derechos de operador, también la sirena y los reinicios",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Todos los usuarios",
@@ -3758,6 +3758,10 @@
 "Mover cámaras PTZ, ir a posiciones guardadas, hacer clic para apuntar",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Reiniciar cámaras (desactivado salvo que lo marques: una cámara queda sin conexión un minuto o dos y no graba nada mientras se reinicia; nunca desde un token de dispositivo)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Hacer sonar la sirena de una cámara (desactivado salvo que lo marques; nunca desde un token de dispositivo)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Todo marcado por defecto. Guardar posiciones, otros ajustes, usuarios y almacenamiento quedan para los administradores.",
-"38aa7bf4"
+"Marcado por defecto, salvo la sirena y reiniciar cámaras. Guardar posiciones, otros ajustes, usuarios y almacenamiento quedan para los administradores.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Inicio de sesión desde el teléfono",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"Los derechos de operador habituales (sin sirena)",
-"033cb0f2"
+"Los derechos de operador habituales (sin sirena, sin reinicios)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "solo ver",

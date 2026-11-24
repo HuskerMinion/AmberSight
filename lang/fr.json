@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Tous les droits d’opérateur, y compris la sirène",
-"832b8c61"
+"Tous les droits d’opérateur, y compris la sirène et les redémarrages",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Tous les utilisateurs",
@@ -3758,6 +3758,10 @@
 "Orienter et zoomer les caméras (PTZ), aller aux préréglages, cliquer pour viser",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Redémarrer les caméras (désactivé sauf si coché : une caméra est hors ligne une minute ou deux et n’enregistre rien pendant son redémarrage ; jamais depuis un jeton d’appareil)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Faire retentir la sirène d’une caméra (désactivé sauf si coché ; jamais depuis un jeton d’appareil)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Tout est coché par défaut. L’enregistrement de préréglages, les autres réglages, les utilisateurs et le stockage restent réservés aux administrateurs.",
-"38aa7bf4"
+"Coché par défaut, sauf la sirène et le redémarrage des caméras. Enregistrer des positions, les autres réglages, les utilisateurs et le stockage restent réservés aux admins.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Connexion par téléphone",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"Droits d’opérateur habituels (pas de sirène)",
-"033cb0f2"
+"Droits d’opérateur habituels (pas de sirène, pas de redémarrage)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "visionnage uniquement",

@@ -3418,8 +3418,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"All operator rights, the siren too",
-"832b8c61"
+"All operator rights, the siren and reboots too",
+"eb398022"
 ],
 "admin_system.all_users": [
 "All users",
@@ -3757,6 +3757,10 @@
 "Move PTZ cameras, go to presets, click to aim",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Reboot cameras (off unless you tick it: a camera is offline for a minute or two and records nothing while it restarts; never from a device token)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Sound a camera’s siren (off unless you tick it; never from a device token)",
 "fbd636bb"
@@ -3766,8 +3770,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Everything ticked by default. Saving presets, other settings, users and storage stay with admins.",
-"38aa7bf4"
+"Ticked by default, except the siren and restarting cameras. Saving presets, other settings, users and storage stay with admins.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Phone sign-in",
@@ -4010,8 +4014,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"The usual operator rights (no siren)",
-"033cb0f2"
+"The usual operator rights (no siren, no reboots)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "watch only",

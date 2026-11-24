@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"[Àll öpéràtör rîghtš, thé šîréñ töö ····]",
-"832b8c61"
+"[Àll öpéràtör rîghtš, thé šîréñ àñd réböötš töö ······]",
+"eb398022"
 ],
 "admin_system.all_users": [
 "[Àll ûšérš ·]",
@@ -3758,6 +3758,10 @@
 "[Mövé PTZ çàméràš, gö tö préšétš, çlîçk tö àîm ······]",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"[Rébööt çàméràš (öff ûñléšš ýöû tîçk ît: à çàmérà îš öfflîñé för à mîñûté ör twö àñd réçördš ñöthîñg whîlé ît réštàrtš; ñévér fröm à dévîçé tökéñ) ···················]",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "[Šöûñd à çàmérà’š šîréñ (öff ûñléšš ýöû tîçk ît; ñévér fröm à dévîçé tökéñ) ·········]",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"[Évérýthîñg tîçkéd bý défàûlt. Šàvîñg préšétš, other šéttîñgš, ûšérš àñd štöràgé štàý wîth àdmîñš. ············]",
-"38aa7bf4"
+"[Tîçkéd bý défàûlt, éxçépt thé šîréñ àñd réštàrtîñg çàméràš. Šàvîñg préšétš, other šéttîñgš, ûšérš àñd štöràgé štàý wîth àdmîñš. ················]",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "[Phöñé šîgñ-îñ ·]",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"[Thé ûšûàl öpéràtör rîghtš (ñö šîréñ) ····]",
-"033cb0f2"
+"[Thé ûšûàl öpéràtör rîghtš (ñö šîréñ, ñö réböötš) ······]",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "[wàtçh öñlý ·]",
@@ -7081,6 +7085,14 @@
 "cameras.import_missed_desc": [
 "[Whéñ à pûšh îš mîššéd (pûšh öff îñ thé Réölîñk àpp, Wî-Fî ör DÑŠ tröûblé) ör ÀmbérŠîght wàš döwñ, thé çàmérà štîll réçördš tö îtš çàrd. Îtš réçördîñgš öf thé làšt 12 höûrš thàt ÀmbérŠîght hàš ñö évéñt för àré împörtéd àš évéñtš, màrkéd \"fröm çàrd\". Évéñtš öldér thàñ à few mîñûtéš šéñd ñö ñötîfîçàtîöñ. Éàçh löök wàkéš thé çàmérà. ············································]",
 "1c6be4b9"
+],
+"cameras.import_missed_hub": [
+"[Împört mîššéd évéñtš fröm thé hûb ····]",
+"461d971e"
+],
+"cameras.import_missed_hub_desc": [
+"[Thé hûb kéépš évérý réçördîñg thé çàmérà màkéš, bût téllš ÀmbérŠîght öñlý öf thöšé thé çàmérà'š ÀÎ çàllš à péršöñ, véhîçlé ör àñîmàl. À mîñûté àftér thé çàmérà göéš bàçk tö šléép, àñd évérý 15 mîñûtéš, îtš réçördîñgš öf thé làšt 12 höûrš thàt ÀmbérŠîght hàš ñö évéñt för àré împörtéd àš évéñtš, màrkéd \"fröm çàrd\". Évéñtš öldér thàñ à few mîñûtéš šéñd ñö ñötîfîçàtîöñ. Löökîñg döéš ñöt wàké thé çàmérà. ·····················································]",
+"bb2cc90f"
 ],
 "cameras.is_restarting": [
 "[{name} îš réštàrtîñg ({method}) ····]",

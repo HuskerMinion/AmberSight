@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Alle Operator-Rechte, auch die Sirene",
-"832b8c61"
+"Alle Operator-Rechte, auch die Sirene und Neustarts",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Alle Benutzer",
@@ -3758,6 +3758,10 @@
 "PTZ-Kameras bewegen, Positionen anfahren, per Klick ausrichten",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Kameras neu starten (aus, wenn du es nicht anhakst: eine Kamera ist während des Neustarts ein bis zwei Minuten offline und zeichnet nichts auf; nie über ein Geräte-Token)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Die Sirene einer Kamera auslösen (aus, wenn du es nicht anhakst; nie über ein Geräte-Token)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Standardmäßig ist alles angehakt. Positionen speichern, andere Einstellungen, Benutzer und Speicher bleiben Admins vorbehalten.",
-"38aa7bf4"
+"Standardmäßig angehakt, außer der Sirene und dem Neustart von Kameras. Positionen speichern, andere Einstellungen, Benutzer und Speicher bleiben Admins vorbehalten.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Telefon-Anmeldung",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"Die üblichen Operator-Rechte (keine Sirene)",
-"033cb0f2"
+"Die üblichen Operator-Rechte (keine Sirene, keine Neustarts)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "nur ansehen",

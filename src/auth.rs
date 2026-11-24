@@ -217,6 +217,7 @@ impl Role {
                 Perm::Lights => p.lights,
                 Perm::Siren => p.siren,
                 Perm::Controls => p.lights || p.siren,
+                Perm::Reboot => p.reboot,
             },
         }
     }
@@ -237,6 +238,8 @@ impl Role {
             "lights": m(Perm::Lights),
             // A physical alarm: never from a device token.
             "siren": m(Perm::Siren) && !by_token,
+            // Takes a camera offline for a while: never from a device token.
+            "reboot": m(Perm::Reboot) && !by_token,
         })
     }
 }
@@ -255,6 +258,8 @@ pub enum Perm {
     Siren,
     /// Either of the two (who may reach the controls at all).
     Controls,
+    /// Restarting a camera.
+    Reboot,
 }
 
 /// The role of `user`, signed in with these rights: `admin` is the

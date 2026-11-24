@@ -3419,8 +3419,8 @@
 "80ce6718"
 ],
 "admin_system.all_operator_rights": [
-"Wszystkie prawa operatora, także syrena",
-"832b8c61"
+"Wszystkie prawa operatora, także syrena i ponowne uruchamianie kamer",
+"eb398022"
 ],
 "admin_system.all_users": [
 "Wszyscy użytkownicy",
@@ -3758,6 +3758,10 @@
 "Poruszanie kamerami PTZ, przechodzenie do wstępnie ustawionych punktów, kliknięcie, by wycelować",
 "14050351"
 ],
+"admin_system.perm_reboot": [
+"Ponowne uruchamianie kamer (wyłączone, chyba że zaznaczysz: kamera jest offline przez minutę lub dwie i nic nie nagrywa podczas ponownego uruchamiania; nigdy z tokenu urządzenia)",
+"6db4d468"
+],
 "admin_system.perm_siren": [
 "Włączanie syreny kamery (wyłączone, chyba że zaznaczysz; nigdy z tokenu urządzenia)",
 "fbd636bb"
@@ -3767,8 +3771,8 @@
 "7a52991b"
 ],
 "admin_system.perms_default": [
-"Domyślnie wszystko zaznaczone. Zapisywanie wstępnie ustawionych punktów, inne ustawienia, użytkownicy i miejsce na dysku zostają przy administratorach.",
-"38aa7bf4"
+"Domyślnie zaznaczone, oprócz syreny i ponownego uruchamiania kamer. Zapisywanie pozycji, inne ustawienia, użytkownicy i pamięć pozostają dla administratorów.",
+"40166b02"
 ],
 "admin_system.phone_signin": [
 "Logowanie z telefonu",
@@ -4011,8 +4015,8 @@
 "1c08d4d9"
 ],
 "admin_system.usual_operator_rights": [
-"Zwykłe prawa operatora (bez syreny)",
-"033cb0f2"
+"Zwykłe prawa operatora (bez syreny i ponownego uruchamiania kamer)",
+"6ce2cead"
 ],
 "admin_system.watch_only": [
 "tylko oglądanie",
