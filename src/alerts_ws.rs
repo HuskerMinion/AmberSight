@@ -498,7 +498,7 @@ mod tests {
     async fn a_client_that_never_reads_is_closed_and_counted_until_then() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut cfg: crate::config::Config = toml::from_str("").unwrap();
-        cfg.server.users.push(crate::config::UserConfig { username: "slow".into(), password: crate::auth::hash_password("pw-slow-1"), admin: true, cameras: vec![], disabled: false, role: String::new(), perms: Default::default() });
+        cfg.server.users.push(crate::config::UserConfig { username: "ws-slow".into(), password: crate::auth::hash_password("pw-slow-1"), admin: true, cameras: vec![], disabled: false, role: String::new(), perms: Default::default() });
         let e = crate::engine::Engine::for_test(cfg);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -506,31 +506,31 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
         let mut req = format!("ws://{addr}/api/alerts/ws").into_client_request().unwrap();
         use base64::Engine as _;
-        req.headers_mut().insert("authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("slow:pw-slow-1")).parse().unwrap());
+        req.headers_mut().insert("authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("ws-slow:pw-slow-1")).parse().unwrap());
         // (Connected, and then never read from again.)
         let (_never_read, _) = tokio_tungstenite::connect_async(req).await.unwrap();
         for _ in 0..50 {
-            if connected("slow") == 1 {
+            if connected("ws-slow") == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(connected("slow"), 1);
+        assert_eq!(connected("ws-slow"), 1);
         let big = "x".repeat(2500);
         let e2 = e.clone();
         tokio::task::spawn_blocking(move || {
             for _ in 0..20_000 {
-                publish_to_user(&e2, "slow", &Message { title: "flood".into(), body: big.clone(), kind: crate::push::MsgType::Test, ..Default::default() });
+                publish_to_user(&e2, "ws-slow", &Message { title: "flood".into(), body: big.clone(), kind: crate::push::MsgType::Test, ..Default::default() });
             }
         })
         .await
         .unwrap();
         // Fallen behind: closed (within the send time limit when its sending is stuck).
         let t0 = Instant::now();
-        while connected("slow") > 0 && t0.elapsed() < Duration::from_secs(15) {
+        while connected("ws-slow") > 0 && t0.elapsed() < Duration::from_secs(15) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(connected("slow"), 0, "closed after {:?}", t0.elapsed());
+        assert_eq!(connected("ws-slow"), 0, "closed after {:?}", t0.elapsed());
     }
 
     /// The whole way through a real server: who gets what, with which
@@ -540,14 +540,14 @@ mod tests {
         use futures::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as T};
         let mut cfg: crate::config::Config = toml::from_str("[[cameras]]\nname = \"Porch\"\nurl = \"rtsp://x/\"\n\n[[cameras]]\nname = \"Garage\"\nurl = \"rtsp://y/\"\n").unwrap();
-        cfg.server.users.push(crate::config::UserConfig { username: "boss".into(), password: crate::auth::hash_password("pw-boss-1"), admin: true, cameras: vec![], disabled: false, role: String::new(), perms: Default::default() });
-        cfg.server.users.push(crate::config::UserConfig { username: "vic".into(), password: crate::auth::hash_password("pw-vic-1"), admin: false, cameras: vec!["Porch".into()], disabled: false, role: String::new(), perms: Default::default() });
+        cfg.server.users.push(crate::config::UserConfig { username: "ws-boss".into(), password: crate::auth::hash_password("pw-boss-1"), admin: true, cameras: vec![], disabled: false, role: String::new(), perms: Default::default() });
+        cfg.server.users.push(crate::config::UserConfig { username: "ws-vic".into(), password: crate::auth::hash_password("pw-vic-1"), admin: false, cameras: vec!["Porch".into()], disabled: false, role: String::new(), perms: Default::default() });
         let e = crate::engine::Engine::for_test(cfg);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let svc = crate::web::build_router(e.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
-        let vic_session = crate::auth::new_session(crate::auth::Identity { user: "vic".into(), admin: false });
+        let vic_session = crate::auth::new_session(crate::auth::Identity { user: "ws-vic".into(), admin: false });
         let open = |query: &str, basic: Option<&str>, cookie: Option<String>| {
             let mut req = format!("ws://{addr}/api/alerts/ws{query}").into_client_request().unwrap();
             if let Some(b) = basic {
@@ -573,7 +573,7 @@ mod tests {
         }
         // Without signing in: refused before the upgrade.
         assert!(open("", None, None).await.is_err());
-        let mut boss = open("", Some("boss:pw-boss-1"), None).await.unwrap();
+        let mut boss = open("", Some("ws-boss:pw-boss-1"), None).await.unwrap();
         let hello = next_json(&mut boss).await;
         assert_eq!((hello["type"].as_str(), hello["complete"].as_bool(), hello["replayed"].as_u64()), (Some("hello"), Some(true), Some(0)));
         let mut vic = open("", None, Some(vic_session.clone())).await.unwrap();
@@ -611,7 +611,7 @@ mod tests {
         let e2 = e.clone();
         tokio::task::spawn_blocking(move || {
             publish(&e2, &Audience::Admins, &Message { title: "Disk nearly full".into(), kind: crate::push::MsgType::Problem, urgent: true, ..Default::default() });
-            publish_to_user(&e2, "vic", &Message { title: "test".into(), kind: crate::push::MsgType::Test, ..Default::default() });
+            publish_to_user(&e2, "ws-vic", &Message { title: "test".into(), kind: crate::push::MsgType::Test, ..Default::default() });
         })
         .await
         .unwrap();
@@ -622,7 +622,7 @@ mod tests {
         nothing(&mut boss).await;
         nothing(&mut vic).await;
         // Back after the Garage message: the Porch one and the problem again, with the same ids.
-        let mut again = open(&format!("?since={garage_id}"), Some("boss:pw-boss-1"), None).await.unwrap();
+        let mut again = open(&format!("?since={garage_id}"), Some("ws-boss:pw-boss-1"), None).await.unwrap();
         let h = next_json(&mut again).await;
         assert_eq!((h["complete"].as_bool(), h["replayed"].as_u64()), (Some(true), Some(2)));
         let r1 = next_json(&mut again).await;
@@ -651,7 +651,7 @@ mod tests {
             last = id;
         }
         // Many opened at once: never more than the limit.
-        let many = futures::future::join_all((0..PER_ACCOUNT + 5).map(|_| open("", Some("boss:pw-boss-1"), None))).await;
+        let many = futures::future::join_all((0..PER_ACCOUNT + 5).map(|_| open("", Some("ws-boss:pw-boss-1"), None))).await;
         let mut open_now = Vec::new();
         for s in many.into_iter().flatten() {
             let mut s = s;
@@ -659,18 +659,18 @@ mod tests {
                 open_now.push(s);
             }
         }
-        assert!(connected("boss") <= PER_ACCOUNT, "{}", connected("boss"));
+        assert!(connected("ws-boss") <= PER_ACCOUNT, "{}", connected("ws-boss"));
         assert!(open_now.len() >= PER_ACCOUNT - 2, "{} open", open_now.len());
         drop(open_now);
         for _ in 0..50 {
-            if connected("boss") <= 2 {
+            if connected("ws-boss") <= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(connected("boss") <= 2, "closed ones leave: {}", connected("boss"));
+        assert!(connected("ws-boss") <= 2, "closed ones leave: {}", connected("ws-boss"));
         // An id from before this server started (or never sent): told some may be gone.
-        let mut old = open("?since=5", Some("boss:pw-boss-1"), None).await.unwrap();
+        let mut old = open("?since=5", Some("ws-boss:pw-boss-1"), None).await.unwrap();
         assert_eq!(next_json(&mut old).await["complete"], false);
         // The app may ping too.
         boss.send(T::Text(r#"{"type":"ping"}"#.into())).await.unwrap();
@@ -696,6 +696,6 @@ mod tests {
         assert_eq!(closed, Some(CLOSE_SIGNED_OUT));
         // And the signed-out session cannot open one.
         assert!(open("", None, Some(vic_session)).await.is_err());
-        assert_eq!(connected("vic"), 0);
+        assert_eq!(connected("ws-vic"), 0);
     }
 }

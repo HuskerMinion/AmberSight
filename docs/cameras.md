@@ -54,7 +54,7 @@ the query string (some do; those entries say so, and need **Use full addresses**
 | Tapo / TP-Link | `rtsp://192.168.1.50:554/stream1` | `.../stream2` | Not tested by us |
 | Uniview | `rtsp://192.168.1.50:554/media/video1` | `.../media/video2` | Not tested by us |
 | Annke | see entry | | Not tested by us |
-| Foscam | `rtsp://192.168.1.50:88/videoMain` | `.../videoSub` | Not tested by us |
+| Foscam | `rtsp://192.168.1.50:88/videoMain`, or `foscam://192.168.1.50:88` on older models that stream over their web port | `.../videoSub` (none on `foscam://`) | Not tested by us |
 | Ubiquiti UniFi Protect | copied from Protect | | Not tested by us |
 | Eufy | copied from the Eufy app | | Not tested by us |
 
@@ -305,11 +305,17 @@ cameras. Amcrest cameras are a Dahua design.
 
 ### Foscam
 
-**Not tested by us.** Foscam documents these paths:
+Two ways to connect:
 
-- **Paths:** main `/videoMain`, sub `/videoSub`. On most of these models RTSP uses the camera's
+- **RTSP (direct):** main `/videoMain`, sub `/videoSub`. On most models RTSP uses the camera's
   HTTP port (88 by default); Foscam lists a few models (C1, C1 Lite, FI9800P) on port 554.
-- **Source:** [Foscam FAQ](https://www.foscam.com/faqs/view.html?id=81).
+  **Not tested by us.** Source: [Foscam FAQ](https://www.foscam.com/faqs/view.html?id=81).
+- **SERVERPUSH (native protocol):** for cameras whose live video is served over Foscam's own
+  `SERVERPUSH` protocol, set the address to `foscam://host:88` (88 is used when no port is given)
+  and put the user name and password in the camera's sign-in fields. This reader was contributed by
+  a user and tested on his own camera; **not tested by us.** H.264 only: models that send H.265
+  are not supported (use their RTSP address). Video only: no audio, and the foscam:// reader has
+  no sub stream. User name and password can be at most 63 bytes each.
 
 ### Ubiquiti UniFi Protect
 
@@ -356,7 +362,7 @@ These are common defaults. Your camera may use others; its web page or app shows
 |---|---|
 | 554 | RTSP on most cameras |
 | 80 | camera web page; ONVIF on many cameras |
-| 88 | RTSP and web page on many older Foscam models (from Foscam's FAQ) |
+| 88 | RTSP and web page on many older Foscam models (from Foscam's FAQ); `foscam://` for those that stream over this web port |
 | 1935 | RTMP, and the port named in Reolink's HTTP-FLV address |
 | 2020 | ONVIF on Tapo (from TP-Link's FAQ) |
 | 7441 / 7447 | RTSPS / RTSP on UniFi Protect (from Ubiquiti's port list) |

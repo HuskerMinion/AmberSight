@@ -94,7 +94,7 @@ pub fn overlay_text_filter(cfg: &CameraConfig, clock: crate::picture_text::Clock
 /// with its transport setting. None for a capture device, which opens only
 /// once.
 pub fn second_reader_args(cfg: &CameraConfig, sub: bool) -> Option<Vec<String>> {
-    if crate::local_source::is_device(&cfg.url) || crate::ingest::push::is_push_url(&cfg.url) || crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
+    if crate::local_source::is_device(&cfg.url) || crate::ingest::push::is_push_url(&cfg.url) || crate::ingest::baichuan::is_baichuan_url(&cfg.url) || crate::ingest::foscam::is_foscam_url(&cfg.url) {
         return None;
     }
     let url = match cfg.sub_url.as_deref().filter(|u| sub && !u.trim().is_empty()) {

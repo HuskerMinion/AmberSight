@@ -30,6 +30,10 @@ pub(super) fn wants_native(cfg: &CameraConfig) -> bool {
     if crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
         return true;
     }
+    // Foscam (SERVERPUSH) frames come from our own client, never ffmpeg.
+    if crate::ingest::foscam::is_foscam_url(&cfg.url) {
+        return true;
+    }
     // Baichuan TCP (or Auto) is the built-in reader's alone.
     if super::connect_way::mode_of(cfg) != super::connect_way::Mode::Rtsp && !cfg.overlay {
         return true;
@@ -285,7 +289,7 @@ fn port_open(addr: &str) -> bool {
 
 /// host:port a stream URL connects to (default RTSP/HTTP ports).
 fn stream_addr(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
+    let (scheme, rest) = url.trim().split_once("://")?;
     let hostport = rest.split(['/', '?']).next()?;
     let hostport = hostport.rsplit_once('@').map(|x| x.1).unwrap_or(hostport);
     if hostport.is_empty() {
@@ -295,10 +299,11 @@ fn stream_addr(url: &str) -> Option<String> {
     if has_port {
         return Some(hostport.to_string());
     }
-    let port = match scheme {
+    let port = match scheme.to_ascii_lowercase().as_str() {
         "rtsp" => 554,
         "rtsps" => 322,
         "https" => 443,
+        "foscam" => crate::ingest::foscam::DEFAULT_PORT,
         _ => 80,
     };
     Some(format!("{hostport}:{port}"))
@@ -422,7 +427,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
     let mut busy_before_play: u32 = 0;
     // RTSP or Baichuan (the `connect` setting), and when Auto moves.
     let mode = super::connect_way::mode_of(&cfg);
-    let mut picker = super::connect_way::WayPicker::new(mode, std::time::Instant::now());
+    let mut picker = super::connect_way::WayPicker::new(mode, std::time::Instant::now()).for_url(&cfg.url);
     // Auto switches since video last came (both ways down: waits grow).
     let mut switches_without_video: u32 = 0;
     if mode != super::connect_way::Mode::Rtsp {
@@ -965,7 +970,7 @@ pub(super) fn native_worker(handle: Arc<CameraHandle>, cfg: CameraConfig, engine
         // (baichuan://) has no ffmpeg fallback either: ffmpeg cannot open it,
         // and a camera that will not preview — e.g. older firmware — must keep
         // retrying the native client, not spin on ffmpeg.)
-        if !end.reached_play && gave_up && mode == super::connect_way::Mode::Rtsp && cfg.ingest != "native" && !crate::ingest::flv::is_flv_url(&cfg.url) && !crate::ingest::push::is_push_url(&cfg.url) && !crate::ingest::baichuan::is_baichuan_url(&cfg.url) {
+        if !end.reached_play && gave_up && mode == super::connect_way::Mode::Rtsp && cfg.ingest != "native" && !crate::ingest::flv::is_flv_url(&cfg.url) && !crate::ingest::push::is_push_url(&cfg.url) && !crate::ingest::baichuan::is_baichuan_url(&cfg.url) && !crate::ingest::foscam::is_foscam_url(&cfg.url) {
             warn!(
                 "camera '{}': built-in RTSP reader could not play this camera ({why}); switching to ffmpeg ingest",
                 cfg.name
@@ -2098,6 +2103,12 @@ mod tests {
         assert_eq!(stream_addr("rtsp://u:p@192.0.2.10/stream").as_deref(), Some("192.0.2.10:554"));
         assert_eq!(stream_addr("rtsp://192.0.2.10:8554/a?b=c").as_deref(), Some("192.0.2.10:8554"));
         assert_eq!(stream_addr("https://cam.example/flv?x=1").as_deref(), Some("cam.example:443"));
+        assert_eq!(stream_addr("foscam://cam.example").as_deref(), Some("cam.example:88"));
+        assert_eq!(stream_addr("foscam://cam.example:8088").as_deref(), Some("cam.example:8088"));
+        // (Spaces around a saved address do not change its port.)
+        assert_eq!(stream_addr(" rtsp://192.0.2.10/a ").as_deref(), Some("192.0.2.10:554"));
+        assert_eq!(stream_addr(" foscam://cam.example").as_deref(), Some("cam.example:88"));
+        assert_eq!(stream_addr("Foscam://cam.example").as_deref(), Some("cam.example:88"));
     }
 
     #[test]
@@ -2190,7 +2201,7 @@ mod routing_tests {
         let rtsp = "rtsp://192.0.2.1/x";
         assert!(wants_native(&cam(rtsp, "")));
         assert!(!wants_native(&cam(rtsp, "overlay = true")));
-        for url in ["push://yard-camera-0001", "baichuan://192.0.2.9?uid=TESTUID000000001"] {
+        for url in ["push://yard-camera-0001", "baichuan://192.0.2.9?uid=TESTUID000000001", "foscam://192.0.2.9"] {
             assert!(wants_native(&cam(url, "")), "{url}: no ffmpeg reader for it");
         }
     }

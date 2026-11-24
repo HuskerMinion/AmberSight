@@ -137,6 +137,24 @@ pub struct WayPicker {
     baichuan_blocked: Option<String>,
     /// What to show next to the way in use: why it is the one in use.
     pub note: Option<String>,
+    /// What reads the camera's own address when `current` is `Way::Rtsp`
+    /// (for messages): "RTSP" for an rtsp:// address, the reader's name for
+    /// another kind, None when there is no short name for it.
+    address_reader: Option<&'static str>,
+}
+
+/// The name of the reader for a camera address, for messages.
+fn address_reader(url: &str) -> Option<&'static str> {
+    let l = url.trim().to_ascii_lowercase();
+    if l.starts_with("rtsp://") || l.starts_with("rtsps://") {
+        Some("RTSP")
+    } else if crate::ingest::foscam::is_foscam_url(url) {
+        Some("Foscam")
+    } else if crate::ingest::baichuan::is_baichuan_url(url) {
+        Some("Baichuan")
+    } else {
+        None
+    }
 }
 
 impl WayPicker {
@@ -155,7 +173,15 @@ impl WayPicker {
             trying_primary: false,
             baichuan_blocked: None,
             note: None,
+            address_reader: Some("RTSP"),
         }
+    }
+
+    /// The camera's address, so messages name the reader that uses it
+    /// (a refused sign-in on foscam:// is not an "RTSP" one).
+    pub fn for_url(mut self, url: &str) -> Self {
+        self.address_reader = address_reader(url);
+        self
     }
 
     fn other(w: Way) -> Way {
@@ -203,9 +229,16 @@ impl WayPicker {
         // Every mode (RTSP alone too): the worker sets `auth` only for a
         // clear refusal there.
         if e.auth {
+            let who = match self.current {
+                Way::Baichuan => Some(Way::Baichuan.label()),
+                Way::Rtsp => self.address_reader,
+            };
+            let head = match who {
+                Some(w) => format!("{w} sign-in refused"),
+                None => "Sign-in refused".to_string(),
+            };
             let why = format!(
-                "{} sign-in refused: the camera did not accept the user name or password. Not asking again (the camera locks out after a few failed sign-ins); fix them in the camera's settings",
-                self.current.label()
+                "{head}: the camera did not accept the user name or password. Not asking again (the camera locks out after a few failed sign-ins); fix them in the camera's settings"
             );
             self.note = Some(why.clone());
             return Next::Stop { why };
@@ -369,6 +402,32 @@ mod tests {
         let bad = Ended { got_video: false, error: Some("401 response to DESCRIBE: Received Unauthorized after trying digest auth".into()), auth: true, battery: false };
         match p.session_ended(&bad, t0) {
             Next::Stop { why } => assert!(why.starts_with("RTSP sign-in refused"), "{why}"),
+            n => panic!("{n:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_sign_in_names_the_reader_of_the_address() {
+        let t0 = Instant::now();
+        let bad = Ended { got_video: false, error: Some("Foscam sign-in refused (the camera answered with code 1)".into()), auth: true, battery: false };
+        for (url, head) in [
+            ("rtsp://192.0.2.1/x", "RTSP sign-in refused: "),
+            ("RTSPS://192.0.2.1/x", "RTSP sign-in refused: "),
+            ("foscam://192.0.2.9", "Foscam sign-in refused: "),
+            ("Foscam://192.0.2.9:88", "Foscam sign-in refused: "),
+            ("baichuan://192.0.2.9?uid=TESTUID000000001", "Baichuan sign-in refused: "),
+            ("http://192.0.2.9/flv?x=1", "Sign-in refused: "),
+        ] {
+            let mut p = WayPicker::new(Mode::Rtsp, t0).for_url(url);
+            match p.session_ended(&bad, t0) {
+                Next::Stop { why } => assert!(why.starts_with(head) && why.contains("Not asking again"), "{url}: {why}"),
+                n => panic!("{url}: {n:?}"),
+            }
+        }
+        // Baichuan in use on an rtsp:// camera is still named Baichuan.
+        let mut p = WayPicker::new(Mode::Baichuan, t0).for_url("rtsp://192.0.2.1/x");
+        match p.session_ended(&bad, t0) {
+            Next::Stop { why } => assert!(why.starts_with("Baichuan sign-in refused: "), "{why}"),
             n => panic!("{n:?}"),
         }
     }

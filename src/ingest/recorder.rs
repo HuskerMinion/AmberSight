@@ -34,6 +34,9 @@ const SR_WAIT_SECS: f64 = 5.0;
 /// A sender-report alignment that moves a track by more than this from its
 /// arrival-time anchor is treated as a bogus camera clock and ignored.
 const MAX_SR_SKEW_SECS: f64 = 2.0;
+/// A report used before is given up (audio back on its arrival anchor) only
+/// this far past MAX_SR_SKEW_SECS.
+const SR_RESET_MARGIN_SECS: f64 = 0.5;
 
 /// Camera clock drift: a camera's media clock can run a little fast or slow
 /// (0.05% is 43 s a day), and segment times are this computer's clock at the
@@ -47,6 +50,17 @@ const MAX_DRIFT_FIX: f64 = 0.0005;
 /// (a file, a test) and is left alone.
 const DRIFT_AFTER_SECS: f64 = 120.0;
 const DRIFT_SANE_SECS: f64 = 30.0;
+/// Sound against picture: some cameras' audio clock runs a little fast or
+/// slow against their video clock (one ran 4 s an hour fast), and audio is
+/// placed by its own clock from an anchor set once per session (by arrival,
+/// or by sender reports while they agree with it within MAX_SR_SKEW_SECS).
+/// So each track's lateness against this computer's clock is watched (the
+/// least over 10-20 s: delays only add to it, see live::Lateness), and when
+/// a new file starts the arrival anchor is moved by what the two have drifted
+/// apart, once past AV_MAX_GAP and by at most AV_MAX_STEP a file. Audio from
+/// before the new file's start is then left out rather than squeezed in.
+const AV_MAX_GAP: f64 = 0.1;
+const AV_MAX_STEP: f64 = 1.0;
 /// A camera whose timestamps run far from real time without one jump big
 /// enough for clockjump.rs (8 s ahead every 2 s keyframe group; standing
 /// still between keyframes): a recording never ends later than this much
@@ -248,6 +262,18 @@ pub struct SegmentWriter {
     /// The file being closed was cut by real time (`wall_full`), not by its
     /// own timestamps.
     wall_cut: bool,
+    /// Sound against picture (see AV_MAX_GAP): each track's lateness (audio
+    /// by its arrival anchor), the file the anchor was last checked for,
+    /// whether the current file's leading audio from before its start is
+    /// left out, and the correction so far with the amount last logged.
+    video_late: super::live::Lateness,
+    audio_late: super::live::Lateness,
+    av_checked: Option<u32>,
+    av_trim: bool,
+    av_fixed: f64,
+    av_logged: f64,
+    /// Tests: seconds since the anchor, in place of the real time.
+    test_now: Option<f64>,
 }
 
 impl SegmentWriter {
@@ -293,7 +319,73 @@ impl SegmentWriter {
             recorded: false,
             closing: None,
             wall_cut: false,
+            video_late: super::live::Lateness::NONE,
+            audio_late: super::live::Lateness::NONE,
+            av_checked: None,
+            av_trim: false,
+            av_fixed: 0.0,
+            av_logged: 0.0,
+            test_now: None,
         })
+    }
+
+    /// Seconds since the anchor (this computer's clock).
+    fn since_anchor(&self) -> f64 {
+        self.test_now.unwrap_or_else(|| self.anchor_instant.elapsed().as_secs_f64())
+    }
+
+    /// Note how late a frame arrived against its place in time (live only).
+    fn note_lateness(&mut self, i: usize, ticks: i64) {
+        if self.recorded {
+            return;
+        }
+        let now = self.since_anchor();
+        let t = &self.tracks[i];
+        let Some(off) = (if t.info.kind == TrackKind::Audio { t.arrival_offset } else { t.offset }) else { return };
+        let at = ticks as f64 / t.info.timescale as f64 + off;
+        if i == self.video {
+            self.video_late.note(now, at);
+        } else if t.info.kind == TrackKind::Audio {
+            self.audio_late.note(now, at);
+        }
+    }
+
+    /// At the start of a file: move the audio's arrival anchor by what sound
+    /// and picture have drifted apart (see AV_MAX_GAP). Audio that follows
+    /// the arrival anchor (no sender-report alignment in use) moves with it;
+    /// the sender-report check that comes next measures against it.
+    fn fix_av_drift(&mut self, a: usize) {
+        if self.recorded || self.file.is_none() || self.av_checked == Some(self.next_index) {
+            return;
+        }
+        self.av_checked = Some(self.next_index);
+        let (Some(v), Some(late)) = (self.video_late.least(), self.audio_late.least()) else { return };
+        // Audio placed ahead of the picture arrives less late against it.
+        let gap = v - late;
+        if gap.abs() <= AV_MAX_GAP || gap.abs() > DRIFT_SANE_SECS {
+            return;
+        }
+        let step = gap.clamp(-AV_MAX_STEP, AV_MAX_STEP);
+        let t = &mut self.tracks[a];
+        let (Some(off), Some(arr)) = (t.offset, t.arrival_offset) else { return };
+        t.arrival_offset = Some(arr - step);
+        if (off - arr).abs() < 1e-9 {
+            t.offset = Some(arr - step);
+            self.av_trim = true;
+        }
+        // Measured again from here, against the moved anchor.
+        self.audio_late = super::live::Lateness::NONE;
+        self.av_fixed += step;
+        let every = if self.av_logged == 0.0 { 1.0 } else { 10.0 };
+        if (self.av_fixed - self.av_logged).abs() >= every {
+            self.av_logged = self.av_fixed;
+            tracing::info!(
+                "{}: the camera's sound runs {} its picture; recordings moved it {:+.1} s so far to keep them together",
+                self.prefix,
+                if self.av_fixed > 0.0 { "ahead of" } else { "behind" },
+                -self.av_fixed
+            );
+        }
     }
 
     /// Segments closed since the last call.
@@ -428,6 +520,7 @@ impl SegmentWriter {
     /// new file is about to open.
     fn adopt_sr_alignment(&mut self) {
         let Some(k) = self.sr_wall_k() else { return };
+        let mut earlier = false;
         for t in self.tracks.iter_mut().filter(|t| t.info.kind == TrackKind::Audio) {
             let (Some((ticks, ntp)), Some(arrival)) = (t.sr, t.arrival_offset) else { continue };
             let aligned = ntp - ticks as f64 / t.info.timescale as f64 - k;
@@ -440,6 +533,16 @@ impl SegmentWriter {
                 }
                 t.offset = Some(aligned);
             } else {
+                // Placed by arrival again (a report used before may have
+                // stopped agreeing: the audio must not stay where it put it,
+                // and the drift check moves the arrival anchor only).
+                // (Only well past the limit: a report that hovers at it must not
+                // flip the audio between the two every file.)
+                let past = (aligned - arrival).abs() > MAX_SR_SKEW_SECS + SR_RESET_MARGIN_SECS;
+                if let Some(off) = t.offset.filter(|&o| past && (o - arrival).abs() > 1e-9) {
+                    earlier |= arrival < off;
+                    t.offset = Some(arrival);
+                }
                 // Tried again for every audio frame until the first audio
                 // fragment is written: say so once per camera per hour.
                 let skew = aligned - arrival;
@@ -453,6 +556,8 @@ impl SegmentWriter {
                 }
             }
         }
+        // Audio moved earlier: what is now before the file's start is left out.
+        self.av_trim |= earlier;
     }
 
     /// Add a video frame shown at its decode time (no B-frames).
@@ -474,6 +579,7 @@ impl SegmentWriter {
     pub fn push_video_cts(&mut self, ticks: i64, cts: i32, data: Vec<u8>, is_key: bool) -> std::io::Result<()> {
         let v = self.video;
         self.anchor_track(v, ticks);
+        self.note_lateness(v, ticks);
         if !self.seen_keyframe {
             if !is_key {
                 return Ok(()); // a file must start on a keyframe
@@ -518,9 +624,11 @@ impl SegmentWriter {
     pub fn push_audio(&mut self, ticks: i64, data: Vec<u8>) {
         let Some(a) = self.tracks.iter().position(|t| t.info.kind == TrackKind::Audio) else { return };
         self.anchor_track(a, ticks);
+        self.note_lateness(a, ticks);
         if self.tracks[a].next_decode.is_none() {
             // Nothing of this track is in the current file yet, so it can
             // still be re-placed without touching written data.
+            self.fix_av_drift(a);
             self.adopt_sr_alignment();
         }
         if !self.seen_keyframe {
@@ -594,8 +702,17 @@ impl SegmentWriter {
         let cut = self.tracks[v].secs(video_end_ticks);
         let mut runs = Vec::new();
         let mut video_frames = 0u64;
+        // (Kept until this file's audio is placed: a flush with no audio yet
+        // must not use it up.)
+        let trim = self.av_trim;
         for (i, track) in self.tracks.iter_mut().enumerate() {
             let is_video = i == v;
+            if trim && !is_video && track.next_decode.is_none() {
+                // The anchor moved for this file (sound ran ahead): audio
+                // now before the file's start belongs to the previous file.
+                let early = track.pending.iter().take_while(|p| track.secs(p.ticks) < file_start - 0.0005).count();
+                track.pending.drain(..early);
+            }
             // Which samples go in this fragment: all buffered video; audio
             // that starts before the cut and whose duration is known (it
             // has a successor), so durations never have to be guessed.
@@ -647,6 +764,9 @@ impl SegmentWriter {
                 video_frames = samples.len() as u64;
             }
             runs.push(TrackRun { track_index: i, base_decode_time: base, samples });
+        }
+        if self.tracks.iter().any(|t| t.info.kind == TrackKind::Audio && t.next_decode.is_some()) {
+            self.av_trim = false;
         }
         if runs.is_empty() {
             return Ok(());
@@ -842,6 +962,10 @@ enum Reader {
     /// setting): converted video and AAC audio arrive on a channel; the
     /// handle stops the stream when dropped.
     Wired(super::baichuan::wired::WiredPreview),
+    /// A Foscam camera over its native `SERVERPUSH` protocol: converted video
+    /// arrives on a channel; the handle stops the stream when dropped. Video
+    /// only (no audio yet).
+    Foscam(Box<super::foscam::FoscamStream>),
 }
 
 /// A playing stream (RTSP, or HTTP-FLV) with its video and optional audio.
@@ -1088,6 +1212,13 @@ impl OpenStream {
                     }
                     return Some(Ok(self.settle_params(item)));
                 }
+                Reader::Foscam(h) => {
+                    let item = match h.rx.recv().await? {
+                        Ok(i) => i,
+                        Err(e) => return Some(Err(anyhow::anyhow!(e))),
+                    };
+                    return Some(Ok(self.settle_params(item)));
+                }
             }
         }
     }
@@ -1152,6 +1283,7 @@ impl OpenStream {
             }
             Reader::Baichuan(h) => Ok(h.video_params()),
             Reader::Wired(h) => Ok(h.video_params()),
+            Reader::Foscam(h) => Ok(h.video_params()),
         }
     }
 
@@ -1169,6 +1301,7 @@ impl OpenStream {
             Reader::Flv(f) => f.audio_config().map(|asc| AudioCodec::Aac { config: asc.to_vec() }),
             Reader::Baichuan(_) => None,
             Reader::Wired(h) => h.audio_config().map(|config| AudioCodec::Aac { config }),
+            Reader::Foscam(_) => None,
         }
     }
 
@@ -1218,6 +1351,7 @@ impl OpenStream {
                     clock_rate: rate,
                 })
             }
+            Reader::Foscam(_) => None,
         }
     }
 }
@@ -1285,6 +1419,10 @@ pub async fn open_stream(src: &super::StreamSource, with_audio: bool) -> anyhow:
     if super::flv::is_flv_url(&src.url) {
         let f = super::flv::FlvStream::open(&src.url, &src.username, &src.password).await?;
         return Ok(opened(Reader::Flv(Box::new(f))));
+    }
+    if super::foscam::is_foscam_url(&src.url) {
+        let f = super::foscam::FoscamStream::open(&src.url, &src.username, &src.password).await?;
+        return Ok(opened(Reader::Foscam(Box::new(f))));
     }
     if let Some(key) = super::push::push_key(&src.url) {
         let r = super::push::take_stream(key, std::time::Duration::from_secs(15))
@@ -1884,6 +2022,118 @@ mod tests {
             .collect();
         let _ = std::fs::remove_dir_all(&dir);
         (segs, bases)
+    }
+
+    /// Half an hour of 25 fps video and 40 ms audio frames arriving
+    /// together (10 s files); the camera's audio clock runs `rate` times its
+    /// video clock. Returns how far apart sound and picture are placed at
+    /// the end (seconds; + = sound ahead) and every file's first audio
+    /// decode time.
+    fn av_drift_run(name: &str, rate: f64, sr_each: Option<usize>) -> (f64, Vec<u64>, f64) {
+        av_drift_run_sr(name, rate, sr_each, usize::MAX)
+    }
+
+    /// The same, with the audio's sender reports stopping after frame
+    /// `audio_sr_until` (the video's go on).
+    fn av_drift_run_sr(name: &str, rate: f64, sr_each: Option<usize>, audio_sr_until: usize) -> (f64, Vec<u64>, f64) {
+        let dir = std::env::temp_dir().join(format!("amber-avdrift-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut w = SegmentWriter::new(&dir, "cam", vec![video_track(), audio_track()], 10).unwrap();
+        let frames = 1800 * 25;
+        let (mut vt, mut at) = (0, 0);
+        for i in 0..frames {
+            w.test_now = Some(i as f64 * 0.04 + if i % 9 == 4 { 0.25 } else { 0.0 });
+            vt = i as i64 * 3600;
+            at = (i as f64 * 640.0 * rate).round() as i64;
+            if sr_each.is_some_and(|n| i % n == 0) {
+                // Honest sender reports: both clocks mapped to real time.
+                let real = NTP0 + i as f64 * 0.04;
+                w.observe_sender_report(TrackKind::Video, vt, real);
+                if i < audio_sr_until {
+                    w.observe_sender_report(TrackKind::Audio, at, real);
+                }
+            }
+            w.push_video(vt, vec![1; 50], i % 50 == 0).unwrap();
+            w.push_audio(at, vec![2; 10]);
+        }
+        let a = w.tracks.iter().position(|t| t.info.kind == TrackKind::Audio).unwrap();
+        let apart = w.tracks[a].secs(at) - w.tracks[w.video].secs(vt);
+        let fixed = w.av_fixed;
+        w.finish().unwrap();
+        let bases = w
+            .take_closed()
+            .iter()
+            .filter_map(|s| tfdt_boxes(&std::fs::read(&s.path).unwrap()).iter().find(|b| b.0 == 2).map(|b| b.1))
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        (apart, bases, fixed)
+    }
+
+    #[test]
+    fn recordings_keep_sound_with_the_picture_when_the_camera_clocks_drift() {
+        for (name, rate) in [("fast", 1.005), ("slow", 0.995)] {
+            let (apart, bases, fixed) = av_drift_run(name, rate, None);
+            // 9 s apart by the end without the correction.
+            assert!(apart.abs() < AV_MAX_GAP + 0.1, "{name}: sound and picture {apart:+.3} s apart");
+            assert!((fixed.abs() - 9.0).abs() < 0.5, "{name}: moved {fixed:+.2} s");
+            assert!(bases.len() > 170, "{name}: {} files with audio", bases.len());
+            // Each file's audio starts near its start (a gap at most a step).
+            assert!(bases.iter().all(|&b| b <= (AV_MAX_STEP * 16000.0) as u64), "{name}: {:?}", bases.iter().max());
+        }
+    }
+
+    #[test]
+    fn recordings_with_steady_clocks_are_left_alone() {
+        let (apart, _, fixed) = av_drift_run("steady", 1.0, None);
+        assert!(apart.abs() < 0.05, "{apart}");
+        assert_eq!(fixed, 0.0);
+    }
+
+    #[test]
+    fn sender_reports_that_follow_the_drift_keep_being_used() {
+        // Reports that map both drifting clocks to real time place the audio
+        // right by themselves: they stay in use past MAX_SR_SKEW_SECS of
+        // drift, and there is nothing for the arrival check to correct.
+        let (apart, _, _) = av_drift_run("sr", 1.005, Some(250));
+        assert!(apart.abs() < AV_MAX_GAP + 0.1, "sound and picture {apart:+.3} s apart");
+    }
+
+    #[test]
+    fn sound_placed_by_reports_that_stop_agreeing_goes_back_to_arrival() {
+        // The audio's reports stop 5 minutes in while its clock keeps
+        // drifting: once they are 2 s off they are dropped, and the audio
+        // must follow the (corrected) arrival anchor again, not stay where
+        // the last report put it.
+        let (apart, _, fixed) = av_drift_run_sr("sr-stale", 1.005, Some(250), 25 * 300);
+        assert!(apart.abs() < AV_MAX_GAP + 0.1, "sound and picture {apart:+.3} s apart");
+        assert!(fixed.abs() > 5.0, "the arrival anchor was moved: {fixed:+.2}");
+    }
+
+    #[test]
+    fn a_report_hovering_at_the_limit_does_not_flip_the_audio() {
+        let dir = std::env::temp_dir().join(format!("amber-sr-hover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut w = SegmentWriter::new(&dir, "cam", vec![video_track(), audio_track()], 10).unwrap();
+        w.test_now = Some(0.0);
+        w.push_video(0, vec![1; 10], true).unwrap();
+        w.push_audio(0, vec![2; 10]);
+        let a = w.tracks.iter().position(|t| t.info.kind == TrackKind::Audio).unwrap();
+        let arrival = w.tracks[a].arrival_offset.unwrap();
+        // Reports put the audio 1.9 s from its arrival anchor: used.
+        w.observe_sender_report(TrackKind::Video, 0, NTP0);
+        w.observe_sender_report(TrackKind::Audio, 0, NTP0 + 1.9);
+        w.adopt_sr_alignment();
+        let used = w.tracks[a].offset.unwrap();
+        assert!((used - arrival - 1.9).abs() < 0.01, "{used} {arrival}");
+        // The anchor moves 0.3 s (drift): now 2.2 s apart, just past the limit.
+        w.tracks[a].arrival_offset = Some(arrival - 0.3);
+        w.adopt_sr_alignment();
+        assert_eq!(w.tracks[a].offset, Some(used), "kept, not flipped back to arrival");
+        // Well past it (2.7 s): back on the arrival anchor.
+        w.tracks[a].arrival_offset = Some(arrival - 0.8);
+        w.adopt_sr_alignment();
+        assert_eq!(w.tracks[a].offset, Some(arrival - 0.8));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

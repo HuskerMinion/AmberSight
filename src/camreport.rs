@@ -448,6 +448,9 @@ fn network_skip(url: &str, rtsp_only: bool) -> Option<&'static str> {
     if crate::ingest::baichuan::is_baichuan_url(url) {
         return Some("a battery camera over the Reolink protocol, not RTSP");
     }
+    if crate::ingest::foscam::is_foscam_url(url) {
+        return Some("a Foscam camera over its own protocol, not RTSP");
+    }
     if rtsp_only && !(l.starts_with("rtsp://") || l.starts_with("rtsps://")) {
         return Some("not an RTSP address");
     }

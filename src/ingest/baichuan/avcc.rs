@@ -8,9 +8,9 @@
 //! This module converts one and builds the other. It is pure and synchronous,
 //! so it unit-tests offline against real captures with no camera.
 //!
-//! Width and height come from the BcMedia `InfoV2` message (the SPS parser in
-//! `super::super::sps` does not expose picture size), so the caller supplies
-//! them via [`AvccBridge::set_dimensions`].
+//! Width and height come from the BcMedia `InfoV2` message (or, for a reader
+//! without one, `crate::ingest::sps::sps_display_size`), so the caller
+//! supplies them via [`AvccBridge::set_dimensions`].
 //!
 //! H.265 (wired cameras' main streams, e.g. a Duo Floodlight's 4608x1728)
 //! works the same way: VPS/SPS/PPS go into an HEVCDecoderConfigurationRecord

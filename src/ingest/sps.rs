@@ -135,6 +135,13 @@ pub struct Sps {
     pub log2_max_poc_lsb: u32,
     pub max_num_ref_frames: u32,
     pub frame_mbs_only: bool,
+    /// chroma_format_idc (1, 4:2:0, unless a High profile says otherwise).
+    pub chroma_format_idc: u32,
+    /// pic_width_in_mbs_minus1 and pic_height_in_map_units_minus1.
+    pub width_mbs_minus1: u32,
+    pub height_map_units_minus1: u32,
+    /// frame_crop_{left,right,top,bottom}_offset (zeros without cropping).
+    pub crop: [u32; 4],
     pub vui: bool,
     /// `max_num_reorder_frames`, when the VUI has a bitstream_restriction.
     pub max_num_reorder: Option<u32>,
@@ -174,8 +181,10 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
     }
     let mut separate_colour_plane = false;
     let mut bit_depth = 8u8;
+    let mut chroma_format_idc = 1;
     if HIGH_PROFILES.contains(&profile) {
         let chroma = r.ue()?;
+        chroma_format_idc = chroma;
         if chroma == 3 {
             separate_colour_plane = r.flag()?;
         }
@@ -224,16 +233,17 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
     }
     let max_num_ref_frames = r.ue()?;
     r.skip(1)?;
-    r.ue()?;
-    r.ue()?;
+    let width_mbs_minus1 = r.ue()?;
+    let height_map_units_minus1 = r.ue()?;
     let frame_mbs_only = r.flag()?;
     if !frame_mbs_only {
         r.skip(1)?;
     }
     r.skip(1)?;
+    let mut crop = [0u32; 4];
     if r.flag()? {
-        for _ in 0..4 {
-            r.ue()?;
+        for c in &mut crop {
+            *c = r.ue()?;
         }
     }
     let vui_flag_at = r.p;
@@ -290,7 +300,40 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
     if last_one < r.p || last_one - r.p > 7 || (r.p..last_one).any(|i| rbsp[i >> 3] & (0x80 >> (i & 7)) != 0) {
         return None;
     }
-    Some(Sps { profile, bit_depth, separate_colour_plane, log2_max_frame_num, poc_type, log2_max_poc_lsb, max_num_ref_frames, frame_mbs_only, vui, max_num_reorder, vui_flag_at, restriction_flag_at })
+    Some(Sps { profile, bit_depth, separate_colour_plane, log2_max_frame_num, poc_type, log2_max_poc_lsb, max_num_ref_frames, frame_mbs_only, chroma_format_idc, width_mbs_minus1, height_map_units_minus1, crop, vui, max_num_reorder, vui_flag_at, restriction_flag_at })
+}
+
+impl Sps {
+    /// The displayed picture size (width, height) in luma samples: the coded
+    /// size less the cropping window. None when a value is out of range (a
+    /// crafted SPS can make the arithmetic overflow, or crop all of it away).
+    pub fn display_size(&self) -> Option<(u32, u32)> {
+        let field = if self.frame_mbs_only { 1 } else { 2 };
+        let width = self.width_mbs_minus1.checked_add(1)?.checked_mul(16)?;
+        let height = self.height_map_units_minus1.checked_add(1)?.checked_mul(16)?.checked_mul(field)?;
+        // Crop units (H.264 7.4.2.1.1): ChromaArrayType 0 (monochrome, or
+        // separate color planes) crops in single samples; otherwise in
+        // chroma samples (SubWidthC x SubHeightC).
+        let chroma_array_type = if self.separate_colour_plane { 0 } else { self.chroma_format_idc };
+        let (sub_w, sub_h) = match chroma_array_type {
+            0 => (1, 1),
+            1 => (2, 2),
+            2 => (2, 1),
+            3 => (1, 1),
+            _ => return None,
+        };
+        let [left, right, top, bottom] = self.crop;
+        let crop_w = left.checked_add(right)?.checked_mul(sub_w)?;
+        let crop_h = top.checked_add(bottom)?.checked_mul(sub_h)?.checked_mul(field)?;
+        let w = width.checked_sub(crop_w).filter(|&w| w > 0)?;
+        let h = height.checked_sub(crop_h).filter(|&h| h > 0)?;
+        Some((w, h))
+    }
+}
+
+/// The displayed picture size of an SPS NAL unit (header byte included).
+pub fn sps_display_size(nal: &[u8]) -> Option<(u32, u32)> {
+    parse_sps(nal)?.display_size()
 }
 
 /// True when the SPS already tells a decoder it never has to wait for
@@ -579,6 +622,7 @@ pub(crate) mod tests {
         w_mbs: u32,
         h_mbs: u32,
         frame_mbs_only: bool,
+        chroma: u32,
         crop: Option<[u32; 4]>,
         /// None: no VUI. Some: timing (num_units, time_scale), with an
         /// aspect ratio and a NAL HRD, and a restriction (reorder frames).
@@ -593,13 +637,16 @@ pub(crate) mod tests {
         o.u(8, s.level as u32);
         o.ue(0);
         if HIGH_PROFILES.contains(&s.profile) {
-            o.ue(1);
+            o.ue(s.chroma);
+            if s.chroma == 3 {
+                o.bit(false);
+            }
             o.ue(0);
             o.ue(0);
             o.bit(false);
             o.bit(s.scaling);
             if s.scaling {
-                for i in 0..8 {
+                for i in 0..if s.chroma != 3 { 8 } else { 12 } {
                     o.bit(i % 2 == 0);
                     if i % 2 == 0 {
                         for j in 0..if i < 6 { 16 } else { 64 } {
@@ -692,7 +739,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn spec() -> SpsSpec {
-        SpsSpec { profile: 100, level: 51, poc_type: 0, refs: 1, w_mbs: 40, h_mbs: 23, frame_mbs_only: true, crop: Some([0, 0, 0, 4]), vui: Some((Some((1, 30)), false, false, None)), scaling: false }
+        SpsSpec { profile: 100, level: 51, poc_type: 0, refs: 1, w_mbs: 40, h_mbs: 23, frame_mbs_only: true, chroma: 1, crop: Some([0, 0, 0, 4]), vui: Some((Some((1, 30)), false, false, None)), scaling: false }
     }
 
     /// An `avc1` sample entry whose avcC has `spec()`'s SPS.
@@ -946,6 +993,60 @@ pub(crate) mod tests {
         // Streams the check does not follow: never pass.
         for s in [SpsSpec { poc_type: 1, ..spec() }, SpsSpec { frame_mbs_only: false, ..spec() }, SpsSpec { poc_type: 2, ..spec() }] {
             assert!(ReorderCheck::new(&avcc_of(&write_sps(&s))).reorders);
+        }
+    }
+
+    #[test]
+    fn display_size_is_the_cropped_size() {
+        let size = |s: SpsSpec| sps_display_size(&write_sps(&s));
+        // 640x368 coded, 8 rows cropped (4 units of 2 in 4:2:0).
+        assert_eq!(size(spec()), Some((640, 360)));
+        assert_eq!(size(SpsSpec { crop: None, ..spec() }), Some((640, 368)));
+        // Main profile (no chroma fields): 4:2:0.
+        assert_eq!(size(SpsSpec { profile: 77, ..spec() }), Some((640, 360)));
+        // 1920x1080: 68 macroblock rows, 4 crop units.
+        assert_eq!(size(SpsSpec { w_mbs: 120, h_mbs: 68, crop: Some([0, 0, 0, 4]), ..spec() }), Some((1920, 1080)));
+        // Interlaced: map units are field rows, crop units twice as tall.
+        assert_eq!(size(SpsSpec { frame_mbs_only: false, h_mbs: 34, crop: Some([0, 0, 0, 2]), ..spec() }), Some((640, 1080)));
+        // A High profile SPS with scaling matrices reads to the size too.
+        assert_eq!(size(SpsSpec { scaling: true, ..spec() }), Some((640, 360)));
+        assert_eq!(size(SpsSpec { chroma: 3, scaling: true, ..spec() }), Some((640, 364)));
+        // Monochrome and 4:4:4 crop in single samples; 4:2:2 is 2 wide, 1 tall.
+        assert_eq!(size(SpsSpec { chroma: 0, crop: Some([1, 1, 0, 4]), ..spec() }), Some((638, 364)));
+        assert_eq!(size(SpsSpec { chroma: 3, crop: Some([1, 1, 0, 4]), ..spec() }), Some((638, 364)));
+        assert_eq!(size(SpsSpec { chroma: 2, crop: Some([1, 1, 0, 4]), ..spec() }), Some((636, 364)));
+        // Not an SPS.
+        assert_eq!(sps_display_size(&[0x68, 0xee, 0x3c, 0xb0]), None);
+    }
+
+    #[test]
+    fn display_size_of_a_crafted_sps_does_not_overflow() {
+        // Each SPS reads; only its size is out of range.
+        let size = |s: SpsSpec| {
+            let p = parse_sps(&write_sps(&s)).expect("reads");
+            p.display_size()
+        };
+        // Width and height that overflow when multiplied out.
+        assert_eq!(size(SpsSpec { w_mbs: u32::MAX, crop: None, ..spec() }), None);
+        assert_eq!(size(SpsSpec { h_mbs: u32::MAX / 16, crop: None, frame_mbs_only: false, ..spec() }), None);
+        // Crop offsets that overflow when added, or crop the whole picture.
+        assert_eq!(size(SpsSpec { crop: Some([u32::MAX - 1, u32::MAX - 1, 0, 0]), ..spec() }), None);
+        assert_eq!(size(SpsSpec { crop: Some([0, 0, u32::MAX / 2, 0]), ..spec() }), None);
+        assert_eq!(size(SpsSpec { crop: Some([160, 160, 0, 0]), ..spec() }), None);
+        assert_eq!(size(SpsSpec { crop: Some([0, 0, 0, 184]), ..spec() }), None);
+        // A chroma format past 4:4:4.
+        let mut s = parse_sps(&write_sps(&spec())).unwrap();
+        s.chroma_format_idc = 7;
+        assert_eq!(s.display_size(), None);
+        // Random bytes after an SPS header never panic.
+        let mut seed = 0x1234_5678u32;
+        for _ in 0..2000 {
+            let mut nal = vec![0x67];
+            for _ in 0..(seed % 24) {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                nal.push((seed >> 24) as u8);
+            }
+            let _ = sps_display_size(&nal);
         }
     }
 }

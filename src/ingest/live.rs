@@ -242,6 +242,85 @@ pub struct LiveMuxer {
     diag: Option<super::aac::Diag>,
     audio_entry: Option<Vec<u8>>,
     video_ts: u32,
+    /// Subtracted from the camera's audio ticks: what the drift correction
+    /// has taken out (dropped audio) or put in (repeated frames) so far.
+    audio_shift: i64,
+    /// Audio ticks still to drop (sound runs ahead of the picture) or to
+    /// fill with repeated frames (sound runs behind: a gap in the times
+    /// would not do, browsers play the frames back to back regardless).
+    audio_skip: i64,
+    audio_fill: i64,
+    /// Ticks dropped since the last kept frame (the next one moves up by
+    /// them), the previous frame's camera ticks, and the usual frame step.
+    dropped: i64,
+    audio_prev_ticks: Option<i64>,
+    frame_len: Option<i64>,
+    /// The previous frame was dropped: its length (the step to this one) is
+    /// counted when this one comes.
+    drop_open: bool,
+    /// Recent steps between frames; the usual frame length is their (upper) median
+    /// (one odd step, a camera nudging its times or a lost packet, must not
+    /// make a repeat fill take thousands of copies, or far too few).
+    recent_steps: std::collections::VecDeque<i64>,
+    /// How early each track's frames arrive against their own times (the
+    /// least lateness seen lately), and the correction made so far (for
+    /// the log).
+    video_late: Lateness,
+    audio_late: Lateness,
+    drift_fixed: f64,
+    drift_logged: f64,
+    name: String,
+    /// Tests: the time now, in seconds since the start.
+    test_now: Option<f64>,
+}
+
+/// Sound and picture are lined up once, by arrival, when a stream starts;
+/// after that each follows its own camera clock. Some cameras' audio clock
+/// runs a little fast or slow against their video clock (one ran 4 s an
+/// hour fast): over a long session the sound drifted far from the picture,
+/// and a viewer that started with sound waited for the picture to reach it.
+/// So each track's lateness (arrival time minus its own time) is watched,
+/// the least seen over the last LATENESS_SPAN..2*LATENESS_SPAN seconds
+/// (delays in the network or in bursts only ever add to it); when the two
+/// differ by more than AUDIO_MAX_GAP, the gap is closed: sound that runs
+/// ahead has frames dropped, sound that runs behind has a frame repeated.
+const AUDIO_MAX_GAP: f64 = 0.15;
+const LATENESS_SPAN: f64 = 10.0;
+const AUDIO_MAX_STEP: f64 = 1.0;
+/// A gap past this is a camera whose times are not live (see correct_drift).
+const AUDIO_SANE_SECS: f64 = 30.0;
+/// A step between audio frames longer than this is a pause in the sound,
+/// not a frame.
+const AUDIO_PAUSE_SECS: f64 = 0.5;
+
+/// The least lateness over the current and the previous span.
+#[derive(Clone, Copy)]
+pub(crate) struct Lateness {
+    cur: f64,
+    prev: f64,
+    since: Option<f64>,
+}
+
+impl Lateness {
+    pub(crate) const NONE: Lateness = Lateness { cur: f64::INFINITY, prev: f64::INFINITY, since: None };
+
+    /// A frame of time `t` arrived at `now`. True when a span ended.
+    pub(crate) fn note(&mut self, now: f64, t: f64) -> bool {
+        let since = *self.since.get_or_insert(now);
+        let rolled = now - since >= LATENESS_SPAN;
+        if rolled {
+            self.prev = self.cur;
+            self.cur = f64::INFINITY;
+            self.since = Some(now);
+        }
+        self.cur = self.cur.min(now - t);
+        rolled
+    }
+
+    /// Known once a whole span has been seen.
+    pub(crate) fn least(&self) -> Option<f64> {
+        self.prev.is_finite().then(|| self.prev.min(self.cur))
+    }
 }
 
 /// Frames (two keyframes among them) a live stream must show in decode
@@ -285,12 +364,27 @@ impl LiveMuxer {
             diag: None,
             audio_entry: audio.map(|a| tracks[a].sample_entry.clone()),
             video_ts: tracks[0].timescale.max(1),
+            audio_shift: 0,
+            audio_skip: 0,
+            audio_fill: 0,
+            dropped: 0,
+            audio_prev_ticks: None,
+            frame_len: None,
+            drop_open: false,
+            recent_steps: std::collections::VecDeque::new(),
+            video_late: Lateness::NONE,
+            audio_late: Lateness::NONE,
+            test_now: None,
+            drift_fixed: 0.0,
+            drift_logged: 0.0,
+            name: String::new(),
         }
     }
 
     /// Name the camera for the one-time log line about its audio.
     pub fn with_name(mut self, name: &str) -> Self {
         self.diag = self.audio_entry.take().and_then(|e| super::aac::Diag::new(name, &e));
+        self.name = name.to_string();
         self
     }
 
@@ -307,7 +401,11 @@ impl LiveMuxer {
         }
         if self.video_first.is_none() {
             self.video_first = Some(ticks);
-            self.video_first_at = self.started.elapsed().as_secs_f64();
+            self.video_first_at = self.now();
+        }
+        if let Some(first) = self.video_first {
+            let now = self.now();
+            self.video_late.note(now, (ticks - first) as f64 / self.video_ts as f64);
         }
         // The previous frame's duration is known now: emit it.
         if let Some(prev) = self.pending.take() {
@@ -351,10 +449,105 @@ impl LiveMuxer {
         }
         if self.audio_zero.is_none() {
             // Line audio up with video by arrival time.
-            let since_video = self.started.elapsed().as_secs_f64() - self.video_first_at;
+            let since_video = self.now() - self.video_first_at;
             self.audio_zero = Some(ticks - (since_video * self.audio_ts as f64) as i64);
         }
-        self.audio_buf.push((ticks, data.to_vec()));
+        // The step from the previous frame: one frame's length, unless the
+        // camera paused its audio (more than AUDIO_PAUSE_SECS).
+        let step = self.audio_prev_ticks.map(|p| ticks - p);
+        self.audio_prev_ticks = Some(ticks);
+        let pause = step.is_some_and(|s| s <= 0 || s as f64 > AUDIO_PAUSE_SECS * self.audio_ts as f64);
+        if let (Some(s), false) = (step, pause) {
+            if self.recent_steps.len() == 8 {
+                self.recent_steps.pop_front();
+            }
+            self.recent_steps.push_back(s);
+            let mut v: Vec<i64> = self.recent_steps.iter().copied().collect();
+            v.sort_unstable();
+            self.frame_len = v.get(v.len() / 2).copied();
+        }
+        if std::mem::take(&mut self.drop_open) {
+            // The dropped frame's own length: the step to this frame (after a
+            // pause, the usual length: the pause keeps its place).
+            let len = match step {
+                Some(s) if !pause => s,
+                _ => self.frame_len.unwrap_or(0),
+            };
+            self.dropped += len;
+            self.audio_skip -= len;
+        }
+        if self.audio_skip > 0 {
+            if self.frame_len.is_some() && !pause {
+                // Dropped: the frames after it move up by its length.
+                self.drop_open = true;
+                return;
+            }
+            // A pause, or no frame length yet: the drop ends here.
+            self.audio_skip = 0;
+        }
+        self.audio_shift += std::mem::take(&mut self.dropped);
+        if self.audio_fill > 0 {
+            if let Some(len) = self.frame_len.filter(|&l| l > 0) {
+                // Repeat this frame to fill: whole frames, back to back.
+                let most = (AUDIO_MAX_STEP * self.audio_ts as f64 / len as f64).ceil() as i64 + 1;
+                let n = ((self.audio_fill + len / 2) / len).clamp(1, most.clamp(1, 100));
+                let at = ticks - self.audio_shift;
+                for k in 0..n {
+                    self.audio_buf.push((at + k * len, data.to_vec()));
+                }
+                self.audio_shift -= n * len;
+            }
+            self.audio_fill = 0;
+        }
+        let at = ticks - self.audio_shift;
+        self.correct_drift(at);
+        self.audio_buf.push((at, data.to_vec()));
+    }
+
+    fn now(&self) -> f64 {
+        self.test_now.unwrap_or_else(|| self.started.elapsed().as_secs_f64())
+    }
+
+    /// Watch how far the sound is from the picture; close a gap past
+    /// AUDIO_MAX_GAP (see there).
+    fn correct_drift(&mut self, ticks: i64) {
+        let Some(zero) = self.audio_zero else { return };
+        let now = self.now();
+        if !self.audio_late.note(now, (ticks - zero) as f64 / self.audio_ts as f64) {
+            return;
+        }
+        let (Some(v), Some(a)) = (self.video_late.least(), self.audio_late.least()) else { return };
+        // Sound ahead of the picture arrives less late against its own time.
+        let gap = v - a;
+        // (Past AUDIO_SANE_SECS the camera's times are not to be followed:
+        // stood still or ran wild. Left alone, as recordings do.)
+        if gap.abs() <= AUDIO_MAX_GAP || gap.abs() > AUDIO_SANE_SECS {
+            return;
+        }
+        // A camera whose clock jumped would lose (or wait for) all of it at
+        // once: a second at most per check.
+        let gap = gap.clamp(-AUDIO_MAX_STEP, AUDIO_MAX_STEP);
+        let n = (gap * self.audio_ts as f64).round() as i64;
+        if n > 0 {
+            self.audio_skip = n;
+        } else {
+            self.audio_fill = -n;
+        }
+        // Measured again from here, with the moved times.
+        self.audio_late = Lateness::NONE;
+        self.drift_fixed += gap;
+        // (Once past a second, then every 10 s: a camera that drifts a few
+        // seconds an hour logs a few lines a day.)
+        let every = if self.drift_logged == 0.0 { 1.0 } else { 10.0 };
+        if (self.drift_fixed - self.drift_logged).abs() >= every {
+            self.drift_logged = self.drift_fixed;
+            tracing::info!(
+                "camera '{}': live view: the camera's sound runs {} its picture; moved it {:+.1} s so far to keep them together",
+                self.name,
+                if self.drift_fixed > 0.0 { "ahead of" } else { "behind" },
+                -self.drift_fixed
+            );
+        }
     }
 
     fn emit(&mut self, v: PendingVideo, duration: u32) {
@@ -647,6 +840,9 @@ mod tests {
             let mut m = LiveMuxer::start(hub.clone(), &[video_track(), audio_track(2)], &["avc1.640033".into(), "mp4a.40.2".into()]);
             let sub = watch.then(|| hub.subscribe_for(true).unwrap());
             for i in 0..12i64 {
+                // (Simulated time: on a busy machine the real clock would line
+                // the sound up a tick apart in the two runs.)
+                m.test_now = Some(i as f64 * 0.04);
                 m.push_video(i * 3600, 0, &[1; 8], i == 0);
                 m.push_audio(i * 1920, &[0x21, 9]);
             }
@@ -654,5 +850,239 @@ mod tests {
             hub.subscribe_for(false).unwrap().1.iter().map(|f| f.to_vec()).collect::<Vec<_>>()
         };
         assert_eq!(run(false), run(true));
+    }
+
+    /// (video, audio) decode times in seconds of each fragment with both.
+    fn both_times(frags: &[Arc<Vec<u8>>]) -> Vec<(f64, f64)> {
+        frags
+            .iter()
+            .filter_map(|f| {
+                let at: Vec<usize> = f.windows(4).enumerate().filter(|(_, w)| *w == b"tfdt").map(|(i, _)| i).collect();
+                let t = |p: usize| u64::from_be_bytes(f[p + 8..p + 16].try_into().unwrap());
+                (at.len() == 2).then(|| (t(at[0]) as f64 / 90_000.0, t(at[1]) as f64 / 48_000.0))
+            })
+            .collect()
+    }
+
+    /// `secs` of 25 fps video and 40 ms audio frames arriving together; the
+    /// camera's audio clock runs `rate` times its video clock.
+    fn drifting(secs: i64, rate: f64) -> (Vec<(f64, f64)>, LiveMuxer) {
+        drifting_in_bursts(secs, rate, 1)
+    }
+
+    /// The same with the audio sent `burst` frames at a time.
+    fn drifting_in_bursts(secs: i64, rate: f64, burst: i64) -> (Vec<(f64, f64)>, LiveMuxer) {
+        let hub = Arc::new(LiveHub::new());
+        let mut m = LiveMuxer::start(hub.clone(), &[video_track(), audio_track(1)], &["avc1.640033".into(), "mp4a.40.2".into()]);
+        let (_, _, mut rx) = hub.subscribe_for(false).unwrap();
+        let mut frags = Vec::new();
+        for i in 0..secs * 25 {
+            // Arrivals a little late now and then (up to 0.3 s).
+            m.test_now = Some(i as f64 * 0.04 + if i % 7 == 3 { 0.3 } else { 0.0 });
+            m.push_video(i * 3600, 0, &[1; 8], i % 50 == 0);
+            m.test_now = Some(i as f64 * 0.04 + if i % 11 == 5 { 0.3 } else { 0.0 });
+            if (i + 1) % burst == 0 {
+                for k in i + 1 - burst..=i {
+                    m.push_audio((k as f64 * 1920.0 * rate).round() as i64, &[0x21, 9, 9, 9]);
+                }
+            }
+            if i % 10 == 0 {
+                frags.extend(collect(&mut rx));
+            }
+        }
+        frags.extend(collect(&mut rx));
+        (both_times(&frags), m)
+    }
+
+    fn check_sound_follows(times: &[(f64, f64)]) {
+        assert!(times.len() > 1000);
+        for w in times.windows(2) {
+            assert!(w[1].1 > w[0].1, "sound times only go forward: {w:?}");
+        }
+        let worst = times.iter().map(|(v, a)| (a - v).abs()).fold(0.0, f64::max);
+        // (Between checks a fast drift adds up to a span or two of it.)
+        assert!(worst < AUDIO_MAX_GAP + 0.2, "sound stays with the picture (worst {worst:.3} s)");
+    }
+
+    /// Each fragment's audio (decode time, total duration), in ticks.
+    fn audio_runs(frags: &[Arc<Vec<u8>>]) -> Vec<(u64, u64)> {
+        frags
+            .iter()
+            .filter_map(|f| {
+                let at: Vec<usize> = f.windows(4).enumerate().filter(|(_, w)| *w == b"traf").map(|(i, _)| i).collect();
+                let a = *at.get(1)?;
+                let p = a + f[a..].windows(4).position(|w| w == b"tfdt").unwrap();
+                let tfdt = u64::from_be_bytes(f[p + 8..p + 16].try_into().unwrap());
+                let (_, _, s) = crate::ingest::fmp4::tests::parse_trun(&f[a..]);
+                Some((tfdt, s.iter().map(|x| x.0 as u64).sum()))
+            })
+            .collect()
+    }
+
+    /// The sound's times have no gaps and no overlaps: browsers play audio
+    /// frames back to back whatever their times say.
+    fn check_gapless(frags: &[Arc<Vec<u8>>]) {
+        let runs = audio_runs(frags);
+        assert!(runs.len() > 100);
+        for w in runs.windows(2) {
+            assert_eq!(w[0].0 + w[0].1, w[1].0, "audio continues where the last fragment's ended: {w:?}");
+        }
+    }
+
+    fn drifting_frags(secs: i64, rate: f64) -> Vec<Arc<Vec<u8>>> {
+        let hub = Arc::new(LiveHub::new());
+        let mut m = LiveMuxer::start(hub.clone(), &[video_track(), audio_track(1)], &["avc1.640033".into(), "mp4a.40.2".into()]);
+        let (_, _, mut rx) = hub.subscribe_for(false).unwrap();
+        let mut frags = Vec::new();
+        for i in 0..secs * 25 {
+            m.test_now = Some(i as f64 * 0.04);
+            m.push_video(i * 3600, 0, &[1; 8], i % 50 == 0);
+            m.push_audio((i as f64 * 1920.0 * rate).round() as i64, &[0x21, 9, 9, 9]);
+            if i % 10 == 0 {
+                frags.extend(collect(&mut rx));
+            }
+        }
+        frags.extend(collect(&mut rx));
+        frags
+    }
+
+    #[test]
+    fn corrections_leave_no_gaps_in_the_sound() {
+        // Fast sound has frames dropped, slow sound frames repeated: either
+        // way the times stay back to back.
+        check_gapless(&drifting_frags(600, 1.005));
+        check_gapless(&drifting_frags(600, 0.995));
+    }
+
+    #[test]
+    fn a_pause_in_the_sound_while_dropping_keeps_its_place() {
+        let hub = Arc::new(LiveHub::new());
+        let mut m = LiveMuxer::start(hub.clone(), &[video_track(), audio_track(1)], &["avc1.640033".into(), "mp4a.40.2".into()]);
+        let push = |m: &mut LiveMuxer, i: i64, audio: Option<i64>| {
+            m.test_now = Some(i as f64 * 0.04);
+            m.push_video(i * 3600, 0, &[1; 8], i % 50 == 0);
+            if let Some(a) = audio {
+                m.push_audio(a, &[0x21, 9, 9, 9]);
+            }
+        };
+        for i in 0..100 {
+            push(&mut m, i, Some(i * 1920));
+        }
+        // A drop of 0.2 s is under way when the camera's sound pauses for
+        // 60 s (its clock running on).
+        m.audio_skip = 9600;
+        push(&mut m, 100, Some(100 * 1920));
+        for i in 101..1600 {
+            push(&mut m, i, None);
+        }
+        for i in 1600..1700 {
+            push(&mut m, i, Some(i * 1920));
+        }
+        // Only the one frame dropped before the pause moved the sound.
+        assert_eq!(m.audio_shift, 1920, "the pause was not closed up");
+    }
+
+    #[test]
+    fn one_short_step_does_not_make_a_long_fill() {
+        // A camera nudging its audio times leaves a 4-tick step into the frame
+        // a 1 s fill falls on: the copies are counted in usual frames, not in
+        // 4 ticks; a lost packet (a double step) does not halve them either.
+        let hub = Arc::new(LiveHub::new());
+        let mut m = LiveMuxer::start(hub.clone(), &[video_track(), audio_track(1)], &["avc1.640033".into(), "mp4a.40.2".into()]);
+        let mut a = 0;
+        for i in 0..50i64 {
+            m.test_now = Some(i as f64 * 0.04);
+            m.push_video(i * 3600, 0, &[1; 8], i % 50 == 0);
+            m.push_audio(a, &[0x21, 9, 9, 9]);
+            a += if i == 49 { 4 } else { 1920 };
+        }
+        m.audio_fill = 48_000;
+        let before = m.audio_buf.len();
+        m.push_audio(a, &[0x21, 9, 9, 9]);
+        let copies = m.audio_buf.len() - before;
+        assert!((25..=27).contains(&copies), "{copies} frames for 1 s of 40 ms frames");
+        m.push_audio(a + 2 * 1920, &[0x21, 9, 9, 9]);
+        m.audio_fill = 48_000;
+        let before = m.audio_buf.len();
+        m.push_audio(a + 3 * 1920, &[0x21, 9, 9, 9]);
+        let copies = m.audio_buf.len() - before;
+        assert!((25..=27).contains(&copies), "after a lost packet: {copies}");
+    }
+
+    #[test]
+    fn a_dropped_frame_is_counted_by_its_own_length() {
+        // Frames of 1024 and 2048 ticks in turn (sizes vary on some
+        // cameras): after a dropped one, the next kept frame takes its place
+        // exactly, whatever the usual length says.
+        let hub = Arc::new(LiveHub::new());
+        let mut m = LiveMuxer::start(hub.clone(), &[video_track(), audio_track(1)], &["avc1.640033".into(), "mp4a.40.2".into()]);
+        m.test_now = Some(0.0);
+        m.push_video(0, 0, &[1; 8], true);
+        let mut t = 0;
+        let mut times = Vec::new();
+        for k in 0..20 {
+            times.push(t);
+            t += if k % 2 == 0 { 1024 } else { 2048 };
+        }
+        for &x in &times[..10] {
+            m.push_audio(x, &[0x21, 9]);
+        }
+        // Frame 10 (1024 long, shorter than the usual 2048) is dropped; frame
+        // 11 must go where it began.
+        m.audio_skip = 1;
+        m.push_audio(times[10], &[0x21, 9]);
+        m.push_audio(times[11], &[0x21, 9]);
+        let last = m.audio_buf.last().unwrap().0;
+        assert_eq!(last, times[10], "placed at the dropped frame's start");
+        assert_eq!(m.audio_shift, 1024);
+    }
+
+    #[test]
+    fn timestamps_that_run_wild_are_left_alone() {
+        // Video standing still against its sound: no correction chases it.
+        let hub = Arc::new(LiveHub::new());
+        let mut m = LiveMuxer::start(hub.clone(), &[video_track(), audio_track(1)], &["avc1.640033".into(), "mp4a.40.2".into()]);
+        for i in 0..25 * 300 {
+            m.test_now = Some(i as f64 * 0.04);
+            m.push_video(i * 3600 / 100, 0, &[1; 8], i % 50 == 0);
+            m.push_audio(i * 1920, &[0x21, 9, 9, 9]);
+        }
+        assert!(m.drift_fixed.abs() <= AUDIO_MAX_STEP * 3.0 + 0.01, "moved {}", m.drift_fixed);
+    }
+
+    #[test]
+    fn steady_clocks_are_left_alone() {
+        let (times, m) = drifting(1200, 1.0);
+        check_sound_follows(&times);
+        assert_eq!((m.audio_shift, m.drift_fixed), (0, 0.0));
+    }
+
+    #[test]
+    fn sound_sent_in_bursts_is_lined_up_once() {
+        // Half a second of audio at a time: each frame arrives up to 0.5 s
+        // after the picture it belongs with. The first one (which lines
+        // sound up with the picture) came 0.44 s late: moved once, then left.
+        let (times, m) = drifting_in_bursts(600, 1.0, 12);
+        // (A fragment carries the audio that came with its picture: up to a
+        // burst older than it, never ahead.)
+        let late = &times[times.len() / 10..];
+        assert!(late.iter().all(|(v, a)| a - v <= AUDIO_MAX_GAP && a - v > -0.6), "{:?}", late.iter().map(|(v, a)| a - v).fold((9.0f64, -9.0f64), |(l, h), g| (l.min(g), h.max(g))));
+        assert_eq!(m.audio_shift, 21_120);
+        assert!((m.drift_fixed - 0.44).abs() < 0.01, "{}", m.drift_fixed);
+    }
+
+    #[test]
+    fn sound_running_fast_is_kept_with_the_picture() {
+        // 0.5 % fast: 6 s in 20 minutes without the correction.
+        let (times, m) = drifting(1200, 1.005);
+        check_sound_follows(&times);
+        assert!(m.audio_shift > 5 * 48_000, "frames were dropped: {}", m.audio_shift);
+    }
+
+    #[test]
+    fn sound_running_slow_is_kept_with_the_picture() {
+        let (times, m) = drifting(1200, 0.995);
+        check_sound_follows(&times);
+        assert!(m.audio_shift < -5 * 48_000, "gaps were put in: {}", m.audio_shift);
     }
 }

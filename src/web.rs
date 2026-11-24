@@ -2460,6 +2460,9 @@ fn check_local_url(url: &str) -> Result<(), String> {
     if crate::ingest::push::is_push_url(url) && !crate::ingest::push::push_key(url).is_some_and(crate::ingest::push::valid_key) {
         return Err("a stream key needs 12 to 128 letters, digits, - or _".into());
     }
+    if crate::ingest::foscam::is_foscam_url(url) && crate::ingest::foscam::parse_url(url).is_none() {
+        return Err("a foscam:// address is foscam://host or foscam://host:port (no path, and the user name and password go in their own fields)".into());
+    }
     Ok(())
 }
 
@@ -4319,6 +4322,22 @@ async fn smart_pic(State(engine): State<Arc<Engine>>, axum::Extension(access): a
     match tokio::task::spawn_blocking(move || engine.smart_pic(id, &|cam| access.can_name(cam))).await {
         Ok(Ok(Some(b))) => Response::builder().header(header::CONTENT_TYPE, "image/jpeg").header(header::CACHE_CONTROL, "private, max-age=3600").body(Body::from(b)).unwrap(),
         _ => (StatusCode::NOT_FOUND, "no picture").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod check_local_url_tests {
+    use super::check_local_url;
+
+    #[test]
+    fn a_bad_foscam_address_is_refused_at_save() {
+        for ok in ["foscam://192.0.2.9", "foscam://cam.example:88", "Foscam://[fd00::5]:8088", "rtsp://192.0.2.1/x"] {
+            assert!(check_local_url(ok).is_ok(), "{ok}");
+        }
+        for bad in ["foscam://192.0.2.9/videoMain", "foscam://u:p@192.0.2.9", "foscam://192.0.2.9:0", "foscam://", "foscam://cam example"] {
+            let e = check_local_url(bad).unwrap_err();
+            assert!(e.starts_with("a foscam:// address is foscam://host or foscam://host:port"), "{bad}: {e}");
+        }
     }
 }
 

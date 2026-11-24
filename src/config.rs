@@ -1477,7 +1477,7 @@ impl CameraConfig {
     /// AmberSight, never from an ffmpeg reader, so nothing ever burned text
     /// into its recordings.
     pub fn no_ffmpeg_reader(&self) -> bool {
-        crate::ingest::push::is_push_url(&self.url) || crate::ingest::baichuan::is_baichuan_url(&self.url)
+        crate::ingest::push::is_push_url(&self.url) || crate::ingest::baichuan::is_baichuan_url(&self.url) || crate::ingest::foscam::is_foscam_url(&self.url)
     }
 
     /// Clear what a page or app of 0.11.1 may still send about masks that
