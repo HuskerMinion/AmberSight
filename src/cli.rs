@@ -1096,6 +1096,10 @@ pub async fn run() -> Result<()> {
                 let card = crate::gpu::pick(&cards, ai.gpu_name.as_deref());
                 let addon = card.as_ref().and_then(|c| match c.api {
                     "CUDA" => crate::gpu_addon::missing_system_libs().is_none().then_some(Addon::Cuda),
+                    "WebGPU" => {
+                        let render: Vec<String> = cards.iter().filter(|g| g.api == "WebGPU").map(|g| g.render.clone()).collect();
+                        crate::ai_amd::driver(&render).is_ok().then_some(Addon::Amd)
+                    }
                     _ => {
                         let render: Vec<String> = cards.iter().filter(|g| g.api == "OpenVINO").map(|g| g.render.clone()).collect();
                         crate::openvino::missing_driver(&render).is_none().then_some(Addon::OpenVino)

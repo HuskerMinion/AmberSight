@@ -1231,8 +1231,8 @@
 "4acd32a8"
 ],
 "admin_config.no_graphics_card": [
-"Não foi encontrada nenhuma placa de vídeo que a IA possa usar (Windows: uma placa DirectX 12; Linux: uma placa NVIDIA com seu driver ou gráficos Intel; Mac: Apple silicon), então ela usa a CPU.",
-"05f6886b"
+"Não foi encontrada nenhuma placa de vídeo que a IA possa usar (Windows: uma placa DirectX 12; Linux: uma placa NVIDIA com seu driver, gráficos Intel ou gráficos AMD; Mac: Apple silicon), então ela usa a CPU.",
+"23eb7dda"
 ],
 "admin_config.no_profile": [
 "Nenhum perfil",
@@ -13761,6 +13761,10 @@
 "livetl.cams_recorded": [
 "{n} de {total} câmeras gravaram",
 "a5d555a8"
+],
+"livetl.cannot_show": [
+"Este navegador não consegue mostrar as gravações desta câmera (H.265). Tente outro navegador ou o app AmberSight.",
+"b7e21c99"
 ],
 "livetl.chip_1h": [
 "1h",

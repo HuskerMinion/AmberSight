@@ -73,4 +73,5 @@ echo "dist/$name.tar.gz"
 if [ "$os" = linux ] && [ "$arch" = x86_64 ] && [ -z "${PREBUILT_TARGET:-}" ]; then
   CUDA_LIBS_DIR="${CUDA_LIBS_DIR:-$(dirname "$bin")}" sh scripts/package-cuda-addon.sh
   sh scripts/package-openvino-addon.sh
+  sh scripts/package-amd-addon.sh
 fi

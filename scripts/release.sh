@@ -17,11 +17,13 @@
 #                                              scripts/package.sh on Linux x86_64)
 #   ambersight-openvino-<v>-linux-x86_64.tar.gz (the Intel graphics add-on, made
 #                                              by scripts/package-openvino-addon.sh)
+#   ambersight-amd-<v>-linux-x86_64.tar.gz (the AMD graphics add-on, made
+#                                              by scripts/package-amd-addon.sh)
 #   ambersight-lang-<code>-<v>.json          (one per language pack, made by
 #                                              scripts/package-lang.sh; required)
-# Any 64-bit Intel/AMD Linux package needs both add-ons beside it: AmberSight
-# downloads them from the same release when it finds an NVIDIA card, or Intel
-# graphics with Intel's compute driver.
+# Any 64-bit Intel/AMD Linux package needs all three add-ons beside it: AmberSight
+# downloads them from the same release when it finds an NVIDIA card, Intel
+# graphics with Intel's compute driver, or AMD graphics with the Vulkan driver.
 #
 # It writes dist/release-<v>/SHA256SUMS over them and signs it with the
 # offline release key (dist/release-<v>/SHA256SUMS.sig), using this
@@ -77,7 +79,8 @@ for f in \
   "ambersight-$v-darwin-arm64.tar.gz" "ambersight-$v-darwin-x86_64.tar.gz" \
   "ambersight_${v}_amd64.deb" "ambersight_${v}_arm64.deb" \
   "ambersight-$v-1.x86_64.rpm" "ambersight-$v-1.aarch64.rpm" \
-  "ambersight-cuda-$v-linux-x86_64.tar.gz" "ambersight-openvino-$v-linux-x86_64.tar.gz"; do
+  "ambersight-cuda-$v-linux-x86_64.tar.gz" "ambersight-openvino-$v-linux-x86_64.tar.gz" \
+  "ambersight-amd-$v-linux-x86_64.tar.gz"; do
   if [ -f "dist/$f" ]; then
     files="$files $f"
   fi
@@ -103,8 +106,36 @@ case "$files" in
     case "$files" in
       *"ambersight-openvino-$v-linux-x86_64.tar.gz"*) ;;
       *) echo "dist/ambersight-openvino-$v-linux-x86_64.tar.gz is missing (the Intel graphics add-on the Linux x86_64 packages download): run scripts/package-openvino-addon.sh" >&2; exit 1 ;;
+    esac
+    case "$files" in
+      *"ambersight-amd-$v-linux-x86_64.tar.gz"*) ;;
+      *) echo "dist/ambersight-amd-$v-linux-x86_64.tar.gz is missing (the AMD graphics add-on the Linux x86_64 packages download): run scripts/package-amd-addon.sh" >&2; exit 1 ;;
     esac ;;
 esac
+
+# The AMD add-on's helper must be this version's (AmberSight refuses a helper
+# of another version) and carry its graphics library.
+amd="dist/ambersight-amd-$v-linux-x86_64.tar.gz"
+if [ -f "$amd" ]; then
+  list=$(tar -tzf "$amd")
+  for want in "ambersight-amd-$v-linux-x86_64/ambersight-ai-amd" "ambersight-amd-$v-linux-x86_64/libwebgpu_dawn.so"; do
+    printf '%s\n' "$list" | grep -qx "$want" || { echo "$amd has no $want" >&2; exit 1; }
+  done
+  if [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ]; then
+    # (Under set -e a failing $(...) would end the script silently and leave the folder.)
+    t=$(mktemp -d)
+    hv=""
+    if tar -xzf "$amd" -C "$t"; then
+      hv=$("$t/ambersight-amd-$v-linux-x86_64/ambersight-ai-amd" --version 2>/dev/null) || hv=""
+    else
+      echo "$amd could not be unpacked" >&2
+    fi
+    rm -rf "$t"
+    [ "$hv" = "$v" ] || { echo "$amd: its helper says version '$hv', not $v: run scripts/package-amd-addon.sh again from the release tree" >&2; exit 1; }
+  else
+    echo "note: not on Linux x86_64, so the AMD helper's version was not run-checked" >&2
+  fi
+fi
 
 # Both add-ons carry ONNX Runtime's bridge library, and one process may load
 # either first (a computer with both cards): they must be the same file.

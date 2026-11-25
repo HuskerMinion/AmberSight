@@ -40,6 +40,23 @@
 //!   Other card errors (CUDA, DirectML, Core ML) are counted as before:
 //!   three in a row within a minute move the AI to the processor for five
 //!   minutes.
+//! - AMD graphics ("WebGPU") run in a helper program of their own
+//!   (ai_amd.rs), so what hurts the other cards does not apply: the helper
+//!   cannot leave this process hanging in a driver's exit code, and a
+//!   crashed, hung or confused helper is simply killed and started again.
+//!   So no AMD error leaks the session (`fault_kills_card` is false for
+//!   it): a helper that says ERROR is a counted error; one that stops (a
+//!   crash, a GPU reset) fails that check as a counted error and is started
+//!   again for the next check, and stopping again within ten minutes (or not
+//!   starting again) moves the AI to the processor for five minutes at once
+//!   (`FailureKind::Gone`, `Recovery::RestNow`; a new helper is started when
+//!   the card is tried again after the rest); a check over
+//!   the limit gets the helper killed at once (`CardThread::on_stuck`: the
+//!   graphics chip is freed, the thread's read ends), then the usual rest of
+//!   five minutes and a new helper, three slow episodes in an hour leaving
+//!   the card off until a restart. A helper that cannot be killed (stuck in
+//!   the kernel's driver) leaves its thread stuck, which is judged as for
+//!   any card: off until restart.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,6 +139,26 @@ pub enum FailureKind {
     Timeout,
     /// The card's runtime gave an error.
     Error,
+    /// The card's session ended and cannot go on (AMD: the helper stopped
+    /// again soon after it was started again, or could not be started again).
+    // (Only made on 64-bit Linux, where AMD graphics run in a helper.)
+    #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
+    Gone,
+}
+
+/// Why a runner on a card thread did not do a check: a plain error message
+/// is an ordinary error (`FailureKind::Error`).
+#[derive(Debug)]
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+pub struct RunError {
+    pub kind: FailureKind,
+    pub detail: String,
+}
+
+impl From<String> for RunError {
+    fn from(detail: String) -> RunError {
+        RunError { kind: FailureKind::Error, detail }
+    }
 }
 
 /// A check the card did not do.
@@ -138,7 +175,7 @@ impl fmt::Display for CardFailure {
         match self.kind {
             // (Worded so engine/ai_gpu.rs tells it for a card error.)
             FailureKind::Timeout => write!(f, "the graphics card did not answer in time ({}, {})", self.api, self.detail),
-            FailureKind::Error => write!(f, "AI inference ({}): {}", self.api, self.detail),
+            FailureKind::Error | FailureKind::Gone => write!(f, "AI inference ({}): {}", self.api, self.detail),
         }
     }
 }
@@ -158,12 +195,16 @@ pub enum Recovery {
     /// a card thread still stuck means `OffUntilRestart`, and one that came
     /// back (the card was slow, not wedged) gets the card again.
     RestThenJudge,
+    /// The processor does this check and the next five minutes' ones, at
+    /// once (not counted), then the card is tried again with a new session.
+    RestNow,
 }
 
 /// The strategy (see the top of this file).
 pub fn recovery(api: &str, kind: FailureKind) -> Recovery {
     match (kind, api) {
         (FailureKind::Timeout, _) => Recovery::RestThenJudge,
+        (FailureKind::Gone, _) => Recovery::RestNow,
         (FailureKind::Error, _) if fault_kills_card(api) => Recovery::OffUntilRestart,
         (FailureKind::Error, _) => Recovery::CountThenRest,
     }
@@ -171,30 +212,49 @@ pub fn recovery(api: &str, kind: FailureKind) -> Recovery {
 
 /// Whether an error from the card's runtime means the session (and the
 /// card, in this process) is dead: OpenVINO on Intel graphics, where any
-/// further call after a fault may hang.
+/// further call after a fault may hang. Not AMD graphics: their session is
+/// another program, which can always be killed (see the top of this file).
 pub fn fault_kills_card(api: &str) -> bool {
     api == "OpenVINO"
+}
+
+/// The card as the notes name it.
+fn card_phrase(api: &str) -> String {
+    match api {
+        "OpenVINO" => "the Intel graphics card".to_string(),
+        "WebGPU" => "the AMD graphics chip".to_string(),
+        _ => format!("the graphics card ({api})"),
+    }
 }
 
 /// What Settings and the Status page say when the card did not load the
 /// model within `took` (a slow first compile is not "stopped responding").
 #[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
 pub fn load_off_text(api: &str, took: Duration) -> String {
-    let card = if api == "OpenVINO" { "the Intel graphics card".to_string() } else { format!("the graphics card ({api})") };
+    let card = card_phrase(api);
     format!("{card} did not finish loading the AI model within {} minutes; using the processor until AmberSight restarts", took.as_secs().div_ceil(60))
 }
 
 /// What Settings says while the AI rests on the processor after a check on
 /// the card took too long.
 pub fn slow_text(api: &str) -> String {
-    let card = if api == "OpenVINO" { "the Intel graphics card".to_string() } else { format!("the graphics card ({api})") };
+    let card = card_phrase(api);
     format!("{card} was too slow to answer an AI check; using the processor for 5 minutes, then the card again")
+}
+
+/// What Settings says while the AI rests on the processor after the card's
+/// session ended (`Recovery::RestNow`).
+pub fn gone_text(api: &str) -> String {
+    match api {
+        "WebGPU" => "the AMD graphics helper stopped twice in a short time (or could not be started again); using the processor for 5 minutes, then the card again".to_string(),
+        a => format!("{} stopped working for the AI; using the processor for 5 minutes, then the card again", card_phrase(a)),
+    }
 }
 
 /// What Settings and the Status page say when checks on the card were too
 /// slow three times within an hour.
 pub fn keeps_slow_text(api: &str) -> String {
-    let card = if api == "OpenVINO" { "the Intel graphics card".to_string() } else { format!("the graphics card ({api})") };
+    let card = card_phrase(api);
     format!("{card} keeps being too slow for the AI; staying on the processor until AmberSight restarts")
 }
 
@@ -203,6 +263,7 @@ pub fn keeps_slow_text(api: &str) -> String {
 pub fn off_text(api: &str) -> String {
     match api {
         "OpenVINO" => "the Intel graphics card stopped responding to the AI; using the processor until AmberSight restarts".to_string(),
+        "WebGPU" => "the AMD graphics chip stopped responding to the AI; using the processor until AmberSight restarts".to_string(),
         "" => "the graphics card stopped responding to the AI; using the processor until AmberSight restarts".to_string(),
         a => format!("the graphics card stopped responding to the AI ({a}); using the processor until AmberSight restarts"),
     }
@@ -318,6 +379,11 @@ struct Shared {
     stuck: AtomicBool,
     /// A fault: the session is leaked, never used again.
     faulted: AtomicBool,
+    /// Called once when a check goes over the limit (AMD: kills the helper).
+    on_stuck: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Set by the runner while it starts its session again (AMD: a new
+    /// helper after a crash), and the limit for a check meanwhile.
+    restarting: Mutex<Option<(Arc<AtomicBool>, Duration)>>,
     /// The thread has ended and dropped its session.
     done: AtomicBool,
 }
@@ -326,6 +392,11 @@ impl Shared {
     fn mark_stuck(&self) {
         if !self.stuck.swap(true, Ordering::SeqCst) {
             STUCK_THREADS.fetch_add(1, Ordering::SeqCst);
+            // (Not called with the lock held.)
+            let hook = self.on_stuck.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(f) = hook {
+                f();
+            }
         }
     }
 
@@ -347,7 +418,7 @@ impl Shared {
 
 struct Job {
     input: Input,
-    reply: mpsc::SyncSender<Result<Output, String>>,
+    reply: mpsc::SyncSender<Result<Output, RunError>>,
     /// Its caller gave up waiting: not run on the card.
     cancelled: Arc<AtomicBool>,
 }
@@ -374,9 +445,10 @@ impl CardThread {
     /// first check, which must happen on it) and then serves checks with the
     /// runner `build` gave. Returns once the session is made, with what
     /// `build` said about it.
-    pub fn start<R, T>(api: &'static str, load_deadline: Duration, build: impl FnOnce() -> Result<(R, T), String> + Send + 'static) -> Result<(CardThread, T), LoadError>
+    pub fn start<R, T, E>(api: &'static str, load_deadline: Duration, build: impl FnOnce() -> Result<(R, T), String> + Send + 'static) -> Result<(CardThread, T), LoadError>
     where
-        R: FnMut(Input) -> Result<Output, String> + 'static,
+        R: FnMut(Input) -> Result<Output, E> + 'static,
+        E: Into<RunError>,
         T: Send + 'static,
     {
         let (tx, rx) = mpsc::channel::<Job>();
@@ -387,6 +459,8 @@ impl CardThread {
             last_done: Mutex::new(None),
             stuck: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
+            on_stuck: Mutex::new(None),
+            restarting: Mutex::new(None),
             done: AtomicBool::new(false),
         });
         let sh = shared.clone();
@@ -415,12 +489,12 @@ impl CardThread {
             // Ends when the detector is dropped (no sender left).
             while let Ok(job) = rx.recv() {
                 if job.cancelled.load(Ordering::SeqCst) {
-                    let _ = job.reply.send(Err("given up before it ran".into()));
+                    let _ = job.reply.send(Err(String::from("given up before it ran").into()));
                     continue;
                 }
                 let t0 = Instant::now();
                 *sh.busy_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(t0);
-                let r = run(job.input);
+                let r = run(job.input).map_err(Into::into);
                 let took = t0.elapsed();
                 *sh.busy_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *sh.last_done.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
@@ -468,6 +542,27 @@ impl CardThread {
         self.api
     }
 
+    /// What to do the moment a check goes over the limit (once; the AMD
+    /// helper is killed there, which ends the thread's wait for it).
+    #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
+    pub fn on_stuck(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.shared.on_stuck.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
+    }
+
+    /// While `flag` is set the runner is starting its session again (AMD: a
+    /// new helper loading the model), which the usual limit for a check does
+    /// not measure: the check gets `limit` instead, and one over even that is
+    /// `FailureKind::Gone` (the session could not be made again), not a slow check.
+    #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
+    pub fn on_restart(&self, flag: Arc<AtomicBool>, limit: Duration) {
+        *self.shared.restarting.lock().unwrap_or_else(|e| e.into_inner()) = Some((flag, limit));
+    }
+
+    /// The limit while the runner starts its session again (None: it is not).
+    fn restart_limit(&self) -> Option<Duration> {
+        self.shared.restarting.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|(f, _)| f.load(Ordering::SeqCst)).map(|(_, l)| *l)
+    }
+
     #[cfg(test)]
     pub fn with_deadline(self, deadline: Duration) -> Self {
         CardThread { fixed: Some(deadline), ..self }
@@ -497,7 +592,11 @@ impl CardThread {
         self.shared.faulted.load(Ordering::SeqCst)
     }
 
+    /// A check over the limit; while the session is made again, `Gone`.
     fn timeout(&self, limit: Duration) -> CardFailure {
+        if let Some(l) = self.restart_limit() {
+            return CardFailure { api: self.api, kind: FailureKind::Gone, detail: format!("its session was not made again within {} s", l.as_secs()) };
+        }
         let ms = limit.as_millis();
         let detail = if ms % 1000 == 0 { format!("over {} s", ms / 1000) } else { format!("over {ms} ms") };
         CardFailure { api: self.api, kind: FailureKind::Timeout, detail }
@@ -523,6 +622,9 @@ impl CardThread {
         // longer than asked for), not held against the card.
         let mut asleep = Duration::ZERO;
         let mut last = Instant::now();
+        // The check that started the session again, whether one was seen
+        // going on, and when the wait in the queue counts from (see below).
+        let (mut since, mut restart_job, mut restart_seen) = (start, None::<Instant>, false);
         loop {
             let r = answer.recv_timeout(slice);
             let gap = last.elapsed();
@@ -530,7 +632,7 @@ impl CardThread {
             asleep = asleep_after(asleep, gap, slice);
             match r {
                 Ok(Ok(out)) => return Ok(out),
-                Ok(Err(e)) => return Err(CardFailure { api: self.api, kind: FailureKind::Error, detail: e }),
+                Ok(Err(e)) => return Err(CardFailure { api: self.api, kind: e.kind, detail: e.detail }),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(CardFailure { api: self.api, kind: FailureKind::Error, detail: "the AI's card thread stopped during a check".into() })
                 }
@@ -539,12 +641,32 @@ impl CardThread {
                         cancelled.store(true, Ordering::SeqCst);
                         return Err(self.timeout(limit));
                     }
-                    // The check being done (this one or one before it) is over the limit.
-                    let late = self.shared.busy_since.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t.elapsed().saturating_sub(asleep) > limit);
-                    if late || start.elapsed().saturating_sub(asleep) > limit * QUEUE_LIMITS {
+                    // The check being done (this one or one before it) is over
+                    // the limit (a longer one while the session is made again).
+                    // A check that waited behind a restart: that check is not
+                    // held to the usual limit once the restart is over, and
+                    // the wait in the queue counts from its end.
+                    let restart = self.restart_limit();
+                    let busy = *self.shared.busy_since.lock().unwrap_or_else(|e| e.into_inner());
+                    if restart.is_some() {
+                        restart_job = busy.or(restart_job);
+                        restart_seen = true;
+                    } else if restart_seen {
+                        restart_seen = false;
+                        since = Instant::now();
+                    }
+                    let limit = restart.unwrap_or(limit);
+                    let late = busy.filter(|t| restart.is_some() || Some(*t) != restart_job).is_some_and(|t| t.elapsed().saturating_sub(asleep) > limit);
+                    if late || since.elapsed().saturating_sub(asleep) > limit * QUEUE_LIMITS {
+                        // (Judged before the hook kills a helper being started,
+                        // which ends the restart and clears its flag.)
+                        let over = match restart {
+                            Some(l) => CardFailure { api: self.api, kind: FailureKind::Gone, detail: format!("its session was not made again within {} s", l.as_secs()) },
+                            None => self.timeout(limit),
+                        };
                         self.shared.mark_stuck();
                         cancelled.store(true, Ordering::SeqCst);
-                        return Err(self.timeout(limit));
+                        return Err(over);
                     }
                 }
             }
@@ -625,6 +747,36 @@ mod tests {
         let t2 = Instant::now();
         assert!(!t.finish(Duration::from_secs(5)));
         assert!(t2.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_stuck_check_runs_the_hook_once_and_amd_errors_do_not_leak_the_session() {
+        let hooked = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (t, _) = CardThread::start("WebGPU", Duration::from_secs(5), move || {
+            let run = move |_i: Input| -> Result<Output, String> {
+                std::thread::sleep(Duration::from_millis(600));
+                Ok((vec![1], vec![1.0]))
+            };
+            Ok((run, ()))
+        })
+        .unwrap();
+        let h = hooked.clone();
+        t.on_stuck(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        let t = t.with_deadline(Duration::from_millis(100));
+        assert_eq!(t.run(input()).unwrap_err().kind, FailureKind::Timeout);
+        assert!(t.run(input()).is_err());
+        assert_eq!(hooked.load(Ordering::SeqCst), 1);
+        // The slow check comes back: not wedged any more, as for any card.
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(!t.stuck());
+        assert!(!fault_kills_card("WebGPU"));
+        assert_eq!(recovery("WebGPU", FailureKind::Error), Recovery::CountThenRest);
+        assert_eq!(recovery("WebGPU", FailureKind::Timeout), Recovery::RestThenJudge);
+        assert!(off_text("WebGPU").contains("AMD graphics chip") && slow_text("WebGPU").contains("AMD graphics chip") && keeps_slow_text("WebGPU").contains("AMD"));
+        assert!(load_off_text("WebGPU", Duration::from_secs(180)).contains("AMD graphics chip"));
+        // (Counted in STUCK_THREADS and given back above; nothing is left over.)
     }
 
     /// A runner that notes when it is dropped.

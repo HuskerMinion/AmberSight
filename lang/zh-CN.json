@@ -1231,8 +1231,8 @@
 "4acd32a8"
 ],
 "admin_config.no_graphics_card": [
-"未检测到可供 AI 使用的显卡（Windows 需 DirectX 12 兼容显卡；Linux 需已安装驱动的 NVIDIA 显卡或 Intel 显卡；Mac 需 Apple Silicon 芯片），因此系统转而使用 CPU。",
-"05f6886b"
+"未检测到可供 AI 使用的显卡（Windows 需 DirectX 12 兼容显卡；Linux 需已安装驱动的 NVIDIA 显卡、Intel 显卡或 AMD 显卡；Mac 需 Apple Silicon 芯片），因此系统转而使用 CPU。",
+"23eb7dda"
 ],
 "admin_config.no_profile": [
 "无配置模式",
@@ -13761,6 +13761,10 @@
 "livetl.cams_recorded": [
 "{total} 个摄像头中有 {n} 个有录像",
 "a5d555a8"
+],
+"livetl.cannot_show": [
+"此浏览器无法显示该摄像头的录像（H.265）。请换用其他浏览器或 AmberSight 应用。",
+"b7e21c99"
 ],
 "livetl.chip_1h": [
 "1h",

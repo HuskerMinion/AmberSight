@@ -3463,6 +3463,21 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 
 ## 12. Changelog
 
+**New in 0.13.5**
+
+- The built-in AI runs on AMD graphics on 64-bit Linux (through a helper program, WebGPU over
+  Vulkan). In `GET /api/settings`, `ai_status.gpus` lists AMD chips too, with `api` `"WebGPU"`, and
+  `ai_status.running_api` is `"WebGPU"` while the AI runs on one. NVIDIA is still preferred, then
+  Intel, then AMD. When the AI picks the AMD chip itself and its checks are more than 1.5 times
+  slower than the processor's, it stays on the processor and `ai_status.gpu_note` says so.
+  When the card the AI picked itself cannot be used (not one chosen in Settings), the next kind
+  is tried, AMD last (not while the first card's own add-on is being downloaded: the note says
+  so and the AI waits on the processor; after a failed try it is tried while the download waits
+  to try again); if none can be used, `ai_status.gpu_note` says why the first one was not, then
+  `; <card> was tried instead: <why>` for each one tried after it. An AMD helper that stops
+  twice within 10 minutes moves the AI to the processor for 5 minutes at once, with a
+  `gpu_note` that says so.
+
 **New in 0.13.4**
 
 - Operator right `reboot` (off by default): `POST /api/cameras/:id/reboot` for operators who

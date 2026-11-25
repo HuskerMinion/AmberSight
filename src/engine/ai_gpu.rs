@@ -42,7 +42,7 @@ pub fn is_gpu_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     [
         "cuda", "cudnn", "cublas", "out of memory", "failed to allocate", "bfcarena", "directml", "dxgi", "d3d12", "device removed", "device hung", "coreml", "core ml", "openvino",
-        "did not answer in time", "stopped answering", "stopped responding", "card thread", "cl_out_of_resources", "clfinish", "cl_invalid",
+        "did not answer in time", "stopped answering", "stopped responding", "card thread", "webgpu", "amd graphics helper", "cl_out_of_resources", "clfinish", "cl_invalid",
     ]
     .iter()
     .any(|k| m.contains(k))
@@ -64,6 +64,8 @@ pub fn plain_error(msg: &str) -> String {
             "DirectML"
         } else if m.contains("openvino") {
             "OpenVINO"
+        } else if m.contains("webgpu") {
+            "WebGPU"
         } else if m.contains("coreml") || m.contains("core ml") {
             "CoreML"
         } else if m.contains("device removed") {
@@ -297,9 +299,10 @@ impl Engine {
                 match recovery(d.gpu_api().unwrap_or(""), kind) {
                     Recovery::OffUntilRestart => self.card_off(d, &msg),
                     Recovery::RestThenJudge => self.card_slow(d, &msg),
+                    Recovery::RestNow => self.leave_card(d, &msg, &crate::ai_card::gone_text(d.gpu_api().unwrap_or(""))),
                     Recovery::CountThenRest => {
                         if health(|h| h.error(now_ms())) {
-                            self.leave_card(d, &msg);
+                            self.leave_card(d, &msg, "the graphics card gave errors, so the AI runs on the processor for a while");
                         }
                     }
                 }
@@ -404,8 +407,9 @@ impl Engine {
         }
     }
 
-    /// Replace the AI that runs on the card with one on the processor.
-    fn leave_card(&self, used: &Arc<crate::ai::AiDetector>, msg: &str) {
+    /// Replace the AI that runs on the card with one on the processor for
+    /// five minutes; `note` is what Settings says meanwhile.
+    fn leave_card(&self, used: &Arc<crate::ai::AiDetector>, msg: &str, note: &str) {
         let _one = super::AI_ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         if !self.detector().is_some_and(|d| Arc::ptr_eq(&d, used)) {
             return; // another thread did it
@@ -419,12 +423,12 @@ impl Engine {
         match crate::ai::AiDetector::load_on(&model, threads, false, None, mb) {
             Ok(d) => {
                 let short = msg.lines().next().unwrap_or("").chars().take(160).collect::<String>();
-                warn!("AI: the graphics card keeps giving errors ({short}); the AI checks run on the processor for 5 minutes, then the card is tried again");
-                crate::ai::set_gpu_note(Some("the graphics card gave errors, so the AI runs on the processor for a while".into()));
+                warn!("AI: {note} ({short}); the AI checks run on the processor for 5 minutes, then the card is tried again");
+                crate::ai::set_gpu_note(Some(note.to_string()));
                 *self.ai.write().unwrap() = Some(Arc::new(d));
                 health(|h| h.left_card(now_ms()));
             }
-            Err(e) => warn!("AI: the graphics card keeps giving errors and the processor could not take over: {e:#}"),
+            Err(e) => warn!("AI: {note}, and the processor could not take over: {e:#}"),
         }
     }
 
@@ -963,7 +967,7 @@ mod card_state_tests {
     /// until `mode` changes (HANG).
     fn card(limit: Duration, mode: Arc<AtomicU32>, dropped: Arc<AtomicBool>) -> crate::ai::AiDetector {
         let keep = Dropped(dropped);
-        fake::card(limit, move |_i| {
+        fake::card(limit, move |_i| -> Result<crate::ai_card::Output, String> {
             let _k = &keep;
             loop {
                 match mode.load(Ordering::SeqCst) {
@@ -1247,6 +1251,21 @@ mod card_state_tests {
         std::thread::sleep(ms(200));
         assert!(!on_card(&e), "not tried again");
         assert!(wait_for(|| dropped.load(Ordering::SeqCst)), "the slow card came back, so it is let go");
+
+        // 10. A card whose session ended for good (an AMD helper that stopped
+        // twice): the processor at once, not after three errors, then the card again.
+        reset();
+        let e = engine();
+        let gone = fake::card(Duration::from_secs(2), |_i| -> Result<crate::ai_card::Output, crate::ai_card::RunError> {
+            Err(crate::ai_card::RunError { kind: crate::ai_card::FailureKind::Gone, detail: "the AMD graphics helper stopped (test)".into() })
+        });
+        *e.ai.write().unwrap() = Some(Arc::new(gone));
+        let before = fake::CPU_CHECKS.load(Ordering::SeqCst);
+        assert!(e.ai_detect(&pic, 0.5).is_ok(), "done on the processor");
+        assert!(fake::CPU_CHECKS.load(Ordering::SeqCst) > before);
+        assert!(!on_card(&e) && health(|h| h.cpu_since.is_some()));
+        assert_eq!(crate::ai::gpu_note(), Some(crate::ai_card::gone_text("OpenVINO")));
+        assert!(crate::ai_card::blocked().is_none());
         reset();
     }
 }

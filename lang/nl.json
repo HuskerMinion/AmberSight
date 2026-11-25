@@ -1231,8 +1231,8 @@
 "4acd32a8"
 ],
 "admin_config.no_graphics_card": [
-"Er is geen grafische kaart gevonden die de AI kan gebruiken (Windows: een DirectX 12-kaart; Linux: een NVIDIA-kaart met bijbehorende driver of Intel-graphics; Mac: Apple Silicon), dus wordt de CPU gebruikt.",
-"05f6886b"
+"Er is geen grafische kaart gevonden die de AI kan gebruiken (Windows: een DirectX 12-kaart; Linux: een NVIDIA-kaart met bijbehorende driver, Intel-graphics of AMD-graphics; Mac: Apple Silicon), dus wordt de CPU gebruikt.",
+"23eb7dda"
 ],
 "admin_config.no_profile": [
 "Geen profiel",
@@ -13761,6 +13761,10 @@
 "livetl.cams_recorded": [
 "{n} van de {total} camera’s hebben opgenomen",
 "a5d555a8"
+],
+"livetl.cannot_show": [
+"Deze browser kan de opnamen van deze camera niet tonen (H.265). Probeer een andere browser of de AmberSight-app.",
+"b7e21c99"
 ],
 "livetl.chip_1h": [
 "1 uur",

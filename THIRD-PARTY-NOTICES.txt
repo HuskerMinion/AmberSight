@@ -34,6 +34,15 @@ ONNX Runtime OpenVINO and CUDA providers (the graphics-card add-ons)
   Copyright (c) Microsoft Corporation. License: MIT. Built by pyke
   (https://ort.pyke.io) from the same ONNX Runtime linked into AmberSight.
 
+ONNX Runtime with its WebGPU provider (the AMD graphics add-on's helper
+program, ambersight-ai-amd, 64-bit Linux)
+  Copyright (c) Microsoft Corporation. License: MIT. Built by pyke
+  (https://ort.pyke.io).
+
+Dawn (libwebgpu_dawn.so, part of the AMD graphics add-on)
+  Copyright The Dawn & Tint Authors. License: BSD-3-Clause
+  (licenses/dawn-LICENSE in the add-on). https://dawn.googlesource.com/dawn
+
 AI models AmberSight downloads when you turn a feature on (not included in
 the AmberSight packages; each keeps its own license):
   - YOLOX object detection models, Megvii: Apache-2.0.

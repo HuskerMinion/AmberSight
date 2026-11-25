@@ -8,9 +8,9 @@
 //! This module converts one and builds the other. It is pure and synchronous,
 //! so it unit-tests offline against real captures with no camera.
 //!
-//! Width and height come from the BcMedia `InfoV2` message (or, for a reader
-//! without one, `crate::ingest::sps::sps_display_size`), so the caller
-//! supplies them via [`AvccBridge::set_dimensions`].
+//! Width and height come from the stream's own SPS when it can be read, else
+//! from the BcMedia info message, which the caller supplies via
+//! [`AvccBridge::set_dimensions`].
 //!
 //! H.265 (wired cameras' main streams, e.g. a Duo Floodlight's 4608x1728)
 //! works the same way: VPS/SPS/PPS go into an HEVCDecoderConfigurationRecord
@@ -187,6 +187,9 @@ struct HevcSpsInfo {
     chroma_format_idc: u8,
     bit_depth_luma_minus8: u8,
     bit_depth_chroma_minus8: u8,
+    /// The picture size, the conformance window taken off.
+    width: u32,
+    height: u32,
 }
 
 fn parse_hevc_sps(nal: &[u8]) -> Option<HevcSpsInfo> {
@@ -219,12 +222,19 @@ fn parse_hevc_sps(nal: &[u8]) -> Option<HevcSpsInfo> {
     if chroma_format_idc == 3 {
         b.bit()?; // separate_colour_plane_flag
     }
-    b.ue()?; // pic_width_in_luma_samples
-    b.ue()?; // pic_height_in_luma_samples
+    let pic_w = b.ue()?; // pic_width_in_luma_samples
+    let pic_h = b.ue()?; // pic_height_in_luma_samples
+    let (mut crop_w, mut crop_h) = (0u32, 0u32);
     if b.bit()? == 1 {
-        for _ in 0..4 {
-            b.ue()?; // conformance window offsets
-        }
+        // Conformance window offsets (left, right, top, bottom), in chroma units.
+        let (sub_w, sub_h) = match chroma_format_idc {
+            1 => (2, 2),
+            2 => (2, 1),
+            _ => (1, 1),
+        };
+        let (l, r, t, bt) = (b.ue()?, b.ue()?, b.ue()?, b.ue()?);
+        crop_w = l.saturating_add(r).saturating_mul(sub_w);
+        crop_h = t.saturating_add(bt).saturating_mul(sub_h);
     }
     let luma = b.ue()?;
     let chroma = b.ue()?;
@@ -238,6 +248,8 @@ fn parse_hevc_sps(nal: &[u8]) -> Option<HevcSpsInfo> {
         chroma_format_idc: chroma_format_idc as u8,
         bit_depth_luma_minus8: luma as u8,
         bit_depth_chroma_minus8: chroma as u8,
+        width: pic_w.saturating_sub(crop_w),
+        height: pic_h.saturating_sub(crop_h),
     })
 }
 
@@ -281,11 +293,13 @@ pub struct AvccBridge {
     config: Option<Vec<u8>>,
     /// Set when the config record changes; cleared when reported on a frame.
     params_dirty: bool,
+    /// The size the SPS gives: it wins over the info message's.
+    sps_size: Option<(u16, u16)>,
 }
 
 impl AvccBridge {
     pub fn new(h265: bool, width: u16, height: u16) -> Self {
-        AvccBridge { h265, width, height, vps: None, sps: None, pps: None, config: None, params_dirty: false }
+        AvccBridge { h265, width, height, vps: None, sps: None, pps: None, config: None, params_dirty: false, sps_size: None }
     }
 
     /// Update the picture size (from a BcMedia `InfoV2` message). A later Info
@@ -294,7 +308,15 @@ impl AvccBridge {
         self.h265
     }
 
+    /// The SPS's size, when it was read, wins over this.
     pub fn set_dimensions(&mut self, width: u16, height: u16) {
+        if self.sps_size.is_some() {
+            return;
+        }
+        self.resize(width, height);
+    }
+
+    fn resize(&mut self, width: u16, height: u16) {
         if width > 0 && height > 0 && (width != self.width || height != self.height) {
             self.width = width;
             self.height = height;
@@ -305,7 +327,25 @@ impl AvccBridge {
         }
     }
 
+    /// Take the picture size from the new SPS (when it reads as a size a
+    /// recording can have).
+    fn size_from_sps(&mut self) {
+        let Some(sps) = &self.sps else { return };
+        let size = if self.h265 {
+            parse_hevc_sps(sps).map(|s| (s.width, s.height))
+        } else {
+            crate::ingest::sps::sps_display_size(sps)
+        };
+        let Some((w, h)) = size else { return };
+        let (Ok(w), Ok(h)) = (u16::try_from(w), u16::try_from(h)) else { return };
+        if (16..=16384).contains(&w) && (16..=16384).contains(&h) {
+            self.sps_size = Some((w, h));
+            self.resize(w, h);
+        }
+    }
+
     fn rebuild_config(&mut self) {
+        self.size_from_sps();
         if let (Some(sps), Some(pps)) = (&self.sps, &self.pps) {
             let next = if self.h265 {
                 let Some(vps) = &self.vps else { return };
@@ -423,6 +463,12 @@ mod tests {
 
     // Minimal but structurally valid NAL units (header byte + a little payload).
     // profile_idc 0x64 (High) so codec_string/sample_entry are exercised.
+    fn sps_2560x1920() -> Vec<u8> {
+        vec![
+            0x67, 0x64, 0x00, 0x32, 0xac, 0xd9, 0x40, 0x28, 0x00, 0xf1, 0xb0, 0x11, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03,
+            0x00, 0x32, 0x0f, 0x18, 0x31, 0x96,
+        ]
+    }
     fn sps() -> Vec<u8> {
         vec![0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40, 0x50, 0x05, 0xbb]
     }
@@ -544,6 +590,29 @@ mod tests {
         let mut back = Vec::new();
         length_prefixed_to_annexb(&f.data, &mut back).unwrap();
         assert_eq!(split_annexb(&back), vec![idr().as_slice()]);
+    }
+
+    #[test]
+    fn the_sps_size_wins_over_the_info_message() {
+        // A real camera SPS: 2560x1920 High profile (built by ffmpeg/x264).
+        let sps = sps_2560x1920();
+        assert_eq!(crate::ingest::sps::sps_display_size(&sps), Some((2560, 1920)));
+        let mut b = AvccBridge::new(false, 2560, 1920);
+        b.push_frame(&annexb(&[&sps, &pps(), &idr()], false)).unwrap();
+        // A bad info size (issue #13) is ignored once the SPS gave one.
+        b.set_dimensions(45941, 22513);
+        assert_eq!(b.video_params().map(|v| (v.width, v.height)), Some((2560, 1920)));
+        // The bridge made before any info header gets the SPS's size.
+        let mut b = AvccBridge::new(false, 0, 0);
+        b.push_frame(&annexb(&[&sps, &pps(), &idr()], false)).unwrap();
+        assert_eq!(b.video_params().map(|v| (v.width, v.height)), Some((2560, 1920)));
+        // H.265: the SPS's size too.
+        let mut h = AvccBridge::new(true, 640, 480);
+        let (vps, pps, idr) = (vec![0x40, 0x01, 0x0c, 0x01, 0xff, 0xff], vec![0x44, 0x01, 0xc1, 0x72, 0xb4], vec![0x26, 0x01, 0xaf, 0x10, 0x20]);
+        h.push_frame(&annexb(&[&vps, &hevc_sps(), &pps, &idr], true)).unwrap();
+        assert_eq!(parse_hevc_sps(&hevc_sps()).map(|s| (s.width, s.height)), Some((4608, 1728)));
+        h.set_dimensions(45941, 22513);
+        assert_eq!(h.video_params().map(|v| (v.width, v.height)), Some((4608, 1728)));
     }
 
     #[test]

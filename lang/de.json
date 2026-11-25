@@ -1231,8 +1231,8 @@
 "4acd32a8"
 ],
 "admin_config.no_graphics_card": [
-"Es wurde keine Grafikkarte gefunden, die die KI nutzen kann (Windows: eine DirectX-12-Karte; Linux: eine NVIDIA-Karte mit Treiber oder Intel-Grafik; Mac: Apple Silicon), daher nutzt sie die CPU.",
-"05f6886b"
+"Es wurde keine Grafikkarte gefunden, die die KI nutzen kann (Windows: eine DirectX-12-Karte; Linux: eine NVIDIA-Karte mit Treiber, Intel-Grafik oder AMD-Grafik; Mac: Apple Silicon), daher nutzt sie die CPU.",
+"23eb7dda"
 ],
 "admin_config.no_profile": [
 "Kein Profil",
@@ -13761,6 +13761,10 @@
 "livetl.cams_recorded": [
 "{n} von {total} Kameras aufgenommen",
 "a5d555a8"
+],
+"livetl.cannot_show": [
+"Dieser Browser kann die Aufnahmen dieser Kamera nicht zeigen (H.265). Versuche einen anderen Browser oder die AmberSight-App.",
+"b7e21c99"
 ],
 "livetl.chip_1h": [
 "1 Std.",

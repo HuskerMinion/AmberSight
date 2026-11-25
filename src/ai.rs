@@ -5,7 +5,8 @@
 //! accurate, about five times the work) or `yolox_tiny.onnx` (416x416, faster). The model input size is read from the file. Runs on a
 //! graphics card where this build can use one (Windows: DirectML, any
 //! DirectX 12 card; 64-bit Linux PCs: an NVIDIA card with CUDA 13 and cuDNN 9,
-//! else Intel graphics with OpenVINO, see gpu_addon.rs and openvino.rs; Apple
+//! else Intel graphics with OpenVINO, else AMD graphics through a helper
+//! program (WebGPU), see gpu_addon.rs, openvino.rs and ai_amd.rs; Apple
 //! silicon Macs: Core ML), else on the CPU. On a card the checks run on a
 //! thread of their own with a time limit (ai_card.rs); detection
 //! only runs while motion is happening, so a few hundred milliseconds per
@@ -79,7 +80,7 @@ pub fn gpu_note() -> Option<String> {
     // download failure never hides the real reason.)
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if note.is_some() && crate::ai_card::blocked().is_none() {
-        for a in [crate::gpu_addon::Addon::Cuda, crate::gpu_addon::Addon::OpenVino] {
+        for a in [crate::gpu_addon::Addon::Cuda, crate::gpu_addon::Addon::OpenVino, crate::gpu_addon::Addon::Amd] {
             if let Some(n) = crate::gpu_addon::note(a) {
                 return Some(n);
             }
@@ -148,11 +149,73 @@ fn quiet_reason(_card: &crate::gpu::Gpu, _why: &str) -> bool {
     false
 }
 
-/// Whether an Intel card may stand in for `card` when it cannot be used: an
-/// NVIDIA card the AI picked itself, not one named in the settings.
+/// Whether `card` is the one named in the settings (not picked by the AI:
+/// "Automatic", or a name no card listed has).
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+fn named(card: &crate::gpu::Gpu, gpu_name: Option<&str>) -> bool {
+    gpu_name.is_some_and(|n| !n.is_empty() && n == card.name)
+}
+
+/// Whether another kind of card may stand in for `card` when it cannot be
+/// used: an NVIDIA or Intel card the AI picked itself, not one named in the
+/// settings (`fall_over_cards` has the order).
 #[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
 fn may_fall_over(card: &crate::gpu::Gpu, gpu_name: Option<&str>) -> bool {
-    card.api == "CUDA" && !gpu_name.is_some_and(|n| n == card.name)
+    matches!(card.api, "CUDA" | "OpenVINO") && !named(card, gpu_name)
+}
+
+/// Whether `card`'s own add-on is being fetched now (the AI is loaded again
+/// when that try ends, so no other card is tried meanwhile: that would start
+/// a second download and move the AI twice; while a failed download waits to
+/// try again, other cards are tried).
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn add_on_coming(card: &crate::gpu::Gpu) -> bool {
+    use crate::gpu_addon::{downloading, Addon};
+    match card.api {
+        "CUDA" => downloading(Addon::Cuda),
+        "OpenVINO" => downloading(Addon::OpenVino),
+        "WebGPU" => downloading(Addon::Amd),
+        _ => false,
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+fn add_on_coming(_card: &crate::gpu::Gpu) -> bool {
+    false
+}
+
+/// Whether to try other cards now that `card` cannot be used: one the AI
+/// picked (`may_fall_over`) whose add-on is not on its way (`add_on_coming`).
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+fn falls_over(card: &crate::gpu::Gpu, gpu_name: Option<&str>) -> bool {
+    may_fall_over(card, gpu_name) && !add_on_coming(card)
+}
+
+/// The cards to try, in turn, when `first` cannot be used (see
+/// `may_fall_over`): the best Intel card after an NVIDIA one, then the
+/// best AMD one (the order `gpu::pick` ranks them in).
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+fn fall_over_cards(first: &crate::gpu::Gpu, cards: &[crate::gpu::Gpu]) -> Vec<crate::gpu::Gpu> {
+    ["OpenVINO", "WebGPU"]
+        .into_iter()
+        .filter(|api| crate::gpu::rank(api) < crate::gpu::rank(first.api))
+        .filter_map(|api| {
+            let kind: Vec<crate::gpu::Gpu> = cards.iter().filter(|g| g.api == api).cloned().collect();
+            crate::gpu::pick(&kind, None)
+        })
+        .collect()
+}
+
+/// Settings' note when no card could be used: why the first one was not,
+/// then why each one tried after it was not.
+#[cfg_attr(all(target_os = "macos", target_arch = "x86_64"), allow(dead_code))]
+fn fall_over_note(first: &str, also: &[(String, String)]) -> String {
+    let mut note = first.to_string();
+    for (name, why) in also {
+        note.push_str(&format!("; {name} was tried instead: {why}"));
+    }
+    note
 }
 
 /// Fake detectors for tests of what the engine does with the card (no
@@ -189,7 +252,7 @@ pub(crate) mod fake {
     }
 
     /// A card ("OpenVINO") whose checks `run` does, with this time limit.
-    pub fn card(deadline: std::time::Duration, run: impl FnMut(crate::ai_card::Input) -> Result<crate::ai_card::Output, String> + Send + 'static) -> AiDetector {
+    pub fn card<E: Into<crate::ai_card::RunError> + 'static>(deadline: std::time::Duration, run: impl FnMut(crate::ai_card::Input) -> Result<crate::ai_card::Output, E> + Send + 'static) -> AiDetector {
         let (t, _) = crate::ai_card::CardThread::start("OpenVINO", std::time::Duration::from_secs(5), move || Ok((run, ()))).unwrap();
         AiDetector { run: Runner::Card(t.with_deadline(deadline)), size: 32, gpu: Some("Test card".into()), _env: None }
     }
@@ -263,7 +326,8 @@ impl AiDetector {
 
     /// On a graphics card, waiting for its session and one first check: the
     /// one named `gpu_name`, else the best one (`gpu::pick`); an NVIDIA card
-    /// that cannot be used gives way to an Intel one unless it was named.
+    /// that cannot be used gives way to an Intel one, then an AMD one, and an
+    /// Intel card to an AMD one, unless it was named (`fall_over_cards`).
     /// Says why not when it is not used.
     pub fn try_card(model: &Path, threads: usize, gpu_name: Option<&str>, gpu_memory_mb: u32) -> CardTry {
         if let Some(b) = crate::ai_card::blocked() {
@@ -288,39 +352,142 @@ impl AiDetector {
             crate::gpu_addon::none_wanted();
             return CardTry::NotUsed(None);
         };
-        let mut tried = (card.clone(), on_card(&env, model, &card, &cards, gpu_name, threads.max(1), gpu_memory_mb));
-        // An NVIDIA card that cannot be used: an Intel one may do (not when
-        // the owner chose that NVIDIA card).
-        let instead = match &tried {
-            (c, Err(why)) if may_fall_over(c, gpu_name) && crate::ai_card::blocked().is_none() => {
-                let intel: Vec<crate::gpu::Gpu> = cards.iter().filter(|g| g.api == "OpenVINO").cloned().collect();
-                let i = crate::gpu::pick(&intel, gpu_name);
-                if let Some(i) = &i {
-                    tracing::warn!("AI: the graphics card {} cannot be used ({why}); trying {}", c.name, i.name);
-                }
-                i
-            }
-            _ => None,
+        // AMD graphics run in a helper program (ai_amd.rs), not in this runtime.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if card.api == "WebGPU" {
+            return Self::try_amd(model, threads, &card, &cards, gpu_name);
+        }
+        let why = match on_card(&env, model, &card, &cards, gpu_name, threads.max(1), gpu_memory_mb) {
+            Ok((thread, found)) => return CardTry::OnCard(AiDetector { run: Runner::Card(thread), size: found.size, gpu: Some(found.name), _env: Some(env) }),
+            Err(why) => why,
         };
-        if let Some(i) = instead {
-            let r = on_card(&env, model, &i, &cards, gpu_name, threads.max(1), gpu_memory_mb);
-            if r.is_ok() {
-                tried = (i, r);
-            }
-        }
-        match tried {
-            (_, Ok((thread, found))) => {
-                CardTry::OnCard(AiDetector { run: Runner::Card(thread), size: found.size, gpu: Some(found.name), _env: Some(env) })
-            }
-            (c, Err(why)) => {
-                if quiet_reason(&c, &why) {
-                    tracing::info!("AI: the graphics card {} cannot be used ({why}); using the CPU", c.name);
-                } else {
-                    tracing::warn!("AI: the graphics card {} cannot be used ({why}); using the CPU", c.name);
+        // Picked by the AI and cannot be used: the next kind of card may do.
+        let mut also: Vec<(String, String)> = Vec::new();
+        if falls_over(&card, gpu_name) {
+            for next in fall_over_cards(&card, &cards) {
+                if crate::ai_card::blocked().is_some() {
+                    break;
                 }
-                CardTry::NotUsed(Some(why))
+                if quiet_reason(&card, &why) {
+                    tracing::info!("AI: the graphics card {} cannot be used ({why}); trying {}", card.name, next.name);
+                } else {
+                    tracing::warn!("AI: the graphics card {} cannot be used ({why}); trying {}", card.name, next.name);
+                }
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if next.api == "WebGPU" {
+                    match Self::try_amd(model, threads, &next, &cards, gpu_name) {
+                        CardTry::OnCard(d) => return CardTry::OnCard(d),
+                        CardTry::NotUsed(n) => also.push((next.name.clone(), n.unwrap_or_else(|| "it cannot be used".into()))),
+                    }
+                    continue;
+                }
+                match on_card(&env, model, &next, &cards, gpu_name, threads.max(1), gpu_memory_mb) {
+                    Ok((thread, found)) => return CardTry::OnCard(AiDetector { run: Runner::Card(thread), size: found.size, gpu: Some(found.name), _env: Some(env) }),
+                    Err(w) => {
+                        tracing::warn!("AI: the graphics card {} cannot be used either ({w})", next.name);
+                        also.push((next.name.clone(), w));
+                        // Its add-on is on its way: the AI waits for it (no AMD try meanwhile).
+                        if add_on_coming(&next) {
+                            break;
+                        }
+                    }
+                }
             }
         }
+        if quiet_reason(&card, &why) {
+            tracing::info!("AI: the graphics card {} cannot be used ({why}); using the CPU", card.name);
+        } else {
+            tracing::warn!("AI: the graphics card {} cannot be used ({why}); using the CPU", card.name);
+        }
+        CardTry::NotUsed(Some(fall_over_note(&why, &also)))
+    }
+
+    /// AMD graphics: the Vulkan driver and the add-on checked (the add-on is
+    /// downloaded when it is missing), then the helper program on a card
+    /// thread, timed against the processor when the AI picked the chip
+    /// itself (`ai_amd::load`).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn try_amd(model: &Path, threads: usize, card: &crate::gpu::Gpu, cards: &[crate::gpu::Gpu], gpu_name: Option<&str>) -> CardTry {
+        use crate::gpu_addon::Addon;
+        let not_used = |why: String, quiet: bool| {
+            if quiet {
+                tracing::info!("AI: the graphics card {} cannot be used ({why}); using the CPU", card.name);
+            } else {
+                tracing::warn!("AI: the graphics card {} cannot be used ({why}); using the CPU", card.name);
+            }
+            CardTry::NotUsed(Some(why))
+        };
+        let render: Vec<String> = cards.iter().filter(|g| g.api == "WebGPU").map(|g| g.render.clone()).filter(|r| !r.is_empty()).collect();
+        let icd = match crate::ai_amd::driver(&render) {
+            Ok(p) => p,
+            Err(why) => {
+                let quiet = crate::ai_amd::is_driver_missing(&why);
+                return not_used(why, quiet);
+            }
+        };
+        let dir = match crate::gpu_addon::find(Addon::Amd) {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                crate::gpu_addon::start_download(Addon::Amd);
+                return CardTry::NotUsed(Some(crate::gpu_addon::note(Addon::Amd).unwrap_or_else(|| "the AMD graphics add-on for the AI is not installed".into())));
+            }
+            Err(why) => return not_used(why, false),
+        };
+        // The helper's home and shader cache: a folder of this user alone.
+        let cache = match crate::gpu_addon::data_dir().map(|d| crate::ai_amd::cache_dir(&d)) {
+            Some(c) => c,
+            None => return not_used("the data folder is not known".into(), false),
+        };
+        if let Err(why) = crate::gpu_addon::private_dir(&cache) {
+            return not_used(why, false);
+        }
+        if let Some(d) = crate::gpu_addon::data_dir() {
+            crate::gpu_addon::remove_other_versions(&d.join("cache"), "amd-", &cache);
+        }
+        let spec = crate::ai_amd::Spec::for_addon(&dir, &icd, &cache);
+        // Chosen in Settings (by name): used however fast it is. A saved name
+        // that matches no card listed is "Automatic", and so is a fall-over.
+        let chosen = named(card, gpu_name);
+        let cpu_times = || -> Result<Vec<std::time::Duration>, String> {
+            let cpu = Self::load_cpu(model, threads).map_err(|e| format!("{e:#}"))?;
+            cpu.time_checks(6).map(|t| t[1..].to_vec())
+        };
+        match crate::ai_amd::load(spec, model, !chosen, &cpu_times, &crate::ai_amd::SPEED) {
+            Ok(l) => {
+                // Shown as the card list names it (the same name Settings
+                // offers); ONNX Runtime does not tell the helper the chip's own name.
+                tracing::debug!("AI: the AMD graphics helper runs on {}", l.name);
+                CardTry::OnCard(AiDetector { run: Runner::Card(l.thread), size: l.size, gpu: Some(card.name.clone()), _env: None })
+            }
+            Err(why) => {
+                // A chip slower than the processor is not a fault: the note says so.
+                not_used(why.clone(), why.contains("slower than the processor"))
+            }
+        }
+    }
+
+    /// `n` timed checks on a blank picture (the first one warms up).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn time_checks(&self, n: usize) -> Result<Vec<std::time::Duration>, String> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let input = ndarray::Array4::<f32>::from_elem((1, 3, self.size, self.size), 114.0);
+            let t = std::time::Instant::now();
+            match &self.run {
+                Runner::Here(s) => {
+                    run_session(&mut s.lock().unwrap_or_else(|e| e.into_inner()), input)?;
+                }
+                Runner::Card(c) => {
+                    c.run(input).map_err(|e| e.to_string())?;
+                }
+                #[cfg(test)]
+                Runner::Fake(f) => {
+                    f(input)?;
+                }
+            }
+            out.push(t.elapsed());
+        }
+        Ok(out)
     }
 
     pub fn input_size(&self) -> usize {
@@ -332,7 +499,7 @@ impl AiDetector {
         self.gpu.as_deref()
     }
 
-    /// What it runs the card with ("CUDA", "OpenVINO", "DirectML", "Core ML"; None: the CPU).
+    /// What it runs the card with ("CUDA", "OpenVINO", "WebGPU", "DirectML", "Core ML"; None: the CPU).
     pub fn gpu_api(&self) -> Option<&'static str> {
         match &self.run {
             Runner::Card(t) => Some(t.api()),
@@ -422,7 +589,9 @@ impl AiDetector {
                 t.run(input).map_err(anyhow::Error::new)?
             }
         };
-        if shape.len() != 3 || shape[2] < 6 || flat.len() < shape[1] * shape[2] {
+        // (At least 6 columns: the decoder reads box, objectness and one class per row. The
+        // product is checked: a helper's shape is not trusted to fit in a number.)
+        if shape.len() != 3 || shape[2] < 6 || shape[1].checked_mul(shape[2]).is_none_or(|n| flat.len() < n) {
             return Err(anyhow!("unexpected AI model output shape {shape:?}"));
         }
         let dets = decode_yolox(&flat, shape[1], shape[2], s, min_score);
@@ -832,7 +1001,62 @@ mod tests {
         assert!(may_fall_over(&rtx, Some("")), "Automatic");
         assert!(may_fall_over(&rtx, Some("a card no longer there")));
         assert!(!may_fall_over(&rtx, Some("NVIDIA GeForce RTX 3060")), "the owner's choice");
-        assert!(!may_fall_over(&g("OpenVINO", "Intel graphics card"), None));
+        // An Intel card the AI picked may give way to an AMD one; AMD is the last kind.
+        let arc = g("OpenVINO", "Intel graphics card");
+        assert!(may_fall_over(&arc, None) && may_fall_over(&arc, Some("gone")));
+        assert!(!may_fall_over(&arc, Some("Intel graphics card")));
+        assert!(!may_fall_over(&g("WebGPU", "AMD Radeon 780M Graphics"), None));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn no_other_card_is_tried_while_the_first_cards_add_on_downloads() {
+        use crate::gpu_addon::{set_downloading_for_test, Addon};
+        let g = |api: &'static str| crate::gpu::Gpu { index: 0, name: api.into(), memory_mb: 0, bus: String::new(), api, render: String::new() };
+        let (rtx, arc) = (g("CUDA"), g("OpenVINO"));
+        assert!(falls_over(&rtx, None) && falls_over(&arc, None));
+        // The NVIDIA add-on downloading: the AI waits for it on the processor.
+        set_downloading_for_test(Addon::Cuda, true);
+        let (nvidia_waits, intel_still) = (!falls_over(&rtx, None), falls_over(&arc, None));
+        set_downloading_for_test(Addon::Cuda, false);
+        assert!(nvidia_waits && intel_still);
+        // The same for Intel's.
+        set_downloading_for_test(Addon::OpenVino, true);
+        let (intel_waits, coming) = (!falls_over(&arc, None), add_on_coming(&arc));
+        set_downloading_for_test(Addon::OpenVino, false);
+        assert!(intel_waits && coming);
+        assert!(falls_over(&rtx, None) && falls_over(&arc, None));
+    }
+
+    #[test]
+    fn a_card_that_cannot_be_used_gives_way_to_intel_then_amd() {
+        let g = |api: &'static str, name: &str, mb: u64| crate::gpu::Gpu { index: 0, name: name.into(), memory_mb: mb, bus: String::new(), api, render: String::new() };
+        let names = |v: Vec<crate::gpu::Gpu>| v.into_iter().map(|c| c.name).collect::<Vec<_>>();
+        let cards = vec![g("CUDA", "RTX", 8192), g("OpenVINO", "Arc", 0), g("WebGPU", "780M", 512), g("WebGPU", "RX 7600", 8192)];
+        // NVIDIA: Intel, then the best AMD one; Intel: AMD only; AMD: nothing.
+        assert_eq!(names(fall_over_cards(&cards[0], &cards)), ["Arc", "RX 7600"]);
+        assert_eq!(names(fall_over_cards(&cards[1], &cards)), ["RX 7600"]);
+        assert!(fall_over_cards(&cards[2], &cards).is_empty());
+        // NVIDIA and AMD only (an AMD processor's graphics beside an NVIDIA card).
+        let two = vec![g("CUDA", "RTX", 8192), g("WebGPU", "780M", 512)];
+        assert_eq!(names(fall_over_cards(&two[0], &two)), ["780M"]);
+        // Settings' note keeps why the first card was not used.
+        assert_eq!(fall_over_note("NVIDIA's CUDA 13 libraries are missing", &[]), "NVIDIA's CUDA 13 libraries are missing");
+        assert_eq!(
+            fall_over_note("no compute driver", &[("780M".into(), "the AMD graphics chip is slower than the processor here".into())]),
+            "no compute driver; 780M was tried instead: the AMD graphics chip is slower than the processor here"
+        );
+    }
+
+    #[test]
+    fn only_a_saved_name_that_is_the_card_counts_as_chosen() {
+        let amd = crate::gpu::Gpu { index: 0, name: "AMD Radeon 780M Graphics".into(), memory_mb: 0, bus: String::new(), api: "WebGPU", render: String::new() };
+        assert!(named(&amd, Some("AMD Radeon 780M Graphics")));
+        // A card no longer there (pick fell back to the best one), Automatic, nothing saved:
+        // picked by the AI, so the speed check is done.
+        assert!(!named(&amd, Some("NVIDIA GeForce RTX 3060")));
+        assert!(!named(&amd, Some("")));
+        assert!(!named(&amd, None));
     }
 
     #[test]

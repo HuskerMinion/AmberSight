@@ -223,7 +223,8 @@ url = "lavfi://mandelbrot=size=640x360:rate=10"
 - **Events:** a list beside the player, filters, false alarms, protect (kept
   from cleanup), and export. Events are stored in a SQLite database.
 - **AI:** built-in YOLOX object detection on CPU or GPU (DirectML on Windows,
-  NVIDIA CUDA or Intel graphics with OpenVINO on Linux, Core ML on Apple silicon Macs),
+  NVIDIA CUDA, Intel graphics with OpenVINO or AMD graphics with WebGPU on Linux,
+  Core ML on Apple silicon Macs),
   with a Large model for the most accurate checks, an AI server option, or an
   external detector command. AI review explains why an event did or did not
   alert. AI remembers fixed spots it keeps mistaking for a person or a car (a

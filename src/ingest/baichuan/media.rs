@@ -68,7 +68,8 @@ pub fn frame_video(payload: &[u8]) -> Option<&[u8]> {
 /// A VALIDATED frame magic at `i` — not just the 4 magic bytes, but the extra
 /// check that proves it's a real frame (so coincidental byte patterns inside
 /// video data don't desync us): video must carry an "H264"/"H265" type, audio
-/// must carry the ADTS syncword, info must be 1001/1002.
+/// must carry the ADTS syncword, info must carry a picture size a camera
+/// could send (see `info_ok`).
 fn valid_magic(data: &[u8], i: usize) -> bool {
     match data.get(i..i + 4) {
         Some(m) if is_video(m).is_some() => {
@@ -77,9 +78,24 @@ fn valid_magic(data: &[u8], i: usize) -> bool {
         Some(b"05wb") => matches!(data.get(i + 8), Some(0xff)) // ADTS sync 0xFFFx
             && data.get(i + 9).is_some_and(|&b| b & 0xf0 == 0xf0),
         Some(b"01wb") => data.get(i + 8..i + 10) == Some(&[0x00, 0x01]),
-        Some(b"1001") | Some(b"1002") => true,
+        Some(b"1001") | Some(b"1002") => info_ok(data, i),
         _ => false,
     }
+}
+
+/// An info header at `i` ("1001"/"1002"): its width and height (u32 at +8
+/// and +12) must be a picture size, 16 to 16384 each, or both 0. The four
+/// magic bytes alone turn up inside video data now and then (about once an
+/// hour on a 4 Mbit/s stream); taken for an info header, their following
+/// bytes became the recording's picture size (45941x22513: players refuse
+/// it, issue #13). Random bytes pass this about once in 2^36.
+fn info_ok(data: &[u8], i: usize) -> bool {
+    if !matches!(data.get(i..i + 4), Some(b"1001") | Some(b"1002")) {
+        return false;
+    }
+    let (Some(w), Some(h)) = (u32le(data, i + 8), u32le(data, i + 12)) else { return false };
+    let size = 16..=16384;
+    (w == 0 && h == 0) || (size.contains(&w) && size.contains(&h))
 }
 
 /// Find the next validated frame magic strictly after `from`.
@@ -272,7 +288,7 @@ pub fn info_end_time(data: &[u8], i: usize) -> Option<chrono::NaiveDateTime> {
 
 /// The first info header in `data` (its start and end), if one is whole.
 pub fn first_info_times(data: &[u8]) -> Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> {
-    let i = data.windows(4).position(|w| w == b"1001" || w == b"1002")?;
+    let i = (0..data.len().saturating_sub(3)).find(|&i| info_ok(data, i))?;
     if data.len() < i + 32 {
         return None;
     }
@@ -522,6 +538,39 @@ mod demux_tests {
         let mut video = Vec::new();
         let st = extract(&stream, &mut video).unwrap();
         assert_eq!((st.iframes, st.incomplete_tail, video.len()), (1, 0, 120_000));
+    }
+
+    #[test]
+    fn info_bytes_inside_video_data_are_not_an_info_header() {
+        // Issue #13: "1001" turned up inside a P frame's data; the bytes after
+        // it became the recording's size (45941x22513) and the frame was cut.
+        let mut junk = vec![0x41, 0x9a];
+        junk.extend_from_slice(b"1001");
+        junk.extend_from_slice(&[0, 0, 0, 0, 0x75, 0xb3, 0x31, 0x52, 0xf1, 0x57, 0x9c, 0x07]);
+        junk.extend_from_slice(&[0x55; 40]);
+        let stream = [info(2560, 1920), vframe(true, 10, &[1, 2, 3, 4]), vframe(false, 20, &junk)].concat();
+        let mut d = Demux::new();
+        let frames = d.push(&stream);
+        assert_eq!((d.width, d.height), (2560, 1920));
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1].annexb, junk, "the P frame is whole");
+        assert!(!frames[1].cut);
+        assert_eq!((d.damaged, d.resized), (0, 0));
+        // The same bytes split over two pushes.
+        let mut d = Demux::new();
+        let (a, b) = stream.split_at(stream.len() - 30);
+        let mut frames = d.push(a);
+        frames.extend(d.push(b));
+        assert_eq!(((d.width, d.height), frames.len()), ((2560, 1920), 2));
+        // A real info header later still counts, and one with no size too.
+        let mut d = Demux::new();
+        d.push(&[info(2560, 1920), vframe(true, 10, &[1]), info(640, 480), vframe(true, 20, &[2])].concat());
+        assert_eq!((d.width, d.height), (640, 480));
+        assert!(info_ok(&info(0, 0), 0));
+        assert!(!info_ok(&info(45941, 22513), 0));
+        assert!(!info_ok(&info(8, 8), 0));
+        assert!(!info_ok(&info(640, 0), 0));
+        assert!(!info_ok(b"1001\0\0\0\0", 0), "cut short");
     }
 
     #[test]

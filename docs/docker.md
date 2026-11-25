@@ -208,6 +208,13 @@ alerts > Objects (AI) then shows *Running on: Intel(R) Arc(TM) ...
 package of it): given `/dev/dri` it decodes video on the card but runs the AI
 on the processor, and Settings says to use the `:openvino` image.
 
+## AI on AMD graphics
+
+The images do not run the AI on AMD graphics yet: given `/dev/dri`, an AMD
+card decodes video, and the AI runs on the processor. To run the AI on AMD
+graphics, install AmberSight from the 64-bit Linux packages instead (see
+[Linux: AMD graphics for the AI](install.md#linux-amd-graphics-for-the-ai)).
+
 ## Recordings whose files are gone
 
 After moving recordings or replacing a drive, Settings > Recording > Drives & folders can find and

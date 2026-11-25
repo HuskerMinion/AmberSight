@@ -145,7 +145,7 @@ fn icd_is_intel_gpu(text: &str) -> bool {
     text.lines().any(|l| l.trim().rsplit('/').next().is_some_and(|f| f.starts_with("libigdrcl")))
 }
 
-fn may_use(node: &str) -> bool {
+pub(crate) fn may_use(node: &str) -> bool {
     let Ok(c) = CString::new(node) else { return false };
     // SAFETY: access(2) with a valid C string.
     unsafe { libc::access(c.as_ptr(), libc::R_OK | libc::W_OK) == 0 }

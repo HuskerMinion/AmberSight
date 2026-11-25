@@ -5275,7 +5275,7 @@ async fn get_settings(State(engine): State<Arc<Engine>>) -> Json<serde_json::Val
             "model_exists": cfg.ai.model.as_ref().map(|m| m.is_file()),
             // The graphics card it runs on (null: the CPU), and the cards there are.
             "running_on": engine.detector().and_then(|d| d.gpu_name().map(String::from)),
-            // What it runs the card with ("CUDA", "OpenVINO", "DirectML", "Core ML"; null: the CPU).
+            // What it runs the card with ("CUDA", "OpenVINO", "WebGPU", "DirectML", "Core ML"; null: the CPU).
             "running_api": engine.detector().and_then(|d| d.gpu_api()),
             // The card "Automatic" uses (null: none).
             "auto_gpu": crate::gpu::pick(&gpus, None).map(|g| g.name),

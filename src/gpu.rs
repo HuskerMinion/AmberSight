@@ -1,7 +1,8 @@
 //! Graphics cards the built-in AI can run on: Windows (DirectML, which
 //! numbers them the way DXGI lists them), 64-bit Linux PCs (NVIDIA cards
-//! with CUDA, as nvidia-smi lists them, and Intel graphics with OpenVINO,
-//! from the kernel's list of cards) and Apple silicon Macs (Core ML: one
+//! with CUDA, as nvidia-smi lists them, Intel graphics with OpenVINO and
+//! AMD graphics with WebGPU in a helper program, from the kernel's list of
+//! cards) and Apple silicon Macs (Core ML: one
 //! entry for the chip). Elsewhere the list is empty and the AI runs on the
 //! CPU.
 
@@ -20,9 +21,10 @@ pub struct Gpu {
     #[serde(skip)]
     #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
     pub bus: String,
-    /// What the AI runs it with: "CUDA", "OpenVINO", "DirectML" or "Core ML".
+    /// What the AI runs it with: "CUDA", "OpenVINO", "WebGPU" (AMD, in the
+    /// helper program of ai_amd.rs), "DirectML" or "Core ML".
     pub api: &'static str,
-    /// Linux, Intel: its render node ("/dev/dri/renderD128").
+    /// Linux, Intel and AMD: its render node ("/dev/dri/renderD128").
     #[serde(skip)]
     #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")), allow(dead_code))]
     pub render: String,
@@ -53,7 +55,8 @@ pub fn list() -> Vec<Gpu> {
     out
 }
 
-/// The NVIDIA cards (none without NVIDIA's driver), then the Intel ones.
+/// The NVIDIA cards (none without NVIDIA's driver), then the Intel ones,
+/// then the AMD ones.
 /// nvidia-smi also gives the NVIDIA cards' memory; without it, the driver's
 /// own list gives the names. Asked at most once a minute (Settings asks on
 /// each visit); the cache is not held while nvidia-smi runs.
@@ -72,6 +75,11 @@ pub fn list() -> Vec<Gpu> {
     let mut intel = intel_cards(std::path::Path::new("/sys/class/drm"), &crate::openvino::known_cards());
     number_same_names(&mut intel);
     v.extend(intel);
+    let ids: Vec<&std::path::Path> = PCI_IDS.iter().map(std::path::Path::new).collect();
+    let amd_ids: Vec<&std::path::Path> = AMDGPU_IDS.iter().map(std::path::Path::new).collect();
+    let mut amd = amd_cards(std::path::Path::new("/sys/class/drm"), &amd_ids, &ids);
+    number_same_names(&mut amd);
+    v.extend(amd);
     *CACHE.lock().unwrap() = Some((Instant::now(), v.clone()));
     v
 }
@@ -177,6 +185,119 @@ fn intel_cards(drm: &std::path::Path, known: &[crate::openvino::Card]) -> Vec<Gp
         .collect()
 }
 
+/// Where the PCI database that names chips may be (the first that exists).
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+const PCI_IDS: [&str; 3] = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids", "/usr/share/pci.ids"];
+
+/// Where AMD's own list of product names may be (libdrm's; the first that
+/// exists). It names chips by device and revision ("AMD Radeon 780M
+/// Graphics"), where the PCI database often has only a code name.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+const AMDGPU_IDS: [&str; 2] = ["/usr/share/libdrm/amdgpu.ids", "/opt/amdgpu/share/libdrm/amdgpu.ids"];
+
+/// The AMD graphics the kernel runs (amdgpu driver) with a render node, in
+/// PCI order. The name is the product's in AMD's list (`amdgpu_ids`, by
+/// device and revision), else the chip's in the PCI database (`pci_ids`, the
+/// first file there), else "AMD graphics" (a name that does not change, so
+/// the one chosen in Settings stays the one; Settings shows the name the
+/// graphics driver gives while the AI runs on it). Video memory is what the driver reports (an integrated
+/// chip's is the part of main memory set aside for it).
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn amd_cards(drm: &std::path::Path, amdgpu_ids: &[&std::path::Path], pci_ids: &[&std::path::Path]) -> Vec<Gpu> {
+    let Ok(rd) = std::fs::read_dir(drm) else { return Vec::new() };
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).map(|t| t.trim().to_string()).unwrap_or_default();
+    let mut found: Vec<(String, String, String, String, u64)> = rd
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        .filter_map(|e| {
+            let dev = e.path().join("device");
+            if read(dev.join("vendor")) != "0x1002" || !read(dev.join("class")).starts_with("0x03") {
+                return None;
+            }
+            let driver = std::fs::read_link(dev.join("driver")).ok()?.file_name()?.to_string_lossy().into_owned();
+            if driver != "amdgpu" {
+                return None;
+            }
+            let bus = std::fs::canonicalize(&dev).ok()?.file_name()?.to_string_lossy().into_owned();
+            let memory_mb = read(dev.join("mem_info_vram_total")).parse::<u64>().unwrap_or(0) / (1024 * 1024);
+            Some((bus, format!("/dev/dri/{}", e.file_name().to_string_lossy()), read(dev.join("device")), read(dev.join("revision")), memory_mb))
+        })
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(i, (bus, render, id, revision, memory_mb))| {
+            let name = amdgpu_name(amdgpu_ids, &id, &revision)
+                .or_else(|| pci_name(pci_ids, &id))
+                .unwrap_or_else(|| "AMD graphics".to_string());
+            Gpu { index: i as u32, name, memory_mb, bus, api: "WebGPU", render }
+        })
+        .collect()
+}
+
+/// An AMD product's name from libdrm's amdgpu.ids: lines of
+/// "15BF,\tC1,\tAMD Radeon 780M Graphics" (device, revision, name, in hex);
+/// "#" lines are comments and the first other line is the file's version.
+/// The name gets "AMD " in front if it does not start with it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn amdgpu_name(files: &[&std::path::Path], device: &str, revision: &str) -> Option<String> {
+    let hex = |s: &str| u32::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok();
+    let (dev, rev) = (hex(device)?, hex(revision)?);
+    let text = files.iter().find_map(|f| std::fs::read_to_string(f).ok())?;
+    text.lines().filter(|l| !l.trim_start().starts_with('#')).find_map(|l| {
+        let mut parts = l.splitn(3, ',');
+        let (d, r, name) = (parts.next()?, parts.next()?, parts.next()?.trim());
+        if hex(d)? != dev || hex(r)? != rev || name.is_empty() || name.chars().any(char::is_control) {
+            return None;
+        }
+        let name: String = name.chars().take(NAME_MAX).collect();
+        let name = name.trim_end();
+        Some(if name.starts_with("AMD ") { name.to_string() } else { format!("AMD {name}") })
+    })
+}
+
+/// The longest AMD product name kept from a name file (characters).
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+const NAME_MAX: usize = 100;
+
+/// An AMD chip's name from the PCI database: its entry under vendor 1002
+/// ("<tab>1638  Cezanne [Radeon Vega Series / Radeon Vega Mobile Series]"),
+/// the part in brackets when there is one, as "AMD <that>".
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn pci_name(files: &[&std::path::Path], device: &str) -> Option<String> {
+    let id = device.trim().strip_prefix("0x")?.to_ascii_lowercase();
+    if id.len() != 4 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let text = files.iter().find_map(|f| std::fs::read_to_string(f).ok())?;
+    let mut in_amd = false;
+    for l in text.lines() {
+        if !l.starts_with('\t') && !l.starts_with('#') {
+            in_amd = l.starts_with("1002 ");
+            continue;
+        }
+        if in_amd && l.starts_with('\t') && !l.starts_with("\t\t") {
+            if let Some((i, name)) = l.trim_start().split_once("  ") {
+                if i.eq_ignore_ascii_case(&id) {
+                    let name = name.trim();
+                    let short = match (name.find('['), name.rfind(']')) {
+                        (Some(a), Some(b)) if b > a + 1 => name[a + 1..b].trim(),
+                        _ => name,
+                    };
+                    // (Shown in Settings and the log: one plain line, as from amdgpu_name.)
+                    if short.is_empty() || short.chars().any(char::is_control) {
+                        return None;
+                    }
+                    let short: String = short.chars().take(NAME_MAX).collect();
+                    return Some(format!("AMD {}", short.trim_end()));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Intel graphics built into the processor (always at PCI 00:02.0).
 pub(crate) fn built_in(bus: &str) -> bool {
     bus.ends_with(":00:02.0")
@@ -221,7 +342,7 @@ pub fn list() -> Vec<Gpu> {
 }
 
 /// The card to use: the one named `want` when it is there, else an NVIDIA
-/// card over an Intel one (Linux), and then the one with the most video
+/// card over an Intel one over an AMD one (Linux), and then the one with the most video
 /// memory (a separate graphics card over built-in graphics; Intel cards
 /// have no size until OpenVINO has looked at them, so a card not built
 /// into the processor comes first there).
@@ -232,7 +353,17 @@ pub fn pick(gpus: &[Gpu], want: Option<&str>) -> Option<Gpu> {
             return Some(g.clone());
         }
     }
-    gpus.iter().max_by_key(|g| (g.api == "CUDA", g.memory_mb, !built_in(&g.bus), std::cmp::Reverse(g.index))).cloned()
+    gpus.iter().max_by_key(|g| (rank(g.api), g.memory_mb, !built_in(&g.bus), std::cmp::Reverse(g.index))).cloned()
+}
+
+/// Which kind of card comes first when the owner has not chosen (Linux has
+/// all three; the other systems have one kind).
+pub(crate) fn rank(api: &str) -> u8 {
+    match api {
+        "CUDA" => 2,
+        "OpenVINO" => 1,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +442,102 @@ mod tests {
         v.extend(named);
         assert_eq!(pick(&v, None).unwrap().api, "CUDA");
         assert_eq!(pick(&v, Some("Intel(R) Arc(TM) B580 Graphics")).unwrap().api, "OpenVINO");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn amd_cards_from_the_kernel_come_after_nvidia_and_intel() {
+        let d = std::env::temp_dir().join(format!("ambersight-drm-amd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let card = |node: &str, bus: &str, vendor: &str, driver: &str, id: &str, vram: Option<&str>| {
+            let rev = if id == "0x15bf" { "0xc1" } else { "0x00" };
+            let dev = d.join("devices").join(bus);
+            std::fs::create_dir_all(&dev).unwrap();
+            std::fs::create_dir_all(d.join("drivers").join(driver)).unwrap();
+            std::fs::write(dev.join("vendor"), format!("{vendor}\n")).unwrap();
+            std::fs::write(dev.join("device"), format!("{id}\n")).unwrap();
+            std::fs::write(dev.join("class"), "0x030000\n").unwrap();
+            std::fs::write(dev.join("revision"), format!("{rev}\n")).unwrap();
+            if let Some(v) = vram {
+                std::fs::write(dev.join("mem_info_vram_total"), format!("{v}\n")).unwrap();
+            }
+            std::os::unix::fs::symlink(d.join("drivers").join(driver), dev.join("driver")).unwrap();
+            std::fs::create_dir_all(d.join("drm").join(node)).unwrap();
+            std::os::unix::fs::symlink(&dev, d.join("drm").join(node).join("device")).unwrap();
+        };
+        card("renderD128", "0000:0c:00.0", "0x1002", "amdgpu", "0x1638", Some("536870912"));
+        card("renderD129", "0000:00:02.0", "0x8086", "i915", "0x46a6", None);
+        card("renderD130", "0000:05:00.0", "0x1002", "vfio-pci", "0x73bf", None);
+        card("renderD131", "0000:06:00.0", "0x10de", "nvidia", "0x2504", None);
+        let ids = d.join("pci.ids");
+        std::fs::write(
+            &ids,
+            "# list\n8086  Intel Corporation\n\t46a6  AlderLake-P GT2 [Iris Xe Graphics]\n1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t1638  Cezanne [Radeon Vega Series / Radeon Vega Mobile Series]\n\t\t1002 1638  sub\n\t73bf  Navi 21 [Radeon RX 6800/6800 XT / 6900 XT]\n",
+        )
+        .unwrap();
+        let nowhere = d.join("nowhere");
+        let amd = amd_cards(&d.join("drm"), &[], &[nowhere.as_path(), ids.as_path()]);
+        assert_eq!(amd.len(), 1, "only an amdgpu card counts");
+        assert_eq!(
+            (amd[0].name.as_str(), amd[0].api, amd[0].render.as_str(), amd[0].bus.as_str(), amd[0].memory_mb),
+            ("AMD Radeon Vega Series / Radeon Vega Mobile Series", "WebGPU", "/dev/dri/renderD128", "0000:0c:00.0", 512)
+        );
+        // No database: a plain name.
+        assert_eq!(amd_cards(&d.join("drm"), &[], &[])[0].name, "AMD graphics");
+        // AMD's own list wins over the PCI database's code name, by device and revision.
+        card("renderD132", "0000:0d:00.0", "0x1002", "amdgpu", "0x15bf", None);
+        let amd_ids = d.join("amdgpu.ids");
+        std::fs::write(
+            &amd_ids,
+            "# list\n1.0.0\n1638,\t00,\tAMD Radeon Graphics\n15BF,\t00,\tAMD Radeon 780M Graphics\n15BF,\tC1,\tRadeon 780M Graphics\n",
+        )
+        .unwrap();
+        std::fs::write(&ids, format!("{}\t15bf  Phoenix1\n", std::fs::read_to_string(&ids).unwrap())).unwrap();
+        let named = amd_cards(&d.join("drm"), &[nowhere.as_path(), amd_ids.as_path()], &[ids.as_path()]);
+        // 1638 is revision 00 here (in the list); 15bf is c1, named without "AMD ".
+        assert_eq!(
+            named.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            ["AMD Radeon Graphics", "AMD Radeon 780M Graphics"]
+        );
+        // Not in AMD's list: the PCI database's name.
+        std::fs::write(&amd_ids, "1.0.0\n15BF,\t00,\tAMD Radeon 780M Graphics\n").unwrap();
+        let named = amd_cards(&d.join("drm"), &[amd_ids.as_path()], &[ids.as_path()]);
+        assert_eq!(named[1].name, "AMD Phoenix1");
+        std::fs::remove_dir_all(d.join("drm").join("renderD132")).unwrap();
+        // Order: NVIDIA, then Intel, then AMD, unless one is named; AMD alone is used.
+        let mut all = parse_nvidia_smi("0, NVIDIA T400, 2048, 00000000:06:00.0\n");
+        all.extend(intel_cards(&d.join("drm"), &[]));
+        all.extend(amd.clone());
+        assert_eq!(pick(&all, None).unwrap().api, "CUDA");
+        assert_eq!(pick(&all[1..], None).unwrap().api, "OpenVINO");
+        assert_eq!(pick(&all[2..], None).unwrap().api, "WebGPU");
+        assert_eq!(pick(&all, Some("AMD Radeon Vega Series / Radeon Vega Mobile Series")).unwrap().api, "WebGPU");
+        // A discrete AMD card with lots of memory still comes after Intel graphics.
+        let mut big = amd[0].clone();
+        big.memory_mb = 16384;
+        let mut mixed = intel_cards(&d.join("drm"), &[]);
+        mixed.push(big);
+        assert_eq!(pick(&mixed, None).unwrap().api, "OpenVINO");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn amd_names_with_control_characters_are_refused_and_long_ones_cut() {
+        let d = std::env::temp_dir().join(format!("ambersight-amd-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (ids, amd_ids) = (d.join("pci.ids"), d.join("amdgpu.ids"));
+        let long = "R".repeat(500);
+        std::fs::write(&ids, format!("1002  AMD\n\t1638  Cezanne [Radeon\x1b[31m Vega]\n\t1639  Bad\rname\n\t163a  {long}\n\t163b  [ ]\n")).unwrap();
+        let pci = |id: &str| pci_name(&[ids.as_path()], id);
+        assert_eq!(pci("0x1638"), None, "an escape sequence");
+        assert_eq!(pci("0x1639"), None, "a carriage return");
+        assert_eq!(pci("0x163a").unwrap().chars().count(), 4 + NAME_MAX);
+        assert_eq!(pci("0x163b"), None, "nothing in the brackets");
+        std::fs::write(&amd_ids, format!("1.0.0\n1638,\t00,\t{long}\n")).unwrap();
+        assert_eq!(amdgpu_name(&[amd_ids.as_path()], "0x1638", "0x00").unwrap().chars().count(), 4 + NAME_MAX);
         let _ = std::fs::remove_dir_all(&d);
     }
 

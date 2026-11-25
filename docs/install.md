@@ -20,7 +20,9 @@ down, under each system's name.
   GPU, and on 64-bit Linux an NVIDIA card once NVIDIA's CUDA libraries are installed (see
   [Linux: an NVIDIA card for the AI](#linux-an-nvidia-card-for-the-ai)), or Intel graphics once
   Intel's compute driver is installed (see
-  [Linux: Intel graphics for the AI](#linux-intel-graphics-for-the-ai)).
+  [Linux: Intel graphics for the AI](#linux-intel-graphics-for-the-ai)), or AMD graphics once
+  Mesa's Vulkan driver is installed (see
+  [Linux: AMD graphics for the AI](#linux-amd-graphics-for-the-ai)).
 - Enough disk space. A typical camera records 10–30 GB a day. A separate large drive for
   recordings is best.
 - Cameras that send video over the network: RTSP (most IP cameras, ONVIF cameras, Reolink,
@@ -34,7 +36,7 @@ down, under each system's name.
 | Windows 10 / 11, 64-bit | `ambersight-<version>-windows-x86_64-setup.exe` (installer) or `ambersight-<version>-windows-x86_64.zip` | Built-in AI runs on the graphics card (DirectML) |
 | macOS on Apple silicon (M1 and later) | `ambersight-<version>-darwin-arm64.tar.gz` | Built-in AI runs on the Neural Engine and GPU (Core ML) |
 | macOS on Intel | `ambersight-<version>-darwin-x86_64.tar.gz` | Everything works except built-in AI detection. To check events for people and vehicles, connect your own detector program (Settings > Connections > External detector) |
-| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer. Built-in AI runs on the processor, on an NVIDIA card (CUDA) when NVIDIA's libraries are installed, or on Intel graphics (OpenVINO) when Intel's compute driver is installed |
+| Linux, 64-bit (Debian, Ubuntu, Fedora, Arch, ...) | `ambersight_<version>_amd64.deb`, `ambersight-<version>-1.x86_64.rpm` or `ambersight-<version>-linux-x86_64.tar.gz` | The packages need Debian 13, Ubuntu 25.04, Fedora 42 or newer. Built-in AI runs on the processor, on an NVIDIA card (CUDA) when NVIDIA's libraries are installed, on Intel graphics (OpenVINO) when Intel's compute driver is installed, or on AMD graphics (WebGPU) when Mesa's Vulkan driver is installed |
 | Raspberry Pi 4 / 5 (and other 64-bit ARM Linux) | `ambersight_<version>_arm64.deb`, `ambersight-<version>-1.aarch64.rpm` or `ambersight-<version>-linux-aarch64.tar.gz` | Needs the **64-bit** Raspberry Pi OS, trixie (2025) or newer. Built-in AI runs on the processor. See [Raspberry Pi](#raspberry-pi). |
 | Docker (and Unraid) | `ghcr.io/huskerminion/ambersight:latest` (`amd64` and `arm64`), `:cuda` for AI on an NVIDIA card, `:openvino` for AI on Intel graphics (`amd64`) | See the [Docker guide](docker.md); on Unraid, the AmberSight template ([Unraid guide](../unraid/README.md)) |
 
@@ -721,6 +723,74 @@ in the middle of a check. It costs about 0.3 ms per check.
 
 In Docker use the `:openvino` image with `--device /dev/dri` (see the
 [Docker guide](docker.md)): it has the compute driver and the add-on built in.
+
+### Linux: AMD graphics for the AI
+
+On a 64-bit Intel/AMD Linux computer with AMD graphics (a Radeon card, or the graphics built into
+a Ryzen processor, on the `amdgpu` kernel driver), the built-in AI can run on the graphics
+through WebGPU over Vulkan. An NVIDIA card is used first when there is one, then Intel graphics,
+then AMD; choose the card in Settings to use another. When the card the AI picked itself cannot
+be used (an NVIDIA card without NVIDIA's CUDA libraries, Intel graphics without Intel's compute
+driver), the next kind is tried, AMD last; a card chosen in Settings is not swapped for another.
+While the first card's own add-on is being downloaded, no other card is tried: the AI stays on
+the processor until that try ends. If the download fails (no internet, say), the next kind of
+card is tried at once while the download waits to try again. **Use a graphics card** in
+Settings (on by default) covers it. 64-bit Linux packages and the tar.gz only: the Docker images do not run the
+AI on AMD graphics yet.
+
+It needs two things:
+
+1. **Mesa's Vulkan driver for AMD** (RADV), which AmberSight does not install for you. The
+   graphics driver itself (`amdgpu`) is part of the Linux kernel already.
+
+   ```sh
+   # Debian, Ubuntu:
+   sudo apt install mesa-vulkan-drivers
+   # Fedora:
+   sudo dnf install mesa-vulkan-drivers
+   ```
+
+   AmberSight runs as its own user, which must be in the `render` group to use the card (the
+   packages add it; for an install of your own: `sudo usermod -aG render ambersight`, then restart
+   AmberSight).
+2. **AmberSight's AMD graphics add-on**: a small program of its own, `ambersight-ai-amd`, with
+   the WebGPU library it uses (`libwebgpu_dawn.so`). The AI runtime that drives AMD graphics
+   cannot also run NVIDIA and Intel cards, so AmberSight starts this program and sends it the
+   pictures. Like the other add-ons, the packages leave it out. When AmberSight finds AMD
+   graphics and the Vulkan driver (step 1) it downloads the add-on of its own version from the
+   release, checks it against the release's signed checksums like an update, and keeps it in
+   `<data folder>/tools/amd-<version>/`. With `[update] check = false`, or without internet, put
+   the two files from that version's `ambersight-amd-<version>-linux-x86_64.tar.gz` in that
+   folder yourself (real files, owned by the user AmberSight runs as, not writable by others;
+   `ambersight-ai-amd` must be executable). AmberSight runs the program only from that folder or
+   from a copy of the add-on beside the AmberSight program itself, owned by root (a copy there
+   owned by the user AmberSight runs as and not writable by others is used only when the data
+   folder has none), never through a shell, and with nothing but the settings the graphics driver
+   needs in its environment. A root-owned copy beside the program comes first and is not replaced
+   by updates (as for the NVIDIA add-on above).
+
+The AI starts on the processor and moves to the card in the background once the model is loaded
+there and has passed one check, so recording never waits for the card. The first start compiles
+the model's shaders (the result is kept in `<data folder>/cache/amd-<version>/`).
+
+AMD graphics are not always faster than the processor: a small built-in chip can be slower. When
+the AI picked the chip itself (the card in Settings is **Automatic**), it times a few checks on
+the chip and on the processor, and uses the chip only when its checks take at most 1.5 times as
+long as the processor's. Otherwise it stays on the processor and **Settings > Detection & alerts >
+Objects (AI)** says *the AMD graphics chip is slower than the processor here (139 ms vs 29 ms per
+check)*. This is decided once each time AmberSight starts. Choosing the AMD card by name in
+Settings always uses it.
+
+The page shows *Running on: ... (WebGPU)*, or why it is not on the card (for example *no Vulkan
+driver for AMD graphics is installed*). The time limit for a check, the rest on the processor
+after a slow one and the notes work as for the other cards (above), with these differences: a
+check over the limit stops the helper program at once, and it is started again when the card is
+tried again after the 5 minutes; a helper that reports an error is counted as a card error (three
+in a row within a minute move the AI to the processor for 5 minutes). A helper that stops (it
+crashed, or the graphics were reset) fails that check, which the processor does, and is started
+again for the next one (that check may take up to a minute, the time to load the model); if it
+stops again within 10 minutes, or cannot be started again in that time, the AI moves to the
+processor for 5 minutes at once and then tries the card with a new helper.
 
 ---
 

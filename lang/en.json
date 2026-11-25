@@ -1230,8 +1230,8 @@
 "4acd32a8"
 ],
 "admin_config.no_graphics_card": [
-"No graphics card the AI can use was found (Windows: a DirectX 12 card; Linux: an NVIDIA card with its driver, or Intel graphics; Mac: Apple silicon), so it uses the CPU.",
-"05f6886b"
+"No graphics card the AI can use was found (Windows: a DirectX 12 card; Linux: an NVIDIA card with its driver, Intel graphics, or AMD graphics; Mac: Apple silicon), so it uses the CPU.",
+"23eb7dda"
 ],
 "admin_config.no_profile": [
 "No profile",
@@ -13760,6 +13760,10 @@
 "livetl.cams_recorded": [
 "{n} of {total} cameras recorded",
 "a5d555a8"
+],
+"livetl.cannot_show": [
+"This browser can't show this camera's recordings (H.265). Try another browser or the AmberSight app.",
+"b7e21c99"
 ],
 "livetl.chip_1h": [
 "1h",

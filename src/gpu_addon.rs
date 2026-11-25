@@ -1,5 +1,6 @@
 //! The graphics-card add-ons for the built-in AI on 64-bit Linux PCs: the
-//! NVIDIA one (CUDA) and the Intel one (OpenVINO).
+//! NVIDIA one (CUDA), the Intel one (OpenVINO) and the AMD one (a helper
+//! program).
 //!
 //! ONNX Runtime is built into the program, but its CUDA part is two separate
 //! libraries (libonnxruntime_providers_shared.so, a few KB, and
@@ -45,6 +46,16 @@
 //! CUDA_VISIBLE_DEVICES do not mix the cards up. The Intel add-on needs
 //! Intel's compute driver (intel-opencl-icd); `openvino::missing_driver`
 //! says what is missing.
+//!
+//! The AMD add-on is not loaded into this program: ONNX Runtime's WebGPU
+//! provider cannot share a runtime with the CUDA and OpenVINO ones, so it
+//! runs in `ambersight-ai-amd`, a program of its own that AmberSight starts
+//! (ai_amd.rs). The add-on holds that program and its `libwebgpu_dawn.so`;
+//! the same ownership rules apply (the folder and both files: this user's
+//! or root's, not a link, not changeable by others), and the program is run
+//! by its full path from that folder, never from anywhere else and never
+//! through a shell. It needs Mesa's Vulkan driver for AMD (RADV, package
+//! `mesa-vulkan-drivers`); `ai_amd::missing_driver` says what is missing.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::ffi::{c_char, c_int};
@@ -60,7 +71,12 @@ pub enum Addon {
     Cuda,
     /// Intel graphics (OpenVINO's GPU plugin, through Intel's compute driver).
     OpenVino,
+    /// AMD graphics (the helper program `ambersight-ai-amd`, WebGPU over Vulkan).
+    Amd,
 }
+
+/// The AMD add-on's program.
+pub const AMD_HELPER: &str = "ambersight-ai-amd";
 
 impl Addon {
     /// Its libraries, in the order they load.
@@ -68,6 +84,7 @@ impl Addon {
         match self {
             Addon::Cuda => &["libonnxruntime_providers_shared.so", "libonnxruntime_providers_cuda.so"],
             Addon::OpenVino => &crate::openvino::LIBS,
+            Addon::Amd => &[AMD_HELPER, "libwebgpu_dawn.so"],
         }
     }
 
@@ -76,6 +93,7 @@ impl Addon {
         match self {
             Addon::Cuda => "cuda",
             Addon::OpenVino => "openvino",
+            Addon::Amd => "amd",
         }
     }
 
@@ -84,6 +102,7 @@ impl Addon {
         match self {
             Addon::Cuda => "the NVIDIA add-on",
             Addon::OpenVino => "the Intel graphics add-on",
+            Addon::Amd => "the AMD graphics add-on",
         }
     }
 
@@ -92,6 +111,7 @@ impl Addon {
         match self {
             Addon::Cuda => "the two .so files",
             Addon::OpenVino => "its library files",
+            Addon::Amd => "its two files",
         }
     }
 
@@ -112,6 +132,16 @@ impl Addon {
 
     fn slot(self) -> usize {
         self as usize
+    }
+
+    /// The mode its file `name` gets: the program is run, so it is
+    /// executable.
+    fn file_mode(self, name: &str) -> u32 {
+        if self == Addon::Amd && name == AMD_HELPER {
+            0o755
+        } else {
+            0o644
+        }
     }
 }
 
@@ -330,6 +360,8 @@ struct Shared {
 struct State {
     /// A download (with its retries) is running.
     busy: bool,
+    /// A try of it is fetching now (not waiting to try again).
+    fetching: bool,
     /// The AI still wants this card (cleared when it is loaded without one:
     /// retries then stop).
     wanted: bool,
@@ -338,7 +370,11 @@ struct State {
 }
 
 static SHARED: Mutex<Shared> = Mutex::new(Shared { data_dir: None, repo: String::new(), downloads: true, on_ready: None });
-static STATE: [Mutex<State>; 2] = [Mutex::new(State { busy: false, wanted: false, note: None }), Mutex::new(State { busy: false, wanted: false, note: None })];
+static STATE: [Mutex<State>; 3] = [
+    Mutex::new(State { busy: false, fetching: false, wanted: false, note: None }),
+    Mutex::new(State { busy: false, fetching: false, wanted: false, note: None }),
+    Mutex::new(State { busy: false, fetching: false, wanted: false, note: None }),
+];
 
 fn state(addon: Addon) -> std::sync::MutexGuard<'static, State> {
     STATE[addon.slot()].lock().unwrap_or_else(|e| e.into_inner())
@@ -358,16 +394,29 @@ pub fn data_dir() -> Option<PathBuf> {
     SHARED.lock().unwrap().data_dir.clone()
 }
 
+/// The add-on is being fetched now (not waiting to try again after a
+/// failure): the AI is loaded again when the try ends, whether it worked or not.
+pub fn downloading(addon: Addon) -> bool {
+    state(addon).fetching
+}
+
+/// Tests: as if the add-on were being fetched (or not).
+#[cfg(test)]
+pub fn set_downloading_for_test(addon: Addon, fetching: bool) {
+    state(addon).fetching = fetching;
+}
+
 /// The AI was loaded without wanting this card (graphics card off, AI off,
 /// no card, another card in use): a download waiting to retry stops.
 pub fn not_wanted(addon: Addon) {
     state(addon).wanted = false;
 }
 
-/// Neither card is wanted.
+/// No card is wanted.
 pub fn none_wanted() {
     not_wanted(Addon::Cuda);
     not_wanted(Addon::OpenVino);
+    not_wanted(Addon::Amd);
 }
 
 /// What to do once a download has put an add-on in place.
@@ -470,26 +519,15 @@ pub fn start_download(addon: Addon) {
         st.note = Some(format!("downloading {} for the AI", addon.what()));
     }
     let spawned = std::thread::Builder::new().name(format!("{}-addon", addon.key())).spawn(move || {
-        let mut tries = 0u32;
-        let ok = loop {
-            tries += 1;
-            if download(addon, &data_dir, &repo, &|_, _| {}).is_ok() {
-                break true;
-            }
-            let Some(wait) = retry_wait(tries) else { break false };
-            if let Some(n) = state(addon).note.as_mut() {
-                n.push_str(&format!("; trying again in {} minutes", wait.as_secs() / 60));
-            }
-            std::thread::sleep(wait);
-            // Put in place by hand meanwhile, or downloads turned off.
-            if matches!(find(addon), Ok(Some(_))) {
-                break true;
-            }
-            let downloads = SHARED.lock().unwrap().downloads;
-            if !downloads || !state(addon).wanted {
-                break false;
+        let ready = || SHARED.lock().unwrap().on_ready.clone();
+        // After a failed try the AI is loaded again (once per failure), so
+        // another card may be used while this one waits for its add-on.
+        let failed = || {
+            if let Some(f) = ready() {
+                f();
             }
         };
+        let ok = tries(addon, &mut || download(addon, &data_dir, &repo, &|_, _| {}).is_ok(), &std::thread::sleep, &failed);
         {
             let mut st = state(addon);
             st.busy = false;
@@ -497,8 +535,7 @@ pub fn start_download(addon: Addon) {
                 st.note = None;
             }
         }
-        let ready = SHARED.lock().unwrap().on_ready.clone();
-        if let (true, Some(f)) = (ok, ready) {
+        if let (true, Some(f)) = (ok, ready()) {
             f();
         }
     });
@@ -506,6 +543,40 @@ pub fn start_download(addon: Addon) {
         let mut st = state(addon);
         st.busy = false;
         st.note = None;
+    }
+}
+
+/// A download's tries (`fetch` is one; `retry_wait` spaces them, `sleep`
+/// waits): true once the add-on is in place. `failed` runs after each try
+/// that failed and has another after it, once its note is written.
+fn tries(addon: Addon, fetch: &mut dyn FnMut() -> bool, sleep: &dyn Fn(Duration), failed: &dyn Fn()) -> bool {
+    let mut n = 0u32;
+    loop {
+        n += 1;
+        state(addon).fetching = true;
+        let ok = fetch();
+        state(addon).fetching = false;
+        if ok {
+            return true;
+        }
+        let wait = retry_wait(n);
+        if let (Some(w), Some(note)) = (wait, state(addon).note.as_mut()) {
+            note.push_str(&format!("; trying again in {} minutes", w.as_secs() / 60));
+        }
+        // The last failure reloads nothing: the AI already moved on at the
+        // earlier ones, and a reload now (with the download about to be
+        // marked done) would start a new day of tries.
+        let Some(wait) = wait else { return false };
+        failed();
+        sleep(wait);
+        // Put in place by hand meanwhile, or downloads turned off.
+        if matches!(find(addon), Ok(Some(_))) {
+            return true;
+        }
+        let downloads = SHARED.lock().unwrap().downloads;
+        if !downloads || !state(addon).wanted {
+            return false;
+        }
     }
 }
 
@@ -676,18 +747,19 @@ fn unpack(addon: Addon, pkg: &Path, out: &Path) -> Result<()> {
         if got[i] {
             bail!("the add-on holds {} twice", libs[i]);
         }
+        let mode = addon.file_mode(libs[i]);
         let dest = out.join(libs[i]);
         // (A new file only, never through a link: the folder is new and made by this process.)
         let mut f = {
             use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).custom_flags(libc::O_NOFOLLOW).open(&dest)
+            std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).custom_flags(libc::O_NOFOLLOW).open(&dest)
         }
         .with_context(|| format!("could not write {}", dest.display()))?;
         let n = std::io::copy(&mut std::io::Read::take(&mut e, MAX_BYTES + 1), &mut f)?;
         if n > MAX_BYTES {
             bail!("{} is bigger than {} MB", libs[i], MAX_BYTES >> 20);
         }
-        f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         f.sync_all()?;
         got[i] = true;
     }
@@ -701,6 +773,39 @@ fn unpack(addon: Addon, pkg: &Path, out: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn fetching_counts_only_during_a_try_and_each_failure_reloads_the_ai() {
+        // (The AMD add-on's state: the other tests do not touch it.)
+        let a = Addon::Amd;
+        state(a).wanted = true;
+        let log = std::sync::Mutex::new(Vec::<String>::new());
+        let fails = std::cell::Cell::new(2);
+        let mut fetch = || {
+            log.lock().unwrap().push(format!("fetch {}", downloading(a)));
+            if fails.get() > 0 {
+                fails.set(fails.get() - 1);
+                state(a).note = Some("could not be downloaded".into());
+                false
+            } else {
+                true
+            }
+        };
+        let sleep = |w: Duration| log.lock().unwrap().push(format!("wait {} {}", w.as_secs(), downloading(a)));
+        let failed = || log.lock().unwrap().push(format!("reload {}", downloading(a)));
+        assert!(tries(a, &mut fetch, &sleep, &failed));
+        assert_eq!(*log.lock().unwrap(), ["fetch true", "reload false", "wait 300 false", "fetch true", "reload false", "wait 900 false", "fetch true"]);
+        assert!(!downloading(a));
+        // The reload after a failure sees when the next try is.
+        assert_eq!(state(a).note.as_deref(), Some("could not be downloaded; trying again in 15 minutes"));
+        // The last failure (no try after it) reloads nothing: 25 tries, 24 reloads.
+        log.lock().unwrap().clear();
+        let mut never = || false;
+        assert!(!tries(a, &mut never, &|_| {}, &failed));
+        assert_eq!(log.lock().unwrap().iter().filter(|l| l.starts_with("reload")).count(), 24);
+        state(a).note = None;
+        state(a).wanted = false;
+    }
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("ambersight-addon-{name}-{}", std::process::id()));
@@ -781,6 +886,36 @@ mod tests {
     }
 
     #[test]
+    fn unpacks_the_amd_add_on_with_an_executable_program() {
+        let d = temp("amd");
+        let p = tar_gz(
+            &d,
+            &[
+                ("ambersight-amd/ambersight-ai-amd", b"program"),
+                ("ambersight-amd/libwebgpu_dawn.so", b"dawn"),
+                ("ambersight-amd/licenses/LICENSE", b"BSD"),
+                ("ambersight-amd/libvulkan.so.1", b"never taken: the system's own is used"),
+            ],
+        );
+        let out = d.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        unpack(Addon::Amd, &p, &out).unwrap();
+        assert!(Addon::Amd.has_libs(&out));
+        assert_eq!(std::fs::metadata(out.join(AMD_HELPER)).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::metadata(out.join("libwebgpu_dawn.so")).unwrap().permissions().mode() & 0o777, 0o644);
+        assert!(!out.join("libvulkan.so.1").exists() && !out.join("LICENSE").exists());
+        if euid() != 0 {
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(trusted(Addon::Amd, &out, euid()).is_ok(), "{:?}", trusted(Addon::Amd, &out, euid()));
+        }
+        // One file missing: refused, naming it.
+        let short = tar_gz(&d, &[("ambersight-ai-amd", b"program")]);
+        std::fs::create_dir_all(d.join("out2")).unwrap();
+        let e = unpack(Addon::Amd, &short, &d.join("out2")).unwrap_err().to_string();
+        assert!(e.contains("does not hold libwebgpu_dawn.so"), "{e}");
+    }
+
+    #[test]
     fn never_writes_through_a_link_or_over_a_file() {
         let d = temp("nofollow");
         let p = tar_gz(&d, &[("libonnxruntime_providers_shared.so", b"shared"), ("libonnxruntime_providers_cuda.so", b"cuda")]);
@@ -823,6 +958,10 @@ mod tests {
     fn names() {
         assert_eq!(archive_name_cuda("0.7.3"), "ambersight-cuda-0.7.3-linux-x86_64.tar.gz");
         assert_eq!(Addon::OpenVino.archive_name("0.12.0"), "ambersight-openvino-0.12.0-linux-x86_64.tar.gz");
+        assert_eq!(Addon::Amd.archive_name("0.13.5"), "ambersight-amd-0.13.5-linux-x86_64.tar.gz");
+        assert!(Addon::Amd.folder(Path::new("/var/lib/ambersight")).ends_with(format!("tools/amd-{}", crate::update::CURRENT)));
+        assert_eq!(Addon::Amd.libs(), ["ambersight-ai-amd", "libwebgpu_dawn.so"]);
+        assert_eq!(Addon::Amd.what(), "the AMD graphics add-on");
         assert!(Addon::Cuda.folder(Path::new("/var/lib/ambersight")).ends_with(format!("tools/cuda-{}", crate::update::CURRENT)));
         assert!(Addon::OpenVino.folder(Path::new("/var/lib/ambersight")).ends_with(format!("tools/openvino-{}", crate::update::CURRENT)));
     }
@@ -834,12 +973,12 @@ mod tests {
     #[test]
     fn other_versions_are_removed_but_not_other_add_ons() {
         let d = temp("versions");
-        for n in ["openvino-0.11.0", "openvino-0.12.0", "cuda-0.11.0", "openvino-cache-x"] {
+        for n in ["openvino-0.11.0", "openvino-0.12.0", "cuda-0.11.0", "openvino-cache-x", "amd-0.12.0"] {
             std::fs::create_dir_all(d.join(n)).unwrap();
         }
         remove_other_versions(&d, "openvino-", &d.join("openvino-0.12.0"));
         assert!(!d.join("openvino-0.11.0").exists());
-        assert!(d.join("openvino-0.12.0").exists() && d.join("cuda-0.11.0").exists() && d.join("openvino-cache-x").exists());
+        assert!(d.join("openvino-0.12.0").exists() && d.join("cuda-0.11.0").exists() && d.join("openvino-cache-x").exists() && d.join("amd-0.12.0").exists());
     }
 
     #[test]
@@ -848,7 +987,7 @@ mod tests {
         if me == 0 {
             return; // (the checks below are about another user's files)
         }
-        for addon in [Addon::Cuda, Addon::OpenVino] {
+        for addon in [Addon::Cuda, Addon::OpenVino, Addon::Amd] {
             let d = temp(&format!("trust-{}", addon.key()));
             let libs = addon.libs();
             let last = libs[libs.len() - 1];
@@ -923,6 +1062,8 @@ mod tests {
         assert!(downloads_allowed(Addon::Cuda, Path::new("/d"), true).is_ok());
         let e = downloads_allowed(Addon::Cuda, Path::new("/d"), false).unwrap_err();
         assert!(e.contains("check = false") && e.contains("ambersight-cuda-") && e.contains("/d/tools/cuda-"), "{e}");
+        let e = downloads_allowed(Addon::Amd, Path::new("/d"), false).unwrap_err();
+        assert!(e.contains("AMD") && e.contains("ambersight-amd-") && e.contains("/d/tools/amd-"), "{e}");
         let e = downloads_allowed(Addon::OpenVino, Path::new("/d"), false).unwrap_err();
         assert!(e.contains("Intel") && e.contains("ambersight-openvino-") && e.contains("/d/tools/openvino-"), "{e}");
     }

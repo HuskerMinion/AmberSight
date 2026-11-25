@@ -1,0 +1,19 @@
+[package]
+name = "ambersight-ai-amd"
+version = "0.0.0" # the real version (AmberSight's) is read from ../../Cargo.toml by build.rs
+edition = "2021"
+description = "AmberSight's AMD graphics AI helper (ONNX Runtime with WebGPU over Vulkan)"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+# Not part of the root package's build.
+[workspace]
+
+[dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "api-31", "tls-rustls", "webgpu"] }
+ndarray = "0.17"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+strip = true

@@ -35,6 +35,12 @@ mod bookmarks_http;
 mod alert_rules;
 mod sound;
 mod gpu;
+// (Used by the AMD graphics helper runner; only its tests until then.)
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod ai_amd;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[allow(dead_code)] // (the helper program uses the rest)
+mod ai_amd_proto;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod gpu_addon;
 mod lang;

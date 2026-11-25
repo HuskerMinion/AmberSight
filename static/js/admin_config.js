@@ -509,7 +509,7 @@ function aiPage(el) {
     const now = '<div class="hint">' + t('admin_config.running_on', 'Running on: <b>{what}</b>', { what: esc(on || (status.builtin_loaded ? t('admin_config.the_cpu', 'the CPU') : t('admin_config.not_loaded', 'not loaded'))) }) +
         (on && status.running_api ? ' (' + esc(status.running_api) + ')' : '') + '</div>' +
       (!on && status.builtin_loaded && draft.gpu && status.gpu_note ? '<div class="hint">' + t('admin_config.not_on_graphics_card', 'Not on the graphics card: {why}', { why: esc(status.gpu_note) }) + '</div>' : '');
-    if (!gpus.length) return '<div class="ac-sub">' + t('admin_config.hardware', 'Hardware') + '</div>' + now + '<div class="hint">' + t('admin_config.no_graphics_card', 'No graphics card the AI can use was found (Windows: a DirectX 12 card; Linux: an NVIDIA card with its driver, or Intel graphics; Mac: Apple silicon), so it uses the CPU.') + '</div>';
+    if (!gpus.length) return '<div class="ac-sub">' + t('admin_config.hardware', 'Hardware') + '</div>' + now + '<div class="hint">' + t('admin_config.no_graphics_card', 'No graphics card the AI can use was found (Windows: a DirectX 12 card; Linux: an NVIDIA card with its driver, Intel graphics, or AMD graphics; Mac: Apple silicon), so it uses the CPU.') + '</div>';
     // (The server's own choice: NVIDIA over Intel, then the most memory.)
     const best = gpus.find(g => g.name === status.auto_gpu) || gpus.slice().sort((a, b) => b.memory_mb - a.memory_mb || a.index - b.index)[0];
     const gb = (g) => g.memory_mb >= 1024 ? ' (' + Math.round(g.memory_mb / 1024) + ' GB)' : '';

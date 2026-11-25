@@ -362,11 +362,29 @@ function camQ(name) {
   let c = CAMQ.get(name);
   if (!c) {
     // (gop: ms of recording between keyframes; keyBits: one keyframe's size.)
-    c = { main: { w: 2560, h: 1440, fps: 15, bps: 4e6, gop: 2000, keyBits: 2.2e6 }, sub: { w: 640, h: 360, fps: 10, bps: 6e5, gop: 2000, keyBits: 1.4e5 }, hasSub: null };
+    // (noPic: a stream whose recordings this browser can't show, e.g. H.265
+    // where it has no H.265 decoder: the sound plays, the picture stays
+    // black. conv: asked converted to H.264 since even the sub stream is.
+    // convBad: converted and still nothing. Each is a time it lasts until
+    // (PIC_FORGET_MS after it was seen), so a passing failure isn't kept
+    // for the whole visit. played: each stream (main, sub, conv: the
+    // converted copy) has shown a picture here.)
+    c = { main: { w: 2560, h: 1440, fps: 15, bps: 4e6, gop: 2000, keyBits: 2.2e6 }, sub: { w: 640, h: 360, fps: 10, bps: 6e5, gop: 2000, keyBits: 1.4e5 }, hasSub: null, noPic: { main: 0, sub: 0 }, conv: 0, convBad: 0, played: { main: false, sub: false, conv: false } };
     CAMQ.set(name, c);
   }
   return c;
 }
+// How long a stream noted as unshowable (or a camera noted as needing the
+// server's conversion) stays so before it is tried again as it is.
+const PIC_FORGET_MS = 600000;
+const latched = (until) => until > Date.now();
+// Whether this browser says it can decode H.265 at all (when it can, an
+// error 4 is much more likely a failed request than the picture).
+const HEVC_OK = (() => {
+  const types = ['video/mp4; codecs="hvc1.1.6.L93.B0"', 'video/mp4; codecs="hev1.1.6.L93.B0"'];
+  try { if (window.MediaSource && types.some(x => MediaSource.isTypeSupported(x))) return true; } catch (e) { /* ignore */ }
+  try { const v = document.createElement('video'); return types.some(x => v.canPlayType(x) !== ''); } catch (e) { return false; }
+})();
 // The device: a phone or tablet decodes and downloads far less than a desktop.
 const DEV = (() => {
   const mm = (q) => { try { return matchMedia(q).matches; } catch (e) { return false; } };
@@ -500,7 +518,8 @@ const keyFrameMs = () => (S.solo !== null ? trickFrameMs() : Math.max(KEY_MIN_MS
 // less often still while the whole grid is held down.
 const keyGap = (p) => (Math.abs(S.speed) >= MAX_RATE ? picGap() : Math.max(picGap(), keyFrameMs()) / Math.min(1, G.scale));
 // The quality a tile's video asks for.
-const tierQ = (p) => (p.tier === 'main' && !dataSaver() ? 'full' : 'low');
+// (Not the full copy when this browser can't show its picture: see noPic.)
+const tierQ = (p) => (p.tier === 'main' && !dataSaver() && !latched(camQ(p.cam.name).noPic.main) ? 'full' : 'low');
 
 // How a tile keeps up, checked over 2 s stretches of playing: falling behind
 // the playhead (the video slips more than its slack, waits for data, or is
@@ -848,7 +867,8 @@ function mountPlayer(frame, cam) {
 // q: 'low' = the sub stream where it was recorded (starts fast), 'full' =
 // the best recording. up: a full-quality copy loading behind the one playing.
 // twall (fast playback): ms of watching the clip covers. again: this is
-// the one retry after the video could not read the clip.
+// the one retry after the video could not read the clip (4: after an
+// error 4, the code a picture this browser can't decode gives).
 async function load(p, si, fromMs, q, up, win, twall, again) {
   const asked = fromMs;
   fromMs = Math.floor(fromMs);
@@ -890,7 +910,10 @@ async function load(p, si, fromMs, q, up, win, twall, again) {
     if (s.up) { if (s.q === 'low') p.noDownTo = fromMs + 60000; else p.noUpTo = fromMs + 60000; resetSlot(s); } else p.failUntil = Date.now() + 3000;
   };
   if (to - fromMs < 1500) return fail();
-  const url = '/api/playback?camera=' + enc(p.cam.name) + '&from=' + fromMs + '&to=' + to + (s.rev ? '&reverse=1' : (s.q === 'low' || dataSaver() ? '&quality=low' : '') + (k > 1 ? '&speed=' + k + '&frame_ms=' + fm : ''));
+  // (A camera none of whose recordings this browser can show: asked
+  // converted to H.264. H.264 recordings come as they are.)
+  const conv = latched(camQ(p.cam.name).conv) && !s.rev && k === 1 ? '&caps=' + enc(CONV_CAPS) : '';
+  const url = '/api/playback?camera=' + enc(p.cam.name) + '&from=' + fromMs + '&to=' + to + (s.rev ? '&reverse=1' : (s.q === 'low' || dataSaver() ? '&quality=low' : '') + (k > 1 ? '&speed=' + k + '&frame_ms=' + fm : '')) + conv;
   let r;
   // A ranged 1-byte probe returns where the clip really starts (x-clip-start-ms).
   const ac = s.abort = new AbortController();
@@ -934,10 +957,64 @@ async function load(p, si, fromMs, q, up, win, twall, again) {
   // a byte range past its new end: asked for once more at once, instead of
   // a black tile for the wait after a failure.)
   // (Not for a clip this browser cannot play at all: code 4.)
-  if (v.error) return again || v.error.code === 4 ? fail() : load(p, si, asked, q, up, win, twall, true);
+  // A picture this browser can't decode (H.265 without an H.265 decoder):
+  // some browsers say so (code 4), others play the sound and leave the
+  // picture black (no width). Never shown: the stream is noted for this
+  // camera and something it can show is asked for instead.
+  // Chrome also says code 4 when the video's own request fails (a clip
+  // removed meanwhile, a conversion that failed), so code 4 counts only
+  // when it is about the picture: on a stream that has not played in this
+  // visit, in a browser without an H.265 decoder, and either the server
+  // says the clip is H.265 (it says so on converted requests) or this
+  // tile's immediate second try fails the same way (each try probes the
+  // clip again, so a clip that is gone fails there instead). A stream
+  // that has played, or a browser that has H.265: the usual wait after a
+  // failure.
+  const sk = conv ? 'conv' : s.sub ? 'sub' : 'main';
+  if (v.error && v.error.code === 4) {
+    if (cq.played[sk] || HEVC_OK) return fail();
+    const hevc = (r.headers.get('x-as-codec') || '') === 'hevc';
+    if (hevc || again === 4) return noPicture(p, si, s, asked, up, win, twall, conv !== '');
+    if (again) return fail();
+    return load(p, si, asked, q, up, win, twall, 4);
+  }
+  if (!v.error && !v.videoWidth) return noPicture(p, si, s, asked, up, win, twall, conv !== '');
+  if (v.error) return again ? fail() : load(p, si, asked, q, up, win, twall, true);
   if (v.videoWidth && v.videoHeight) { st.w = v.videoWidth; st.h = v.videoHeight; }
+  cq.played[sk] = true; p.picWait = false;
+  if (conv) cq.convBad = 0;
   s.ready = true; s.loading = false;
   tickPlayer(p);
+}
+
+// What a tile can be sent that this browser can show: H.264 up to 4K (an
+// H.264 recording comes as it is; others are converted by the server).
+const CONV_CAPS = 'h264:3840x2160';
+
+// The clip just loaded in slot `si` has no picture this browser can show
+// (see load). The main stream: the sub stream from now on for this camera.
+// The sub stream too (or the only one): converted by the server. Converted
+// and still none: a message on the tile, not a black picture.
+function noPicture(p, si, s, at, up, win, twall, wasConv) {
+  const cq = camQ(p.cam.name);
+  const sub = s.sub, plain = s.k === 1 && !s.rev;
+  s.loading = false;
+  resetSlot(s);
+  const until = Date.now() + PIC_FORGET_MS;
+  // (Converted and still nothing; or fast or backwards, which are not
+  // converted: the message for a minute, then tried again. picWait: the
+  // wait ends at once when the tile goes back to 1x forwards, which is.)
+  if (wasConv || (latched(cq.conv) && !plain)) { if (wasConv) cq.convBad = until; p.failUntil = Date.now() + 60000; p.picWait = !wasConv; return; }
+  cq.noPic[sub ? 'sub' : 'main'] = until;
+  if (!sub && cq.hasSub !== false && !latched(cq.noPic.sub)) {
+    // (A full copy behind the one playing: just not swapped in. Otherwise
+    // the sub stream for this moment, now.)
+    if (up) return;
+    return load(p, si, at, 'low', false, win, twall);
+  }
+  cq.conv = until;
+  if (!plain) { p.failUntil = Date.now() + 60000; p.picWait = true; return; }
+  return load(p, si, at, 'low', up, win, twall);
 }
 
 function tickPlayer(p) { tickVideo(p); applySound(p); paintTime(p); }
@@ -960,6 +1037,9 @@ function tickVideo(p) {
   if (p.live) stopLive(p);
   if (picMode(p)) { tickPic(p); return; }
   const ts = S.playhead, now = Date.now();
+  // (Waiting because fast or backwards playback isn't converted: back at
+  // 1x forwards it is, so loaded now rather than after the wait.)
+  if (p.picWait && tileK(p) === 1 && !rev()) { p.picWait = false; if (latched(camQ(p.cam.name).conv)) p.failUntil = 0; }
   let cs = p.slots[p.cur], os = p.slots[1 - p.cur];
   for (const s of p.slots) if (s.loading && now - s.since > 20000) resetSlot(s);   // stuck request
   // A clip the video could not read on (a later byte range refused): dropped
@@ -1054,7 +1134,7 @@ function tickVideo(p) {
     const soon = !!nx && nx[0] - ts < 3000 * Math.max(1, Math.abs(S.speed));
     const none = !busy && (now < p.failUntil || (!rec && !soon));
     // (A recorded moment that could not load is tried again after a pause.)
-    const text = none ? (p.waitSince = 0, rec ? t('livetl.could_not_load', 'Could not load, trying again') : noRecText(p.cam.name, ts)) : soon ? (p.waitSince = 0, t('livetl.loading', 'Loading…')) : waitText(p);
+    const text = none ? (p.waitSince = 0, rec ? (latched(camQ(p.cam.name).convBad) || (latched(camQ(p.cam.name).conv) && (tileK(p) > 1 || rev())) ? t('livetl.cannot_show', 'This browser can\'t show this camera\'s recordings (H.265). Try another browser or the AmberSight app.') : t('livetl.could_not_load', 'Could not load, trying again')) : noRecText(p.cam.name, ts)) : soon ? (p.waitSince = 0, t('livetl.loading', 'Loading…')) : waitText(p);
     if (p.msg.textContent !== text) p.msg.textContent = text;
     p.msg.classList.toggle('wait', !none);
     p.msg.hidden = pic;
