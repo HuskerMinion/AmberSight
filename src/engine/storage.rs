@@ -585,6 +585,39 @@ pub(super) fn sweep_ai_frames(engine: &Engine) {
     }
 }
 
+/// `<data_dir>/tmp`, the server's temporary files (exports, downloads being
+/// converted, subtitles, the transcode cache): made private when missing
+/// (mode 700 on Unix); an existing one of this user that others may change
+/// loses that (group and others shut out). Its path, also when it could
+/// not be made (the caller's write then says why).
+pub(crate) fn temp_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = data_dir.join("tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+        if let Ok(m) = std::fs::symlink_metadata(&dir) {
+            // SAFETY: geteuid cannot fail.
+            let me = unsafe { libc::geteuid() };
+            if let Some(mode) = private_temp_mode(m.is_dir(), m.uid() == me, m.mode()) {
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    dir
+}
+
+/// The mode the tmp folder is given (None: left as it is): only a real
+/// folder of this user that group or others may change, made 700.
+#[cfg(unix)]
+fn private_temp_mode(is_dir: bool, mine: bool, mode: u32) -> Option<u32> {
+    (is_dir && mine && mode & 0o022 != 0).then_some(0o700)
+}
+
 /// Temporary files in use (an export being written or sent): the sweep
 /// leaves them alone however old they look. Removed from the list, and the
 /// file deleted, when the last holder drops it.
@@ -613,7 +646,8 @@ impl Drop for TempInUse {
 }
 
 /// Temporary files left over from a crash or a stopped job, in `data_dir`:
-/// in tmp/, exports (`export-*`, after an hour), time subtitle files
+/// in tmp/, exports (`export-*`) and downloads with their sound converted
+/// (`aac-*.mp4`), after an hour, time subtitle files
 /// (`subs-*.srt`) and burned-in clips (`burn-*.mp4`), after a day; with
 /// `thumbs`, the half-written pictures (`*.part`) a masked picture's rewrite
 /// leaves (after a day). Files in use (see [`TempInUse`]) stay.
@@ -625,7 +659,7 @@ pub(crate) fn sweep_temp_files(data_dir: &std::path::Path, thumbs: bool) {
     if let Ok(rd) = std::fs::read_dir(data_dir.join("tmp")) {
         for f in rd.flatten() {
             let (p, name) = (f.path(), f.file_name().to_string_lossy().into_owned());
-            let old = if name.starts_with("export-") {
+            let old = if name.starts_with("export-") || (name.starts_with("aac-") && name.ends_with(".mp4")) {
                 age(&p) > HOUR
             } else if (name.starts_with("subs-") && name.ends_with(".srt")) || (name.starts_with("burn-") && name.ends_with(".mp4")) {
                 age(&p) > DAY
@@ -1900,6 +1934,28 @@ fn prune_listed(db: &crate::db::Db, root: &std::path::Path, files: &[crate::db::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tmp folder is made private (700); an existing one of this user
+    /// that others may change is shut; a stricter or another user's stays.
+    #[cfg(unix)]
+    #[test]
+    fn the_temp_folder_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("amber-tmpdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let t = temp_dir(&d);
+        assert_eq!(t, d.join("tmp"));
+        assert_eq!(std::fs::metadata(&t).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o777)).unwrap();
+        temp_dir(&d);
+        assert_eq!(std::fs::metadata(&t).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o750)).unwrap();
+        temp_dir(&d);
+        assert_eq!(std::fs::metadata(&t).unwrap().permissions().mode() & 0o777, 0o750, "not writable by others: left");
+        assert_eq!(private_temp_mode(true, false, 0o777), None, "another user's");
+        assert_eq!(private_temp_mode(false, true, 0o777), None, "not a folder");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn sweep_comes_every_six_hours_after_the_first_half_hour() {

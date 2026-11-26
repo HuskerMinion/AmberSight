@@ -13674,6 +13674,18 @@
 "włączone",
 "61342fd0"
 ],
+"live.tap_menu": [
+"Dotknięcie otwiera: {what}...",
+"7d9e0f16"
+],
+"live.tap_opens": [
+"Dotknięcie otwiera",
+"4722af6c"
+],
+"live.tap_timeline": [
+"Dotknięcie otwiera oś czasu na żywo",
+"583fade7"
+],
 "live.tap_to_wake": [
 "Dotknij, by wybudzić",
 "096946c9"
@@ -14249,6 +14261,10 @@
 "main.start_page_toast": [
 "Strona startowa: {label}",
 "671a3838"
+],
+"main.tap_opens": [
+"Dotknięcie otwiera…",
+"4567917e"
 ],
 "main.timeline_label": [
 "Oś czasu",

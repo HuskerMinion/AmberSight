@@ -1758,8 +1758,10 @@ The event's video as `video/mp4`: from the event start minus pre-roll to the end
 - `quality=low` uses the sub stream where it was recorded (data saver).
 - `download=1` adds `Content-Disposition: attachment`. A download is the clip as it is: one
   assembled from the recordings (no saved clip file) carries the time as a subtitle track (3GPP
-  timed text, `tx3g`), with no conversion; one sent from the event's saved clip file is that file
-  unchanged, **without** a subtitle track.
+  timed text, `tx3g`), with no conversion; one sent from the event's saved clip file is that file,
+  **without** a subtitle track, as it was saved. One assembled from the recordings is a plain MP4;
+  FLAC sound is converted to AAC in either (see
+  [Downloads: plain MP4, AAC sound](#downloads-plain-mp4-aac-sound)).
 - `burn_text=1` (with `download=1`): the camera's text is drawn into the picture too: its
   `overlay_text`, or `{short} {date} {time}` when it has none, with the recording's own date and
   time. This converts the clip (slower).
@@ -2789,7 +2791,7 @@ the web app uses it directly as `<video src>`. Over HTTPS with the private CA, s
 | `speed` | no | 2–1024: fast playback (keyframes only, retimed) |
 | `frame_ms` | no | Fast playback: ms each picture shows, 100–1000 (default 100) |
 | `reverse` | no | `1`: the window played backwards. Capped at 10 s, scaled down to at most 960 px wide; `speed` is ignored. |
-| `download` | no | `1`: attachment, exactly the window, with the camera name and time as captions (normal speed only). With `caps`: made to fit the device, see below. The file has a subtitle track with the wall-clock time. |
+| `download` | no | `1`: attachment, exactly the window, with the camera name and time as captions (normal speed only). With `caps`: made to fit the device, see below. The file has a subtitle track with the wall-clock time. It is a plain MP4 (one `moov`, no fragments) for every browser and app; FLAC sound is converted to AAC (up to 1 GB or 20 minutes), see [Downloads: plain MP4, AAC sound](#downloads-plain-mp4-aac-sound). |
 | `burn_text` | no | With `download=1`: `1` also draws the camera's text on the picture into the video (re-encoded; slower). |
 | `caps`, `start`, `info` | no | What the player decodes: transcoded when the recording does not fit, from `start`; `info=1` answers JSON. See [Best quality on every device](#best-quality-on-every-device-caps). With `download=1`, see below (`start` and `info` are not used there). |
 | `quiet` | no | `1`: when nothing is recorded in the window, answer `204` with the header `x-none: 1` instead of `404` (the web app uses this so a browser's console stays free of errors; `/api/filmstrip` and `/api/playback/picture` take it too) |
@@ -2826,6 +2828,39 @@ Errors:
 | 503 | `busy, try again`, with `Retry-After: 1` |
 | 500 | `playback failed (details are in the server log)` |
 
+#### Downloads: plain MP4, AAC sound
+
+A download assembled from the recordings (`/api/playback?download=1`, and
+`/api/clips/:id?download=1` or `/api/export` for an event without a saved clip file) is a **plain
+MP4** (one `moov` with the whole sample table, no `moof` fragments), whatever the User-Agent. A
+saved clip file is sent as it was saved (it may be fragmented MP4: with H.264 or H.265 and AAC
+sound that plays in QuickTime and Windows' players too).
+
+Cameras with G.711 sound are recorded with **FLAC** sound, which QuickTime, Windows' own players
+(Movies & TV, Media Player) and many phones do not play in MP4: in a download (also from a saved
+clip file) that sound is converted to **AAC** (ffmpeg; the video and the time subtitle track are
+copied, not re-encoded; a plain MP4 with the header at the start). Such an answer is `200` with
+`Content-Length`, `Accept-Ranges: none`, `Cache-Control: no-store` and `x-as-audio: aac`; the
+file name and the `x-clip-*` headers are as for any download. The file is made before anything is
+sent (a few seconds for a typical window). Only a plain `GET` is converted: a `HEAD` answers the
+headers that `GET` would send (`x-as-audio: aac` when it would be converted), without
+`Content-Length` and without converting anything; a request with a `Range` header is answered
+from the unconverted plain MP4 (FLAC header fixed, see below) with byte ranges (`206`), as before.
+A reader that takes nothing for **2 minutes** is given up (the answer ends unfinished and the
+server's copy is removed). Conversions share the server's two download places with
+[fitted downloads](#downloads-that-fit-the-device) (a download waits up to 30 s for one).
+
+Not converted (the server logs why at info level, or a warning when ffmpeg failed): a clip over
+**1 GB** or a window over **20 minutes** (it is sent at once instead), too little free space in
+the data folder's `tmp` (the conversion needs the clip's size plus 256 MB, without going into the
+share of the drive the recordings keep free, `min_free_percent`), no ffmpeg, a failed conversion,
+or no download place free. The download is then sent as it would be without the conversion, with
+the FLAC sound and without `x-as-audio`: a clip assembled from the recordings, or a plain saved
+clip file, has its FLAC header marked with one block size (as Apple's players get it for
+playback), so QuickTime plays it; Windows' own players still play only the picture. Clips whose
+sound is not FLAC (AAC, or none) are not converted. Playback (no `download`) is unchanged:
+browsers other than Apple's get fragmented MP4 with the sound as recorded.
+
 #### Downloads that fit the device
 
 A download for a phone to keep and play: `GET /api/playback?camera=&from=&to=&download=1&caps=h264:1920x1080@30`.
@@ -2840,7 +2875,7 @@ and the target is picked the same way. whoami feature `fit_download`. Device tok
   (`x-as-*` headers as for converted playback, `x-as-transcoded: 1`), with the camera name and the
   date and time **burned into the picture** (bottom center). Exactly the window, at most 2 hours.
   It uses the server's video encoder (or software), within the same limits as converted playback.
-  The file is fragmented MP4 sent as it is made: no `Content-Length`, `Accept-Ranges: none`,
+  The sound is AAC (FLAC sound is converted). The file is fragmented MP4 sent as it is made: no `Content-Length`, `Accept-Ranges: none`,
   `Content-Disposition: attachment`. Headers `x-clip-start-ms`, `x-clip-end-ms` (the window
   covered) and `x-as-media-duration-ms`. `HEAD` or `Range: bytes=0-0` answers the headers and
   starts nothing; a Range from further in is **416** (a download cannot resume; ask again).
@@ -2884,7 +2919,9 @@ there), or `ids=a,b,c` to export exactly those events (at most 200; none valid i
 `no event ids given`). When any of these is used, only events the account may see are included
 and a camera name is not required. It returns `application/zip` (`ambersight-events.zip`): one MP4 per event plus `events.csv`.
 Clips are as recorded: one assembled from the recordings carries the time as a subtitle track; a
-saved clip file goes in unchanged, without one. The
+saved clip file goes in without one, as it was saved. One assembled from the recordings is a plain
+MP4; FLAC sound is converted to AAC in either (see
+[Downloads: plain MP4, AAC sound](#downloads-plain-mp4-aac-sound)). The
 export does not take `burn_text`.
 
 - Unconfirmed events are included.
@@ -3462,6 +3499,22 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.13.6**
+
+- Downloads assembled from the recordings are plain MP4 for every browser and app
+  (`/api/playback?download=1`, `/api/clips/:id?download=1`, the clips in `/api/export`), not only
+  for Apple's players, and FLAC sound (cameras with G.711 sound) is converted to AAC, the video and
+  the time subtitles copied: they play in QuickTime and Windows' own players. Not converted: over
+  1 GB or 20 minutes, or too little free disk space (sent at once, FLAC header fixed). A converted download has `Content-Length`,
+  `Accept-Ranges: none` and `x-as-audio: aac`; only a plain `GET` is converted (`HEAD` answers its
+  headers without converting, a `Range` gets the unconverted file with byte ranges). Downloads converted for the device or to burn in
+  the camera's text (`caps`, `burn_text`) have AAC sound too. See
+  [Downloads: plain MP4, AAC sound](#downloads-plain-mp4-aac-sound).
+- The plain Docker image (`:latest`, `amd64`) runs the AI on AMD graphics (it has Mesa's Vulkan
+  driver; given `--device /dev/dri`), so `ai_status.gpus` lists the AMD chip there and
+  `ai_status.running_api` can be `"WebGPU"`. In `:cuda` and `:openvino`
+  `ai_status.gpu_note` points to the plain image instead of saying Docker cannot do it.
 
 **New in 0.13.5**
 

@@ -13674,6 +13674,18 @@
 "attivo",
 "61342fd0"
 ],
+"live.tap_menu": [
+"Tocca per aprire: {what}...",
+"7d9e0f16"
+],
+"live.tap_opens": [
+"Tocca per aprire",
+"4722af6c"
+],
+"live.tap_timeline": [
+"Toccando si apre la timeline, in live.",
+"583fade7"
+],
 "live.tap_to_wake": [
 "Tocca per svegliare",
 "096946c9"
@@ -14249,6 +14261,10 @@
 "main.start_page_toast": [
 "Pagina iniziale: {label}",
 "671a3838"
+],
+"main.tap_opens": [
+"Tocca per aprire…",
+"4567917e"
 ],
 "main.timeline_label": [
 "Timeline",

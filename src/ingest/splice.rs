@@ -1387,6 +1387,14 @@ impl VirtualClip {
         self.total
     }
 
+    /// Whether its sound is FLAC (G.711 recorded by the built-in reader).
+    pub fn has_flac(&self) -> bool {
+        match self.pieces.first() {
+            Some(Piece::Bytes(head)) => crate::ingest::mp4read::flac_streaminfo_at(head).is_some(),
+            _ => false,
+        }
+    }
+
     /// A clip made elsewhere (a reversed copy), served like the others.
     /// The clip as Apple's players (iPhone, Safari, QuickTime) take it: a
     /// FLAC track's header says one block size (see

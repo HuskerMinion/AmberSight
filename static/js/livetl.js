@@ -921,7 +921,13 @@ async function load(p, si, fromMs, q, up, win, twall, again) {
   if (s.abort === ac) s.abort = null;
   if (gen !== s.gen) return;
   if (r.status === 401) { bus.emit('unauth'); return fail(); }
+  // (204 with x-none: the server says nothing is recorded in that window.
+  // Not a failure: the tile says "No recording" for it, also while the
+  // recordings list is not in yet (or is older than the moment), when every
+  // moment counts as recorded and is tried.)
+  if (r.status === 204 && r.headers.get('x-none') === '1' && !s.up) { p.emptyAt = [fromMs - 1000, to + 1000]; return fail(); }
   if (!r.ok || r.status === 204) return fail();
+  p.emptyAt = null;
   s.start = parseInt(r.headers.get('x-clip-start-ms'), 10) || fromMs;
   s.end = parseInt(r.headers.get('x-clip-end-ms'), 10) || to;
   s.sub = r.headers.get('x-clip-sub') === '1';
@@ -1132,9 +1138,13 @@ function tickVideo(p) {
     // next stretch: playing reaches it in a moment, so not "No recording".
     const nx = !rec && S.playing && !back ? spanAfter(p.cam.name, ts) : null;
     const soon = !!nx && nx[0] - ts < 3000 * Math.max(1, Math.abs(S.speed));
-    const none = !busy && (now < p.failUntil || (!rec && !soon));
+    // (A moment the server just said has no recording: so, not a failure,
+    // and still so while it is asked again.)
+    // (While a load is running there, it says loading instead.)
+    const empty = !busy && !!p.emptyAt && ts >= p.emptyAt[0] && ts <= p.emptyAt[1];
+    const none = empty || (!busy && (now < p.failUntil || (!rec && !soon)));
     // (A recorded moment that could not load is tried again after a pause.)
-    const text = none ? (p.waitSince = 0, rec ? (latched(camQ(p.cam.name).convBad) || (latched(camQ(p.cam.name).conv) && (tileK(p) > 1 || rev())) ? t('livetl.cannot_show', 'This browser can\'t show this camera\'s recordings (H.265). Try another browser or the AmberSight app.') : t('livetl.could_not_load', 'Could not load, trying again')) : noRecText(p.cam.name, ts)) : soon ? (p.waitSince = 0, t('livetl.loading', 'Loading…')) : waitText(p);
+    const text = none ? (p.waitSince = 0, rec && !empty ? (latched(camQ(p.cam.name).convBad) || (latched(camQ(p.cam.name).conv) && (tileK(p) > 1 || rev())) ? t('livetl.cannot_show', 'This browser can\'t show this camera\'s recordings (H.265). Try another browser or the AmberSight app.') : t('livetl.could_not_load', 'Could not load, trying again')) : noRecText(p.cam.name, ts)) : soon ? (p.waitSince = 0, t('livetl.loading', 'Loading…')) : waitText(p);
     if (p.msg.textContent !== text) p.msg.textContent = text;
     p.msg.classList.toggle('wait', !none);
     p.msg.hidden = pic;

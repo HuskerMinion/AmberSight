@@ -18,11 +18,14 @@ pub enum Input {
 
 /// What a converted recording carries besides the scaling and a caption: a
 /// time subtitle track added from an SRT file. `keep_times`: every frame keeps its own time (fast and
-/// backwards clips, whose frames are not evenly spaced).
+/// backwards clips, whose frames are not evenly spaced). `aac`: the sound
+/// made AAC (a download: QuickTime and Windows' players do not play the
+/// FLAC cameras with G.711 sound are recorded with).
 #[derive(Default, Clone, Copy)]
 pub struct Extra<'a> {
     pub subs: Option<&'a std::path::Path>,
     pub keep_times: bool,
+    pub aac: bool,
 }
 
 /// The ffmpeg arguments for a recording: `seek_ms` into it, as fragmented
@@ -89,6 +92,8 @@ pub fn args_with(e: &Encoder, hw_decode: bool, t: &Target, fps: f64, depth: u8, 
     a.extend(["-map", "0:v:0", "-map", "0:a:0?"].iter().map(|s| s.to_string()));
     if trim {
         a.extend(["-af".to_string(), format!("atrim=start={ss},asetpts=PTS-STARTPTS"), "-c:a".to_string(), "aac".to_string()]);
+    } else if x.aac {
+        a.extend(["-c:a".to_string(), "aac".to_string()]);
     } else {
         a.extend(["-c:a".to_string(), "copy".to_string()]);
     }
@@ -294,7 +299,7 @@ fn run(job: Job, sink: Sink) {
             Input::File(p) => Some(p.as_path()),
             Input::Clip(_) => None,
         };
-        let extra = Extra { subs: subs.as_ref().map(|s| s.path()), keep_times };
+        let extra = Extra { subs: subs.as_ref().map(|s| s.path()), keep_times, aac: download.is_some() };
         let a = args_with(&e, hw_decode, &target, fps, depth, file, seek_ms, limit_ms, caption.as_deref(), extra);
         let mut child = match crate::child::ffmpeg().args(&a).stdin(if file.is_some() { Stdio::null() } else { Stdio::piped() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
@@ -587,7 +592,7 @@ mod tests {
         let subs = dir.join("t.srt");
         std::fs::write(&subs, "1\n00:00:00,000 --> 00:00:10,000\nx\n\n").unwrap();
         for (file, with_subs) in [(true, false), (false, false), (false, true)] {
-            let x = super::Extra { subs: with_subs.then_some(subs.as_path()), keep_times: false };
+            let x = super::Extra { subs: with_subs.then_some(subs.as_path()), keep_times: false, aac: false };
             let mut a = super::args_with(&sw, false, &t, 10.0, 8, file.then_some(src.as_path()), 2500, Some(2000), Some("showinfo"), x);
             // (showinfo logs each frame's time: at info level.)
             a[2] = "info".into();

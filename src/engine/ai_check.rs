@@ -537,7 +537,7 @@ fn http_detect(url: &str, jpeg: &[u8], min_score: f32, data_dir: &std::path::Pat
     let (w, h) = image::io::Reader::new(std::io::Cursor::new(jpeg))
         .with_guessed_format()?
         .into_dimensions()?;
-    let tmp_dir = data_dir.join("tmp");
+    let tmp_dir = crate::engine::storage::temp_dir(data_dir);
     std::fs::create_dir_all(&tmp_dir)?;
     let tmp = tmp_dir.join(format!("ai-{}-{}.jpg", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or(0)));
     std::fs::write(&tmp, jpeg)?;

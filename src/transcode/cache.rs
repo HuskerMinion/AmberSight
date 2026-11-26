@@ -86,7 +86,7 @@ static GLOBAL: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
 /// The server's cache (set up once, at start: `<data_dir>/tmp/transcode-cache`).
 pub fn init(data_dir: &std::path::Path, limits: Limits) {
     GLOBAL.get_or_init(|| {
-        let c = Cache::new(data_dir.join("tmp").join("transcode-cache"), limits);
+        let c = Cache::new(crate::engine::storage::temp_dir(data_dir).join("transcode-cache"), limits);
         let c2 = c.clone();
         std::thread::Builder::new()
             .name("transcode-cache".into())

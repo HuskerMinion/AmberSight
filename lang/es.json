@@ -13674,6 +13674,18 @@
 "activados",
 "61342fd0"
 ],
+"live.tap_menu": [
+"Un toque abre: {what}...",
+"7d9e0f16"
+],
+"live.tap_opens": [
+"Un toque abre",
+"4722af6c"
+],
+"live.tap_timeline": [
+"Un toque abre la línea de tiempo, en directo",
+"583fade7"
+],
 "live.tap_to_wake": [
 "Toca para despertar",
 "096946c9"
@@ -14249,6 +14261,10 @@
 "main.start_page_toast": [
 "Página de inicio: {label}",
 "671a3838"
+],
+"main.tap_opens": [
+"Un toque abre…",
+"4567917e"
 ],
 "main.timeline_label": [
 "Línea de tiempo",

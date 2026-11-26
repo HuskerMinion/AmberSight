@@ -76,9 +76,10 @@ directly.
 `--runtime=nvidia` to **Extra Parameters**, and add a variable
 `NVIDIA_VISIBLE_DEVICES` set to `all` (or the card's GPU ID).
 
-**AMD graphics.** The images do not run the AI on AMD graphics yet; with
-`--device=/dev/dri` an AMD card decodes video and the AI runs on the
-processor. The AI on AMD graphics needs the 64-bit Linux packages.
+**AMD graphics.** The default image (`:latest`) runs the AI on AMD graphics
+too: add `--device=/dev/dri` to Extra Parameters, and AmberSight downloads its
+AMD graphics add-on into the data folder by itself. The page shows *Running
+on: AMD Radeon Graphics (WebGPU)*.
 
 ## Updates
 

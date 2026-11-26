@@ -32,7 +32,7 @@ impl Engine {
                 continue;
             }
             let name = format!("{}.mp4", ev.id);
-            match self.export_clip_bytes(ev) {
+            match self.export_clip_bytes(ev, cancelled) {
                 // (A zip's offsets are 32-bit: one clip never takes it past them.)
                 Some(b) if total + b.len() as u64 > ZIP_HARD_MAX => rows.push(row("not included: export too large, choose a shorter time range")),
                 Some(b) => {
@@ -49,13 +49,38 @@ impl Engine {
         std::io::Write::flush(&mut w)
     }
 
-    /// An event's clip as it is: its saved file, else assembled from the
-    /// recordings with the time as a subtitle track (no conversion).
-    fn export_clip_bytes(&self, ev: &Event) -> Option<Vec<u8>> {
-        if let Ok(mut b) = std::fs::read(self.clip_file_path(&ev.id)) {
-            // (A clip saved from recordings ffmpeg copied may say hev1: hvc1 plays on Apple's players.)
-            crate::ingest::mp4read::hev1_to_hvc1(&mut b);
-            return Some(b);
+    /// An event's clip: its saved file, else assembled from the recordings
+    /// with the time as a subtitle track, as a plain MP4. FLAC sound is
+    /// converted to AAC (see [`crate::transcode::aac`]: QuickTime and
+    /// Windows' players do not play it); when it cannot be, it is sent as
+    /// FLAC with its header marked one block size (QuickTime then plays it).
+    fn export_clip_bytes(&self, ev: &Event, cancelled: &dyn Fn() -> bool) -> Option<Vec<u8>> {
+        use crate::transcode::aac;
+        let path = self.clip_file_path(&ev.id);
+        let what = format!("export {}", ev.id);
+        let min_free_pct = self.config.lock().unwrap().storage.min_free_pct();
+        if path.is_file() {
+            let src = aac::Src::File(path.clone());
+            if src.has_flac() {
+                if let Some(t) = aac::convert_to_temp(&self.data_dir, &src, &what, min_free_pct, cancelled) {
+                    if let Ok(b) = std::fs::read(t.path()) {
+                        return Some(b);
+                    }
+                }
+            }
+            if cancelled() {
+                return None;
+            }
+            if let Ok(mut b) = std::fs::read(&path) {
+                // (A clip saved from recordings ffmpeg copied may say hev1: hvc1 plays on Apple's players.)
+                crate::ingest::mp4read::hev1_to_hvc1(&mut b);
+                if let Ok(Some((at, fix))) = crate::ingest::mp4read::flac_file_fixed_block(&path) {
+                    if let Some(d) = b.get_mut(at as usize..at as usize + fix.len()) {
+                        d.copy_from_slice(&fix);
+                    }
+                }
+                return Some(b);
+            }
         }
         let c = self.virtual_clip(ev).ok().flatten()?;
         let c = match c.clone().for_download(None, &ev.camera, &crate::transcode::burn::clock) {
@@ -65,6 +90,19 @@ impl Engine {
                 c
             }
         };
+        let src = aac::Src::Clip(c);
+        if src.has_flac() {
+            if let Some(t) = aac::convert_to_temp(&self.data_dir, &src, &what, min_free_pct, cancelled) {
+                if let Ok(b) = std::fs::read(t.path()) {
+                    return Some(b);
+                }
+            }
+        }
+        if cancelled() {
+            return None;
+        }
+        let aac::Src::Clip(c) = src else { return None };
+        let c = c.for_apple();
         c.read_range(0, c.len()).ok()
     }
 }

@@ -21,10 +21,20 @@ FROM debian:trixie-slim
 # Debian's ffmpeg decodes H.264 and H.265. Hardware decode (VAAPI/QSV) needs
 # the drivers below and /dev/dri passed in; libmfx-gen1.2 is Intel's Quick
 # Sync runtime (Gen12+), without which QSV fails and Intel falls back to VAAPI.
+# amd64 also gets Mesa's Vulkan driver for AMD (RADV) for the AI on AMD
+# graphics (src/ai_amd.rs; the add-on is downloaded at run time like outside
+# Docker, x86_64 only). dpkg leaves out Mesa's other Vulkan drivers and
+# layers, so only RADV (about 14 MB) is added. pci.ids names the AMD chip
+# (src/gpu.rs) when libdrm's list does not, as on the computer itself.
+COPY docker/radv-only.cfg /tmp/radv-only.cfg
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tzdata tini mesa-va-drivers fonts-dejavu-core \
  && if [ "$(dpkg --print-architecture)" = amd64 ]; then \
-      apt-get install -y --no-install-recommends intel-media-va-driver libmfx-gen1.2; fi \
+      mv /tmp/radv-only.cfg /etc/dpkg/dpkg.cfg.d/ambersight-radv-only \
+      && apt-get install -y --no-install-recommends intel-media-va-driver libmfx-gen1.2 mesa-vulkan-drivers pci.ids \
+      && ls /usr/share/vulkan/icd.d/radeon_icd*.json /usr/lib/x86_64-linux-gnu/libvulkan_radeon.so >/dev/null \
+      && ! ls /usr/lib/x86_64-linux-gnu/libvulkan_lvp.so 2>/dev/null; \
+    else rm /tmp/radv-only.cfg; fi \
  && curl --version >/dev/null && ffmpeg -version >/dev/null \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 1000 --user-group --home-dir /data --no-create-home ambersight \

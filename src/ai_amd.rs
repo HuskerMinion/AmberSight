@@ -138,7 +138,7 @@ fn driver_in(dirs: &[&Path], render: &[String], container: bool, uid: u32) -> Re
             ));
         }
         return Err(if container {
-            format!("{DRIVER_MISSING}: the Docker images cannot run the AI on AMD graphics yet; install AmberSight from its package on the computer instead")
+            format!("{DRIVER_MISSING}: this image has no Vulkan driver for AMD graphics; use the plain ghcr.io/huskerminion/ambersight:latest image on a 64-bit Intel/AMD computer (with --device /dev/dri) for the AI on AMD graphics")
         } else {
             format!("{DRIVER_MISSING}: install Mesa's Vulkan drivers (Debian, Ubuntu and Fedora: mesa-vulkan-drivers; Arch: vulkan-radeon), see the install guide")
         });
@@ -743,7 +743,7 @@ mod tests {
         let e = driver_in(&[a.as_path()], &[], false, me).unwrap_err();
         assert!(is_driver_missing(&e) && e.contains("mesa-vulkan-drivers"), "{e}");
         let e = driver_in(&[a.as_path()], &[], true, me).unwrap_err();
-        assert!(is_driver_missing(&e) && e.contains("Docker"), "{e}");
+        assert!(is_driver_missing(&e) && e.contains("ambersight:latest") && !e.contains("apt"), "{e}");
         // Found, the 64-bit file first, the first folder first.
         put(&b.join("radeon_icd.json"));
         put(&b.join("radeon_icd.x86_64.json"));

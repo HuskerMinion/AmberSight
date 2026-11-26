@@ -264,6 +264,12 @@ fn read_moov(f: &mut std::fs::File) -> std::io::Result<Option<(u64, Vec<u8>)>> {
     Ok(None)
 }
 
+/// Whether a finished file on disk (a saved clip) has a FLAC sound track.
+pub fn file_has_flac(path: &std::path::Path) -> std::io::Result<bool> {
+    let mut f = std::fs::File::open(path)?;
+    Ok(read_moov(&mut f)?.is_some_and(|(_, moov)| flac_track(&moov).is_some()))
+}
+
 /// For a finished file on disk (a saved clip) with FLAC sound: where its
 /// STREAMINFO block sizes are and the 4 bytes [`flac_fixed_block`] would
 /// put there (the most samples one of its first 64 frames holds), for

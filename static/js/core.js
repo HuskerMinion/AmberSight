@@ -202,6 +202,10 @@ function toastBox() {
   }
   return c;
 }
+// Made at start, empty: screen readers announce what is added to a live
+// region that already exists, and often miss the first toast otherwise.
+if (document.body) toastBox();
+else document.addEventListener('DOMContentLoaded', toastBox, { once: true });
 // ---------- video start ----------
 // Some browsers (Samsung Internet with its autoplay or power-saving settings,
 // Firefox with "Block audio and video") refuse even muted video until the
@@ -261,7 +265,9 @@ export function toast(msg, onClick, opts) {
   const kind = opts.kind === 'err' || opts.kind === 'ok' ? opts.kind : 'info';
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
-  el.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+  // (The stack is the live region that reads a new toast out; a status role
+  // on the toast too made it a second one, so each was there twice.)
+  if (kind === 'err') el.setAttribute('role', 'alert');
   const m = document.createElement('span');
   m.className = 'tmsg';
   m.textContent = msg;

@@ -12,4 +12,5 @@
 !LICENSE
 !THIRD-PARTY-NOTICES.txt
 !docker/entrypoint.sh
+!docker/radv-only.cfg
 !scripts/package-openvino-addon.sh

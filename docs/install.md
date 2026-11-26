@@ -735,8 +735,9 @@ driver), the next kind is tried, AMD last; a card chosen in Settings is not swap
 While the first card's own add-on is being downloaded, no other card is tried: the AI stays on
 the processor until that try ends. If the download fails (no internet, say), the next kind of
 card is tried at once while the download waits to try again. **Use a graphics card** in
-Settings (on by default) covers it. 64-bit Linux packages and the tar.gz only: the Docker images do not run the
-AI on AMD graphics yet.
+Settings (on by default) covers it. 64-bit Linux packages, the tar.gz and the plain Docker image
+(`:latest` on `amd64`, given `--device /dev/dri`; it has the Vulkan driver of step 1, see
+[docs/docker.md](docker.md#ai-on-amd-graphics)).
 
 It needs two things:
 

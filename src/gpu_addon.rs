@@ -150,6 +150,89 @@ fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// The account name of `uid` (None: not in the user database).
+fn user_name(uid: u32) -> Option<String> {
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as c_char; 4096];
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes only into `pw` and `buf` (sizes given) and sets `out`.
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr(), buf.len(), &mut out) };
+    if rc != 0 || out.is_null() || pw.pw_name.is_null() {
+        return None;
+    }
+    // SAFETY: pw_name points into `buf`, NUL-terminated by getpwuid_r.
+    let name = unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned();
+    Some(name).filter(|n| !n.is_empty() && n.chars().all(|c| !c.is_control()))
+}
+
+/// An account by name when it has one, else by number.
+fn account(uid: u32) -> String {
+    user_name(uid).unwrap_or_else(|| format!("user {uid}"))
+}
+
+/// What to say when the tools folder (or something in it) cannot be written:
+/// whose it is, who AmberSight runs as, and the command that gives it back.
+/// Other errors are passed on as they are.
+fn not_writable(tools: &Path, what: &str, e: std::io::Error) -> anyhow::Error {
+    not_writable_file(tools, None, what, e)
+}
+
+/// `not_writable`, for a file in `tools` that could not be opened (`file`):
+/// one left by another account (say root) needs chown even when the folder
+/// is AmberSight's own.
+fn not_writable_file(tools: &Path, file: Option<&Path>, what: &str, e: std::io::Error) -> anyhow::Error {
+    use std::os::unix::fs::MetadataExt;
+    if e.kind() != std::io::ErrorKind::PermissionDenied {
+        return anyhow::Error::new(e).context(format!("could not {what}"));
+    }
+    let me = euid();
+    let folder = std::fs::symlink_metadata(tools).map(|m| m.uid()).ok();
+    let file = file.and_then(|f| std::fs::symlink_metadata(f).ok().map(|m| (f, m.uid())));
+    anyhow!("{}", writable_advice(tools, folder, file, me, what))
+}
+
+/// The text of `not_writable_file`, from who owns what: the folder (`folder`),
+/// the file that could not be opened (`file`, when it is there), and who
+/// AmberSight runs as (`me`).
+fn writable_advice(tools: &Path, folder: Option<u32>, file: Option<(&Path, u32)>, me: u32, what: &str) -> String {
+    let dir = shell_quote(&tools.display().to_string());
+    let who = shell_quote(&user_name(me).unwrap_or_else(|| me.to_string()));
+    // A file in it that another account (say root) left: that file is the problem.
+    if let Some((f, o)) = file.filter(|(_, o)| *o != me) {
+        return format!(
+            "could not {what}: {} belongs to {}, and AmberSight runs as {}. Give the folder back to AmberSight's account with: sudo chown -R {who}: {dir}",
+            f.display(),
+            account(o),
+            account(me)
+        );
+    }
+    let owner = folder;
+    match owner {
+        // Its own folder that it may not write to: the mode is the problem, not the owner.
+        Some(o) if o == me => format!(
+            "could not {what}: the folder {} cannot be written (it belongs to {}, the account AmberSight runs as, but its permissions don't let it write there). Allow it with: sudo chmod u+w {dir}",
+            tools.display(),
+            account(me)
+        ),
+        _ => {
+            let whose = match owner {
+                Some(o) => format!("it belongs to {}, and AmberSight runs as {}", account(o), account(me)),
+                None => format!("AmberSight runs as {} and is not allowed to write there", account(me)),
+            };
+            format!("could not {what}: the folder {} cannot be written ({whose}). Give it to AmberSight's account with: sudo chown -R {who}: {dir}", tools.display())
+        }
+    }
+}
+
+/// `s` as one word for a POSIX shell: as it is when it has only safe
+/// characters, else in single quotes (a ' inside written as '\'').
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+:@%,".contains(c)) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// May this process use `p`? It must belong to this user or root (only root
 /// when this is root), must not be a link and must not be writable by group
 /// or others. Err says why not.
@@ -647,7 +730,7 @@ pub fn fetch(addon: Addon, data_dir: &Path, repo: &str, progress: &dyn Fn(u64, u
     let tools = crate::ffmpeg_bin::tools_dir(data_dir);
     tools_folder(&tools)?;
     let lock_path = tools.join(format!("{}.lock", addon.key()));
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).context("could not open the add-on lock file")?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).map_err(|e| not_writable_file(&tools, Some(&lock_path), "open the add-on lock file", e))?;
     // SAFETY: flock on a file this function keeps open.
     if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
         bail!("could not lock {}", lock_path.display());
@@ -696,7 +779,10 @@ pub fn fetch(addon: Addon, data_dir: &Path, repo: &str, progress: &dyn Fn(u64, u
 /// may change loses that (a stricter one, such as 700, stays as it is).
 fn tools_folder(tools: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    std::fs::DirBuilder::new().recursive(true).mode(0o755).create(tools).with_context(|| format!("could not make {}", tools.display()))?;
+    std::fs::DirBuilder::new().recursive(true).mode(0o755).create(tools).map_err(|e| match tools.parent() {
+        Some(p) if e.kind() == std::io::ErrorKind::PermissionDenied => not_writable(p, &format!("make {}", tools.display()), e),
+        _ => anyhow::Error::new(e).context(format!("could not make {}", tools.display())),
+    })?;
     let m = std::fs::symlink_metadata(tools).with_context(|| format!("could not read {}", tools.display()))?;
     if m.uid() == euid() && m.mode() & 0o022 != 0 {
         std::fs::set_permissions(tools, std::fs::Permissions::from_mode(m.mode() & 0o7777 & !0o022)).with_context(|| format!("could not set the mode of {}", tools.display()))?;
@@ -930,6 +1016,56 @@ mod tests {
         std::fs::create_dir_all(&out2).unwrap();
         std::fs::write(out2.join("libonnxruntime_providers_cuda.so"), b"old").unwrap();
         assert!(unpack(Addon::Cuda, &p, &out2).is_err());
+    }
+
+    #[test]
+    fn a_tools_folder_that_cannot_be_written_is_named_with_its_owner_and_the_fix() {
+        let d = temp("notwritable");
+        let t = d.join("tools");
+        std::fs::create_dir_all(&t).unwrap();
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = not_writable(&t, "open the add-on lock file", denied).to_string();
+        assert!(msg.starts_with("could not open the add-on lock file: the folder "), "{msg}");
+        assert!(msg.contains(&t.display().to_string()), "{msg}");
+        // The folder is this account's own: the fix is its mode, not its owner.
+        assert!(msg.contains(&format!("sudo chmod u+w {}", shell_quote(&t.display().to_string()))), "{msg}");
+        assert!(!msg.contains("chown"), "{msg}");
+        // A folder that isn't there (or another's): chown, to this account.
+        let me = user_name(euid()).unwrap_or_else(|| euid().to_string());
+        let gone = d.join("no such folder");
+        let msg = not_writable(&gone, "make it", std::io::Error::from(std::io::ErrorKind::PermissionDenied)).to_string();
+        assert!(msg.contains(&format!("sudo chown -R {me}: '{}'", gone.display())), "{msg}");
+        assert_eq!(shell_quote("/var/lib/ambersight/tools"), "/var/lib/ambersight/tools");
+        assert_eq!(shell_quote("/data/my cams/tools"), "'/data/my cams/tools'");
+        assert_eq!(shell_quote("/data/it's"), "'/data/it'\\''s'");
+        // Another error is passed on with its own text.
+        let other = not_writable(&t, "open the add-on lock file", std::io::Error::other("disk on fire")).to_string();
+        assert_eq!(other, "could not open the add-on lock file");
+        assert_eq!(format!("{:#}", not_writable(&t, "x", std::io::Error::other("disk on fire"))), "could not x: disk on fire");
+        // A real refusal (not as root, which may write anywhere): the lock cannot be made.
+        if euid() != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let e = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(t.join("amd.lock")).unwrap_err();
+            assert!(not_writable(&t, "open the add-on lock file", e).to_string().contains("sudo chmod u+w"));
+            std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(account(u32::MAX - 7), format!("user {}", u32::MAX - 7));
+        // A lock file another account left in our own folder: the file is named, and chown, not chmod.
+        let me_id = euid();
+        let other = me_id.wrapping_add(4242);
+        let lock = t.join("cuda.lock");
+        let msg = writable_advice(&t, Some(me_id), Some((&lock, other)), me_id, "open the add-on lock file");
+        assert!(msg.contains(&format!("{} belongs to user {other}", lock.display())), "{msg}");
+        assert!(msg.contains("sudo chown -R") && !msg.contains("cannot be written") && !msg.contains("chmod"), "{msg}");
+        // A file of our own in our own folder: the folder's mode.
+        assert!(writable_advice(&t, Some(me_id), Some((&lock, me_id)), me_id, "x").contains("chmod u+w"));
+        // Another's folder: chown, naming the folder.
+        let msg = writable_advice(&t, Some(other), None, me_id, "x");
+        assert!(msg.contains(&format!("the folder {} cannot be written (it belongs to user {other}", t.display())) && msg.contains("chown -R"), "{msg}");
+        // No such file: the folder decides.
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(not_writable_file(&t, Some(&t.join("nope.lock")), "x", denied).to_string().contains("chmod u+w"));
     }
 
     #[test]

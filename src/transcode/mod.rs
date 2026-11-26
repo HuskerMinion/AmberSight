@@ -10,6 +10,7 @@
 //! `live.rs`); recordings and event clips are transcoded per request as
 //! fragmented MP4 (`file.rs`).
 
+pub mod aac;
 pub mod cache;
 pub mod file;
 pub mod http;

@@ -4,12 +4,12 @@ A prebuilt image is published with each release:
 
 | Image | For |
 |---|---|
-| `ghcr.io/huskerminion/ambersight:latest` | the newest release, `amd64` and `arm64` (such as a Raspberry Pi 5) |
+| `ghcr.io/huskerminion/ambersight:latest` | the newest release, `amd64` and `arm64` (such as a Raspberry Pi 5); on `amd64` also the AI on AMD graphics |
 | `ghcr.io/huskerminion/ambersight:<version>` | one release, e.g. `0.11.0` |
 | `ghcr.io/huskerminion/ambersight:cuda` | the newest release with the AI on an NVIDIA card, `amd64` only (also `<version>-cuda`) |
 | `ghcr.io/huskerminion/ambersight:openvino` | the newest release with the AI on Intel graphics, `amd64` only (also `<version>-openvino`) |
 
-It holds the AmberSight program, ffmpeg and the Intel/AMD video drivers; your
+It holds the AmberSight program, ffmpeg, the Intel/AMD video drivers and (`amd64`) Mesa's Vulkan driver for the AI on AMD graphics; your
 settings and recordings live in two folders you mount. You can also build the
 image yourself from this repository ([Building](#building)).
 
@@ -156,7 +156,8 @@ graphics card (an NVIDIA card's node does not do VAAPI).
 
 ## AI on an NVIDIA card
 
-The plain image runs the built-in AI on the processor. For an NVIDIA card,
+The plain image runs the built-in AI on the processor (or on AMD graphics,
+[below](#ai-on-amd-graphics)). For an NVIDIA card,
 use the CUDA image instead (`:cuda`, built from `Dockerfile.cuda`: NVIDIA's
 CUDA 13 + cuDNN 9 runtime libraries with AmberSight and its NVIDIA add-on; it
 is large, about 4 GB, and `amd64` only):
@@ -210,10 +211,32 @@ on the processor, and Settings says to use the `:openvino` image.
 
 ## AI on AMD graphics
 
-The images do not run the AI on AMD graphics yet: given `/dev/dri`, an AMD
-card decodes video, and the AI runs on the processor. To run the AI on AMD
-graphics, install AmberSight from the 64-bit Linux packages instead (see
+The plain image (`:latest`, `amd64`) runs the AI on AMD graphics (a Radeon
+card, or the graphics built into a Ryzen processor, on the host's `amdgpu`
+kernel driver). It carries Mesa's Vulkan driver for AMD (RADV); pass the
+card's device files in, as for hardware decoding:
+
+```sh
+docker run -d --name ambersight --restart unless-stopped --stop-timeout 30 --device /dev/dri --network host \
+  -v ./config:/config -v ./data:/data ghcr.io/huskerminion/ambersight:latest
+```
+
+The container user gets the group of the device files (`renderD*`) by
+itself. As outside Docker, AmberSight downloads its AMD graphics add-on of
+its own version from the release (checked against the release's signed
+checksums) into `/data/tools/amd-<version>/`; with `[update] check = false`
+or without internet, put the files from that version's
+`ambersight-amd-<version>-linux-x86_64.tar.gz` there yourself, owned by
+`PUID:PGID` (see
 [Linux: AMD graphics for the AI](install.md#linux-amd-graphics-for-the-ai)).
+Settings > Detection & alerts > Objects (AI) then shows *Running on: AMD
+Radeon Graphics (WebGPU)*, or that the chip is slower than the processor
+here. The image has Debian 13's Mesa (25.0), which is older than recent
+distributions' own: the chip's checks can take a little longer than with
+AmberSight installed on the computer (about 175 ms instead of 145 ms on a
+Ryzen's built-in graphics). NVIDIA, then Intel, are still preferred when the container has those
+too. The `arm64` image, `:cuda` and `:openvino` do not run the AI on AMD
+graphics.
 
 ## Recordings whose files are gone
 

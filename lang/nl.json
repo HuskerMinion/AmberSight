@@ -13674,6 +13674,18 @@
 "aan",
 "61342fd0"
 ],
+"live.tap_menu": [
+"Tikken opent: {what}...",
+"7d9e0f16"
+],
+"live.tap_opens": [
+"Tikken opent",
+"4722af6c"
+],
+"live.tap_timeline": [
+"Tikken opent de tijdlijn, bij de live-weergave",
+"583fade7"
+],
 "live.tap_to_wake": [
 "Tik om wakker te maken",
 "096946c9"
@@ -14249,6 +14261,10 @@
 "main.start_page_toast": [
 "Startpagina: {label}",
 "671a3838"
+],
+"main.tap_opens": [
+"Tikken opent…",
+"4567917e"
 ],
 "main.timeline_label": [
 "Tijdlijn",

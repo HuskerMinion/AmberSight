@@ -52,6 +52,9 @@ export function dblOpens(c) {
 }
 // Per-user "a single click opens the camera" (default off: double-click opens). Pref 'oneclick'.
 export const oneClickOpens = () => Prefs.get('oneclick', false) === true;
+// A touch screen with no mouse or trackpad: a tap opens a tile (see
+// attachTileInput), so the choice is worded for taps.
+export const tapOnly = () => { try { return matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches; } catch (e) { return false; } };
 function openTileTarget(id) {
   const c = camFromId(id);
   if (c && !c.remote && dblOpens(c) === 'timeline') bus.emit('timeline-live', id); else openFullCam(id);
@@ -63,14 +66,16 @@ export function dblClickDlg(c) {
     '<span class="sw-text"><b>' + esc(label) + '</b>' + (hint ? '<small>' + esc(hint) + '</small>' : '') + '</span></label>';
   const d = dblPref();
   const own = c ? d.cams[c.name] : undefined;
+  const tap = tapOnly();
+  const toTimeline = tap ? t('live.tap_timeline', 'A tap opens the timeline, at live') : t('live.dblclick_timeline', 'Double-click opens the timeline, at live');
   const html = '<div class="hint">' + esc(t('live.dbl_hint', 'Your choice only, kept by this server (set it on each server you use). Off: the live full view. The Timeline button or L opens the timeline either way.')) + '</div>' +
     '<div class="sec">' + esc(t('live.all_cameras', 'All cameras')) + '</div>' +
-    sw('data-one', oneClickOpens(), t('live.single_click_opens', 'A single click opens the camera'), t('live.single_click_hint', 'Instead of only selecting it. Double-click then does the same.')) +
-    sw('data-all', d.all === 'timeline', t('live.dblclick_timeline', 'Double-click opens the timeline, at live')) +
+    (tap ? '' : sw('data-one', oneClickOpens(), t('live.single_click_opens', 'A single click opens the camera'), t('live.single_click_hint', 'Instead of only selecting it. Double-click then does the same.'))) +
+    sw('data-all', d.all === 'timeline', toTimeline) +
     (c ? '<div class="sec">' + esc(camLabel(c)) + '</div>' +
       sw('data-own', own === 'full' || own === 'timeline', t('live.its_own_setting', 'Its own setting'), t('live.otherwise_follows', 'Otherwise it follows all cameras')) +
-      sw('data-cam', dblOpens(c) === 'timeline', t('live.dblclick_timeline', 'Double-click opens the timeline, at live')) : '');
-  const dlg = openDlg(t('live.double_click_opens', 'Double-click opens'), html, true);
+      sw('data-cam', dblOpens(c) === 'timeline', toTimeline) : '');
+  const dlg = openDlg(tap ? t('live.tap_opens', 'A tap opens') : t('live.double_click_opens', 'Double-click opens'), html, true);
   const q = (a) => dlg.querySelector('[' + a + ']');
   const sync = () => {
     if (!c) return;
@@ -82,7 +87,7 @@ export function dblClickDlg(c) {
     q('data-cam').closest('.sw').classList.toggle('off', !has);
   };
   const save = (all, cams) => { Prefs.set({ dblclick: { all, cams } }); sync(); };
-  q('data-one').onchange = (e) => { Prefs.set({ oneclick: e.target.checked }); savedToast(); };
+  if (q('data-one')) q('data-one').onchange = (e) => { Prefs.set({ oneclick: e.target.checked }); savedToast(); };
   q('data-all').onchange = (e) => { const p = dblPref(); save(e.target.checked ? 'timeline' : 'full', p.cams); };
   if (c) {
     q('data-own').onchange = (e) => {
@@ -124,13 +129,14 @@ function tileMenu(ev, c, anchor) {
   sep();
   items.push(['timeline', t('live.timeline', 'Timeline'), () => bus.emit('timeline-for', c.id)]);
   items.push(['play', t('live.clips', 'Clips'), () => { if (inFull) closeFull(); openClipsFor(c); }]);
-  items.push(['expand', t('live.dbl_menu', 'Double-click opens: {what}...', { what: dblOpens(c) === 'timeline' ? t('live.timeline', 'Timeline') : t('live.full_view', 'Full view') }), () => dblClickDlg(c)]);
+  const what = dblOpens(c) === 'timeline' ? t('live.timeline', 'Timeline') : t('live.full_view', 'Full view');
+  items.push(['expand', tapOnly() ? t('live.tap_menu', 'A tap opens: {what}...', { what }) : t('live.dbl_menu', 'Double-click opens: {what}...', { what }), () => dblClickDlg(c)]);
   }
   if ((can('pause') || can('camera_detection') || (can('reboot') && canReboot(c)) || state.isAdmin) && !c.remote) {
     sep();
     if (can('pause')) {
       if (c.alerts_paused) items.push(['play', t('live.resume_notifications', 'Resume notifications (paused {text})', { text: pausedText(c) }), () => resumeAlerts(c)]);
-      else items.push(['pause', t('live.pause_notifications', 'Pause notifications...'), () => pauseAlertsDlg(c)]);
+      else items.push(['belloff', t('live.pause_notifications', 'Pause notifications...'), () => pauseAlertsDlg(c)]);
     }
     if (can('camera_detection')) {
       if (!inFull) items.push(['zone', t('live.draw_motion_zone', 'Draw a motion zone'), () => { setSelected(c.id); import('./zones.js').then(m => m.openZoneEditor(c.id)); }]);
@@ -139,7 +145,7 @@ function tileMenu(ev, c, anchor) {
     // Admins, and operators an admin let reboot cameras.
     if (can('reboot') && canReboot(c)) items.push(['power', t('live.reboot_camera', 'Reboot camera...'), () => rebootDlg(c)]);
     if (state.isAdmin) {
-      items.push([c.enabled === false ? 'play' : 'pause', c.enabled === false ? t('live.enable_camera', 'Enable camera') : t('live.disable_camera', 'Disable camera'), () => setCameraEnabled(c.id, c.enabled === false)]);
+      items.push([c.enabled === false ? 'camera' : 'camoff', c.enabled === false ? t('live.enable_camera', 'Enable camera') : t('live.disable_camera', 'Disable camera'), () => setCameraEnabled(c.id, c.enabled === false)]);
     }
   }
   const m = document.createElement('div');
@@ -1370,7 +1376,7 @@ async function aimAt(id, spot, sx, sy) {
 // Tiles. A plain click selects the camera (the dock then shows its controls); double-click,
 // Enter or the expand button opens it full size. Dragging on the picture does nothing unless
 // Click to aim was chosen in the dock for this camera. (Zones are drawn in the zone editor.) Touch: a tap
-// opens the camera full size, as before.
+// opens it, as a double-click does (full size, or the timeline when chosen).
 function attachTileInput(tile, frame, id) {
   let pt = 'mouse';
   tile.addEventListener('pointerdown', (ev) => { pt = ev.pointerType || 'mouse'; });
@@ -1384,7 +1390,8 @@ function attachTileInput(tile, frame, id) {
     if (performance.now() - lastDrag < 400) return;
     if (tlHook) { if (frame.contains(ev.target)) { setSelected(id); tlHook.tileClick(id, ev); } return; }
     if (tool && id === selId) return;
-    if (pt === 'touch') { openFullCam(id); return; }
+    // (Touch: a tap opens what the "opens" choice in the tile menu says: full size or the timeline.)
+    if (pt === 'touch') { openTileTarget(id); return; }
     setSelected(id);
     if (oneClickOpens() && !ev.target.closest('button, a, input, select, .tileact, .cover')) openTileTarget(id);
   });
@@ -1661,7 +1668,12 @@ export function initLive() {
   $('cycleOn').onchange = () => { Layouts.setPrefs({ cycle: $('cycleOn').checked }); };
   $('cycleSec').onchange = () => { Layouts.setPrefs({ sec: parseInt($('cycleSec').value, 10) }); };
   let lastQuality = null;
+  // The zones drawn on the pictures (motion and ignore) are a tuning aid
+  // like the motion outlines: shown only while those are on.
+  const zonesShown = () => document.documentElement.classList.toggle('nozones', Layouts.getPrefs().boxes !== 'motion');
+  zonesShown();
   bus.on('layouts-prefs', () => {
+    zonesShown();
     syncCycleUi();
     armCycle();
     const q = Layouts.getPrefs().quality;

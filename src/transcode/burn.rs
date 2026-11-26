@@ -83,8 +83,7 @@ impl Drop for SubsFile {
 pub fn subs_file(engine: &Engine, start_ms: i64, dur_ms: i64, label: &str) -> Option<SubsFile> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let dir = engine.data_dir.join("tmp");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = crate::engine::storage::temp_dir(&engine.data_dir);
     let p = dir.join(format!("subs-{}-{}.srt", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     match std::fs::write(&p, srt(start_ms, dur_ms, label, &clock)) {
         Ok(()) => Some(SubsFile(p)),
@@ -294,7 +293,7 @@ mod tests {
         let t = Target { codec: OutCodec::H264, width: 640, height: 360, fps: None, bitrate_kbps: 1000 };
         let subs = std::path::Path::new("/tmp/x.srt");
         let qsv = Encoder { hw: Some(Hw::Qsv), device: None };
-        let x = crate::transcode::file::Extra { subs: Some(subs), keep_times: true };
+        let x = crate::transcode::file::Extra { subs: Some(subs), keep_times: true, aac: false };
         let a = crate::transcode::file::args_with(&qsv, true, &t, 25.0, 8, None, 1500, Some(10_000), Some("drawtext=text='a'"), x);
         let at = |k: &str| a.iter().position(|v| v == k).map(|i| a[i + 1].clone());
         assert!(!a.iter().any(|v| v == "-hwaccel"), "decoded in software: {a:?}");
@@ -308,13 +307,17 @@ mod tests {
         assert_eq!(at(pass[0]).as_deref(), Some(pass[1]));
         assert!(a.windows(2).any(|w| w[0] == "-i" && w[1] == "/tmp/x.srt"));
         // A file seeks before its input; the subtitles then start at the moment asked for.
-        let a = crate::transcode::file::args_with(&Encoder::software(), false, &t, 25.0, 8, Some(std::path::Path::new("/c.mp4")), 1500, None, Some("drawtext=text='a'"), crate::transcode::file::Extra { subs: Some(subs), keep_times: false });
+        let a = crate::transcode::file::args_with(&Encoder::software(), false, &t, 25.0, 8, Some(std::path::Path::new("/c.mp4")), 1500, None, Some("drawtext=text='a'"), crate::transcode::file::Extra { subs: Some(subs), keep_times: false, aac: true });
         let at = |k: &str| a.iter().position(|v| v == k).map(|i| a[i + 1].clone());
         assert_eq!(at("-ss").as_deref(), Some("1.500"));
         assert!(a.iter().position(|v| v == "-ss") < a.iter().position(|v| v == "/c.mp4"));
         assert_eq!(at("-vf").unwrap(), "scale=640:360:flags=bilinear,drawtext=text='a',format=yuv420p");
-        assert_eq!(at("-c:a").as_deref(), Some("copy"));
+        // A download: the sound made AAC (FLAC does not play in QuickTime or Windows' players).
+        assert_eq!(at("-c:a").as_deref(), Some("aac"));
         assert!(a.iter().any(|v| v == "-threads"), "threads capped: {a:?}");
+        // Not a download: the sound copied.
+        let a = crate::transcode::file::args_with(&Encoder::software(), false, &t, 25.0, 8, Some(std::path::Path::new("/c.mp4")), 1500, None, None, crate::transcode::file::Extra::default());
+        assert_eq!(a.iter().position(|v| v == "-c:a").map(|i| a[i + 1].as_str()), Some("copy"));
     }
 
     fn have_ffmpeg() -> bool {
@@ -363,7 +366,7 @@ mod http_tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    const USERS: [&str; 6] = ["bt-a", "bt-b", "bt-c", "bt-d", "bt-e", "bt-f"];
+    const USERS: [&str; 7] = ["bt-a", "bt-b", "bt-c", "bt-d", "bt-e", "bt-f", "bt-g"];
 
     /// One conversion test at a time: the server converts two downloads at
     /// most, and these tests download.
@@ -450,6 +453,8 @@ mod http_tests {
         assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
         assert!(!h.contains_key("x-as-transcoded") && h.get(header::CONTENT_DISPOSITION).is_some(), "{h:?}");
         assert!(subtitled(&dir, "d1.mp4", &b));
+        // No sound to convert: the plain MP4 of the recording (as Apple's players get it).
+        assert!(!h.contains_key("x-as-audio") && !top_boxes(&b).iter().any(|k| k == "moof"), "{h:?}");
         // burn_text=1: converted for the text alone, the subtitles kept.
         let (s, h, b) = get(&app, &format!("/api/playback?camera=Open&{win}&download=1&burn_text=1"), "bt-b").await;
         assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
@@ -493,6 +498,163 @@ mod http_tests {
         let have = h.get("x-pic-ms").and_then(|v| v.to_str().ok()).expect("x-pic-ms").to_string();
         let (s, _, _) = get(&app, &format!("/api/playback/picture?camera=Open&at={at}&have={have}"), "bt-e").await;
         assert_eq!(s, StatusCode::NO_CONTENT, "the same picture again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The kinds of an MP4's top-level boxes.
+    fn top_boxes(b: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut p = 0usize;
+        while p + 8 <= b.len() {
+            let mut len = u32::from_be_bytes(b[p..p + 4].try_into().unwrap()) as u64;
+            if len == 1 && p + 16 <= b.len() {
+                len = u64::from_be_bytes(b[p + 8..p + 16].try_into().unwrap());
+            } else if len == 0 {
+                len = (b.len() - p) as u64;
+            }
+            out.push(String::from_utf8_lossy(&b[p + 4..p + 8]).into_owned());
+            if len < 8 {
+                break;
+            }
+            p += len as usize;
+        }
+        out
+    }
+
+    /// What ffmpeg says of an MP4's streams.
+    fn streams(dir: &std::path::Path, name: &str, mp4: &[u8]) -> String {
+        let p = dir.join(name);
+        std::fs::write(&p, mp4).unwrap();
+        String::from_utf8_lossy(&ffmpeg(&["-hide_banner", "-i", p.to_str().unwrap()]).stderr).into_owned()
+    }
+
+    /// Downloads of a camera whose sound is FLAC (G.711 cameras): a plain
+    /// MP4 (no fragments), the sound AAC, the video copied, the time
+    /// subtitles kept: the timeline's download, an event clip assembled from
+    /// the recordings and a saved one, and the export's clips. Playback is
+    /// not changed: fragmented, the sound FLAC.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flac_downloads_are_plain_mp4_with_aac_sound() {
+        let _one = SERIAL.lock().await;
+        if !have_ffmpeg() {
+            eprintln!("no ffmpeg here: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("amber-burn-flac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("rec")).unwrap();
+        std::fs::create_dir_all(dir.join("clips")).unwrap();
+        let e = engine(&dir);
+        // Six seconds of picture and 8 kHz sound in FLAC (fragmented, as recorded).
+        let seg = dir.join("rec").join("open.mp4");
+        let src = ["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=320x240:r=10", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000", "-t", "6", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "10", "-bf", "0", "-c:a", "flac", "-ac", "1", "-strict", "-2"];
+        let o = ffmpeg(&[&src[..], &["-movflags", "frag_keyframe+empty_moov+default_base_moof", seg.to_str().unwrap()]].concat());
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        // A saved clip of the same (a plain MP4).
+        let saved = e.clip_file_path("bt-ev-saved");
+        let o = ffmpeg(&[&src[..], &["-movflags", "+faststart", saved.to_str().unwrap()]].concat());
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let t0 = (chrono::Utc::now().timestamp() - 3600) * 1000;
+        let bytes = std::fs::metadata(&seg).unwrap().len() as i64;
+        let row = crate::db::SegmentRow { path: "rec/open.mp4".into(), start_ms: t0, end_ms: t0 + 6000, bytes, video_frames: 60, kind: "continuous".into(), folder: String::new() };
+        e.db.insert_segment("open", &row).unwrap();
+        for id in ["bt-ev-flac", "bt-ev-saved"] {
+            let ev = crate::engine::Event { id: id.into(), camera_id: 0, camera: "Open".into(), start: t0 / 1000 + 2, end: t0 / 1000 + 3, score: 1.0, clip: None, thumb: None, objects: vec![], protect: false };
+            e.db.insert_event(&ev).unwrap();
+        }
+        let app = crate::web::build_router(e.clone());
+        let win = format!("from={t0}&to={}", t0 + 6000);
+        let aac = |name: &str, b: &[u8], subs: bool| {
+            let boxes = top_boxes(b);
+            assert!(!boxes.iter().any(|k| k == "moof"), "{name}: plain, not fragmented: {boxes:?}");
+            assert!(boxes.iter().position(|k| k == "moov") < boxes.iter().position(|k| k == "mdat"), "{name}: header first: {boxes:?}");
+            let info = streams(&dir, name, b);
+            assert!(info.contains("Audio: aac") && info.contains("Video: h264"), "{name}: {info}");
+            assert_eq!(info.contains("Subtitle:"), subs, "{name}: {info}");
+            assert!(subtitled(&dir, name, b) == subs);
+        };
+
+        // Playback: as before.
+        let (s, h, b) = get(&app, &format!("/api/playback?camera=Open&{win}"), "bt-g").await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(top_boxes(&b).iter().any(|k| k == "moof") && streams(&dir, "p.mp4", &b).contains("Audio: flac"), "{h:?}");
+
+        // The timeline's download.
+        let (s, h, b) = get(&app, &format!("/api/playback?camera=Open&{win}&download=1"), "bt-g").await;
+        assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(h.get("x-as-audio").map(|v| v.to_str().unwrap()), Some("aac"), "{h:?}");
+        assert_eq!(h.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok()), Some(b.len()));
+        assert!(h.get(header::CONTENT_DISPOSITION).is_some_and(|v| v.to_str().unwrap().contains(&format!("open-{t0}.mp4"))), "{h:?}");
+        assert!(h.contains_key("x-clip-start-ms") && h.contains_key("x-clip-end-ms"), "{h:?}");
+        aac("d.mp4", &b, true);
+        // HEAD and Range: nothing converted (no file made). HEAD says what a GET
+        // sends, without a length; a Range is answered from the plain MP4.
+        let ask = |method: &str, path: String, range: Option<&str>| {
+            let mut r = Request::builder().method(method).uri(path).header(header::HOST, "localhost:8090").header(header::AUTHORIZATION, auth("bt-g"));
+            if let Some(v) = range {
+                r = r.header(header::RANGE, v);
+            }
+            r.body(Body::empty()).unwrap()
+        };
+        let aac_files = || std::fs::read_dir(dir.join("tmp")).map(|rd| rd.flatten().filter(|f| f.file_name().to_string_lossy().starts_with("aac-")).count()).unwrap_or(0);
+        for path in [format!("/api/playback?camera=Open&{win}&download=1"), "/api/clips/bt-ev-flac?download=1".to_string(), "/api/clips/bt-ev-saved?download=1".to_string()] {
+            let t0h = std::time::Instant::now();
+            let r = app.clone().oneshot(ask("HEAD", path.clone(), None)).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "{path}");
+            let h = r.headers().clone();
+            assert_eq!(h.get("x-as-audio").map(|v| v.to_str().unwrap()), Some("aac"), "{path}: {h:?}");
+            assert!(h.contains_key(header::CONTENT_DISPOSITION) && h.contains_key("x-clip-start-ms") && !h.contains_key(header::CONTENT_LENGTH), "{path}: {h:?}");
+            assert!(axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap().is_empty());
+            assert!(t0h.elapsed() < std::time::Duration::from_secs(2), "{path}: {:?}", t0h.elapsed());
+            let r = app.clone().oneshot(ask("GET", path.clone(), Some("bytes=0-99"))).await.unwrap();
+            assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT, "{path}");
+            assert!(!r.headers().contains_key("x-as-audio") && r.headers().contains_key(header::CONTENT_RANGE), "{path}: {:?}", r.headers());
+            assert_eq!(axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap().len(), 100);
+            assert_eq!(aac_files(), 0, "{path}: nothing converted");
+        }
+        // A stretch of it: exactly that long (2.5 s at 10 fps), from the keyframe before.
+        let (s, _, b) = get(&app, &format!("/api/playback?camera=Open&from={}&to={}&download=1", t0 + 2500, t0 + 5000), "bt-g").await;
+        assert_eq!(s, StatusCode::OK);
+        aac("d2.mp4", &b, true);
+        std::fs::write(dir.join("d2.mp4"), &b).unwrap();
+        let o = ffmpeg(&["-v", "error", "-i", dir.join("d2.mp4").to_str().unwrap(), "-map", "0:v", "-vf", "scale=16:16", "-pix_fmt", "gray", "-f", "rawvideo", "-"]);
+        let frames = o.stdout.len() / 256;
+        assert!((24..=26).contains(&frames), "{frames} pictures for 2.5 s");
+
+        // An event clip from the recordings, and a saved one.
+        let (s, h, b) = get(&app, "/api/clips/bt-ev-flac?download=1", "bt-g").await;
+        assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert!(h.get(header::CONTENT_DISPOSITION).is_some_and(|v| v.to_str().unwrap().contains("bt-ev-flac.mp4")) && h.contains_key("x-clip-start-ms"), "{h:?}");
+        aac("c.mp4", &b, true);
+        let (s, h, b) = get(&app, "/api/clips/bt-ev-saved?download=1", "bt-g").await;
+        assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert!(h.get(header::CONTENT_DISPOSITION).is_some_and(|v| v.to_str().unwrap().contains("bt-ev-saved.mp4")) && h.contains_key("x-clip-start-ms"), "{h:?}");
+        aac("s.mp4", &b, false);
+        // Watching the saved clip: as it is.
+        let (_, _, b) = get(&app, "/api/clips/bt-ev-saved", "bt-g").await;
+        assert!(streams(&dir, "s2.mp4", &b).contains("Audio: flac"));
+
+        // The export.
+        let (s, _, zip) = get(&app, "/api/export?ids=bt-ev-flac,bt-ev-saved", "bt-g").await;
+        assert_eq!(s, StatusCode::OK);
+        let entry = |name: &str| -> Vec<u8> {
+            let mut p = 0;
+            while p + 30 <= zip.len() && zip[p..p + 4] == [0x50, 0x4B, 0x03, 0x04] {
+                let u = |o: usize| u32::from_le_bytes(zip[p + o..p + o + 4].try_into().unwrap()) as usize;
+                let n = u16::from_le_bytes(zip[p + 26..p + 28].try_into().unwrap()) as usize;
+                let (size, start) = (u(18), p + 30 + n);
+                if &zip[p + 30..start] == name.as_bytes() {
+                    return zip[start..start + size].to_vec();
+                }
+                p = start + size;
+            }
+            panic!("{name} not in the export");
+        };
+        aac("x1.mp4", &entry("bt-ev-flac.mp4"), true);
+        aac("x2.mp4", &entry("bt-ev-saved.mp4"), false);
+        // Nothing is left in the temporary folder.
+        let left: Vec<_> = std::fs::read_dir(dir.join("tmp")).map(|rd| rd.flatten().map(|f| f.file_name()).filter(|n| n.to_string_lossy().starts_with("aac-")).collect()).unwrap_or_default();
+        assert!(left.is_empty(), "{left:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

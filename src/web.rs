@@ -3166,8 +3166,7 @@ async fn export(
     let Ok(permit) = EXPORTS.try_acquire() else {
         return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "30")], "other exports are running; try again shortly").into_response();
     };
-    let dir = engine.data_dir.join("tmp");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = crate::engine::storage::temp_dir(&engine.data_dir);
     // Left over from a crash: gone after an hour (this one is kept while it
     // is written and sent, however long that takes).
     crate::engine::storage::sweep_temp_files(&engine.data_dir, false);
@@ -3808,6 +3807,11 @@ async fn hvc1_saved_clip(path: &std::path::Path) {
     }
 }
 
+/// The share of the recordings' drive kept free (storage settings).
+fn min_free_pct(engine: &Engine) -> u64 {
+    engine.config.lock().unwrap().storage.min_free_pct()
+}
+
 /// A player of Apple's (iPhone and iPad apps, Safari, QuickTime): they all
 /// play through AVFoundation, which asks for media as `AppleCoreMedia`, or
 /// WebKit on its own (every browser on iPhone, and Safari).
@@ -3817,12 +3821,13 @@ fn apple_player(h: &axum::http::HeaderMap) -> bool {
 }
 
 /// A saved clip file served as it is (ServeFile: byte ranges, If-Range,
-/// HEAD), HEVC labeled hvc1 (see [`hvc1_saved_clip`]); to Apple's players
-/// with FLAC sound marked one block size, in the bytes sent only (see
+/// HEAD), HEVC labeled hvc1 (see [`hvc1_saved_clip`]); with `fix` (Apple's
+/// players, and every download) with FLAC sound marked one block size, in
+/// the bytes sent only (see
 /// [`crate::ingest::mp4read::flac_file_fixed_block`]). None: no such file.
-async fn serve_saved_clip(path: &std::path::Path, req: Request) -> Option<Response> {
+async fn serve_saved_clip(path: &std::path::Path, req: Request, fix: bool) -> Option<Response> {
     hvc1_saved_clip(path).await;
-    let patch = if apple_player(req.headers()) {
+    let patch = if fix {
         let p = path.to_path_buf();
         tokio::task::spawn_blocking(move || crate::ingest::mp4read::flac_file_fixed_block(&p)).await.ok().and_then(|r| r.ok()).flatten()
     } else {
@@ -3929,7 +3934,8 @@ async fn clip_file(
                 let r = if low || !path.is_file() {
                     virtual_clip_response(engine, id, false, low, req).await
                 } else {
-                    match serve_saved_clip(&path, req).await {
+                    let apple = apple_player(req.headers());
+                    match serve_saved_clip(&path, req, apple).await {
                         Some(mut r) => {
                             r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
                             r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -3946,7 +3952,17 @@ async fn clip_file(
         // No saved file: assemble the event's video from the recordings.
         return virtual_clip_response(engine, id, download, dl.quality == "low", req).await;
     }
-    let Some(mut resp) = serve_saved_clip(&path, req).await else {
+    if download {
+        // FLAC sound: converted to AAC (QuickTime and Windows' players do not play FLAC).
+        let mut hs = vec![("content-disposition".to_string(), format!("attachment; filename=\"{id}.mp4\""))];
+        hs.extend(file_start_ms.map(|ms| ("x-clip-start-ms".to_string(), ms.to_string())));
+        hvc1_saved_clip(&path).await;
+        if let Some(r) = crate::transcode::aac::download(engine.data_dir.clone(), min_free_pct(&engine), crate::transcode::aac::Src::File(path.clone()), format!("clip {id}"), hs, crate::transcode::aac::Ask::of(req.method(), req.headers())).await {
+            return r;
+        }
+    }
+    let fix = download || apple_player(req.headers());
+    let Some(mut resp) = serve_saved_clip(&path, req, fix).await else {
         return (StatusCode::NOT_FOUND, "clip not found").into_response();
     };
     let h = resp.headers_mut();
@@ -4003,6 +4019,7 @@ fn parse_range(h: &str, len: u64) -> Option<Result<(u64, u64), ()>> {
 }
 
 async fn virtual_clip_response(engine: Arc<Engine>, id: String, download: bool, small: bool, req: Request) -> Response {
+    let engine2 = engine.clone();
     let built = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(crate::ingest::splice::VirtualClip, String)>> {
         let Some(ev) = engine.db.get_event(&id)? else { return Ok(None) };
         let Some(c) = engine.virtual_clip_q(&ev, small)? else { return Ok(None) };
@@ -4025,7 +4042,7 @@ async fn virtual_clip_response(engine: Arc<Engine>, id: String, download: bool, 
         Ok(Ok(Some((clip, id)))) => {
             // The clip's first picture and end (epoch ms), as /api/playback sends them.
             let extra = vec![("x-clip-start-ms", clip.start_ms.to_string()), ("x-clip-end-ms", clip.end_ms.to_string()), ("x-clip-sub", (clip.sub as u8).to_string())];
-            serve_clip(clip, format!("{id}.mp4"), extra, download, req).await
+            serve_clip(&engine2, clip, format!("{id}.mp4"), extra, download, req).await
         }
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, "clip not found").into_response(),
         Ok(Err(e)) => internal_error("clip", &e),
@@ -4033,17 +4050,27 @@ async fn virtual_clip_response(engine: Arc<Engine>, id: String, download: bool, 
     }
 }
 
-/// Serve an assembled clip with Range/206 and HEAD support.
+/// Serve an assembled clip with Range/206 and HEAD support. A download
+/// whose sound is FLAC is converted to AAC (see [`crate::transcode::aac`]).
 async fn serve_clip(
+    engine: &Arc<Engine>,
     clip: crate::ingest::splice::VirtualClip,
     filename: String,
     extra_headers: Vec<(&'static str, String)>,
     download: bool,
     req: Request,
 ) -> Response {
-    // Apple's players: a plain MP4 of the same media (made once per clip:
-    // it reads every fragment's header), FLAC marked one block size.
-    let clip = if apple_player(req.headers()) {
+    if download {
+        let mut hs = vec![("content-disposition".to_string(), format!("attachment; filename=\"{filename}\""))];
+        hs.extend(extra_headers.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        if let Some(r) = crate::transcode::aac::download(engine.data_dir.clone(), min_free_pct(engine), crate::transcode::aac::Src::Clip(clip.clone()), filename.clone(), hs, crate::transcode::aac::Ask::of(req.method(), req.headers())).await {
+            return r;
+        }
+    }
+    // Apple's players, and every download: a plain MP4 of the same media
+    // (made once per clip: it reads every fragment's header), FLAC marked
+    // one block size (QuickTime drops the sound otherwise, and stops).
+    let clip = if download || apple_player(req.headers()) {
         let keep = clip.clone();
         tokio::task::spawn_blocking(move || clip.for_apple()).await.unwrap_or(keep)
     } else {
@@ -4580,7 +4607,7 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
             ];
             extra.append(&mut caps_headers);
             let name = format!("{}-{from}.mp4", crate::config::slug(&camera));
-            serve_clip(clip, name, extra, download, req).await
+            serve_clip(&engine2, clip, name, extra, download, req).await
         }
         Ok(Ok(None)) => {
             // Nothing playback can read: an event's saved clip may still
@@ -4601,7 +4628,7 @@ async fn playback(State(engine): State<Arc<Engine>>, Query(q): Query<PlaybackQ>,
                     if let Some(text) = if download { burn_text_cfg(&engine2, &camera, &q.burn_text) } else { None } {
                         return event_clip_burned(&engine2, c, &camera, &name, download, text, &user).await;
                     }
-                    return event_clip_window(c, &name, download, req).await;
+                    return event_clip_window(&engine2, c, &name, download, req).await;
                 }
             }
             nothing_recorded(&q.quiet, "no recording covers that window")
@@ -4697,8 +4724,19 @@ async fn event_clip_burned(engine: &Arc<Engine>, c: crate::engine::playback::Eve
 /// A playback window answered from an event's saved clip file (see
 /// `Engine::event_clip_at`): the file as it is (byte ranges, HEAD), with the
 /// stretch it shows in the same headers a planned window has.
-async fn event_clip_window(c: crate::engine::playback::EventClipAt, name: &str, download: bool, req: Request) -> Response {
-    let Some(mut r) = serve_saved_clip(&c.path, req).await else {
+async fn event_clip_window(engine: &Arc<Engine>, c: crate::engine::playback::EventClipAt, name: &str, download: bool, req: Request) -> Response {
+    let headers = [("x-clip-start-ms", c.start_ms.to_string()), ("x-clip-end-ms", c.end_ms.to_string()), ("x-clip-sub", "0".into()), ("x-clip-reverse", "0".into()), ("x-clip-frames", "0".into()), ("x-clip-event", "1".into())];
+    if download {
+        // FLAC sound: converted to AAC (QuickTime and Windows' players do not play FLAC).
+        let mut hs = vec![("content-disposition".to_string(), format!("attachment; filename=\"{name}\""))];
+        hs.extend(headers.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        hvc1_saved_clip(&c.path).await;
+        if let Some(r) = crate::transcode::aac::download(engine.data_dir.clone(), min_free_pct(engine), crate::transcode::aac::Src::File(c.path.clone()), name.to_string(), hs, crate::transcode::aac::Ask::of(req.method(), req.headers())).await {
+            return r;
+        }
+    }
+    let fix = download || apple_player(req.headers());
+    let Some(mut r) = serve_saved_clip(&c.path, req, fix).await else {
         return (StatusCode::NOT_FOUND, "no recording covers that window").into_response();
     };
     if !r.status().is_success() {
@@ -4707,7 +4745,7 @@ async fn event_clip_window(c: crate::engine::playback::EventClipAt, name: &str, 
     let h = r.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    for (k, v) in [("x-clip-start-ms", c.start_ms.to_string()), ("x-clip-end-ms", c.end_ms.to_string()), ("x-clip-sub", "0".into()), ("x-clip-reverse", "0".into()), ("x-clip-frames", "0".into()), ("x-clip-event", "1".into())] {
+    for (k, v) in headers {
         if let Ok(v) = HeaderValue::from_str(&v) {
             h.insert(header::HeaderName::from_static(k), v);
         }

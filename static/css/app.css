@@ -162,6 +162,7 @@ main { padding: var(--s4); max-width: 1900px; margin: 0 auto; }
 .tile .meta strong { font-weight: 600; margin-right: auto; }
 .zbox { position: absolute; border: 1px dashed var(--accent); background: rgba(242,166,80,.14); pointer-events: none; z-index: 2; }
 .zbox.ignore { border-color: var(--bad); background: rgba(229,96,79,.14); }
+.nozones .zbox { display: none; }
 .pic { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
 .blobs { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
 .blob { position: absolute; border: 1px solid var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.5); }

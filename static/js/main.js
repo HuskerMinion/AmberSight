@@ -11,7 +11,7 @@ import { registerTab, buildNav, showTab, applyRole, hideAllTabs, activeTab, hash
 import { initAuthUi, whoami, applyWho, showGate, hideGate, takePairCode, redeemPairCode, homeScreenHint } from './auth.js';
 import { refreshStatus, initStatus, markUnreachable } from './status.js';
 import { initServerMenu } from './servers.js';
-import { initLive, showLive, hideLive, closeFull, openFullCam, setTool, finishArrange } from './live.js';
+import { initLive, showLive, hideLive, closeFull, openFullCam, setTool, finishArrange, tapOnly } from './live.js';
 import { initEvents, showEvents, hideEvents, refreshEvents, resetEvents } from './events.js';
 import { initCameras } from './cameras.js';
 import { initSettings, settingsTab } from './settings.js';
@@ -235,6 +235,8 @@ function boot() {
   logo.onclick = goHome;
   logo.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goHome(); } };
   $('menuStart').onclick = () => { $('userDrop').hidden = true; startPageDlg(); };
+  // (A touch screen without a mouse opens a tile with a tap.)
+  if (tapOnly()) $('menuDbl').textContent = t('main.tap_opens', 'A tap opens…');
   $('menuDbl').onclick = async () => { $('userDrop').hidden = true; (await import('./live.js')).dblClickDlg(null); };
   initAuthUi();
   initStatus();

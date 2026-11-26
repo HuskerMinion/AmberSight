@@ -13674,6 +13674,18 @@
 "[öñ ·]",
 "61342fd0"
 ],
+"live.tap_menu": [
+"[À tàp öpéñš: {what}... ··]",
+"7d9e0f16"
+],
+"live.tap_opens": [
+"[À tàp öpéñš ·]",
+"4722af6c"
+],
+"live.tap_timeline": [
+"[À tàp öpéñš thé tîmélîñé, àt lîvé ····]",
+"583fade7"
+],
 "live.tap_to_wake": [
 "[Tàp tö wàké ·]",
 "096946c9"
@@ -14249,6 +14261,10 @@
 "main.start_page_toast": [
 "[Štàrt pàgé: {label} ··]",
 "671a3838"
+],
+"main.tap_opens": [
+"[À tàp öpéñš… ·]",
+"4567917e"
 ],
 "main.timeline_label": [
 "[Tîmélîñé ·]",

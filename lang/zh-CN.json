@@ -13674,6 +13674,18 @@
 "开",
 "61342fd0"
 ],
+"live.tap_menu": [
+"点击打开：{what}……",
+"7d9e0f16"
+],
+"live.tap_opens": [
+"点击即可打开",
+"4722af6c"
+],
+"live.tap_timeline": [
+"点击打开时间轴（从实时位置开始）",
+"583fade7"
+],
 "live.tap_to_wake": [
 "点击唤醒",
 "096946c9"
@@ -14249,6 +14261,10 @@
 "main.start_page_toast": [
 "起始页面：{label}",
 "671a3838"
+],
+"main.tap_opens": [
+"点击打开……",
+"4567917e"
 ],
 "main.timeline_label": [
 "时间轴",

@@ -13674,6 +13674,18 @@
 "an",
 "61342fd0"
 ],
+"live.tap_menu": [
+"Tippen öffnet: {what}…",
+"7d9e0f16"
+],
+"live.tap_opens": [
+"Tippen öffnet",
+"4722af6c"
+],
+"live.tap_timeline": [
+"Tippen öffnet die Zeitleiste, live",
+"583fade7"
+],
 "live.tap_to_wake": [
 "Tippen zum Aufwecken",
 "096946c9"
@@ -14249,6 +14261,10 @@
 "main.start_page_toast": [
 "Startseite: {label}",
 "671a3838"
+],
+"main.tap_opens": [
+"Tippen öffnet…",
+"4567917e"
 ],
 "main.timeline_label": [
 "Zeitleiste",
