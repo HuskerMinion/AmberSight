@@ -861,7 +861,7 @@ function mountPlayer(frame, cam) {
   createZoom(el, { box: true, on: () => S.solo !== null });
   players.add(p);
   tickPlayer(p);
-  return { el, stop() { pills.remove(); if (ot) ot.remove(); players.delete(p); stopLive(p); stopPic(p); if (p.bx) p.bx.remove(); p.slots.forEach(resetSlot); } };
+  return { el, stop() { pills.remove(); if (ot) ot.remove(); players.delete(p); stopLive(p); stopPic(p); if (p.bx) p.bx.remove(); if (p.cam) { const cam = p.cam.name; setTimeout(() => { if (![...players].some(o => o.cam && o.cam.name === cam)) dropTrackAsks(cam); }, 0); } p.slots.forEach(resetSlot); } };
 }
 
 // q: 'low' = the sub stream where it was recorded (starts fast), 'full' =
@@ -1314,10 +1314,37 @@ function leaveLive() {
 // watched is ready soon: the part at the playhead, then the next one.
 const aiSeen = new Map();   // event id -> { review: [...] | null, parts: Map(part -> frames), asked: Set }
 const TRACK_PART_MS = 5000;
-function aiChecks(e, t) {
+// Parts asked for and not answered yet ('event id:part' -> { ac, cam, a, n }).
+// Each costs the server's graphics card seconds, so one the playhead has
+// left is called off (the server stops working on it).
+const trackAsked = new Map();
+function dropTrackAsks(cam, keep) {
+  for (const [key, q] of trackAsked) {
+    if ((cam && q.cam !== cam) || (keep && keep.has(key))) continue;
+    trackAsked.delete(key);
+    q.a.asked.delete(q.n);
+    q.a.making.delete(q.n);
+    try { q.ac.abort(); } catch (e) { /* ignore */ }
+  }
+}
+// Keep (in `want`) the parts of event `e` still being made that were asked
+// since the last jump (S.jumpN, counted by setPlayhead), or that `near` says are at the playhead; true if any.
+function keepMaking(e, a, want, near) {
+  let any = false;
+  for (const [n, at] of a.making) {
+    const close = near && near(n);
+    if (at !== (S.jumpN || 0) && !close) continue;
+    // (At the playhead after a jump: wanted, as if just asked.)
+    if (close) a.making.set(n, S.jumpN || 0);
+    any = true;
+    if (want) want.add(e.id + ':' + n);
+  }
+  return any;
+}
+function aiChecks(e, t, want) {
   let a = aiSeen.get(e.id);
   if (!a) {
-    a = { review: null, parts: new Map(), asked: new Set() };
+    a = { review: null, parts: new Map(), asked: new Set(), making: new Map(), failed: new Map() };
     aiSeen.set(e.id, a);
     if (aiSeen.size > 3000) aiSeen.delete(aiSeen.keys().next().value);
     api('/api/events/' + enc(e.id) + '/ai').then(r => {
@@ -1331,20 +1358,40 @@ function aiChecks(e, t) {
   const ask = (n) => {
     if (n < 0 || a.asked.has(n) || (a.total !== undefined && n >= a.total)) return;
     a.asked.add(n);
-    api('/api/events/' + enc(e.id) + '/track?part=' + n).then(r => {
+    const key = e.id + ':' + n, ac = new AbortController();
+    trackAsked.set(key, { ac, cam: e.camera, a, n });
+    a.making.set(n, S.jumpN || 0);
+    api('/api/events/' + enc(e.id) + '/track?part=' + n, { signal: ac.signal }).then(r => {
       a.total = r.parts;
       a.parts.set(n, (r.frames || []).map(f => ({ t: f.t, seen: f.seen || [], parked: [] })));
     }).catch((err) => {
+      if (ac.signal.aborted) return;
       // Busy with another part: ask again shortly (while boxes are wanted).
       a.asked.delete(n);
-      if (!(err && err.status === 503)) a.asked.add(n);
+      // Another error: not asked again for a while (for good if the server
+      // says there is no such part), and meanwhile it counts as done.
+      if (!(err && err.status === 503)) { a.asked.add(n); a.failed.set(n, err && (err.status === 404 || err.status === 400) ? Infinity : Date.now() + 30000); }
+    }).finally(() => {
+      if (trackAsked.get(key) && trackAsked.get(key).ac === ac) { trackAsked.delete(key); a.making.delete(n); }
     });
   };
   // Playing fast, the moment is gone before a part is ready (and each
   // part costs the graphics card seconds): the AI's own checks only.
+  // One part at a time per event: the one at the playhead, then the next.
+  // A part being made is kept until it is ready while the playhead only
+  // plays on (on a card slower than real time it falls behind; calling it
+  // off would throw every part away), then the part at the playhead is
+  // next. A jump (setPlayhead) calls off what is no longer near it.
   if (!(S.playing && Math.abs(S.speed) > 4)) {
-    ask(k);
-    ask(rev() ? k - 1 : k + 1);
+    const next = rev() ? k - 1 : k + 1;
+    for (const [n, until] of a.failed) if (until < Date.now()) { a.failed.delete(n); a.asked.delete(n); }
+    const going = keepMaking(e, a, want, (n) => n === k || n === next);
+    if (!going) {
+      // (A part the server could not make counts as done.)
+      const n = a.parts.has(k) || a.failed.has(k) ? next : k;
+      ask(n);
+      if (want) want.add(e.id + ':' + n);
+    }
   }
   if (!a.parts.size) return a.review;
   let all = [];
@@ -1354,11 +1401,21 @@ function aiChecks(e, t) {
 }
 function boxesAt(name, t) {
   let checks = [];
+  const want = new Set();
+  const asking = !(S.playing && Math.abs(S.speed) > 4);
   for (const e of D.ev) {
-    if (e.camera !== name || t < e.start * 1000 - 3000 || t > e.end * 1000 + 3000) continue;
-    const c = aiChecks(e, t);
+    if (e.camera !== name || t < e.start * 1000 - 3000 - TRACK_PART_MS || t > e.end * 1000 + 3000 + TRACK_PART_MS) continue;
+    if (t < e.start * 1000 - 3000 || t > e.end * 1000 + 3000) {
+      // Just played past its edge: its last part, still being made, is
+      // kept a while longer (nothing new is asked for).
+      const a = aiSeen.get(e.id);
+      if (a && asking) keepMaking(e, a, want, null);
+      continue;
+    }
+    const c = aiChecks(e, t, want);
     if (c) checks = checks.concat(c);
   }
+  dropTrackAsks(name, want);
   if (!checks.length) return [];
   checks.sort((a, b) => a.t - b.t);
   let i = checks.findIndex(c => c.t > t);
@@ -1402,6 +1459,7 @@ const boxColor = (kind) => BOX_COLORS[kind] || BOX_COLORS.other;
 // The boxes over player `p`'s picture at the playhead.
 function drawBoxes(p) {
   if (!S.boxes || (p.cam && p.cam.remote)) {
+    if (p.cam) dropTrackAsks(p.cam.name);
     if (p.bx) { p.bx.remove(); p.bx = null; p.bxKey = ''; }
     return;
   }
@@ -1412,6 +1470,7 @@ function drawBoxes(p) {
   }
   // Only what alerts are about (people, vehicles, animals): not the chairs,
   // benches and bottles the AI also names.
+  if (S.live) dropTrackAsks(p.cam.name);
   const boxes = S.live ? [] : boxesAt(p.cam.name, S.playhead).filter(b => kindOfLabel(b.label) !== 'other');
   const W = p.el.clientWidth, H = p.el.clientHeight;
   const key = W + 'x' + H + ':' + boxes.map(b => b.label + [b.x, b.y, b.w, b.h].map(n => n.toFixed(3)).join(',')).join(';');
@@ -1465,6 +1524,7 @@ function setBoxes(on) {
 function setPlayhead(ms) {
   leaveLive();
   S.jumpAt = performance.now();
+  S.jumpN = (S.jumpN || 0) + 1;
   S.playhead = Math.max(0, Math.min(Math.round(ms), Date.now()));
   S.anchorHead = S.playhead; S.anchorWall = performance.now();
 }
@@ -2530,6 +2590,7 @@ export async function enter(opts) {
 }
 
 export function exit() {
+  dropTrackAsks();
   closeCalendar(false);
   document.body.classList.remove('tlpeek');
   document.body.classList.remove('tlidle'); clearTimeout(idleTimer);

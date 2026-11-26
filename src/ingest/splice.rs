@@ -1228,7 +1228,7 @@ impl VirtualClip {
         let mut last_used: [Option<f64>; 2] = [None; 2];
         for (j, s) in order.into_iter().enumerate() {
             if cancelled() {
-                bail!("cancelled");
+                bail!("canceled");
             }
             let known = if quick { parse_segment_opt(&s.path, false).ok().flatten() } else { None };
             let p = match known {

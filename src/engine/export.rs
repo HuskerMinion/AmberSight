@@ -21,7 +21,7 @@ impl Engine {
         let mut total: u64 = 0;
         for ev in evs.iter() {
             if cancelled() {
-                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "export cancelled"));
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "export canceled"));
             }
             let objs = ev.objects.join(";");
             let row = |clip: &str| {

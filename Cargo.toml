@@ -1,6 +1,6 @@
 [package]
 name = "ambersight"
-version = "0.13.6"
+version = "0.13.7"
 edition = "2021"
 description = "AmberSight - a self-hosted camera security and recording server"
 license = "PolyForm-Noncommercial-1.0.0"

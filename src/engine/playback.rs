@@ -778,7 +778,7 @@ fn run_ffmpeg_reverse(clip: VirtualClip, cancelled: &dyn Fn() -> bool) -> anyhow
             let _ = child.wait();
             let _ = feeder.join();
             let _ = errors.join();
-            anyhow::bail!("cancelled");
+            anyhow::bail!("canceled");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
@@ -1096,10 +1096,10 @@ impl Engine {
         }
         let Some(fwd) = self.playback_clip(camera, from_ms, to_ms, true)? else { return Ok(None) };
         let Some(_slot) = JOBS.enter_unless(std::time::Duration::from_secs(15), cancelled) else {
-            anyhow::bail!(if cancelled() { "cancelled" } else { "busy" })
+            anyhow::bail!(if cancelled() { "canceled" } else { "busy" })
         };
         if cancelled() {
-            anyhow::bail!("cancelled");
+            anyhow::bail!("canceled");
         }
         let (start, end, sub) = (fwd.start_ms, fwd.end_ms, fwd.sub);
         let t0 = std::time::Instant::now();
@@ -1121,8 +1121,11 @@ impl Engine {
     /// has confirmed the event, so they cover only its first moments):
     /// (parts in the event, (time ms, objects) per frame). In parts so the
     /// moment being watched is ready in a second or two. Kept in memory for
-    /// the most recent.
-    pub fn event_track(&self, id: &str, part: u32) -> anyhow::Result<Option<(u32, TrackFrames)>> {
+    /// the most recent. Stops (error "canceled") as soon as `cancelled`
+    /// says the browser no longer waits: while queued behind another part,
+    /// and between frames, so a viewer jumping from alert to alert does not
+    /// leave the card working on the ones already left.
+    pub fn event_track(&self, id: &str, part: u32, cancelled: &dyn Fn() -> bool) -> anyhow::Result<Option<(u32, TrackFrames)>> {
         use std::sync::{Arc, Mutex, OnceLock};
         type Track = Arc<(u32, TrackFrames)>;
         type Cache = Mutex<std::collections::VecDeque<((String, u32), Track)>>;
@@ -1142,7 +1145,12 @@ impl Engine {
             return Ok(Some((parts, Vec::new())));
         }
         let (pf, pt) = (from + part as i64 * TRACK_PART_MS, (from + (part as i64 + 1) * TRACK_PART_MS).min(to));
-        let Some(_slot) = JOBS.enter(std::time::Duration::from_secs(30)) else { anyhow::bail!("busy") };
+        let Some(_slot) = JOBS.enter_unless(std::time::Duration::from_secs(30), cancelled) else {
+            anyhow::bail!(if cancelled() { "canceled" } else { "busy" })
+        };
+        if cancelled() {
+            anyhow::bail!("canceled");
+        }
         // (Another request may have made it while this one waited.)
         if let Some(t) = cached() {
             return Ok(Some(t));
@@ -1157,6 +1165,9 @@ impl Engine {
         let mut out = Vec::new();
         let mut ai_time = std::time::Duration::ZERO;
         run_ffmpeg_frames(clip, FPS as u32, if tiled.is_some() { 1920 } else { 640 }, &mut |n, jpeg| {
+            if cancelled() {
+                anyhow::bail!("canceled");
+            }
             // The clip starts at the keyframe before the part: only its own frames.
             let t = start + (n as i64 * 1000) / FPS;
             if t < pf || t >= pt {

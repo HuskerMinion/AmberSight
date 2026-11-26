@@ -194,7 +194,19 @@ pub async fn event_track(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<S
     if !good_id(&id) {
         return err(StatusCode::BAD_REQUEST, "bad event id");
     }
-    match tokio::task::spawn_blocking(move || engine.event_track(&id, q.part)).await {
+    // Set when the browser stops waiting (it moved on, or the request was
+    // aborted): the handler is dropped, and the work stops with it.
+    struct Gone(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let gone = Gone(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let flag = gone.0.clone();
+    let r = tokio::task::spawn_blocking(move || engine.event_track(&id, q.part, &|| flag.load(std::sync::atomic::Ordering::Relaxed))).await;
+    drop(gone);
+    match r {
         Ok(Ok(Some((parts, frames)))) => Json(serde_json::json!({
             "parts": parts,
             "part_ms": crate::engine::playback::TRACK_PART_MS,
@@ -203,6 +215,8 @@ pub async fn event_track(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<S
         .into_response(),
         Ok(Ok(None)) => err(StatusCode::NOT_FOUND, "no recording of that event"),
         Ok(Err(e)) if e.to_string() == "busy" => err(StatusCode::SERVICE_UNAVAILABLE, "busy, try again"),
+        // (Nobody is waiting for this answer.)
+        Ok(Err(e)) if e.to_string() == "canceled" => err(StatusCode::SERVICE_UNAVAILABLE, "canceled"),
         Ok(Err(e)) => {
             tracing::warn!("AI track: {e:#}");
             err(StatusCode::INTERNAL_SERVER_ERROR, "could not run the AI on this event")
