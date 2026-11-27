@@ -2340,16 +2340,51 @@ function markChips() {
 // Alerts in one order for stepping: by landing, then by id (two cameras'
 // alerts often start in the same second).
 const stepOrder = (a, b) => landing(a) - landing(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+// Where a keyset walk for a step starts: (start, id), every alert the step
+// can take strictly beyond it in stepOrder ("" is before every id). `cur`:
+// the alert stepped on from (null: from the playhead `head`). The bounds
+// are those of stepAlert's `ok`, rounded outward (`ok` still decides).
+function stepCursor(dir, head, cur) {
+  const exact = cur && Number.isInteger(cur.start);
+  if (dir < 0) {
+    // Before `cur`, or landing before head - 1000 (an alert begun since it).
+    if (exact && landing(cur) >= head - 1000) return { start: cur.start, id: cur.id };
+    const hi = cur ? Math.max(landing(cur), head - 1000) : head - 1000;
+    return { start: Math.floor((hi + LEAD) / 1000) + 1, id: '' };   // (start <= the second of hi)
+  }
+  if (exact) return { start: cur.start, id: cur.id };
+  const lo = cur ? landing(cur) : head + 1000;
+  return { start: Math.floor((lo + LEAD) / 1000), id: '' };          // (start >= the second of lo)
+}
 // The nearest alert the step `dir` from `from` (a landing time) that `ok`
 // takes, from the server (outside the loaded range, or when the loaded
 // marks are grouped by slot and would hide some).
-async function findOutside(dir, from, names, ok) {
-  // (One camera: asked for by name; several as a list, unless a name holds
-  // a comma, which the list would split: then they are filtered here.)
+// `key`: the cursor a keyset walk starts from (see stepCursor).
+async function findOutside(dir, from, names, ok, key) {
   if (!names.length) return null;
-  const single = names.length === 1 ? '&camera=' + enc(names[0]) : names.some(n => n.includes(',')) ? '' : '&cameras=' + enc(names.join(','));
   const set = new Set(names);
   const take = (e) => set.has(e.camera) && passes(e) && ok(e);
+  if (key && (state.features || []).includes('events_keyset')) {
+    // Pages in stepOrder from the cursor on (newest first going back): the
+    // first alert taken is the nearest, however many lie between.
+    const cams = '&cams=' + enc(JSON.stringify(names));
+    let c = key;
+    for (let k = 0; k < 40; k++) {
+      const at = dir < 0 ? '&before=' + c.start + (c.id ? '&before_id=' + enc(c.id) : '') : '&after=' + c.start + (c.id ? '&after_id=' + enc(c.id) : '');
+      const evs = (await api('/api/events?limit=500' + at + cams)).events || [];
+      const hit = evs.find(take);
+      if (hit) return hit;
+      if (evs.length < 500) return null;
+      const l = evs[evs.length - 1];
+      // (A page that does not move on would come back the same.)
+      if (dir * stepOrder(l, c) <= 0) return null;
+      c = { start: l.start, id: l.id };
+    }
+    return null;
+  }
+  // (One camera: asked for by name; several as a list, unless a name holds
+  // a comma, which the list would split: then they are filtered here.)
+  const single = names.length === 1 ? '&camera=' + enc(names[0]) : names.some(n => n.includes(',')) ? '' : '&cameras=' + enc(names.join(','));
   const best = (xs) => xs.reduce((a, b) => ((dir < 0) === (stepOrder(a, b) > 0) ? a : b));
   if (dir < 0) {
     const until = Math.floor((from + LEAD) / 1000) + 1;
@@ -2416,7 +2451,7 @@ async function stepAlert(dir) {
       // nearest: one that ended just before it is not loaded. Ask then.)
       if (hit && dir < 0 && landing(hit) < D.evRange[0]) hit = null;
     }
-    if (!hit) { try { hit = await findOutside(dir, dir < 0 ? Math.max(head, active ? last.at : head) : Math.min(head, active ? last.at : head), names, ok); } catch (e) { hit = null; } }
+    if (!hit) { try { hit = await findOutside(dir, dir < 0 ? Math.max(head, active ? last.at : head) : Math.min(head, active ? last.at : head), names, ok, stepCursor(dir, head, cur)); } catch (e) { hit = null; } }
     if (!hit) { const w = kindsOn.size ? [...kindsOn].map(k => KINDS[k].label.toLowerCase()).join('/') + ' ' : ''; note(dir < 0 ? t('livetl.no_earlier', 'No earlier {kinds}alert', { kinds: w }) : t('livetl.no_later', 'No later {kinds}alert', { kinds: w })); return; }
     seek(landing(hit), true);
     S.lastStep = { dir, id: hit.id, at: S.playhead, ids: skip.filter(x => Math.abs(x.at - S.playhead) < STEP_AGAIN_MS).concat({ id: hit.id, at: S.playhead }) };

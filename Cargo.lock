@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "ambersight"
-version = "0.13.8"
+version = "0.13.9"
 dependencies = [
  "aes",
  "aes-gcm",

@@ -9,6 +9,7 @@ export const state = {
   isAdmin: true,        // refined by /api/whoami
   role: 'admin',        // 'viewer' | 'operator' | 'admin' (from /api/whoami)
   perms: null,          // an operator's rights (/api/whoami perms): { ptz, talk_clip, arm, events, camera_detection, lights, siren, reboot, ... }
+  features: [],         // what the server can do (/api/whoami features)
   authRequired: false,  // false = open-LAN mode: no sign-in UI
   cams: [],             // last /api/cameras result
   overlayVars: {},      // named overlay variables (name -> value) from /api/cameras

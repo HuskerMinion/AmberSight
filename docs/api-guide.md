@@ -328,7 +328,7 @@ can do the same to notice that the server was updated, or ignore it.
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
-| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `events_latest` = `GET /api/events?latest_per_camera=1` (the newest event per camera, section 5), `apple_plain_mp4` = to Apple's players (User-Agent `AppleCoreMedia`, or WebKit that is not Chrome or Android) a playback window or an event clip made from recordings is a plain MP4 (one `moov` with the whole sample table; converted answers stay fragmented), so AVFoundation starts without reading every fragment and long windows are fine, `alerts_ws` = notifications over `GET /api/alerts/ws` (section 5, Notifications over a WebSocket), `siren_sound` = `/api/cameras/:id/siren-sound` (a Reolink camera's own siren sound, section 4), `camera_reboot` = operators with the `reboot` right may restart a camera (`POST /api/cameras/:id/reboot`; older servers: admins only), `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `events_latest` = `GET /api/events?latest_per_camera=1` (the newest event per camera, section 5), `apple_plain_mp4` = to Apple's players (User-Agent `AppleCoreMedia`, or WebKit that is not Chrome or Android) a playback window or an event clip made from recordings is a plain MP4 (one `moov` with the whole sample table; converted answers stay fragmented), so AVFoundation starts without reading every fragment and long windows are fine, `alerts_ws` = notifications over `GET /api/alerts/ws` (section 5, Notifications over a WebSocket), `events_keyset` = keyset paging and the `cams` JSON camera list on `GET /api/events` (`after`, `before`, section 5), `siren_sound` = `/api/cameras/:id/siren-sound` (a Reolink camera's own siren sound, section 4), `camera_reboot` = operators with the `reboot` right may restart a camera (`POST /api/cameras/:id/reboot`; older servers: admins only), `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -1729,12 +1729,37 @@ confirmed what was seen. Event times are **epoch seconds** (UTC).
 | `review` | string | any | Comma-separated verdicts to include: `false_alarm`, `ok`, `none` (not reviewed yet). `any`, or leaving it out, means no filter. Unknown words are ignored. |
 | `ids` | string | none | Comma-separated event ids: only these events (up to 200). Ids that cannot be event ids are skipped; with none left, no events are returned |
 | `latest_per_camera` | bool | false | `1`: only the newest event of each camera, newest first, one per camera at most (camera names in any case count as one camera). Only events that **start** at or after `since`; `since` defaults to 24 hours ago and goes back at most 31 days. `limit` and `offset` are ignored; the other filters apply as usual. Same item shape as the ordinary list. Servers that have it list `events_latest` in `features`. |
+| `cams` | JSON array | none | Camera **names** as a JSON array, URL-encoded, e.g. `cams=%5B%22Front%2C%20Door%22%2C%22Garage%22%5D` for `["Front, Door","Garage"]`: for names that hold a comma, which `cameras` would split. Names are kept as given (not trimmed) and matched as `cameras` matches them; up to 200, added to `cameras`. Dropped for a restricted viewer as `cameras` are. Not a JSON array of strings: 400; an empty array: no events. Servers that have it list `events_keyset` in `features`. |
+| `after`, `after_id` | int (s), string | none | Keyset paging: only events **strictly after** the cursor (`after`, `after_id`) in (start, id) order, sorted **oldest first** (start, then id). See [Keyset paging](#keyset-paging-after-and-before). |
+| `before`, `before_id` | int (s), string | none | Only events **strictly before** the cursor (`before`, `before_id`), sorted newest first (start, then id, both descending). |
 
 All filters combine (AND). A restricted viewer who gives no camera gets their allowed cameras.
 
-The list is sorted newest first. There is no "changed since" cursor. To poll for new events, ask
+The list is sorted newest first (by start, then id), unless `after` is given. There is no "changed since" cursor. To poll for new events, ask
 with `since=<newest start you have>` every 15–60 s while the app is in the foreground, and drop
 duplicates by `id`.
+
+#### Keyset paging: `after` and `before`
+
+`offset` paging gets slower and shifts as events come in; to walk a long stretch event by event,
+page from a cursor instead. The cursor is an event's (`start`, `id`): give the last event of the
+page you have to get the next page. Ids are ASCII and compare bytewise (as JavaScript's `<` on
+strings and SQLite do): `B` sorts before `a`. `after_id` / `before_id` default to `""`, which is
+before every id, so `after=T` alone gives events that start at or after `T`, and `before=T` alone
+those that start before `T`. A page is a lookup on the start index from the cursor on, however
+many events lie before it.
+
+- One of `after` and `before`, not both (400). Not with `latest_per_camera` (400). An id that
+  cannot be an event id: 400. An id without its time: 400.
+- `limit` is at most **500** here (a larger one gets 500); `offset` is ignored. A page shorter than `min(limit, 500)` is the last.
+- Every other filter applies as usual (`camera`, `cameras`, `cams`, `since`, `until`, `object`,
+  `objects`, `all`, ...), and a restricted viewer only gets the cameras they may see. Same item
+  shape as the ordinary list.
+- Servers that have it list `events_keyset` in `features`.
+
+```
+GET /api/events?after=1762166400&after_id=front_door-1762166400&limit=500&cams=%5B%22Front%2C%20Door%22%5D
+```
 
 ```json
 {
@@ -3574,6 +3599,13 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.13.9**
+
+- `GET /api/events` keyset paging: `after` / `after_id` (oldest first) and `before` /
+  `before_id` (newest first) page from an event's (start, id), at most 500 a page. `cams`: camera
+  names as a JSON array, for names that hold a comma. Feature `events_keyset`. See
+  [Keyset paging](#keyset-paging-after-and-before).
 
 **New in 0.13.8**
 

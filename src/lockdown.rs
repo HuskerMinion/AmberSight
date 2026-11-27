@@ -391,10 +391,13 @@ pub fn foreign_programs(names: &[String]) -> Vec<String> {
 }
 
 /// The files the capture helper (run from this folder in a person's own
-/// session) and the shortcuts need to read and run.
+/// session) and the shortcuts need to read and run, and the uninstaller:
+/// Windows Settings starts it before asking for administrator rights, so
+/// without read-and-run there it fails ("Windows cannot access the specified
+/// device, path, or file") while Control Panel, which asks first, works.
 pub fn is_helper_file(name: &str) -> bool {
     let l = name.to_lowercase();
-    matches!(l.as_str(), "ambersight.exe" | "ffmpeg.exe" | "ffprobe.exe" | "ffmpeg-path.txt") || l.ends_with(".dll") || l.ends_with(".ico")
+    matches!(l.as_str(), "ambersight.exe" | "ffmpeg.exe" | "ffprobe.exe" | "ffmpeg-path.txt" | "uninstall.exe") || l.ends_with(".dll") || l.ends_with(".ico")
 }
 
 /// The server's own ffmpeg files that the capture helper (an ordinary
@@ -1366,6 +1369,8 @@ mod tests {
         let pairs = parse_save_pairs("ambersight.exe\nD:P(A;;FA;;;SY)\nDirectML.dll\nD:P(A;;FA;;;SY)(A;;0x1200a9;;;BU)\nconfig.toml\nD:P(A;;FA;;;SY)\nffmpeg.exe\nD:P(A;;FA;;;SY)");
         assert_eq!(helper_files_needing_grant(&pairs), vec!["ambersight.exe".to_string(), "ffmpeg.exe".to_string()]);
         assert!(is_helper_file("VCRUNTIME140.DLL") && is_helper_file("ambersight.ico") && !is_helper_file("config.toml") && !is_helper_file("install.cmd"));
+        // Settings > Apps starts the uninstaller as the signed-in person (UAC comes after).
+        assert!(is_helper_file("uninstall.exe") && is_helper_file("Uninstall.EXE"));
     }
 
     #[test]

@@ -1041,6 +1041,13 @@ fn summary(r: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The report slots are one per process: tests that take them (directly, or
+    /// through a report's ONVIF lookup) run one at a time.
+    static SLOTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn slots() -> std::sync::MutexGuard<'static, ()> {
+        SLOTS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     use super::*;
 
     fn cfg(url: &str) -> CameraConfig {
@@ -1085,6 +1092,7 @@ mod tests {
     /// The review's leaks, with its exact strings.
     #[tokio::test]
     async fn review_leaks_stay_out_of_the_report() {
+        let _slots = slots();
         // 1. A raw '/' in the password.
         let mut c = cfg("rtsp://slashusr:pa/ss99xx@127.0.0.1:9/main");
         assert_eq!((c.username.as_str(), c.password.as_str(), c.url.as_str()), ("slashusr", "pa/ss99xx", "rtsp://127.0.0.1:9/main"));
@@ -1152,6 +1160,7 @@ mod tests {
     /// special characters, raw and percent-encoded.
     #[tokio::test]
     async fn report_never_contains_the_sign_in() {
+        let _slots = slots();
         let pw = "S3cr:t@P#ss/w%rd&x y";
         let enc = percent_encoding::utf8_percent_encode(pw, ENC).to_string();
         let qpw = "Qu3ryP4ss!";
@@ -1233,6 +1242,7 @@ mod tests {
     /// report's own last pass over the sign-in, and the whole report neither.
     #[tokio::test]
     async fn onvif_answers_echoing_the_security_header_stay_out_of_the_report() {
+        let _slots = slots();
         use crate::onvif::echo_device;
         for status in ["400 Bad Request", "500 Internal Server Error"] {
             let (port, sent) = echo_device::start(status);
@@ -1306,6 +1316,7 @@ mod tests {
 
     #[test]
     fn one_report_per_camera_at_a_time() {
+        let _slots = slots();
         let a = begin(4242).expect("first");
         assert!(begin(4242).is_none());
         assert!(begin(4243).is_some());

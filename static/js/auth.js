@@ -76,6 +76,7 @@ export function applyWho(who) {
   // (An older server sends no role: admin or viewer from the flag.)
   state.role = who.role || (who.admin ? 'admin' : 'viewer');
   state.perms = who.perms || null;
+  state.features = Array.isArray(who.features) ? who.features : [];
   state.limited = !!who.limited;
   renderUserMenu();
 }

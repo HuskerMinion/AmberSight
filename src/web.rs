@@ -3136,9 +3136,12 @@ async fn export(
 ) -> Response {
     let q = EventQuery { camera: q.camera.filter(|c| !c.is_empty()), ..q };
     // `ids=a,b,c` (exactly these events) or the list filters (`cameras`,
-    // `protect`, `objects`, `review`): the events the caller may see.
+    // `cams`, `protect`, `objects`, `review`): the events the caller may see.
     let by_ids = q.ids.is_some();
-    let by_query = by_ids || q.cameras.is_some() || q.protect.is_some() || q.objects.is_some() || q.review.is_some();
+    if q.cams.as_deref().is_some_and(|v| json_names(v, 200).is_none()) {
+        return (StatusCode::BAD_REQUEST, "cams must be a JSON array of camera names").into_response();
+    }
+    let by_query = by_ids || q.cameras.is_some() || q.cams.is_some() || q.protect.is_some() || q.objects.is_some() || q.review.is_some();
     let id_query = if by_query {
         let names = visible_names(&engine, &access);
         // Same cap as the classic path. Events the cameras' settings hide as
@@ -3280,7 +3283,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4", "alerts_ws", "camera_reboot", "siren_sound"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4", "alerts_ws", "camera_reboot", "siren_sound", "events_keyset"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -3356,6 +3359,23 @@ struct EventQuery {
     /// `since` (default the last 24 hours, at most 31 days back).
     #[serde(default, deserialize_with = "query_flag")]
     latest_per_camera: bool,
+    /// Camera names as a JSON array (`["Front, Door","Garage"]`): names
+    /// that hold a comma, which `cameras` would split. Added to `cameras`.
+    #[serde(default)]
+    cams: Option<String>,
+    /// Keyset paging: the events strictly after (`after`, `after_id`) in
+    /// (start, id) order, oldest first. No `after_id`: "" (before every id),
+    /// so the events that start at or after `after`.
+    #[serde(default)]
+    after: Option<i64>,
+    #[serde(default)]
+    after_id: Option<String>,
+    /// ... or strictly before (`before`, `before_id`), newest first. No
+    /// `before_id`: the events that start before `before`.
+    #[serde(default)]
+    before: Option<i64>,
+    #[serde(default)]
+    before_id: Option<String>,
 }
 fn default_limit() -> usize {
     100
@@ -3384,6 +3404,12 @@ fn csv_list(v: &Option<String>, max: usize) -> Vec<String> {
     v.as_deref().unwrap_or("").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).take(max).collect()
 }
 
+/// `cams`: a JSON array of camera names, kept exactly (None: not a list of names).
+fn json_names(v: &str, max: usize) -> Option<Vec<String>> {
+    let names: Vec<String> = serde_json::from_str(v).ok()?;
+    Some(names.into_iter().filter(|s| !s.is_empty()).take(max).collect())
+}
+
 /// The database query for an events request, or None when nothing can match
 /// (a camera the caller may not see, no cameras left). `visible` = the
 /// cameras a limited caller may see (None: all). `hide_unconfirmed` as the
@@ -3397,7 +3423,15 @@ fn event_db_query(q: &EventQuery, access: &Access, visible: Option<Vec<String>>,
     if access.limited() && q.camera.as_deref().is_some_and(|c| !access.can_name(c)) {
         return None;
     }
-    let asked = csv_list(&q.cameras, 200);
+    let mut asked = csv_list(&q.cameras, 200);
+    if let Some(c) = q.cams.as_deref() {
+        // (Not a list of names, or an empty one: nothing, never every camera.)
+        let named = json_names(c, 200)?;
+        if named.is_empty() {
+            return None;
+        }
+        asked.extend(named);
+    }
     let mut cameras: Vec<String> = asked.iter().filter(|c| access.can_name(c)).cloned().collect();
     if !asked.is_empty() && cameras.is_empty() {
         return None;
@@ -3436,20 +3470,55 @@ fn event_db_query(q: &EventQuery, access: &Access, visible: Option<Vec<String>>,
         objects_any: csv_list(&q.objects, 20),
         ids,
         start_from: None,
+        keyset: None,
     })
+}
+
+/// The keyset of an events request (None: not asked for); Err: malformed.
+fn keyset_of(q: &EventQuery) -> Result<Option<crate::db::Keyset>, &'static str> {
+    let id_ok = |id: &Option<String>| id.as_deref().is_none_or(event_id_ok);
+    if !id_ok(&q.after_id) || !id_ok(&q.before_id) {
+        return Err("after_id / before_id must be an event id");
+    }
+    if (q.after_id.is_some() && q.after.is_none()) || (q.before_id.is_some() && q.before.is_none()) {
+        return Err("after_id / before_id need after / before");
+    }
+    let k = match (q.after, q.before) {
+        (Some(_), Some(_)) => return Err("after and before cannot both be given"),
+        (Some(s), None) => crate::db::Keyset { start: s, id: q.after_id.clone().unwrap_or_default(), ascending: true },
+        (None, Some(s)) => crate::db::Keyset { start: s, id: q.before_id.clone().unwrap_or_default(), ascending: false },
+        (None, None) => return Ok(None),
+    };
+    if q.latest_per_camera {
+        return Err("after / before do not go with latest_per_camera");
+    }
+    Ok(Some(k))
 }
 
 async fn events(
     State(engine): State<Arc<Engine>>,
     axum::Extension(access): axum::Extension<Access>,
     Query(q): Query<EventQuery>,
-) -> Json<serde_json::Value> {
-    // One page at most this big (the web app asks for up to 500).
-    let q = EventQuery { camera: q.camera.filter(|c| !c.is_empty()), limit: q.limit.min(EVENTS_PAGE_MAX), offset: q.offset.min(EVENTS_OFFSET_MAX), ..q };
+) -> Response {
+    let keyset = match keyset_of(&q) {
+        Ok(k) => k,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    if q.cams.as_deref().is_some_and(|c| json_names(c, 200).is_none()) {
+        return (StatusCode::BAD_REQUEST, "cams must be a JSON array of camera names").into_response();
+    }
+    // One page at most this big (the web app asks for up to 500; a keyset page at most 500).
+    let max = if keyset.is_some() { EVENTS_KEYSET_MAX } else { EVENTS_PAGE_MAX };
+    let q = EventQuery { camera: q.camera.filter(|c| !c.is_empty()), limit: q.limit.min(max), offset: q.offset.min(EVENTS_OFFSET_MAX), ..q };
     let hide = if q.all { Vec::new() } else { engine.hide_unconfirmed_cameras() };
     let Some(mut query) = event_db_query(&q, &access, visible_names(&engine, &access), hide, q.limit) else {
-        return Json(serde_json::json!({ "events": [] }));
+        return Json(serde_json::json!({ "events": [] })).into_response();
     };
+    if keyset.is_some() {
+        // (The cursor says where the page starts.)
+        query.offset = 0;
+        query.keyset = keyset;
+    }
     let latest = q.latest_per_camera;
     if latest {
         // The walk reads every event of the stretch, so it is kept to a month.
@@ -3488,10 +3557,12 @@ async fn events(
     })
     .await
     .unwrap_or_default();
-    Json(serde_json::json!({ "events": out }))
+    Json(serde_json::json!({ "events": out })).into_response()
 }
 
 const EVENTS_PAGE_MAX: usize = 2000;
+/// Most events one keyset page (`after` / `before`) holds.
+const EVENTS_KEYSET_MAX: usize = 500;
 /// Most cameras one `latest_per_camera` answer holds.
 const LATEST_CAMERAS_MAX: usize = 500;
 const EVENTS_OFFSET_MAX: usize = 1_000_000;
@@ -8173,7 +8244,7 @@ mod event_filter_tests {
         q
     }
     fn serde_urlencoded_empty() -> EventQuery {
-        EventQuery { offset: 0, limit: 100, camera: None, since: None, until: None, object: None, all: false, cameras: None, protect: None, objects: None, review: None, ids: None, latest_per_camera: false }
+        EventQuery { offset: 0, limit: 100, camera: None, since: None, until: None, object: None, all: false, cameras: None, protect: None, objects: None, review: None, ids: None, latest_per_camera: false, cams: None, after: None, after_id: None, before: None, before_id: None }
     }
     fn limited(names: &[&str]) -> Access {
         Access(Some(names.iter().map(|n| crate::config::slug(n)).collect()))
@@ -9738,6 +9809,75 @@ mod operator_tests {
         // Advertised.
         assert!(super::FEATURES.contains(&"events_latest"));
         assert!(super::FEATURES.contains(&"apple_plain_mp4"));
+    }
+
+    #[tokio::test]
+    async fn keyset_pages_of_events_with_camera_names_as_json() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        let mut cfg: crate::config::Config = toml::from_str("[[cameras]]\nname = \"Front, Door\"\nurl = \"rtsp://192.0.2.1/a\"\n[[cameras]]\nname = \"Garage\"\nurl = \"rtsp://192.0.2.2/a\"\nai_hide_unconfirmed = true\n[[cameras]]\nname = \"Shed\"\nurl = \"rtsp://192.0.2.3/a\"\n").unwrap();
+        for (name, admin, cams) in [("ann", true, vec![]), ("lim", false, vec!["Front, Door".to_string()])] {
+            cfg.server.users.push(crate::config::UserConfig { username: name.into(), password: crate::auth::hash_password(&format!("pw-{name}-1")), admin, cameras: cams, disabled: false, role: String::new(), perms: Default::default() });
+        }
+        let e = crate::engine::Engine::for_test(cfg);
+        let ev = |id: &str, cam: &str, start: i64| crate::engine::Event { id: id.into(), camera_id: 1, camera: cam.into(), start, end: start + 10, score: 0.5, clip: None, thumb: None, objects: vec!["person".into()], protect: false };
+        // Two cameras' alerts in the same seconds, one Garage alert hidden as unconfirmed.
+        for s in 100..110 {
+            e.db.insert_event(&ev(&format!("front_door-{s}"), "Front, Door", s)).unwrap();
+            e.db.insert_event(&ev(&format!("garage-{s}"), "Garage", s)).unwrap();
+            e.db.insert_event(&ev(&format!("shed-{s}"), "Shed", s)).unwrap();
+        }
+        e.db.set_event_unconfirmed("garage-105").unwrap();
+        let app = super::build_router(e.clone());
+        let call = |path: String, who: &'static str| {
+            let req = Request::builder().uri(path).header(header::HOST, "localhost:8090").header(header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{who}:pw-{who}-1")))).body(Body::empty()).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let s = r.status();
+                let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 22).await.unwrap()).unwrap_or_default();
+                (s, v)
+            }
+        };
+        let get = |path: String, who: &'static str| async move {
+            let (s, v) = call(path, who).await;
+            assert_eq!(s, StatusCode::OK);
+            v["events"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        let cams = |names: &[&str]| percent_encoding::utf8_percent_encode(&serde_json::to_string(names).unwrap(), percent_encoding::NON_ALPHANUMERIC).to_string();
+        let both = cams(&["Front, Door", "Garage"]);
+        // Oldest first after the cursor, ties by id; strictly after it.
+        assert_eq!(get(format!("/api/events?after=104&after_id=front_door-104&limit=4&cams={both}"), "ann").await, ["garage-104", "front_door-105", "front_door-106", "garage-106"]);
+        // (garage-105 is unconfirmed on a camera that hides those; all=1 shows it.)
+        assert_eq!(get(format!("/api/events?after=105&limit=2&cams={both}"), "ann").await, ["front_door-105", "front_door-106"]);
+        assert_eq!(get(format!("/api/events?after=105&limit=2&all=1&cams={both}"), "ann").await, ["front_door-105", "garage-105"]);
+        // Newest first before it; no id: those that start before `before`.
+        assert_eq!(get(format!("/api/events?before=104&before_id=garage-104&limit=3&cams={both}"), "ann").await, ["front_door-104", "garage-103", "front_door-103"]);
+        assert_eq!(get(format!("/api/events?before=101&limit=5&cams={both}"), "ann").await, ["garage-100", "front_door-100"]);
+        // The row shape is /api/events' own.
+        let (_, v) = call(format!("/api/events?after=100&limit=1&cams={}", cams(&["Front, Door"])), "ann").await;
+        let row = &v["events"][0];
+        assert!(row["id"] == "front_door-100" && row["camera"] == "Front, Door" && row["start"] == 100 && row.get("review").is_some(), "{v}");
+        // At most 500 a page.
+        for s in 0..520 {
+            e.db.insert_event(&ev(&format!("shed-a{s}"), "Shed", 50)).unwrap();
+        }
+        assert_eq!(get(format!("/api/events?after=0&limit=2000&cams={}", cams(&["Shed"])), "ann").await.len(), 500);
+        // A limited account: only its cameras, a forbidden one asked alone gives nothing.
+        assert_eq!(get(format!("/api/events?after=108&cams={}", cams(&["Front, Door", "Garage", "Shed"])), "lim").await, ["front_door-108", "front_door-109"]);
+        assert!(get(format!("/api/events?after=0&cams={}", cams(&["Garage"])), "lim").await.is_empty());
+        // Not a list of names: refused; an empty list: nothing (never every camera).
+        for bad in ["after=1&after_id=a.b", "after=1&before=2", "after_id=x", "after=1&latest_per_camera=1", "cams=Front", "cams=%5B1%5D"] {
+            assert_eq!(call(format!("/api/events?{bad}"), "ann").await.0, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert!(get("/api/events?after=0&cams=%5B%5D".into(), "ann").await.is_empty());
+        assert!(super::FEATURES.contains(&"events_keyset"));
+        // Export takes `cams` as a filter too: alone it is the camera choice a
+        // limited account needs (no "choose a camera" refusal), and not a list: refused.
+        assert_eq!(call(format!("/api/export?cams={}", cams(&["Front, Door"])), "lim").await.0, StatusCode::OK);
+        assert_eq!(call("/api/export?cams=Front".into(), "ann").await.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

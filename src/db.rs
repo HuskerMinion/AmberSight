@@ -97,6 +97,18 @@ pub struct EventQuery {
     pub ids: Vec<String>,
     /// Only events that start at or after this (`since` is about the end).
     pub start_from: Option<i64>,
+    /// Keyset paging (see [`Keyset`]); `offset` is not used with it.
+    pub keyset: Option<Keyset>,
+}
+
+/// A page of events strictly after (`ascending`) or before the cursor
+/// (`start`, `id`) in (start, id) order, in that direction. Ids compare
+/// bytewise (they are ASCII), so "" is before every id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Keyset {
+    pub start: i64,
+    pub id: String,
+    pub ascending: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -425,6 +437,39 @@ fn event_filter_sql(q: &EventQuery, cols: &str) -> (String, Vec<rusqlite::types:
         args.push(from.into());
     }
     (sql, args)
+}
+
+/// The query for one page of events: newest first by `limit` and `offset`,
+/// or from the keyset cursor on in its direction.
+fn events_page_sql(q: &EventQuery) -> (String, Vec<rusqlite::types::Value>) {
+    let (mut sql, mut args) = event_filter_sql(q, EV_COLS);
+    match &q.keyset {
+        // (The start bound keeps the walk on the start index from the cursor on.)
+        Some(k) => {
+            let (cmp, order) = if k.ascending { (">", "ASC") } else { ("<", "DESC") };
+            sql.push_str(&format!(" AND start {cmp}= ? AND (start {cmp} ? OR id {cmp} ?) ORDER BY start {order}, id {order} LIMIT ?"));
+            args.extend([k.start.into(), k.start.into(), k.id.clone().into()]);
+            args.push((q.limit.min(i64::MAX as usize) as i64).into());
+        }
+        None => {
+            sql.push_str(" ORDER BY start DESC, id DESC LIMIT ? OFFSET ?");
+            args.push((q.limit.min(i64::MAX as usize) as i64).into());
+            args.push((q.offset.min(i64::MAX as usize) as i64).into());
+        }
+    }
+    (sql, args)
+}
+
+#[cfg(test)]
+impl Db {
+    /// The plan SQLite makes for a page of events (tests: it walks the start index).
+    pub fn events_page_plan(&self, q: &EventQuery) -> Vec<String> {
+        let (sql, args) = events_page_sql(q);
+        let conn = self.lock();
+        let mut st = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows = st.query_map(params_from_iter(args), |r| r.get::<_, String>(3)).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
+    }
 }
 
 fn upsert_event(conn: &Connection, ev: &Event) -> Result<()> {
@@ -2474,10 +2519,7 @@ impl Db {
     }
 
     pub fn query_events(&self, q: &EventQuery) -> Result<Vec<Event>> {
-        let (mut sql, mut args) = event_filter_sql(q, EV_COLS);
-        sql.push_str(" ORDER BY start DESC, id DESC LIMIT ? OFFSET ?");
-        args.push((q.limit.min(i64::MAX as usize) as i64).into());
-        args.push((q.offset.min(i64::MAX as usize) as i64).into());
+        let (sql, args) = events_page_sql(q);
         let conn = self.lock();
         let mut st = conn.prepare(&sql)?;
         let rows = st.query_map(params_from_iter(args), event_from_row)?;
@@ -3861,6 +3903,56 @@ mod tests {
         assert_eq!(db.query_events(&q).unwrap().len(), 1);
         assert_eq!(db.last_segment_end("porch").unwrap(), Some(1000));
         assert_eq!(db.ai_reviews(0, Some("Porch"), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn keyset_pages_walk_start_then_id_in_both_directions() {
+        let db = Db::open_in_memory().unwrap();
+        // Ties in the same second (ids out of insert order), a long alert, a comma name.
+        let rows = [("b-10", "Front", 10), ("a-10", "Front", 10), ("C-10", "Back, Yard", 10), ("z-9", "Front", 9), ("a-11", "Back, Yard", 11), ("long-5", "Front", 5), ("x-12", "Front", 12)];
+        for (id, cam, s) in rows {
+            db.insert_event(&ev(id, cam, s, if id == "long-5" { 5000 } else { s + 1 }, &[])).unwrap();
+        }
+        let page = |start: i64, id: &str, ascending: bool, limit: usize, cams: &[&str]| {
+            let q = EventQuery { limit, keyset: Some(Keyset { start, id: id.into(), ascending }), cameras: cams.iter().map(|c| c.to_string()).collect(), ..Default::default() };
+            db.query_events(&q).unwrap().into_iter().map(|e| e.id).collect::<Vec<_>>()
+        };
+        // The order is (start, id), ids bytewise ("C" before "a").
+        let mut all: Vec<(i64, &str)> = rows.iter().map(|r| (r.2, r.0)).collect();
+        all.sort();
+        let ids: Vec<&str> = all.iter().map(|r| r.1).collect();
+        assert_eq!(ids, ["long-5", "z-9", "C-10", "a-10", "b-10", "a-11", "x-12"]);
+        assert_eq!(page(0, "", true, 100, &[]), ids);
+        let mut rev = ids.clone();
+        rev.reverse();
+        assert_eq!(page(1000, "", false, 100, &[]), rev);
+        // Strictly after / before the cursor; "" is before every id.
+        assert_eq!(page(10, "a-10", true, 100, &[]), ["b-10", "a-11", "x-12"]);
+        assert_eq!(page(10, "", true, 100, &[]), ["C-10", "a-10", "b-10", "a-11", "x-12"]);
+        assert_eq!(page(10, "a-10", false, 100, &[]), ["C-10", "z-9", "long-5"]);
+        assert_eq!(page(10, "", false, 100, &[]), ["z-9", "long-5"]);
+        assert_eq!(page(10, "b-10", true, 100, &[]), ["a-11", "x-12"]);
+        assert!(page(12, "x-12", true, 100, &[]).is_empty());
+        // The limit, and paging on from the last row reaches every row once.
+        assert_eq!(page(0, "", true, 2, &[]), ["long-5", "z-9"]);
+        let (mut cur, mut seen) = ((0i64, String::new()), Vec::new());
+        loop {
+            let q = EventQuery { limit: 2, keyset: Some(Keyset { start: cur.0, id: cur.1.clone(), ascending: true }), ..Default::default() };
+            let p = db.query_events(&q).unwrap();
+            let Some(l) = p.last() else { break };
+            cur = (l.start, l.id.clone());
+            seen.extend(p.into_iter().map(|e| e.id));
+        }
+        assert_eq!(seen, ids);
+        // Camera names with a comma are matched whole.
+        assert_eq!(page(0, "", true, 100, &["Back, Yard"]), ["C-10", "a-11"]);
+        assert!(page(0, "", true, 100, &["Back"]).is_empty());
+        // The walk is on the start index (no full scan, whatever lies before the cursor).
+        for ascending in [true, false] {
+            let q = EventQuery { limit: 10, keyset: Some(Keyset { start: 10, id: "a-10".into(), ascending }), cameras: vec!["Front".into()], hide_unconfirmed: vec!["Front".into()], ..Default::default() };
+            let plan = db.events_page_plan(&q).join(" | ");
+            assert!(plan.contains("idx_events_start (start") && !plan.contains("SCAN events"), "{plan}");
+        }
     }
 
     #[test]
