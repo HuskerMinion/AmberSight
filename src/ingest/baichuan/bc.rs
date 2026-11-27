@@ -38,6 +38,24 @@ pub const MSG_LED_SET: u32 = 209;
 /// WRITE: sound the siren for a number of rounds, or stop it
 /// (`<audioPlayInfo>`). Camera controls only: see `CONTROL_WRITES`.
 pub const MSG_AUDIO_PLAY: u32 = 263;
+// The siren's sound (the camera's own stored sound, or one sent to it). As
+// the official Reolink app sends them (decoded from its traffic, 2026-11-27).
+/// Read the size of the stored custom sound (`<audioFileInfo>`, `fileSize`
+/// 0: none). Read-only. Not reliable behind a Home Hub (reads 0).
+pub const MSG_AUDIO_FILE_INFO: u32 = 260;
+/// WRITE: send a custom siren sound: a header (`<audioFileInfo>`), then the
+/// ADPCM data in pieces (binary, not encrypted). Camera controls only.
+pub const MSG_AUDIO_FILE_SEND: u32 = 261;
+/// WRITE: the custom sound is all sent (extension only). Camera controls only.
+pub const MSG_AUDIO_FILE_DONE: u32 = 262;
+/// Read the siren's settings (`<audioCfg>`: `audioSelect` 1 = the custom
+/// sound, 0 = the built-in one; volume). Read-only.
+pub const MSG_AUDIO_CFG_GET: u32 = 264;
+/// WRITE: the siren's settings (the 264 answer sent back with `audioSelect`
+/// changed). Camera controls only.
+pub const MSG_AUDIO_CFG_SET: u32 = 265;
+/// Read what sound the camera takes (`<AudioEncodeAbility>`). Read-only.
+pub const MSG_AUDIO_ENCODE_ABILITY: u32 = 267;
 // Talk (two-way audio; see `super::talk`). Ids and their XML from public
 // protocol notes (the neolink project's dissector/messages.md).
 pub const MSG_TALK_ABILITY: u32 = 10;   // read what talk audio the camera takes (read-only)
@@ -52,15 +70,18 @@ pub const MSG_TALK: u32 = 202;          // talk audio (ADPCM packets) to the cam
 pub const ALLOWED: &[u32] =
     &[MSG_LOGIN, MSG_LOGOUT, MSG_PREVIEW, MSG_PREVIEW_STOP, MSG_MOTION_REQUEST, MSG_KEEPALIVE, MSG_BATTERY, MSG_ABILITY, MSG_DOWNLOAD,
       MSG_DOWNLOAD_STOP, MSG_GENERAL, MSG_SUPPORT, MSG_LED_GET,
+      // The siren's sound: what is stored, which is used, what it takes.
+      MSG_AUDIO_FILE_INFO, MSG_AUDIO_CFG_GET, MSG_AUDIO_ENCODE_ABILITY,
       // Talk: plays sound on the camera's speaker but changes no setting.
       MSG_TALK_ABILITY, MSG_TALK_CONFIG, MSG_TALK];
 
 /// The only messages that change something on a camera, sent only through
 /// [`write_control_msg`] (the camera controls, after their rights, confirm,
-/// rate limit and audit): the infrared/status lights (209) and the siren
-/// (263). Nothing else that writes is listed: no spotlight, no PIR, no
-/// settings, no reboot.
-pub const CONTROL_WRITES: &[u32] = &[MSG_LED_SET, MSG_AUDIO_PLAY];
+/// rate limit and audit): the infrared/status lights (209), the siren
+/// (263), and the siren's sound (261 and 262 send a custom sound, 265 picks
+/// the custom or the built-in one). Nothing else that writes is listed: no
+/// spotlight, no PIR, no other settings, no reboot.
+pub const CONTROL_WRITES: &[u32] = &[MSG_LED_SET, MSG_AUDIO_PLAY, MSG_AUDIO_FILE_SEND, MSG_AUDIO_FILE_DONE, MSG_AUDIO_CFG_SET];
 
 pub const CLASS_LEGACY: u16 = 0x6514;
 pub const CLASS_MODERN: u16 = 0x6614;
@@ -341,7 +362,7 @@ mod tests {
             assert!(write_msg(&mut out, &h, b"").is_err(), "{id} is not on the read-only list");
             assert!(!ALLOWED.contains(id));
         }
-        for id in [MSG_LOGIN, MSG_PREVIEW, MSG_SUPPORT, 288, 289, 290, 23, 105] {
+        for id in [MSG_LOGIN, MSG_PREVIEW, MSG_SUPPORT, MSG_AUDIO_FILE_INFO, MSG_AUDIO_CFG_GET, MSG_AUDIO_ENCODE_ABILITY, 266, 288, 289, 290, 23, 105] {
             let h = Header { msg_id: id, ..h.clone() };
             assert!(write_control_msg(&mut out, &h, b"").is_err(), "{id} is not a control write");
         }

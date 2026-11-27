@@ -570,6 +570,9 @@ mod tests {
             |c| c.password = "x".into(),
             |c| c.enabled = !c.enabled,
             |c| c.record = !c.record,
+            // (A new handle: the clock zone check, issue #15, starts again.)
+            |c| c.onvif_port = Some(8000),
+            |c| c.username = "y".into(),
         ] {
             let mut n = new.clone();
             f(&mut n);

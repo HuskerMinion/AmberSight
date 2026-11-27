@@ -1333,18 +1333,33 @@ impl Session {
     /// controls' writes (`bc::CONTROL_WRITES`), else a read-only message.
     /// Returns the message number (the camera answers with the same one).
     pub(super) fn send_parts(&mut self, msg_id: u32, channel: u8, ext_xml: &str, pay_xml: &str, write: bool) -> anyhow::Result<u16> {
-        let enc = |s: &str| -> Vec<u8> {
-            if s.is_empty() {
+        self.send_ctl(msg_id, channel, None, ext_xml, pay_xml.as_bytes(), false, write)
+    }
+
+    /// A control exchange's message: the extension and the payload, each
+    /// encrypted on its own (an empty one stays empty), or the payload as is
+    /// when `raw` (binary data). `num`: reuse a message number (the pieces of
+    /// a sound sent to the camera), else a new one. `write`: one of
+    /// `bc::CONTROL_WRITES`, else one of `bc::ALLOWED`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn send_ctl(&mut self, msg_id: u32, channel: u8, num: Option<u16>, ext_xml: &str, payload: &[u8], raw: bool, write: bool) -> anyhow::Result<u16> {
+        let enc = |d: &[u8]| -> Vec<u8> {
+            if d.is_empty() {
                 return Vec::new();
             }
             match &self.aes {
-                Some(a) => a.encrypt(s.as_bytes()),
-                None => bc::xor_crypt(channel as u32, s.as_bytes()),
+                Some(a) => a.encrypt(d),
+                None => bc::xor_crypt(channel as u32, d),
             }
         };
-        let ext = enc(ext_xml);
-        let body = [ext.clone(), enc(pay_xml)].concat();
-        let num = self.next_num();
+        let ext = enc(ext_xml.as_bytes());
+        let mut body = ext.clone();
+        if raw {
+            body.extend_from_slice(payload);
+        } else {
+            body.extend_from_slice(&enc(payload));
+        }
+        let num = num.unwrap_or_else(|| self.next_num());
         let h = Header { msg_id, body_len: 0, channel, stream: 0, msg_num: num, status: 0, class: bc::CLASS_MODERN_OFS, payload_offset: Some(ext.len() as u32) };
         if write {
             bc::write_control_msg(&mut self.sock, &h, &body)?;

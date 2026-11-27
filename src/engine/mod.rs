@@ -175,6 +175,14 @@ pub struct CameraState {
     /// How far the camera's own clock is from this computer's (seconds),
     /// from its RTCP sender reports.
     pub clock_skew: Option<f64>,
+    /// A time-zone step (s) the stream's skew was found to be while the
+    /// camera's UTC clock, read over ONVIF, is right: its sender reports carry
+    /// local time (see `timesync::zone_step`). No clock warning while the skew
+    /// stays that step.
+    pub clock_zone: Option<f64>,
+    /// When the camera's clock was last tried over ONVIF for that (epoch s),
+    /// the stream's skew then, and whether it was read.
+    pub clock_zone_checked: Option<(i64, f64, bool)>,
     /// The camera's microphone: loudness and loud sounds (sound trigger).
     pub sound: sound::SoundState,
     /// The last wanted object the AI saw live: label, score, when (epoch ms).
@@ -1712,6 +1720,8 @@ fn make_handle(id: usize, cfg: CameraConfig) -> Arc<CameraHandle> {
             ai_last: None,
             zones_occupied: Vec::new(),
             clock_skew: None,
+            clock_zone: None,
+            clock_zone_checked: None,
             sound: Default::default(),
         }),
     })

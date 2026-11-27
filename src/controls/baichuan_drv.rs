@@ -20,6 +20,11 @@
 //!     and `onOff` `ctl::TIMED_ON_OFF` sounds the siren that many rounds (the
 //!     camera is meant to stop by itself: UNPROVEN until the live test);
 //!     `playMode` 2 with `onOff` 0 is the manual switch, off (the stop).
+//!   * The siren's sound (`siren_sound.rs`; as the official app sends it,
+//!     2026-11-27): 267 (read) what sound it takes, 264 (read) / 265 (write)
+//!     `<audioCfg>` (`audioSelect` 1: the custom sound), 260 (read) the stored
+//!     sound's size, 261 (write) a sound's header then its pieces, 262 (write)
+//!     its end. Also for a channel of a hub, while the hub reports it awake.
 //!
 //! Not done here (UNVERIFIED or not wanted yet): the spotlight (a camera
 //! that has one says so on its page, but it is not switched over port 9000:
@@ -103,13 +108,23 @@ pub struct BaichuanDriver {
     pass: String,
     channel: u8,
     base: String,
+    /// A channel of a hub, asked only for the siren's sound while the hub reports it awake.
+    hub: bool,
 }
 
 impl BaichuanDriver {
     pub fn at(base: &str, user: &str, pass: &str, channel: u32) -> Result<BaichuanDriver> {
         let (host, port) = split(base)?;
         let channel = u8::try_from(channel).map_err(|_| anyhow!("no such channel"))?;
-        Ok(BaichuanDriver { host, port, user: user.to_string(), pass: pass.to_string(), channel, base: base.to_string() })
+        Ok(BaichuanDriver { host, port, user: user.to_string(), pass: pass.to_string(), channel, base: base.to_string(), hub: false })
+    }
+
+    /// For the siren's sound only: also a channel of a hub (`hub`; the
+    /// caller saw the hub report it awake).
+    pub fn for_sound(base: &str, user: &str, pass: &str, channel: u32, hub: bool) -> Result<BaichuanDriver> {
+        let mut d = BaichuanDriver::at(base, user, pass, channel)?;
+        d.hub = hub;
+        Ok(d)
     }
 
     fn key(&self) -> String {
@@ -185,6 +200,129 @@ impl BaichuanDriver {
             }
         }
         Ok(ab)
+    }
+}
+
+// ------------------------------------------------------- the siren's sound
+
+/// The pieces a sound is sent in (the last may be shorter), as the app does.
+pub const SOUND_PIECE: usize = 2048;
+/// A whole sound sent (header, pieces, end) within this, past the sign-in.
+#[cfg(not(test))]
+const SOUND_JOB_TIME: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const SOUND_JOB_TIME: Duration = Duration::from_secs(10);
+
+/// What a camera says of its siren's sound.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SoundState {
+    /// It takes a sound of its own (ADPCM, 16 kHz, in its encode ability).
+    pub takes: bool,
+    /// The siren uses the custom sound (Some(false): the built-in one; None: not read).
+    pub custom: Option<bool>,
+    /// The size of the stored custom sound (0: none). None: not read, or
+    /// not reliable (behind a hub).
+    pub stored_bytes: Option<u64>,
+}
+
+/// Whether a 267 answer lists IMA ADPCM at 16 kHz.
+pub fn takes_adpcm_16k(ability: &str) -> bool {
+    ctl::elements(ability, "audioEncode").iter().any(|e| {
+        ctl::text(e, "audioType").is_some_and(|t| t.eq_ignore_ascii_case("adpcm")) && ctl::text(e, "sampleRate") == Some("16000")
+    })
+}
+
+impl BaichuanDriver {
+    /// One exchange (or job) for the siren's sound; the camera's answer, any
+    /// status. `keep`: a change (a page's read does not keep the session).
+    fn ask_sound(&self, msg_id: u32, ext: String, body: String, then: Vec<ctl::Step>, write: bool, keep: bool) -> Result<ctl::Answer> {
+        let c = wired::client_for(&self.host, self.port, &self.user, &self.pass, OWNER).map_err(|e| anyhow!(NotSent(e)))?;
+        let within = if then.is_empty() { ctl::ANSWER_WAIT } else { SOUND_JOB_TIME };
+        c.control_job(msg_id, self.channel, ext, body, then, write, self.hub, keep, within).map_err(|e| if e.contains(ctl::NOT_SENT) { anyhow!(NotSent(e)) } else { anyhow!(e) })
+    }
+
+    fn sound_read(&self, msg_id: u32, keep: bool) -> Result<String> {
+        let a = self.ask_sound(msg_id, ctl::read_ext(self.channel), String::new(), Vec::new(), false, keep)?;
+        if a.status != 200 {
+            return Err(anyhow!(Refusal(a.status)));
+        }
+        Ok(a.xml)
+    }
+
+    /// The siren's sound now: what the camera takes (267), which sound it
+    /// uses (264) and, not behind a hub, the stored sound's size (260).
+    /// (Reads as a page's: they do not keep a controls-only session.)
+    pub fn sound_state(&self) -> Result<SoundState> {
+        let t = turn(&self.key());
+        let _g = t.lock().unwrap_or_else(|e| e.into_inner());
+        let takes = match self.sound_read(bc::MSG_AUDIO_ENCODE_ABILITY, false) {
+            Ok(x) => takes_adpcm_16k(&x),
+            // (A camera that does not know the question takes no sound.)
+            Err(e) if e.downcast_ref::<Refusal>().is_some() => false,
+            Err(e) => return Err(e),
+        };
+        if !takes {
+            return Ok(SoundState::default());
+        }
+        let cfg = self.sound_read(bc::MSG_AUDIO_CFG_GET, false).map_err(|e| plain(e, "say which siren sound it uses"))?;
+        let custom = ctl::text(&cfg, "audioSelect").map(|v| v == "1");
+        let stored_bytes = if self.hub { None } else { self.sound_read(bc::MSG_AUDIO_FILE_INFO, false).ok().and_then(|x| ctl::text(&x, "fileSize").and_then(|v| v.parse().ok())) };
+        Ok(SoundState { takes, custom, stored_bytes })
+    }
+
+    /// Switch the siren to its custom sound or its built-in one: the
+    /// camera's own settings (264) back with only that changed (265), then
+    /// read again to see it took.
+    fn sound_pick_on(&self, custom: bool) -> Result<()> {
+        let what = if custom { "switch its siren to the custom sound" } else { "switch its siren to its built-in sound" };
+        let cfg = self.sound_read(bc::MSG_AUDIO_CFG_GET, true).map_err(|e| plain(e, what))?;
+        let body = ctl::audio_cfg_xml(&cfg, custom, None).ok_or_else(|| anyhow!(super::NotDone("the camera did not say which siren sound it uses".into())))?;
+        let a = self.ask_sound(bc::MSG_AUDIO_CFG_SET, ctl::channel_ext(self.channel), body, Vec::new(), true, true)?;
+        if a.status != 200 {
+            return Err(plain(anyhow!(Refusal(a.status)), what));
+        }
+        let back = self.sound_read(bc::MSG_AUDIO_CFG_GET, true).map_err(|e| anyhow!("the camera took the change but its setting could not be read back: {e:#}"))?;
+        if ctl::text(&back, "audioSelect") != Some(if custom { "1" } else { "0" }) {
+            bail!("the camera answered that it was done, but its siren sound did not change");
+        }
+        Ok(())
+    }
+
+    pub fn sound_pick(&self, custom: bool) -> Result<()> {
+        let t = turn(&self.key());
+        let _g = t.lock().unwrap_or_else(|e| e.into_inner());
+        self.sound_pick_on(custom)
+    }
+
+    /// Send `adpcm` (the camera's format, see `siren_sound`) as the custom
+    /// sound, then switch the siren to it. One job on the session: the
+    /// header (261), the pieces (261, binary, the header's message number),
+    /// the end (262); any answer but 200 stops it and says which part.
+    pub fn sound_send(&self, adpcm: &[u8]) -> Result<()> {
+        if adpcm.is_empty() {
+            bail!("no sound to send");
+        }
+        let t = turn(&self.key());
+        let _g = t.lock().unwrap_or_else(|e| e.into_inner());
+        // (Its settings first: they must be there to switch to the sound after.)
+        let cfg = self.sound_read(bc::MSG_AUDIO_CFG_GET, true).map_err(|e| plain(e, "say which siren sound it uses"))?;
+        if ctl::text(&cfg, "audioSelect").is_none() {
+            return Err(anyhow!(super::NotDone("the camera did not say which siren sound it uses".into())));
+        }
+        let pieces: Vec<&[u8]> = adpcm.chunks(SOUND_PIECE).collect();
+        let n = pieces.len();
+        let mut then: Vec<ctl::Step> = pieces.iter().map(|p| ctl::Step { msg_id: bc::MSG_AUDIO_FILE_SEND, ext: ctl::binary_ext(self.channel), payload: p.to_vec(), raw: true, same_num: true }).collect();
+        then.push(ctl::Step { msg_id: bc::MSG_AUDIO_FILE_DONE, ext: ctl::channel_ext(self.channel), payload: Vec::new(), raw: false, same_num: false });
+        let a = self.ask_sound(bc::MSG_AUDIO_FILE_SEND, ctl::channel_ext(self.channel), ctl::sound_header_xml(self.channel, adpcm.len()), then, true, true)?;
+        if a.status != 200 {
+            let part = match a.step {
+                0 => "the sound's header".to_string(),
+                i if i <= n => format!("part {i} of {n} of the sound"),
+                _ => "the end of the sound".to_string(),
+            };
+            return Err(plain(anyhow!(Refusal(a.status)), &format!("take {part}")));
+        }
+        self.sound_pick_on(true).map_err(|e| anyhow!("the sound was sent, but the siren could not be switched to it: {e:#}"))
     }
 }
 

@@ -602,9 +602,27 @@ impl WiredClient {
         self.cmd_tx
             .lock()
             .unwrap()
-            .send(Cmd::Control(super::ctl::Request { msg_id, channel, ext, body, write, urgent, keep, deadline, reply }))
+            .send(Cmd::Control(super::ctl::Request { msg_id, channel, ext, body, write, urgent, keep, deadline, reply, then: Vec::new(), hub_ok: false }))
             .map_err(|_| format!("the Baichuan session has stopped; {}", super::ctl::NOT_SENT))?;
         rx.recv_timeout(START_TIMEOUT + super::ctl::ANSWER_WAIT + Duration::from_secs(2)).map_err(|_| "the camera did not answer in time".to_string())?
+    }
+
+    /// A control exchange for the siren's sound: `then` are more messages of
+    /// the same job (each sent once the one before was answered with 200,
+    /// nothing else in between), all done within `within` (past the sign-in).
+    /// `hub_ok`: it may go to a channel of a hub (the caller saw it awake).
+    /// `keep`: it keeps a controls-only session signed in (not a page's read).
+    /// The answer is the last message's, or the first that was not 200.
+    #[allow(clippy::too_many_arguments)]
+    pub fn control_job(&self, msg_id: u32, channel: u8, ext: String, body: String, then: Vec<super::ctl::Step>, write: bool, hub_ok: bool, keep: bool, within: Duration) -> Result<super::ctl::Answer, String> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        let deadline = Instant::now() + START_TIMEOUT + within;
+        self.cmd_tx
+            .lock()
+            .unwrap()
+            .send(Cmd::Control(super::ctl::Request { msg_id, channel, ext, body, write, urgent: false, keep, deadline, reply, then, hub_ok }))
+            .map_err(|_| format!("the Baichuan session has stopped; {}", super::ctl::NOT_SENT))?;
+        rx.recv_timeout(START_TIMEOUT + within + Duration::from_secs(2)).map_err(|_| "the camera did not answer in time".to_string())?
     }
 
     /// What the session knows of the device (after a sign-in).

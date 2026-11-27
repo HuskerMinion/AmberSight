@@ -416,7 +416,11 @@ function statusPage(el) {
         // minutes or years off reads as a duration, not a count of seconds.)
         const sk = c.online ? c.clock_skew_s : null;
         const skText = (v) => Math.abs(v) < 120 ? (v > 0 ? '+' : '') + Math.round(v) + ' s' : (v > 0 ? '+' : '-') + dur(Math.abs(v));
-        const clock = sk == null ? '-' : Math.abs(sk) < 2 ? '<span class="muted">' + t('status_page.clock_right', 'right') + '</span>' : '<span' + (Math.abs(sk) > 30 ? ' class="st-bad"' : '') + '>' + skText(sk) + '</span>';
+        // A skew that is only the camera's time zone, its clock right over ONVIF:
+        // its stream times are in local time (some firmware does that).
+        const zone = c.online ? c.clock_zone_s : null;
+        const zoneText = (z) => (z > 0 ? '+' : '-') + Math.floor(Math.abs(z) / 3600) + (Math.abs(z) % 3600 ? ':' + String(Math.round(Math.abs(z) % 3600 / 60)).padStart(2, '0') : '') + ' h';
+        const clock = sk == null ? '-' : zone != null ? '<span class="muted" title="' + esc(t('status_page.clock_zone_title', "The camera's clock is right (read over ONVIF); it sends its stream times in its own local time, which does not affect recordings.")) + '">' + t('status_page.clock_right_zone', 'right (stream times in local time, {zone})', { zone: zoneText(zone) }) + '</span>' : Math.abs(sk) < 2 ? '<span class="muted">' + t('status_page.clock_right', 'right') + '</span>' : '<span' + (Math.abs(sk) > 30 ? ' class="st-bad"' : '') + '>' + skText(sk) + '</span>';
         return '<tr><td><b>' + esc(c.name) + '</b></td><td>' + b + '</td><td class="num">' + clock + '</td><td class="num">' + (f != null && c.online ? f : '-') + '</td>' +
           '<td class="num">' + kbps(pc.kbps) + '</td>' +
           '<td class="num"' + (pc.rough ? ' title="' + t('status_page.rough_title', 'Less than a day of recordings so far: a rough figure') + '"' : '') + '>' + perDay(pc.bytes_per_day) + (pc.rough ? '*' : '') + '</td>' +

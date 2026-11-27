@@ -725,6 +725,9 @@ pub struct Live {
     pub offline_since: Option<i64>,
     pub frames: u64,
     pub clock_skew: Option<f64>,
+    /// The time-zone step the stream's times are in while the camera's clock
+    /// is right over ONVIF (see `timesync::zone_step`).
+    pub clock_zone: Option<f64>,
     /// Behind a hub (an NVR or Reolink Home Hub channel): the report opens
     /// no extra stream connections to it.
     pub hub: bool,
@@ -885,6 +888,7 @@ pub async fn make(cfg: CameraConfig, live: Live) -> (String, String) {
             "offline_since": when(live.offline_since),
             "frames": live.frames,
             "clock_skew_s": live.clock_skew,
+            "clock_zone_s": live.clock_zone,
         },
         "stream_ends": ends.iter().map(|(t, w)| json!({ "at": when(Some(*t)), "why": w })).collect::<Vec<_>>(),
         "describe": { "main": main_sdp, "sub": sub_sdp },
@@ -1046,7 +1050,7 @@ mod tests {
     }
 
     fn live() -> Live {
-        Live { ingest: "native".into(), online: false, sleeping: false, last_error: None, last_error_at: None, reconnects: 0, online_since: None, offline_since: None, frames: 0, clock_skew: None, hub: false }
+        Live { ingest: "native".into(), online: false, sleeping: false, last_error: None, last_error_at: None, reconnects: 0, online_since: None, offline_since: None, frames: 0, clock_skew: None, clock_zone: None, hub: false }
     }
 
     /// Every spelling of `secret` that must never be in the report.

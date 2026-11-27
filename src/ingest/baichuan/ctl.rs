@@ -9,7 +9,13 @@
 //! (pages ask a few times in a row), then signs out like an idle stream.
 //!
 //! Battery cameras and channels of hubs and recorders are refused here: the
-//! controls never wake a battery camera, and a hub's channel may be one.
+//! controls never wake a battery camera, and a hub's channel may be one. The
+//! one exception is the siren's sound (`hub_ok`, for its messages only),
+//! asked for only after the controls saw the hub report that camera awake.
+//!
+//! An exchange can be a job of several messages (a sound sent in pieces):
+//! each goes out when the one before was answered with 200, and nothing
+//! else is sent in between.
 
 use super::bc;
 use super::client::Session;
@@ -31,6 +37,8 @@ pub const CONTROL_IDLE: Duration = Duration::from_secs(60);
 /// The words of a refusal for a battery camera or a hub's channel.
 pub const NOT_FOR_BATTERY: &str = "Controls over Reolink port 9000 are not for battery cameras: asking would wake them.";
 pub const NOT_FOR_HUB: &str = "Controls over Reolink port 9000 work for a camera of its own so far, not for a camera behind a hub or recorder.";
+/// The siren's sound messages: the only ones `hub_ok` lets go to a hub's channel.
+pub const SOUND_MSGS: &[u32] = &[bc::MSG_AUDIO_FILE_INFO, bc::MSG_AUDIO_FILE_SEND, bc::MSG_AUDIO_FILE_DONE, bc::MSG_AUDIO_CFG_GET, bc::MSG_AUDIO_CFG_SET, bc::MSG_AUDIO_ENCODE_ABILITY];
 /// The start of the words for a request that was never sent (the camera has
 /// not had it: nothing can be playing because of it).
 pub const NOT_SENT: &str = "not sent to the camera";
@@ -52,6 +60,24 @@ pub struct Request {
     /// is not waited for past it.
     pub deadline: Instant,
     pub reply: SyncSender<Result<Answer, String>>,
+    /// More messages of the same job, in order (empty: one exchange).
+    pub then: Vec<Step>,
+    /// May go to a channel of a hub (the caller checked it is awake): only
+    /// when every message of it is one of `SOUND_MSGS`.
+    pub hub_ok: bool,
+}
+
+/// One more message of a job: sent once the one before it was answered
+/// with 200 (any other answer ends the job and is the job's answer).
+#[derive(Clone, Debug)]
+pub struct Step {
+    pub msg_id: u32,
+    pub ext: String,
+    pub payload: Vec<u8>,
+    /// The payload goes as is (binary data), not encrypted.
+    pub raw: bool,
+    /// The message number of the message before (the pieces of a sound share one).
+    pub same_num: bool,
 }
 
 impl Request {
@@ -65,21 +91,41 @@ impl Request {
 pub struct Answer {
     pub status: u16,
     pub xml: String,
+    /// Which message of a job answered (0: the first; for one exchange, always 0).
+    pub step: usize,
 }
 
 struct Flight {
     msg_id: u32,
     msg_num: u16,
     until: Instant,
+    /// `until` is the request's (or job's) deadline, not ANSWER_WAIT.
+    by_deadline: bool,
     keep: bool,
     reply: SyncSender<Result<Answer, String>>,
+    job: Option<Job>,
 }
+
+/// The rest of a running job.
+struct Job {
+    channel: u8,
+    write: bool,
+    deadline: Instant,
+    rest: VecDeque<Step>,
+    /// The message (0: the first) now on its way.
+    step: usize,
+}
+
+/// A job whose last message was answered with 200: its message number, whether it keeps the session, and who waits.
+type NextStep = (Job, u16, bool, SyncSender<Result<Answer, String>>);
 
 /// The controls' exchanges on one session (owned by the session thread).
 #[derive(Default)]
 pub(super) struct Queue {
     waiting: VecDeque<Request>,
     flight: Option<Flight>,
+    /// A job's next message: it goes before anything else.
+    next: Option<NextStep>,
     /// The last exchange that keeps the session.
     last: Option<Instant>,
     key: String,
@@ -95,13 +141,15 @@ pub fn recent(key: &str) -> bool {
     RECENT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(key)).is_some_and(|t| t.elapsed() < CONTROL_IDLE)
 }
 
+/// May this request go to a hub's channel (`hub_ok`, and only the siren's sound)?
+fn hub_ok(r: &Request) -> bool {
+    r.hub_ok && SOUND_MSGS.contains(&r.msg_id) && r.then.iter().all(|s| SOUND_MSGS.contains(&s.msg_id))
+}
+
 /// May this request be sent at all (the read-only list, or the control writes)?
 fn on_the_list(r: &Request) -> bool {
-    if r.write {
-        bc::CONTROL_WRITES.contains(&r.msg_id)
-    } else {
-        bc::ALLOWED.contains(&r.msg_id)
-    }
+    let list = if r.write { bc::CONTROL_WRITES } else { bc::ALLOWED };
+    list.contains(&r.msg_id) && r.then.iter().all(|s| list.contains(&s.msg_id))
 }
 
 impl Queue {
@@ -121,7 +169,7 @@ impl Queue {
         if battery {
             return r.fail(format!("{NOT_FOR_BATTERY} ({NOT_SENT})"));
         }
-        if multi || r.channel != 0 {
+        if (multi || r.channel != 0) && !hub_ok(&r) {
             return r.fail(format!("{NOT_FOR_HUB} ({NOT_SENT})"));
         }
         if r.keep {
@@ -139,7 +187,7 @@ impl Queue {
 
     /// Something is waiting or running, or kept the session a moment ago.
     pub(super) fn busy(&self) -> bool {
-        !self.waiting.is_empty() || self.flight.is_some() || self.last.is_some_and(|t| t.elapsed() < CONTROL_IDLE)
+        !self.waiting.is_empty() || self.flight.is_some() || self.next.is_some() || self.last.is_some_and(|t| t.elapsed() < CONTROL_IDLE)
     }
 
     /// The next request that may go out now: requests past their deadline,
@@ -167,10 +215,43 @@ impl Queue {
         let now = Instant::now();
         if self.flight.as_ref().is_some_and(|f| now >= f.until) {
             let f = self.flight.take().unwrap();
-            let _ = f.reply.send(Err(format!("the camera did not answer within {} s", ANSWER_WAIT.as_secs())));
+            let why = match (&f.job, f.by_deadline) {
+                (Some(j), true) => format!("the job took too long: message {} of {} was not answered in time", j.step + 1, j.step + 1 + j.rest.len()),
+                (Some(j), false) => format!("the camera did not answer within {} s (message {} of {} of the job)", ANSWER_WAIT.as_secs(), j.step + 1, j.step + 1 + j.rest.len()),
+                (None, true) => "the camera did not answer in time".to_string(),
+                (None, false) => format!("the camera did not answer within {} s", ANSWER_WAIT.as_secs()),
+            };
+            let _ = f.reply.send(Err(why));
         }
         if self.flight.is_some() {
             return Ok(());
+        }
+        // The next message of a job: nothing goes in between.
+        if let Some((mut job, num, keep, reply)) = self.next.take() {
+            let step = job.rest.pop_front().expect("a job waits only with a message left");
+            job.step += 1;
+            if now >= job.deadline {
+                // (Not NOT_SENT: the messages before it reached the camera.)
+                let _ = reply.send(Err(format!("the job took too long: stopped after message {} of {}", job.step, job.step + 1 + job.rest.len())));
+                return Ok(());
+            }
+            if keep {
+                self.touch();
+            }
+            let n = if step.same_num { Some(num) } else { None };
+            return match s.send_ctl(step.msg_id, job.channel, n, &step.ext, &step.payload, step.raw, job.write) {
+                Ok(msg_num) => {
+                    let by_deadline = job.deadline < now + ANSWER_WAIT;
+                    let until = (now + ANSWER_WAIT).min(job.deadline);
+                    self.flight = Some(Flight { msg_id: step.msg_id, msg_num, until, by_deadline, keep, reply, job: Some(job) });
+                    Ok(())
+                }
+                Err(e) => {
+                    let why = format!("sending to the camera (message {} of the job): {e:#}", job.step + 1);
+                    let _ = reply.send(Err(why.clone()));
+                    Err(why)
+                }
+            };
         }
         let Some(r) = self.next_sendable(now) else { return Ok(()) };
         if r.keep {
@@ -178,7 +259,9 @@ impl Queue {
         }
         match s.send_parts(r.msg_id, r.channel, &r.ext, &r.body, r.write) {
             Ok(msg_num) => {
-                self.flight = Some(Flight { msg_id: r.msg_id, msg_num, until: (now + ANSWER_WAIT).min(r.deadline), keep: r.keep, reply: r.reply });
+                let job = (!r.then.is_empty()).then(|| Job { channel: r.channel, write: r.write, deadline: r.deadline, rest: r.then.into(), step: 0 });
+                let by_deadline = r.deadline < now + ANSWER_WAIT;
+                self.flight = Some(Flight { msg_id: r.msg_id, msg_num, until: (now + ANSWER_WAIT).min(r.deadline), by_deadline, keep: r.keep, reply: r.reply, job });
                 Ok(())
             }
             Err(e) => {
@@ -196,10 +279,17 @@ impl Queue {
             return false;
         }
         let f = self.flight.take().unwrap();
-        let xml = s.reply_xml(&m.header, &m.body);
-        let _ = f.reply.send(Ok(Answer { status: m.header.status, xml }));
         if f.keep {
             self.touch();
+        }
+        let step = f.job.as_ref().map_or(0, |j| j.step);
+        match f.job {
+            // Done: the job's next message goes out on the next pump.
+            Some(j) if m.header.status == 200 && !j.rest.is_empty() => self.next = Some((j, f.msg_num, f.keep, f.reply)),
+            _ => {
+                let xml = s.reply_xml(&m.header, &m.body);
+                let _ = f.reply.send(Ok(Answer { status: m.header.status, xml, step }));
+            }
         }
         true
     }
@@ -208,6 +298,10 @@ impl Queue {
     pub(super) fn fail_all(&mut self, why: &str) {
         if let Some(f) = self.flight.take() {
             let _ = f.reply.send(Err(why.to_string()));
+        }
+        if let Some((j, _, _, reply)) = self.next.take() {
+            // (Not NOT_SENT: the job's first messages reached the camera.)
+            let _ = reply.send(Err(format!("{why}; the job stopped after message {} of {}", j.step + 1, j.step + 1 + j.rest.len())));
         }
         for r in self.waiting.drain(..) {
             r.fail(format!("{why}; {NOT_SENT}"));
@@ -259,6 +353,52 @@ pub fn siren_off_xml(channel: u8) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<audioPlayInfo version=\"1.1\">\n<channelId>{channel}</channelId>\n<playMode>2</playMode>\n<playDuration>10</playDuration>\n<playTimes>1</playTimes>\n<onOff>0</onOff>\n</audioPlayInfo>\n</body>\n"
     )
+}
+
+// The siren's sound (as the official Reolink app sends it, 2026-11-27).
+
+/// The extension of a read of the siren's sound (260, 264, 267).
+pub fn read_ext(channel: u8) -> String {
+    format!("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<Extension version=\"1.1\">\n<channelId>{channel}</channelId>\n<chnType>0</chnType>\n</Extension>\n")
+}
+
+/// The extension of a piece of a sound sent to the camera (its payload is binary).
+pub fn binary_ext(channel: u8) -> String {
+    format!("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<Extension version=\"1.1\">\n<binaryData>1</binaryData>\n<channelId>{channel}</channelId>\n</Extension>\n")
+}
+
+/// The header of a sound sent to the camera (261): its size in bytes.
+pub fn sound_header_xml(channel: u8, bytes: usize) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<audioFileInfo version=\"1.1\">\n<channelId>{channel}</channelId>\n<fileSize>{bytes}</fileSize>\n<fileFormat>adpcm</fileFormat>\n</audioFileInfo>\n</body>\n"
+    )
+}
+
+/// The siren's settings (the `<audioCfg>` element as the camera gave it with
+/// 264) with only `audioSelect` changed (1: the custom sound, 0: the built-in
+/// one), and `volume` when given; `audioListId` and `visitorLoudspeaker` are
+/// added when missing (the app does). Everything else goes back unchanged.
+/// None: the camera gave no `audioSelect` to change.
+pub fn audio_cfg_xml(cfg: &str, custom: bool, volume: Option<u32>) -> Option<String> {
+    let el = element(cfg, "audioCfg")?;
+    let mut x = with_text(el, "audioSelect", if custom { "1" } else { "0" })?;
+    if let Some(v) = volume {
+        x = with_text(&x, "volume", &v.to_string())?;
+    }
+    let close = x.rfind("</audioCfg>")?;
+    let mut add = String::new();
+    for name in ["audioListId", "visitorLoudspeaker"] {
+        if element(&x, name).is_none() {
+            add.push_str(&format!("<{name}>0</{name}>\n"));
+        }
+    }
+    if !add.is_empty() {
+        if !x[..close].ends_with('\n') {
+            add.insert(0, '\n');
+        }
+        x.insert_str(close, &add);
+    }
+    Some(format!("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n{x}\n</body>\n"))
 }
 
 /// The whole `<name ...>...</name>` element in `xml` (the first one); a
@@ -354,7 +494,7 @@ mod tests {
 
     fn req(msg_id: u32, write: bool, deadline: Instant) -> (Request, std::sync::mpsc::Receiver<Result<Answer, String>>) {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        (Request { msg_id, channel: 0, ext: String::new(), body: String::new(), write, urgent: false, keep: false, deadline, reply: tx }, rx)
+        (Request { msg_id, channel: 0, ext: String::new(), body: String::new(), write, urgent: false, keep: false, deadline, reply: tx, then: Vec::new(), hub_ok: false }, rx)
     }
 
     #[test]
@@ -407,6 +547,80 @@ mod tests {
         q.accept(stop, false, false);
         let order: Vec<(u32, String)> = std::iter::from_fn(|| q.next_sendable(now)).map(|r| (r.msg_id, r.body)).collect();
         assert_eq!(order, vec![(bc::MSG_AUDIO_PLAY, String::new()), (bc::MSG_AUDIO_PLAY, "stop".to_string()), (bc::MSG_LED_GET, String::new())]);
+    }
+
+    #[test]
+    fn a_hubs_channel_only_for_the_sound_and_a_job_only_with_listed_messages() {
+        let now = Instant::now();
+        let mut q = Queue::new("test:2");
+        let (mut a, a_rx) = req(bc::MSG_AUDIO_CFG_GET, false, now + Duration::from_secs(5));
+        a.channel = 1;
+        q.accept(a, false, true);
+        assert!(a_rx.try_recv().unwrap().unwrap_err().contains(NOT_FOR_HUB));
+        let (mut b, _b_rx) = req(bc::MSG_AUDIO_CFG_GET, false, now + Duration::from_secs(5));
+        b.channel = 1;
+        b.hub_ok = true;
+        q.accept(b, false, true);
+        assert_eq!(q.next_sendable(now).unwrap().msg_id, bc::MSG_AUDIO_CFG_GET);
+        // hub_ok lets only the siren's sound messages through.
+        for (first, more) in [(bc::MSG_LED_SET, None), (bc::MSG_AUDIO_PLAY, None), (bc::MSG_LED_GET, None), (bc::MSG_AUDIO_FILE_SEND, Some(bc::MSG_AUDIO_PLAY))] {
+            let (mut x, x_rx) = req(first, first != bc::MSG_LED_GET, now + Duration::from_secs(5));
+            x.channel = 1;
+            x.hub_ok = true;
+            if let Some(m) = more {
+                x.then = vec![Step { msg_id: m, ext: String::new(), payload: Vec::new(), raw: false, same_num: false }];
+            }
+            q.accept(x, false, true);
+            assert!(x_rx.try_recv().unwrap().unwrap_err().contains(NOT_FOR_HUB), "{first} {more:?}");
+        }
+        assert!(q.waiting.is_empty());
+        // Never a battery camera's own session, hub_ok or not.
+        let (mut c, c_rx) = req(bc::MSG_AUDIO_CFG_GET, false, now + Duration::from_secs(5));
+        c.hub_ok = true;
+        q.accept(c, true, false);
+        assert!(c_rx.try_recv().unwrap().unwrap_err().contains(NOT_FOR_BATTERY));
+        // Every message of a job must be on the list.
+        let step = |id| Step { msg_id: id, ext: String::new(), payload: Vec::new(), raw: true, same_num: true };
+        let (mut j, j_rx) = req(bc::MSG_AUDIO_FILE_SEND, true, now + Duration::from_secs(5));
+        j.then = vec![step(bc::MSG_AUDIO_FILE_SEND), step(213)];
+        q.accept(j, false, false);
+        assert!(q.next_sendable(now).is_none());
+        assert!(j_rx.try_recv().unwrap().unwrap_err().contains("not one AmberSight sends"));
+    }
+
+    #[test]
+    fn a_job_ended_mid_way_is_not_said_to_be_not_sent() {
+        let now = Instant::now();
+        let mut q = Queue::new("test:3");
+        let step = Step { msg_id: bc::MSG_AUDIO_FILE_SEND, ext: String::new(), payload: Vec::new(), raw: true, same_num: true };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let job = Job { channel: 0, write: true, deadline: now, rest: vec![step.clone(), step].into(), step: 3 };
+        q.next = Some((job, 1, true, tx));
+        q.fail_all("the Baichuan session ended (gone)");
+        let e = rx.try_recv().unwrap().unwrap_err();
+        assert!(!e.contains(NOT_SENT) && e.contains("stopped after message 4 of 6"), "{e}");
+    }
+
+    #[test]
+    fn the_sirens_settings_go_back_with_one_field_changed() {
+        let doorbell = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<audioCfg version=\"1.1\">\n<channelId>0</channelId>\n<timeout>0</timeout>\n<audioSelect>0</audioSelect>\n<volume>25</volume>\n<preAlarm>0</preAlarm>\n<talkAndReplyVolume>80</talkAndReplyVolume>\n<visitorVolume>60</visitorVolume>\n<audioListId>3</audioListId>\n<visitorLoudspeaker>1</visitorLoudspeaker>\n</audioCfg>\n</body>\n";
+        let x = audio_cfg_xml(doorbell, true, None).unwrap();
+        assert_eq!(text(&x, "audioSelect"), Some("1"));
+        for (k, v) in [("volume", "25"), ("talkAndReplyVolume", "80"), ("visitorVolume", "60"), ("audioListId", "3"), ("visitorLoudspeaker", "1"), ("timeout", "0"), ("preAlarm", "0")] {
+            assert_eq!(text(&x, k), Some(v), "{k} kept");
+        }
+        assert!(x.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<audioCfg version=\"1.1\">\n"), "{x}");
+        assert_eq!(x.matches("<audioListId>").count(), 1);
+        let cam = "<body><audioCfg><channelId>0</channelId><audioSelect>1</audioSelect><volume>25</volume><unknownThing>7</unknownThing></audioCfg></body>";
+        let x = audio_cfg_xml(cam, false, Some(80)).unwrap();
+        assert_eq!(text(&x, "audioSelect"), Some("0"));
+        assert_eq!(text(&x, "volume"), Some("80"));
+        assert_eq!(text(&x, "unknownThing"), Some("7"), "an unknown field goes back");
+        assert_eq!((text(&x, "audioListId"), text(&x, "visitorLoudspeaker")), (Some("0"), Some("0")), "added as the app does");
+        assert!(audio_cfg_xml("<body><audioCfg><volume>1</volume></audioCfg></body>", true, None).is_none(), "nothing to switch");
+        assert!(sound_header_xml(0, 39936).contains("<fileSize>39936</fileSize>\n<fileFormat>adpcm</fileFormat>"));
+        assert!(binary_ext(2).contains("<binaryData>1</binaryData>\n<channelId>2</channelId>"));
+        assert!(read_ext(0).contains("<chnType>0</chnType>"));
     }
 
     #[test]

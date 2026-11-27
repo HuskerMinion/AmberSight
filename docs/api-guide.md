@@ -77,6 +77,7 @@ All examples use the placeholder `https://nvr.example:8090`. 8090 is the default
 | GET | `/api/cameras/:id/ptz/caps`, `/ptz/presets` | viewer | PTZ capabilities and presets |
 | POST | `/api/cameras/:id/ptz`, `/ptz/aim` | **admin**, operator (`ptz`) | Move / zoom / go to presets / tours (saving and deleting presets: admin) |
 | GET / POST | `/api/cameras/:id/controls` | viewer / **admin**, operator (`lights`, `siren`) | A camera's spotlight, siren, infrared and status light: what it has and its state / an action (the siren never from a device token) |
+| GET / POST / PUT | `/api/cameras/:id/siren-sound` | **admin** (password sign-in) | A Reolink camera's siren sound: which one it uses / send a sound of your own / switch between it and the built-in one. See [The siren's sound](#the-sirens-sound-apicamerasidsiren-sound) |
 | POST | `/api/cameras/:id/reboot` | **admin**, operator (`reboot`) | Restart the camera now through its own interface (ONVIF, Reolink, Dahua/Amcrest or Hikvision): **200** `{"ok": true, "method": "..."}`, **502** with the reason, or **429** with `Retry-After` when it was restarted from here in the last minute (a failed restart doesn't count). Hide the button when the camera's `reboot_off` (`GET /api/cameras`) is `true`. The camera is offline for a minute or two and records nothing meanwhile. Never from a device token. Older servers (no feature `camera_reboot`): admins only |
 | POST | `/api/shield` | **admin**, operator (`arm`) | Arm / disarm |
 | GET / POST | `/api/profiles` / `/api/profile` | viewer / **admin**, operator (`arm`) | List / switch profiles |
@@ -327,7 +328,7 @@ can do the same to notice that the server was updated, or ignore it.
 | `session_cookie` | Whether any `as_session` cookie arrived (for troubleshooting) |
 | `two_step_required` | The request had the right password in Basic, for an account that needs a device token instead |
 | `by_token` | The request was let in by a device token |
-| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `events_latest` = `GET /api/events?latest_per_camera=1` (the newest event per camera, section 5), `apple_plain_mp4` = to Apple's players (User-Agent `AppleCoreMedia`, or WebKit that is not Chrome or Android) a playback window or an event clip made from recordings is a plain MP4 (one `moov` with the whole sample table; converted answers stay fragmented), so AVFoundation starts without reading every fragment and long windows are fine, `alerts_ws` = notifications over `GET /api/alerts/ws` (section 5, Notifications over a WebSocket), `camera_reboot` = operators with the `reboot` right may restart a camera (`POST /api/cameras/:id/reboot`; older servers: admins only), `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
+| `features` | What this server can do, also before sign-in, e.g. `["caps", "operator", "event_copy"]`: `caps` = transcoding for players (see [Best quality on every device](#best-quality-on-every-device-caps)), `operator` = operator accounts, `event_copy` = event clips saved to a folder (`copy_events_*` camera settings, see section 6). `fit_recordings` = converted clips and playback carry their length in the MP4 header (mvhd, tkhd, mdhd and mvex/mehd), so players such as ExoPlayer show the right duration and position; older servers send 0 there. `alert_search` = `GET /api/smart/search` (section 5), `fit_download` = playback downloads made to fit the device (`download=1&caps`, section 6), `battery` = the `battery` field in `GET /api/cameras` (battery cameras behind a Reolink hub too, read while the camera is awake), `events_latest` = `GET /api/events?latest_per_camera=1` (the newest event per camera, section 5), `apple_plain_mp4` = to Apple's players (User-Agent `AppleCoreMedia`, or WebKit that is not Chrome or Android) a playback window or an event clip made from recordings is a plain MP4 (one `moov` with the whole sample table; converted answers stay fragmented), so AVFoundation starts without reading every fragment and long windows are fine, `alerts_ws` = notifications over `GET /api/alerts/ws` (section 5, Notifications over a WebSocket), `siren_sound` = `/api/cameras/:id/siren-sound` (a Reolink camera's own siren sound, section 4), `camera_reboot` = operators with the `reboot` right may restart a camera (`POST /api/cameras/:id/reboot`; older servers: admins only), `snapshot_no_wake` = `GET /api/snapshot/:id` never wakes a battery camera, a linked server's too: one asleep on an older linked server gets a 503 with `x-camera-asleep: 1` instead of a picture (older servers wake it for every picture request). Names may be added; ignore ones you do not know. Test for a feature here, not by the version string. |
 
 ### Password sign-in: `POST /api/login`
 
@@ -1614,6 +1615,80 @@ is `false`; each new sighting pushes the end out), and/or sound the siren for `s
 while armed (at most once per `siren_cooldown_minutes`, default 10, and 3 times an hour;
 `siren_night_only` to limit it to the night). Night: between sunset and sunrise at the location
 set for profiles, else 19:00 to 07:00.
+
+### The siren's sound: `/api/cameras/:id/siren-sound`
+
+Reolink cameras with a siren can play a sound of your own instead of their built-in one. This
+endpoint sends one to the camera, switches between the two, and says which is in use. It always
+goes over Reolink port 9000 (Baichuan), also for a camera whose other controls use its web
+interface: port 9000 must be on in the camera's network settings. Other brands: not yet.
+
+Who: **admins signed in with a password** (a setting kept on the camera, like the infrared
+lights). Viewers, operators and device tokens get **403**. Servers that have it list
+`siren_sound` in `GET /api/whoami` `features`; hide the feature unless that is there and `GET`
+says `supported: true`.
+
+`GET /api/cameras/:id/siren-sound` (asks the camera; read at most every 5 seconds, and limited per
+sign-in like the controls' `GET`):
+
+```json
+{
+  "supported": true,
+  "why": null,
+  "using": "custom",
+  "custom_bytes": 39936,
+  "hub": false,
+  "max_seconds": 4.992,
+  "max_upload_bytes": 10485760,
+  "error": null
+}
+```
+
+- `supported`: `true` when the camera has a siren and takes a sound of its own (it lists
+  4-bit ADPCM at 16 kHz). `false` comes with `why` in words (not a Reolink camera, no siren, a
+  battery camera asleep or reached without a hub, port 9000 did not answer...). When it is
+  `false` the other fields may be missing; `"asleep": true` is added when a battery camera behind
+  a hub is asleep (it is never woken for this: open its live view, then ask again).
+- `using`: `"custom"`, `"built_in"` or `"unknown"` (the camera did not say).
+- `custom_bytes`: the size of the custom sound stored on the camera (0: none). `null` behind a
+  Reolink Home Hub, where the camera's answer is not reliable.
+- `hub`: the camera is a channel of a hub.
+- `max_seconds`: the longest sound the camera gets (longer uploads are cut).
+- `max_upload_bytes`: the biggest upload taken (10 MB).
+- `error`: set when the camera did not answer this time; the rest is then what was last read.
+
+`POST /api/cameras/:id/siren-sound` sends a sound. The **request body is the sound file itself**
+(not multipart, not JSON) with its `Content-Type`: `audio/wav`, `audio/mpeg`, `audio/mp4`
+(M4A/AAC), `audio/aac`, `audio/webm` (a browser's recording), `audio/ogg`, `audio/flac`; any
+`audio/*` type, `video/webm`, `video/mp4` and `application/octet-stream` are also taken (the
+server reads the file itself to tell the format). At most **10 MB** (`max_upload_bytes`), refused
+with **413** (JSON, as every error here) before anything reads it. The server decodes it, takes the first audio track's
+first 4.99 seconds, mixes it to mono, brings it up to full loudness (the camera plays it as loud as
+it is), converts it to what the camera takes, sends it, and switches the siren to it. It answers
+the new state, in the same shape as `GET`. A send takes a few seconds (up to about a minute on a
+slow link); one camera gets at most one in 10 seconds, one account at most 10 in 10 minutes, and
+the server reads at most two uploads at once (a third gets **429**: try again in a moment).
+
+`PUT /api/cameras/:id/siren-sound` with `{"use": "custom"}` or `{"use": "built_in"}` switches the
+siren and answers the new state, in the same shape as `GET`. Only that setting is changed: the
+camera's other sound settings (its volume, a doorbell's other volumes) are sent back as they were.
+At most once in 2 seconds per camera.
+
+While the camera's siren is sounding from AmberSight, or its stop is still due, a `POST` or `PUT`
+is refused with **409** ("The siren is sounding: try again when it has stopped."): a send takes
+the camera's port 9000 link for up to a minute, and the siren's stop must not wait behind it.
+
+Errors (`{"error": "..."}` in words): **400** (the file could not be read as sound, has no
+sound, is silent, or is shorter than a quarter of a second; a `PUT` without `use`), **403**
+(not allowed), **404** (no such camera), **409** (the camera cannot: `supported` would be
+`false`; or its siren is sounding), **413** (over 10 MB), **415** (not an audio `Content-Type`), **429** (too soon, or other uploads being read),
+**502** (the camera did not answer, or refused: the words say which part, for example `part 3 of
+20 of the sound`). Behind a Home Hub a battery camera may refuse while its own siren setting is
+switched off; the words then say that this might be why (switch it on in the Reolink app). Every
+send and switch is in the audit log as `camera control`.
+
+The sound plays when the siren sounds (`POST /api/cameras/:id/controls` `siren`, the actions next
+to alerts, or the camera's own alarm).
 
 ### Two-way talk: `GET /api/cameras/:id/talk?rate=48000` (WebSocket, admins and operators)
 
@@ -3499,6 +3574,14 @@ GET  /api/playback?camera=Front%20Door&from=1762166380000&to=1762166980000
 ---
 
 ## 12. Changelog
+
+**New in 0.13.8**
+
+- `GET`/`POST`/`PUT /api/cameras/:id/siren-sound`: a Reolink camera's siren sound (built-in or
+  a sound of your own, sent as the request body). Feature `siren_sound`. See
+  [The siren's sound](#the-sirens-sound-apicamerasidsiren-sound).
+- `POST /api/cameras/:id/controls` `siren` refused by a battery camera behind a Home Hub: the
+  error's words add that the camera's own siren setting might be off.
 
 **New in 0.13.6**
 

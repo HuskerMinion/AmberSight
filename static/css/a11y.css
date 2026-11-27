@@ -52,6 +52,8 @@ input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color])
    styles (.vstyle) stay one row. */
 .seg:not(.vstyle) { flex-wrap: wrap; border-radius: 18px; }
 .seg:not(.vstyle) button { white-space: normal; overflow-wrap: break-word; line-height: 1.25; max-width: 100%; box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); }
+.seg.sndseg { flex: none; }                                      /* the siren sound switch: two short words, kept on one line */
+.seg.sndseg button { white-space: nowrap; }
 .seg:not(.vstyle) button + button { border-left: 0; }
 .evview .chip { padding: 4px 14px; min-height: 30px; }
 .evview .chip.on { background: var(--accent-soft); color: var(--accent); }

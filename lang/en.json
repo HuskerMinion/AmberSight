@@ -5681,13 +5681,101 @@
 "Siren only at night",
 "bdb1ac0b"
 ],
+"cam_controls.siren_sound": [
+"Siren sound",
+"a7c9d5e1"
+],
+"cam_controls.siren_sound_hint": [
+"What the camera's siren plays: its built-in sound or one of your own, up to {secs} seconds. A sound of your own is brought up to full loudness before it is sent.",
+"de382443"
+],
 "cam_controls.siren_while_armed": [
 "siren while armed",
 "21a79494"
 ],
+"cam_controls.sound_builtin": [
+"Built-in",
+"be1d82a5"
+],
+"cam_controls.sound_custom": [
+"Custom",
+"9525b78e"
+],
+"cam_controls.sound_discard": [
+"Discard",
+"1e706c21"
+],
+"cam_controls.sound_https": [
+"Recording here needs the page over HTTPS (or on localhost). You can still upload a sound file.",
+"bf915086"
+],
+"cam_controls.sound_no_mic": [
+"The microphone could not be used: {error}",
+"9560888c"
+],
+"cam_controls.sound_none": [
+"No custom sound on the camera yet.",
+"88ecffe9"
+],
+"cam_controls.sound_read_failed": [
+"Could not read the siren sound: {error}",
+"3eba208a"
+],
+"cam_controls.sound_rec_stop": [
+"Stop ({n} s)",
+"2be88955"
+],
+"cam_controls.sound_record": [
+"Record",
+"9f4565ec"
+],
+"cam_controls.sound_recording": [
+"Your recording",
+"32b40c6d"
+],
+"cam_controls.sound_send": [
+"Send to camera",
+"4b740283"
+],
+"cam_controls.sound_send_hint": [
+"{name}. Listen first: sending replaces the camera's custom sound and switches the siren to it.",
+"e0736769"
+],
+"cam_controls.sound_sending": [
+"Sending…",
+"967aa5dd"
+],
+"cam_controls.sound_sent": [
+"Siren sound sent",
+"0aa95ff5"
+],
 "cam_controls.sound_siren": [
 "Sound the siren while armed",
 "cab2a89c"
+],
+"cam_controls.sound_stored": [
+"Custom sound on the camera: {kb} KB.",
+"1d0521e4"
+],
+"cam_controls.sound_to_builtin": [
+"Siren sound: built-in",
+"1f195943"
+],
+"cam_controls.sound_to_custom": [
+"Siren sound: custom",
+"e2156400"
+],
+"cam_controls.sound_too_big": [
+"That file is too big: at most 10 MB.",
+"63563b76"
+],
+"cam_controls.sound_unknown": [
+"The camera did not say which it uses.",
+"f7a722d8"
+],
+"cam_controls.sound_upload": [
+"Upload a sound file",
+"4c3ec442"
 ],
 "cam_controls.spotlight": [
 "Spotlight",
@@ -17068,6 +17156,14 @@
 "status_page.clock_right": [
 "right",
 "78e32de5"
+],
+"status_page.clock_right_zone": [
+"right (stream times in local time, {zone})",
+"262844e3"
+],
+"status_page.clock_zone_title": [
+"The camera's clock is right (read over ONVIF); it sends its stream times in its own local time, which does not affect recordings.",
+"c9daacb2"
 ],
 "status_page.clocks_hint": [
 "Camera clocks: the time each camera stamps on its picture. Sync turns on each camera's own time sync (NTP) and sets its clock to this computer's now.",

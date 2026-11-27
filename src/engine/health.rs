@@ -79,7 +79,9 @@ impl Engine {
                 }
             }
             if enabled {
-                if let Some(skew) = st.clock_skew.filter(|s| s.abs() > 30.0) {
+                // (A skew that is only the camera's time zone, its UTC clock
+                // right over ONVIF: its stream times are local time, no warning.)
+                if let Some(skew) = st.clock_skew.filter(|&s| crate::timesync::clock_warns(s, st.clock_zone)) {
                     fixes.push(serde_json::json!({ "warning": warnings.len(), "camera": h.id, "kind": "timesync" }));
                     shorts.push(format!("{}'s clock is off", run.name));
                     warnings.push(format!(
@@ -145,6 +147,8 @@ impl Engine {
                 "ffmpeg_why": super::ffpath::why_ffmpeg_now(&run, st.ingest),
                 "ffmpeg": procs,
                 "clock_skew_s": st.clock_skew.map(|s| (s * 10.0).round() / 10.0),
+                // The time-zone step the stream's times are in, the camera's clock being right.
+                "clock_zone_s": crate::timesync::zone_now(st.clock_skew, st.clock_zone),
                 "enabled": enabled,
                 "online": st.online,
                 "sleeping": st.sleeping,

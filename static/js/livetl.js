@@ -24,6 +24,7 @@ const FIRST_WIN = 60000;         // the first window after a click: fewer record
 const MIN_VIEW = 10000;          // closest zoom (10 s)
 const MAX_VIEW = 7 * 86400000;   // furthest zoom
 const LEAD = 2000;               // land this long before an alert
+const STEP_AGAIN_MS = 10000;     // a step again this soon goes on from the alert just landed on (as the app)
 const CLUSTER_PX = 34;
 
 const S = {
@@ -181,6 +182,8 @@ async function loadData() {
     // (n: how many alerts a zoomed-out slot stands for.)
     D.ev = (ev.rows || []).map(r => ({ id: r[0], camera: evCams[r[1]], start: r[2], end: r[3], objects: r[4] || [], thumb: r[5] ? r[0] : null, n: r[6] || 1 }));
     D.evCams = new Set(asked);
+    // (What the marks loaded are: stepping uses them only when each is one alert.)
+    D.evBucket = bucket; D.evRange = [a, b]; D.evMore = !!ev.more;
     // (Cameras shown since the request went out: load theirs too.)
     if (shownNames().some(n => !D.evCams.has(n))) scheduleFetch(true);
     draw();
@@ -770,6 +773,7 @@ function tickPic(p) {
   const show = pc.drawn && pc.shownFor !== null && !pc.none && Math.abs(pc.shownFor - ts) < hold;
   pc.cv.hidden = !show;
   if (show) { p.cv.hidden = true; p.msg.hidden = true; p.waitSince = 0; return; }
+  if (liveShot(p, ts)) { p.cv.hidden = true; p.msg.hidden = true; p.waitSince = 0; return; }
   let pic = false;
   if (rec) pic = drawStrip(p, ts); else p.cv.hidden = true;
   const none = !(rec && !pc.none);
@@ -1040,7 +1044,8 @@ function tickVideo(p) {
     return;
   }
   if (S.live && !S.scrubbing) { stopPic(p); showLive(p); return; }
-  if (p.live) stopLive(p);
+  if (p.live) { keepLiveShot(p); stopLive(p); }
+  hideShot(p);
   if (picMode(p)) { tickPic(p); return; }
   const ts = S.playhead, now = Date.now();
   // (Waiting because fast or backwards playback isn't converted: back at
@@ -1128,6 +1133,13 @@ function tickVideo(p) {
       shown.v.hidden = false; shown.v.classList.remove('tlup');
       p.cv.hidden = !S.scrubbing || !drawStrip(p, ts);
       p.msg.hidden = true; p.waitSince = 0;
+      return;
+    }
+    // (Not saved yet: the last live picture, see keepLiveShot.)
+    if (liveShot(p, ts)) {
+      p.cv.hidden = true; p.msg.hidden = true; p.waitSince = 0;
+      for (const s of p.slots) s.v.hidden = true;
+      p.shownIdx = -1;
       return;
     }
     // While the video loads (or while scrubbing, or if it could not play),
@@ -1262,6 +1274,7 @@ function showLive(p) {
   for (const s of p.slots) { if (s.ready || s.loading) resetSlot(s); s.v.hidden = true; }
   p.shownIdx = -1;
   p.cv.hidden = true;
+  hideShot(p);
   if (p.live.failed) {
     const noLive = t('livetl.no_live_picture', 'No live picture');
     if (p.msg.textContent !== noLive) p.msg.textContent = noLive;
@@ -1275,6 +1288,56 @@ function stopLive(p) {
   try { p.live.player.stop(); } catch (e) { /* already stopped */ }
   p.live.v.remove();
   p.live = null;
+}
+// Leaving live (paused, backwards, another speed): the live picture on
+// screen is kept. The recording being written is listed only once its file
+// closes, so for a few seconds the playhead is where nothing is saved yet:
+// that picture shows there instead of a black tile.
+const SHOT_MS = 30000;   // shown for moments up to this far from it, then let go
+function keepLiveShot(p) {
+  const v = p.live && !p.live.failed ? p.live.v : null;
+  // (No new picture: an older one is not shown as this moment.)
+  if (!v || v.readyState < 2 || !v.videoWidth) { dropShot(p); return; }
+  if (!p.shot) {
+    const cv = document.createElement('canvas');
+    cv.className = 'tlpic'; cv.hidden = true;
+    p.el.insertBefore(cv, p.msg);
+    p.shot = { cv, at: 0 };
+  }
+  const cv = p.shot.cv;
+  if (cv.width !== v.videoWidth || cv.height !== v.videoHeight) { cv.width = v.videoWidth; cv.height = v.videoHeight; }
+  try { cv.getContext('2d').drawImage(v, 0, 0, cv.width, cv.height); p.shot.at = Date.now(); } catch (e) { p.shot.cv.remove(); p.shot = null; }
+}
+function dropShot(p) {
+  if (p.shot) { p.shot.cv.remove(); p.shot = null; }
+}
+// Hidden; let go once older than SHOT_MS (a full-size canvas per tile).
+function hideShot(p) {
+  if (!p.shot) return;
+  if (Date.now() - p.shot.at > SHOT_MS) dropShot(p);
+  else p.shot.cv.hidden = true;
+}
+// Shows the kept live picture when the playhead is in the recording not
+// saved yet, or in the newest saved seconds while they load, near when it
+// was taken; true if it shows.
+function liveShot(p, ts) {
+  const sh = p.shot;
+  if (!sh) return false;
+  if (Date.now() - sh.at > SHOT_MS) { dropShot(p); return false; }
+  const sp = D.spans[p.cam.name] || [], end = sp.length ? sp[sp.length - 1][1] : 0;
+  const on = Math.abs(ts - sh.at) < SHOT_MS && (unsaved(p.cam.name, ts) || (end > 0 && ts > end - 5000 && ts <= end));
+  sh.cv.hidden = !on;
+  return on;
+}
+// The newest saved moment of the cameras shown that record now (null: none).
+function newestSaved() {
+  const now = Date.now();
+  let last = null;
+  for (const n of shownNames()) {
+    const sp = D.spans[n] || [], end = sp.length ? sp[sp.length - 1][1] : 0;
+    if (end && recordingNow(n, end, now) && (last === null || end > last)) last = end;
+  }
+  return last;
 }
 // Playing into the live edge (or a click at it): watch live, the strip
 // running on with the recordings. Anything that moves the playhead back,
@@ -1318,6 +1381,16 @@ const TRACK_PART_MS = 5000;
 // Each costs the server's graphics card seconds, so one the playhead has
 // left is called off (the server stops working on it).
 const trackAsked = new Map();
+// About how long the server takes to make a part (ms): on a card slower
+// than real time, the next part asked is the one the playhead will be in
+// when it is ready. Each part answered counts (an error says nothing of
+// it): a slow answer (over 300 ms) sets it, a quick one (from the server's
+// cache, or a quick card) halves it, and under 300 ms it is 0, so one slow
+// start does not skip parts for good.
+let trackCost = 0;
+function costSeen(took) {
+  trackCost = took > 300 ? took : trackCost / 2 > 300 ? trackCost / 2 : 0;
+}
 function dropTrackAsks(cam, keep) {
   for (const [key, q] of trackAsked) {
     if ((cam && q.cam !== cam) || (keep && keep.has(key))) continue;
@@ -1361,7 +1434,9 @@ function aiChecks(e, t, want) {
     const key = e.id + ':' + n, ac = new AbortController();
     trackAsked.set(key, { ac, cam: e.camera, a, n });
     a.making.set(n, S.jumpN || 0);
+    const t0 = performance.now();
     api('/api/events/' + enc(e.id) + '/track?part=' + n, { signal: ac.signal }).then(r => {
+      costSeen(performance.now() - t0);
       a.total = r.parts;
       a.parts.set(n, (r.frames || []).map(f => ({ t: f.t, seen: f.seen || [], parked: [] })));
     }).catch((err) => {
@@ -1388,9 +1463,24 @@ function aiChecks(e, t, want) {
     const going = keepMaking(e, a, want, (n) => n === k || n === next);
     if (!going) {
       // (A part the server could not make counts as done.)
-      const n = a.parts.has(k) || a.failed.has(k) ? next : k;
-      ask(n);
-      if (want) want.add(e.id + ':' + n);
+      const done = (m) => a.parts.has(m) || a.failed.has(m);
+      let n = done(k) ? next : k;
+      // Playing, a part that would be ready only after the playhead has left
+      // it is no use: the one the playhead will be in by then instead (at 2x
+      // to 4x that can be several parts ahead), or the one after it when that
+      // one is done already.
+      if (S.playing && trackCost) {
+        const dir = rev() ? -1 : 1, sp = Math.abs(S.speed), into = t - from - k * TRACK_PART_MS;
+        const left = (rev() ? into : TRACK_PART_MS - into) / sp;
+        const by = trackCost > left ? Math.ceil((trackCost - left) * sp / TRACK_PART_MS) : 0;
+        if (by > Math.abs(n - k)) n = k + dir * by;
+        if (done(n) && Math.abs(n - k) <= by) n += dir;
+      }
+      // (Done already, or past the event: nothing to ask.)
+      if (!done(n) && n >= 0 && from + n * TRACK_PART_MS <= e.end * 1000 + 3000) {
+        ask(n);
+        if (want) want.add(e.id + ':' + n);
+      }
     }
   }
   if (!a.parts.size) return a.review;
@@ -1523,6 +1613,7 @@ function setBoxes(on) {
 // ---------- playhead / clock ----------
 function setPlayhead(ms) {
   leaveLive();
+  S.lastStep = null;   // (stepAlert sets it again after its own seek)
   S.jumpAt = performance.now();
   S.jumpN = (S.jumpN || 0) + 1;
   S.playhead = Math.max(0, Math.min(Math.round(ms), Date.now()));
@@ -1539,7 +1630,15 @@ function setPlaying(on) {
 }
 function setSpeed(x) {
   if (SND.on && soundSpeedOk() && !(x > 0 && x <= SOUND_MAX_RATE)) note(t('livetl.sound_limit', 'No sound above {max}x or backwards', { max: SOUND_MAX_RATE }));
-  if (S.live && x !== 1) { leaveLive(); S.playhead = Date.now() - LIVE_EDGE_MS; } S.speed = x; S.anchorHead = S.playhead; S.anchorWall = performance.now(); updateControls(); syncAll(); }
+  if (S.live && x !== 1) {
+    leaveLive();
+    S.playhead = Date.now() - LIVE_EDGE_MS;
+    // Backwards: from the newest saved moment (what is not saved yet was
+    // just seen live), so recorded video plays at once.
+    const last = x < 0 ? newestSaved() : null;
+    if (last !== null) S.playhead = Math.min(S.playhead, last - 500);
+  }
+  S.speed = x; S.anchorHead = S.playhead; S.anchorWall = performance.now(); updateControls(); syncAll(); }
 
 function note(text) {
   const n = $('tlNote');
@@ -2237,35 +2336,49 @@ function markChips() {
 }
 
 // ---------- alert stepping ----------
-function inCache(head) { return D.range && head >= D.range[0] && head <= D.range[1]; }
 
-async function findOutside(dir, head, names) {
-  const single = names.length === 1 ? '&camera=' + enc(names[0]) : '';
+// Alerts in one order for stepping: by landing, then by id (two cameras'
+// alerts often start in the same second).
+const stepOrder = (a, b) => landing(a) - landing(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+// The nearest alert the step `dir` from `from` (a landing time) that `ok`
+// takes, from the server (outside the loaded range, or when the loaded
+// marks are grouped by slot and would hide some).
+async function findOutside(dir, from, names, ok) {
+  // (One camera: asked for by name; several as a list, unless a name holds
+  // a comma, which the list would split: then they are filtered here.)
+  if (!names.length) return null;
+  const single = names.length === 1 ? '&camera=' + enc(names[0]) : names.some(n => n.includes(',')) ? '' : '&cameras=' + enc(names.join(','));
   const set = new Set(names);
+  const take = (e) => set.has(e.camera) && passes(e) && ok(e);
+  const best = (xs) => xs.reduce((a, b) => ((dir < 0) === (stepOrder(a, b) > 0) ? a : b));
   if (dir < 0) {
-    const until = Math.floor((head + 1000) / 1000);
+    const until = Math.floor((from + LEAD) / 1000) + 1;
     for (let off = 0; off < 1000; off += 200) {
       const r = await api('/api/events?limit=200&offset=' + off + '&until=' + until + single);
       const evs = r.events || [];
-      const hit = evs.find(e => set.has(e.camera) && passes(e) && landing(e) < head - 1000);   // newest first
-      if (hit) return hit;
+      const hits = evs.filter(take);   // (newest first: the first page with any has the nearest)
+      if (hits.length) return best(hits);
       if (evs.length < 200) return null;
     }
     return null;
   }
-  const since = Math.floor((head + 1000) / 1000);
+  const since = Math.floor((from + LEAD) / 1000) - 1;
   for (const span of [3600, 43200, 259200, 2592000, 34560000]) {
-    let until = since + span;
-    for (let k = 0; k < 6; k++) {
+    let until = since + span, later = [];
+    for (let k = 0; ; k++) {
       const r = await api('/api/events?limit=500&since=' + since + '&until=' + until + single);
       const evs = r.events || [];
-      const ok = evs.filter(e => set.has(e.camera) && passes(e) && landing(e) > head + 1000);
-      if (evs.length < 500) {
-        if (ok.length) return ok.reduce((a, b) => (landing(a) <= landing(b) ? a : b));
+      const hits = evs.filter(take);
+      // (A narrower page's are nearer: kept in case the rest has none.)
+      if (hits.length) later = hits;
+      // Complete: not cut off, or it reaches back to `since` (an alert that
+      // began before it, still running, can fill the page), or asked enough.
+      if (evs.length < 500 || evs[evs.length - 1].start <= since || k >= 5) {
+        if (later.length) return best(later);
         break;
       }
-      // truncated (newest first): the nearest ones are cut; narrow to what we saw
-      until = Math.min(...evs.map(e => e.start)) ;
+      // cut off (newest first): the nearest ones are missing; narrow to what we saw
+      until = Math.min(...evs.map(e => e.start));
     }
   }
   return null;
@@ -2276,15 +2389,37 @@ async function stepAlert(dir) {
   S.stepBusy = true;
   try {
     const names = shownNames();
-    const set = new Set(names), head = S.playhead;
+    const set = new Set(names);
+    // Soon after a step (within STEP_AGAIN_MS of where it landed, either way
+    // the playhead has moved since, or paused), the next step goes on from
+    // that alert in one fixed order (stepOrder), so alerts starting in the
+    // same second or a moment apart are each reached, whatever the speed of
+    // the presses; Previous also takes an alert begun since that the
+    // playhead has passed. The alerts of the run landed on near here are not
+    // landed on again (a step the other way: only the one just landed on).
+    // Later (as in the app), a step is from the playhead as usual: Previous
+    // then starts the alert being watched again.
+    const last = S.lastStep, head = S.playhead;
+    const active = !!last && Math.abs(head - last.at) < STEP_AGAIN_MS;
+    const skip = active ? (last.dir === dir ? last.ids : [{ id: last.id, at: last.at }]) : [];
+    const cur = active ? { start: (last.at + LEAD) / 1000, id: last.id } : null;
+    const ok = (e) => !skip.some(x => x.id === e.id) && (dir < 0
+      ? (active ? stepOrder(e, cur) < 0 || (landing(e) > last.at && landing(e) < head - 1000) : landing(e) < head - 1000)
+      : (active ? stepOrder(e, cur) > 0 : landing(e) > head + 1000));
     let hit = null;
-    if (inCache(head)) {
-      const c = D.ev.filter(e => set.has(e.camera) && passes(e) && (dir < 0 ? landing(e) < head - 1000 : landing(e) > head + 1000));
-      if (c.length) hit = c.reduce((a, b) => ((dir < 0) === (landing(a) > landing(b)) ? a : b));
+    // (The loaded marks, when they are each one alert and cover every
+    // camera shown; zoomed out they are grouped by slot.)
+    if (D.evRange && head >= D.evRange[0] && head <= D.evRange[1] && D.evBucket === 0 && !D.evMore && names.every(n => !n.includes(',') && D.evCams && D.evCams.has(n))) {
+      const c = D.ev.filter(e => set.has(e.camera) && passes(e) && ok(e));
+      if (c.length) hit = c.reduce((a, b) => ((dir < 0) === (stepOrder(a, b) > 0) ? a : b));
+      // (Going back, an alert begun before the loaded range may not be the
+      // nearest: one that ended just before it is not loaded. Ask then.)
+      if (hit && dir < 0 && landing(hit) < D.evRange[0]) hit = null;
     }
-    if (!hit) { try { hit = await findOutside(dir, head, names); } catch (e) { hit = null; } }
+    if (!hit) { try { hit = await findOutside(dir, dir < 0 ? Math.max(head, active ? last.at : head) : Math.min(head, active ? last.at : head), names, ok); } catch (e) { hit = null; } }
     if (!hit) { const w = kindsOn.size ? [...kindsOn].map(k => KINDS[k].label.toLowerCase()).join('/') + ' ' : ''; note(dir < 0 ? t('livetl.no_earlier', 'No earlier {kinds}alert', { kinds: w }) : t('livetl.no_later', 'No later {kinds}alert', { kinds: w })); return; }
     seek(landing(hit), true);
+    S.lastStep = { dir, id: hit.id, at: S.playhead, ids: skip.filter(x => Math.abs(x.at - S.playhead) < STEP_AGAIN_MS).concat({ id: hit.id, at: S.playhead }) };
     // zoom so the alert is not lost in a very wide view
     if (S.view.to - S.view.from > 6 * 3600000) { const c = S.playhead; setView(c - 1.5 * 3600000, c + 1.5 * 3600000); }
   } finally { S.stepBusy = false; }

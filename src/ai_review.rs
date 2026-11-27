@@ -215,8 +215,6 @@ pub async fn event_track(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<S
         .into_response(),
         Ok(Ok(None)) => err(StatusCode::NOT_FOUND, "no recording of that event"),
         Ok(Err(e)) if e.to_string() == "busy" => err(StatusCode::SERVICE_UNAVAILABLE, "busy, try again"),
-        // (Nobody is waiting for this answer.)
-        Ok(Err(e)) if e.to_string() == "canceled" => err(StatusCode::SERVICE_UNAVAILABLE, "canceled"),
         Ok(Err(e)) => {
             tracing::warn!("AI track: {e:#}");
             err(StatusCode::INTERNAL_SERVER_ERROR, "could not run the AI on this event")

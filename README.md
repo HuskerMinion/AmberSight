@@ -33,14 +33,11 @@ More screenshots: [Screenshots](#screenshots).
 | | |
 |---|---|
 | <img src="docs/images/screenshots/2-timeline.jpg" alt="Timeline: all cameras in sync with alert markers"><br>**Timeline**: every camera in sync, alerts by kind, mark and export a clip | <img src="docs/images/screenshots/3-events.jpg" alt="Events: list beside the player"><br>**Events**: filter chips, list beside the player, the AI's verdict |
-| <img src="docs/images/screenshots/4-camera-panel.jpg" alt="Camera settings in a side panel over the live view"><br>**Camera settings**: a side panel over Live, with a live picture | <img src="docs/images/screenshots/5-zones.jpg" alt="Zones editor with live motion boxes"><br>**Zones**: detect and ignore zones, live motion |
-| <img src="docs/images/screenshots/6-performance.jpg" alt="Performance charts and per-camera table"><br>**Performance**: the last hour of CPU, AI, network and disk | <img src="docs/images/screenshots/7-live-light.jpg" alt="Live view in the light theme"><br>**Light theme** |
+| <img src="docs/images/screenshots/4-camera-panel.jpg" alt="Camera settings in a side panel over the live view"><br>**Camera settings**: a side panel over Live, with a live picture | <img src="docs/images/screenshots/7-live-light.jpg" alt="Live view in the light theme"><br>**Light theme** |
 
 <p align="center"><img src="docs/images/screenshots/8-phone.jpg" alt="Live view on a phone" width="260"><br><b>On a phone</b></p>
 
-<sub>The cameras in these screenshots are public-domain video from Grand Canyon
-National Park's B-roll library (National Park Service), looped into a demo
-AmberSight server. The National Park Service does not endorse AmberSight.</sub>
+<sub>The cameras in these screenshots are the author's own outdoor cameras, with license plates and other identifying details blurred.</sub>
 
 ## Install
 

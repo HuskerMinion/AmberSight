@@ -1089,6 +1089,66 @@ fn at_clean_point(sink: Option<&Sink>, ticks: i64) -> bool {
     }
 }
 
+/// A stream skew that is a whole time-zone step: read the camera's UTC clock
+/// over ONVIF in the background (at most every few hours, and again when the
+/// skew moves) to tell firmware that stamps its sender reports in local time
+/// (clock right, issue #15) from a clock that is off. Only for an always-on
+/// camera, never one asleep, and not for a channel of a hub or recorder (its
+/// ONVIF clock is the recorder's, not the camera's); its ONVIF port, else 80
+/// then 8000 (a camera without ONVIF is tried again only after the hours).
+fn check_clock_zone(handle: &Arc<CameraHandle>, skew: f64) {
+    let now = Utc::now().timestamp();
+    {
+        let mut st = handle.state.write().unwrap();
+        let due = crate::timesync::zone_check_due(skew, st.clock_zone_checked, now);
+        if st.sleeping || (!due && st.clock_zone.is_none()) {
+            return;
+        }
+        let cfg = handle.cfg.read().unwrap();
+        if cfg.on_demand || cfg.uid.is_some() {
+            return;
+        }
+        // (A recorder's channel, learnt since an earlier check: its ONVIF clock
+        // is the recorder's, so a zone read from it is let go at once, and it
+        // is asked again only after the hours.)
+        if crate::controls::known_channel_of_multi(&cfg) {
+            st.clock_zone = None;
+            st.clock_zone_checked = Some((now, skew, true));
+            return;
+        }
+        if !due {
+            return;
+        }
+        // Marked first, as not read: one reading at a time.
+        st.clock_zone_checked = Some((now, skew, false));
+    }
+    let mut cfg = handle.cfg.read().unwrap().clone();
+    crate::engine::normalize_creds(&mut cfg);
+    let h = handle.clone();
+    let again = cfg.clone();
+    tokio::spawn(async move {
+        let read = tokio::time::timeout(Duration::from_secs(30), tokio::task::spawn_blocking(move || crate::timesync::utc_offset(&cfg))).await;
+        let offset = match read {
+            Ok(Ok(Ok(o))) => Some(o),
+            Ok(Ok(Err(e))) => {
+                tracing::debug!("camera '{}': could not read its clock over ONVIF ({e:#})", h.state.read().unwrap().name);
+                None
+            }
+            _ => None,
+        };
+        // (Learnt to be a recorder's channel while reading: not its clock.)
+        let zone = crate::timesync::confirmed_zone(skew, offset).filter(|_| !crate::controls::known_channel_of_multi(&again));
+        let mut st = h.state.write().unwrap();
+        if offset.is_some() {
+            st.clock_zone_checked = Some((now, skew, true));
+        }
+        if zone.is_some() && st.clock_zone.is_none() {
+            info!("camera '{}': its clock is right over ONVIF; its stream times are in local time ({:+} min)", st.name, (skew / 60.0).round());
+        }
+        st.clock_zone = zone;
+    });
+}
+
 /// The open recording of one stream task. However the task ends (its
 /// stream stops, an error returns early, or the session drops it because
 /// the other stream ended first), the file is finished and handed to the
@@ -1193,6 +1253,12 @@ async fn main_task(
         s.stall_limit = WAKE_STALL;
     }
     reached_play.store(true, Ordering::Relaxed);
+    // (A hub's or recorder's channel: its ONVIF clock would be the recorder's.)
+    // (Whether the device has more channels is learnt later: asked at each check.)
+    let zone_check = !plan.on_demand && {
+        let cfg = handle.cfg.read().unwrap().clone();
+        !is_hub_channel(&cfg, &engine.config.lock().unwrap().cameras)
+    };
     main_played.store(true, Ordering::Relaxed);
     match &plan.main.baichuan {
         Some(t) => info!("camera '{}': native stream playing ({})", handle.state.read().unwrap().name, t.describe()),
@@ -1216,7 +1282,11 @@ async fn main_task(
                 if n == 0 {
                     // A sender report describes "now" on the camera's clock.
                     let local = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-                    handle.state.write().unwrap().clock_skew = Some(report.1 - local);
+                    let skew = report.1 - local;
+                    handle.state.write().unwrap().clock_skew = Some(skew);
+                    if zone_check {
+                        check_clock_zone(handle, skew);
+                    }
                 }
                 if let Some(k) = sink.as_mut() {
                     k.observe_sender_report(n, report);
@@ -2055,6 +2125,11 @@ mod tests {
         r.reolink_channel = Some(0);
         assert!(is_hub_channel(&r, &[r.clone()]));
         assert!(is_hub_channel(&cam("F", "http://10.0.0.8/x"), &[]), "not RTSP");
+        // (Nor a clock zone check: also a recorder's channel known from its stream address.)
+        let creds = |name: &str, url: &str| -> CameraConfig { toml::from_str(&format!("name = \"{name}\"\nurl = \"{url}\"\nusername = \"u\"\npassword = \"p\"\n")).unwrap() };
+        assert!(crate::controls::known_channel_of_multi(&creds("N", "rtsp://10.0.0.9/h264Preview_03_main")));
+        assert!(!crate::controls::known_channel_of_multi(&creds("O", "rtsp://10.0.0.10/h264Preview_01_main")), "not known to be a hub's");
+        assert!(!crate::controls::known_channel_of_multi(&creds("P", "rtsp://10.0.0.11/live")));
     }
 
     #[test]

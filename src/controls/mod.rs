@@ -23,6 +23,7 @@ mod baichuan_drv;
 pub mod http;
 mod reolink_drv;
 pub mod session;
+pub mod siren_sound;
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(test)]
@@ -31,6 +32,8 @@ pub(crate) mod fake_bc;
 mod tests;
 #[cfg(test)]
 mod tests_bc;
+#[cfg(test)]
+mod tests_sound;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -215,6 +218,9 @@ pub struct Target {
     /// a camera of its own, or channel 1 of a hub or recorder. Which, the
     /// device is asked (once); until it has said, it counts as a hub's.
     pub ch0: bool,
+    /// The device's Reolink port 9000 address (the siren's sound is set
+    /// that way, however the other controls are reached).
+    pub bc_base: String,
 }
 
 impl Target {
@@ -270,6 +276,13 @@ impl Target {
             }
         }
     }
+}
+
+/// A channel of a hub or recorder as far as is known without asking: a
+/// channel set or in the stream address, or Preview_01 of a device the
+/// controls found to have several channels.
+pub fn known_channel_of_multi(cfg: &CameraConfig) -> bool {
+    target(cfg).is_ok_and(|t| t.hub || (t.ch0 && device_known(&t).is_some_and(|k| k.multi)))
 }
 
 /// The device channel in a Reolink stream path (`Preview_02_main`: 1).
@@ -330,6 +343,7 @@ pub fn target(cfg: &CameraConfig) -> Result<Target, String> {
         .map(|t| t.host)
         .unwrap_or_else(|| crate::ingest::baichuan::wired::norm_host(&host));
     let bc = baichuan_drv::base_for(&dev_host, bc_port);
+    let bc_base = bc.clone();
     let bc_ok = !battery && !hub;
     let connect = c.connect.trim().to_ascii_lowercase();
     // HTTPS only, unless the admin picks plain HTTP (which sends the camera's
@@ -363,7 +377,7 @@ pub fn target(cfg: &CameraConfig) -> Result<Target, String> {
     // behind port forwarding one address can be several cameras), the account
     // and the channel. Not the scheme or the way in.
     let place = place_of(&dev_host, port, c.baichuan_port, &c.username, channel);
-    Ok(Target { key: format!("{place}|{pass_tag}|{battery}"), place, brand: "reolink", bases, user: c.username.clone(), pass: c.password.clone(), channel, battery, hub, ch0 })
+    Ok(Target { key: format!("{place}|{pass_tag}|{battery}"), place, brand: "reolink", bases, user: c.username.clone(), pass: c.password.clone(), channel, battery, hub, ch0, bc_base })
 }
 
 /// Where a light is (`Target::place`).
@@ -993,6 +1007,22 @@ pub fn siren_playing(engine: &Engine, name: &str) -> bool {
     engine.controls.cams.lock().unwrap().get(name).and_then(|c| c.siren_until_ms).is_some_and(|u| u > now)
 }
 
+/// Whether the camera's siren is sounding or its timed stop is still due (a
+/// siren started from AmberSight, its play on its way, or its stop running).
+pub fn siren_busy(engine: &Engine, name: &str) -> bool {
+    engine.controls.cams.lock().unwrap().get(name).is_some_and(|c| c.siren_until_ms.is_some() || c.siren_flying.is_some() || c.stopping)
+}
+
+/// A battery camera behind a Home Hub (not a recorder's channel): one the
+/// hub reports sleep or a charge for, or one set as a battery camera.
+pub fn battery_behind_hub(h: &CameraHandle, t: &Target) -> bool {
+    if !is_hub(t) || device_known(t).is_some_and(|k| k.recorder) {
+        return false;
+    }
+    let st = h.state.read().unwrap();
+    t.battery || st.device_sleeping.is_some() || st.battery.is_some()
+}
+
 /// Whether the camera has a siren (as known).
 pub fn has_siren(engine: &Engine, name: &str) -> bool {
     engine.controls.cams.lock().unwrap().get(name).and_then(|c| c.ab.as_ref()).is_some_and(|a| a.siren)
@@ -1335,7 +1365,9 @@ pub fn act(engine: &Engine, id: usize, who: &Caller, action: Action, extend_only
                 Err(e) if not_done(&e) => {
                     let e = crate::engine::redact_url(format!("{e:#}"));
                     audit(engine, who, &name, &format!("siren for {secs} s"), &Err(e.clone()));
-                    return Err(refuse(502, format!("The siren did not start: {e}.")));
+                    // (Behind a hub, a battery camera refuses while its own siren setting is off.)
+                    let hint = if battery_behind_hub(&h, &t) { format!(" {}", siren_sound::HUB_SIREN_HINT) } else { String::new() };
+                    return Err(refuse(502, format!("The siren did not start: {e}.{hint}")));
                 }
                 Err(e) => {
                     // No clear answer: it may be sounding. Its stop stays due when its time is up.

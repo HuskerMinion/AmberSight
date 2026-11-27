@@ -148,6 +148,19 @@ Section "Uninstall"
     DetailPrint "Removing the AmberSight service, firewall rule and shortcuts"
     nsExec::ExecToLog '"$INSTDIR\ambersight.exe" setup --uninstall --installed'
     Pop $0
+  ${Else}
+    ; The program is gone (for example antivirus took it), so it cannot
+    ; remove what it set up: do the same here. The service only when it runs
+    ; the program from this folder (never another program's "AmberSight").
+    DetailPrint "ambersight.exe is missing: removing the service, firewall rules and shortcuts directly"
+    nsExec::ExecToLog '"$SYSDIR\cmd.exe" /C ""$SYSDIR\sc.exe" qc AmberSight 4096 | "$SYSDIR\findstr.exe" /I /C:"$INSTDIR\ambersight.exe" >NUL && "$SYSDIR\sc.exe" stop AmberSight & "$SYSDIR\sc.exe" qc AmberSight 4096 | "$SYSDIR\findstr.exe" /I /C:"$INSTDIR\ambersight.exe" >NUL && "$SYSDIR\sc.exe" delete AmberSight"'
+    Pop $0
+    nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule "name=AmberSight NVR"'
+    Pop $0
+    nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule "name=AmberSight HomeKit"'
+    Pop $0
+    Delete "$SMPROGRAMS\AmberSight.url"
+    Delete "$DESKTOP\AmberSight.url"
   ${EndIf}
 
   ; Exactly the files the installer put here; anything else stays.

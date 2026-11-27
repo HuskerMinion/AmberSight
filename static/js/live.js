@@ -1123,7 +1123,10 @@ export function renderLive() {
   grid.dataset.style = style;
   document.body.classList.toggle('livefill', fill);
   fitN = shown.length;
-  const bigN = fill && shown.length > BIG[style] ? BIG[style] : 0;
+  // (The large places, also when there are no more cameras than places; a
+  // camera alone in full screen or in a window-filling style is large too.
+  // Not one alone in the plain grid: one per page, the last page, a group.)
+  const bigN = shown.length === 1 && (tvOn() || fill) && !tlHook ? 1 : fill ? Math.min(BIG[style], shown.length) : 0;
   grid.dataset.per = solo ? 'solo' : (per ? String(per) : 'auto');
   grid.style.setProperty('--cols', per ? String(Math.round(Math.sqrt(per))) : '');
   if (!all.length) {

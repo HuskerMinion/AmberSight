@@ -1389,7 +1389,10 @@ for the packages), start AmberSight, then run the dry run above as that account
 
 ## Uninstalling
 
-- **Windows installer:** Settings > Apps > Installed apps > AmberSight > Uninstall.
+- **Windows installer:** Settings > Apps > Installed apps > AmberSight > Uninstall. It also
+  removes the service, the firewall rules and the shortcuts when `ambersight.exe` is already
+  gone (for example removed by antivirus); the settings and recordings in
+  `C:\ProgramData\AmberSight` are kept.
 - **.deb / .rpm:** `sudo apt remove ambersight` or `sudo dnf remove ambersight`.
 - **`ambersight setup`:** `ambersight setup --uninstall` (with `--system` or `--here` if you
   used them).

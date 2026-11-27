@@ -1,9 +1,10 @@
 //! A fake Reolink camera on Baichuan TCP (port 9000) for tests: sign-in
 //! (nonce, hashed user name and password, AES), what it supports (199), the
 //! account's abilities (151), the infrared and status lights (208 read, 209
-//! write) and the siren (263). Answers are shaped as the lab's E1 Pro and E1
-//! Outdoor SE answered the read-only questions (2026-11-19); the writes are
-//! as the public descriptions give them, and are only proven here.
+//! write) and the siren (263), and the siren's sound (260, 264, 267 read;
+//! 261, 262, 265 write). Answers are shaped as the lab's E1 Pro and E1
+//! Outdoor SE answered the read-only questions (2026-11-19), the siren's
+//! sound as the lab's cameras answered the official app (2026-11-27).
 
 use crate::ingest::baichuan::{bc, ctl};
 use std::io::{Read, Write};
@@ -52,6 +53,23 @@ pub struct BcState {
     pub mute_play: bool,
     /// The sign-in's answer waits this long (a slow camera).
     pub login_delay_ms: u64,
+    /// 267 lists ADPCM 16 kHz (false: refused, as a camera without it).
+    pub sound_ok: bool,
+    /// 264's `audioSelect` (1: custom), and fields after it the camera also has.
+    pub audio_select: u8,
+    pub audio_cfg_more: String,
+    /// The stored custom sound (260's `fileSize` is its length).
+    pub stored: Vec<u8>,
+    /// 260 reads 0 whatever is stored (as behind a hub).
+    pub file_info_zero: bool,
+    /// A sound being received: the size its header said, and what came.
+    pub receiving: Option<(usize, Vec<u8>)>,
+    /// Refuse (400) the n-th piece of a sound (1: the first after the header).
+    pub refuse_piece: Option<usize>,
+    /// "Done" to 265, and nothing changes.
+    pub noop_audio_cfg: bool,
+    /// Every 261 and 262: (message id, message number, header channel byte, extension, payload as received).
+    pub sound_msgs: Vec<(u32, u16, u8, String, Vec<u8>)>,
 }
 
 impl BcState {
@@ -88,6 +106,15 @@ impl Default for BcState {
             round_ms: 300,
             mute_play: false,
             login_delay_ms: 0,
+            sound_ok: true,
+            audio_select: 0,
+            audio_cfg_more: String::new(),
+            stored: Vec::new(),
+            file_info_zero: false,
+            receiving: None,
+            refuse_piece: None,
+            noop_audio_cfg: false,
+            sound_msgs: Vec::new(),
         }
     }
 }
@@ -122,7 +149,11 @@ impl FakeBc {
     pub fn set_manual(&self, on: bool) {
         self.st.lock().unwrap().siren_manual = on;
     }
-    /// The messages that change something (209, 263), in order.
+    /// Change the state as a test needs.
+    pub fn set(&self, f: impl FnOnce(&mut BcState)) {
+        f(&mut self.st.lock().unwrap());
+    }
+    /// The messages that change something (209, 263, 261, 262, 265), in order.
     pub fn writes(&self) -> Vec<(u32, String)> {
         self.state().log.into_iter().filter(|(id, _)| bc::CONTROL_WRITES.contains(id)).collect()
     }
@@ -185,9 +216,16 @@ fn serve(mut c: TcpStream, st: &Mutex<BcState>) {
             let Some(a) = &aes else { break 'conn };
             let off = (h.payload_offset.unwrap_or(0) as usize).min(m.body.len());
             let dec = |d: &[u8]| if d.is_empty() { String::new() } else { String::from_utf8_lossy(&a.decrypt(d)).into_owned() };
-            let text = format!("{}{}", dec(&m.body[..off]), dec(&m.body[off..]));
+            let ext = dec(&m.body[..off]);
+            // (A piece of a sound: its payload is not encrypted.)
+            let binary = ext.contains("<binaryData>1</binaryData>");
+            let text = if binary { ext.clone() } else { format!("{ext}{}", dec(&m.body[off..])) };
             let mut s = st.lock().unwrap();
             s.log.push((h.msg_id, text.clone()));
+            if matches!(h.msg_id, bc::MSG_AUDIO_FILE_SEND | bc::MSG_AUDIO_FILE_DONE) {
+                let pay = if binary { m.body[off..].to_vec() } else { text[ext.len()..].as_bytes().to_vec() };
+                s.sound_msgs.push((h.msg_id, h.msg_num, h.channel, ext.clone(), pay));
+            }
             let answer: Option<(u16, String)> = match h.msg_id {
                 bc::MSG_KEEPALIVE if h.status == 0 => Some((200, String::new())),
                 bc::MSG_KEEPALIVE | bc::MSG_LOGOUT => None,
@@ -237,6 +275,58 @@ fn serve(mut c: TcpStream, st: &Mutex<BcState>) {
                         Some((200, String::new()))
                     }
                 }
+                bc::MSG_AUDIO_ENCODE_ABILITY if !s.sound_ok => Some((400, String::new())),
+                bc::MSG_AUDIO_ENCODE_ABILITY => Some((
+                    200,
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<AudioEncodeAbility version=\"1.1\">\n<channelId>0</channelId>\n<maxCapacity>128</maxCapacity>\n<audioEncodeList>\n<audioEncode>\n<audioType>adpcm</audioType>\n<sampleRate>16000</sampleRate>\n<samplePrecision>16</samplePrecision>\n<lengthPerEncoder>1024</lengthPerEncoder>\n<soundTrack>mono</soundTrack>\n</audioEncode>\n</audioEncodeList>\n</AudioEncodeAbility>\n</body>\n".to_string(),
+                )),
+                bc::MSG_AUDIO_FILE_INFO => {
+                    let size = if s.file_info_zero { 0 } else { s.stored.len() };
+                    Some((200, format!("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<audioFileInfo version=\"1.1\">\n<channelId>0</channelId>\n<fileSize>{size}</fileSize>\n</audioFileInfo>\n</body>\n")))
+                }
+                bc::MSG_AUDIO_CFG_GET => Some((
+                    200,
+                    format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<audioCfg version=\"1.1\">\n<channelId>0</channelId>\n<timeout>0</timeout>\n<audioSelect>{}</audioSelect>\n<volume>25</volume>\n<preAlarm>0</preAlarm>\n{}</audioCfg>\n</body>\n",
+                        s.audio_select, s.audio_cfg_more
+                    ),
+                )),
+                bc::MSG_AUDIO_CFG_SET if s.not_admin => Some((401, String::new())),
+                bc::MSG_AUDIO_CFG_SET => {
+                    if !s.noop_audio_cfg {
+                        if let Some(v) = ctl::text(&text, "audioSelect").and_then(|v| v.parse().ok()) {
+                            s.audio_select = v;
+                        }
+                    }
+                    Some((200, String::new()))
+                }
+                bc::MSG_AUDIO_FILE_SEND if s.not_admin => Some((401, String::new())),
+                bc::MSG_AUDIO_FILE_SEND if !binary => {
+                    let size = ctl::text(&text, "fileSize").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    s.receiving = Some((size, Vec::new()));
+                    Some((200, String::new()))
+                }
+                bc::MSG_AUDIO_FILE_SEND => {
+                    // (Pieces since the last header.)
+                    let head = s.sound_msgs.iter().rposition(|m| m.0 == bc::MSG_AUDIO_FILE_SEND && !m.3.contains("binaryData")).unwrap_or(0);
+                    let pieces = s.sound_msgs.len() - 1 - head;
+                    if s.refuse_piece == Some(pieces) {
+                        s.receiving = None;
+                        Some((400, String::new()))
+                    } else if let Some((_, got)) = s.receiving.as_mut() {
+                        got.extend_from_slice(&m.body[off..]);
+                        Some((200, String::new()))
+                    } else {
+                        Some((400, String::new()))
+                    }
+                }
+                bc::MSG_AUDIO_FILE_DONE => match s.receiving.take() {
+                    Some((size, got)) if size == got.len() => {
+                        s.stored = got;
+                        Some((200, String::new()))
+                    }
+                    _ => Some((400, String::new())),
+                },
                 _ => Some((400, String::new())),
             };
             drop(s);

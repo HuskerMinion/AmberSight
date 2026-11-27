@@ -132,3 +132,117 @@ pub async fn post(
         Err(_) => err(500, "internal error"),
     }
 }
+
+// ------------------------------------------------------- the siren's sound
+
+/// `/api/cameras/:id/siren-sound`: admins, signed in with a password (a
+/// setting kept on the camera), like the camera's other settings.
+pub fn sound_refusal(role: &Role, by_token: bool) -> Option<&'static str> {
+    if by_token {
+        Some("sign in with a password for this")
+    } else if !may(role, false).settings {
+        Some("only an admin can change the camera's own settings")
+    } else {
+        None
+    }
+}
+
+/// The content types an upload may have (a browser's recording says
+/// `audio/webm;codecs=opus` or `audio/mp4`; a file may come as octet-stream).
+pub fn sound_type_ok(ct: &str) -> bool {
+    let t = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    t.starts_with("audio/") || matches!(t.as_str(), "video/webm" | "video/mp4" | "video/ogg" | "application/ogg" | "application/octet-stream")
+}
+
+fn web_caller(token: &Option<axum::Extension<TokenUsed>>, caller: &WebCaller, ci: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>) -> Caller {
+    Caller {
+        user: match token {
+            Some(t) => format!("{} (device token \"{}\")", caller.0, t.0 .0),
+            None => caller.0.clone(),
+        },
+        ip: ci.map(|c| c.0.ip().to_string()).unwrap_or_default(),
+        source: "web",
+    }
+}
+
+async fn sound_answer(f: impl FnOnce() -> Result<serde_json::Value, super::Refused> + Send + 'static) -> Response {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(r)) => err(r.status, &r.msg),
+        Err(_) => err(500, "internal error"),
+    }
+}
+
+pub async fn sound_get(
+    State(engine): State<Arc<Engine>>,
+    token: Option<axum::Extension<TokenUsed>>,
+    axum::Extension(role): axum::Extension<Role>,
+    axum::Extension(caller): axum::Extension<WebCaller>,
+    sign_in: Option<axum::Extension<SignIn>>,
+    AxPath(id): AxPath<usize>,
+) -> Response {
+    if let Some(why) = sound_refusal(&role, token.is_some()) {
+        return err(403, why);
+    }
+    // (Each read may ask the camera: the same caps as the controls' reads.)
+    let key = sign_in.map(|s| s.0 .0).unwrap_or_else(|| format!("account:{}", caller.0));
+    if !get_allowed(&format!("in|{key}"), GET_PER_ACCOUNT) || !get_allowed(&format!("user|{}", caller.0), GET_PER_USER) {
+        return err(429, "too many reads of camera controls from this sign-in: wait a few seconds");
+    }
+    sound_answer(move || super::siren_sound::view(&engine, id)).await
+}
+
+/// `POST`: the body is the sound file itself (its Content-Type an audio type).
+/// A body over the route's limit (MAX_UPLOAD) is a rejection here, so it is
+/// answered in JSON like the rest.
+#[allow(clippy::too_many_arguments)]
+pub async fn sound_post(
+    State(engine): State<Arc<Engine>>,
+    token: Option<axum::Extension<TokenUsed>>,
+    axum::Extension(role): axum::Extension<Role>,
+    axum::Extension(caller): axum::Extension<WebCaller>,
+    ci: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    AxPath(id): AxPath<usize>,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    if let Some(why) = sound_refusal(&role, token.is_some()) {
+        return err(403, why);
+    }
+    let body = match body {
+        Ok(b) => b,
+        Err(r) if r.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE => return err(413, "the sound file is too big: at most 10 MB"),
+        Err(r) => return err(400, &format!("the sound file could not be received: {}", r.body_text())),
+    };
+    let ct = headers.get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !sound_type_ok(ct) {
+        return err(415, "send the sound file itself as the request body, with its audio Content-Type (audio/wav, audio/mpeg, audio/mp4, audio/aac, audio/webm, audio/ogg)");
+    }
+    if body.len() > super::siren_sound::MAX_UPLOAD {
+        return err(413, "the sound file is too big: at most 10 MB");
+    }
+    let who = web_caller(&token, &caller, ci);
+    sound_answer(move || super::siren_sound::upload(&engine, id, &who, &body)).await
+}
+
+/// `PUT {"use": "custom" | "built_in"}`.
+pub async fn sound_put(
+    State(engine): State<Arc<Engine>>,
+    token: Option<axum::Extension<TokenUsed>>,
+    axum::Extension(role): axum::Extension<Role>,
+    axum::Extension(caller): axum::Extension<WebCaller>,
+    ci: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    AxPath(id): AxPath<usize>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Some(why) = sound_refusal(&role, token.is_some()) {
+        return err(403, why);
+    }
+    let custom = match body.get("use").and_then(|v| v.as_str()) {
+        Some("custom") => true,
+        Some("built_in") => false,
+        _ => return err(400, "say which sound: {\"use\": \"custom\"} or {\"use\": \"built_in\"}"),
+    };
+    let who = web_caller(&token, &caller, ci);
+    sound_answer(move || super::siren_sound::pick(&engine, id, &who, custom)).await
+}

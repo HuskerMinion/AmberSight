@@ -32,6 +32,7 @@ pub fn build_router(engine: Arc<Engine>) -> Router {
         .route("/timesync/all", post(timesync_all))
         .route("/cameras/:id/reboot", post(camera_reboot))
         .route("/cameras/:id/controls", get(crate::controls::http::get).post(crate::controls::http::post))
+        .route("/cameras/:id/siren-sound", get(crate::controls::http::sound_get).post(crate::controls::http::sound_post).put(crate::controls::http::sound_put).layer(axum::extract::DefaultBodyLimit::max(crate::controls::siren_sound::MAX_UPLOAD)))
         .route("/cameras/:id/powercycle", post(camera_powercycle))
         .route("/cameras/:id/watchdog", get(camera_watchdog))
         .route("/cameras/:id/netinfo", get(camera_netinfo))
@@ -1051,7 +1052,7 @@ fn admin_only_path(path: &str) -> bool {
         || path.starts_with("/system")
         // A camera's tamper, unusual-activity and ONVIF settings windows (the
         // pictures are open to anyone who may see the camera).
-        || matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(), ["cameras", _, "tamper" | "unusual" | "onvif" | "spots" | "report"])
+        || matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(), ["cameras", _, "tamper" | "unusual" | "onvif" | "spots" | "report" | "siren-sound"])
 }
 
 /// The answer to a password (or code, or token) for the demo account.
@@ -3279,7 +3280,7 @@ fn caps_of(caps: &Option<String>, download: bool) -> Result<Option<crate::transc
 
 /// `GET /api/whoami` `features`: abilities apps can test for (the version
 /// string is for the updater).
-const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4", "alerts_ws", "camera_reboot"];
+const FEATURES: &[&str] = &["caps", "operator", "event_copy", "fit_recordings", "alert_search", "fit_download", "battery", "snooze", "demo", "snapshot_no_wake", "events_latest", "apple_plain_mp4", "alerts_ws", "camera_reboot", "siren_sound"];
 
 /// How a request with caps asks for the bytes: HEAD or `Range: bytes=0-0`
 /// (headers only), a range from further in, or from the start.
@@ -7781,6 +7782,7 @@ async fn camera_report(State(engine): State<Arc<Engine>>, AxPath(id): AxPath<usi
             offline_since: st.offline_since,
             frames: st.frames,
             clock_skew: st.clock_skew,
+            clock_zone: crate::timesync::zone_now(st.clock_skew, st.clock_zone),
         }
     };
     let (file, text) = crate::camreport::make(cfg, live).await;
@@ -8244,6 +8246,7 @@ mod viewer_write_tests {
     /// in neither this list nor `TOKEN_ROUTES` fails the test below.
     const TOKEN_REFUSED: &[&str] = &[
         "/lang",
+        "/cameras/:id/siren-sound",
         "/lang/default",
         "/lang/install",
         "/lang/upload",
@@ -8481,6 +8484,9 @@ mod viewer_write_tests {
         ("/cameras/:id/reboot", "POST", "operator:reboot"),
         ("/cameras/:id/controls", "GET", "viewer"),
         ("/cameras/:id/controls", "POST", "operator:controls"),
+        ("/cameras/:id/siren-sound", "GET", "admin"),
+        ("/cameras/:id/siren-sound", "POST", "admin"),
+        ("/cameras/:id/siren-sound", "PUT", "admin"),
         ("/cameras/:id/powercycle", "POST", "admin"),
         ("/cameras/:id/watchdog", "GET", "viewer"),
         ("/cameras/:id/netinfo", "GET", "viewer"),

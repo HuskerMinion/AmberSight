@@ -1,7 +1,8 @@
 // cam_controls.js - the camera window's "Lights & siren" section (admins): what the camera has
 // (asked of the camera), its infrared and status lights, and the actions next to alerts (the
 // spotlight or the siren when the AI confirms a person). The siren and the light themselves are
-// in Live (controls.js).
+// in Live (controls.js). The siren's sound (Reolink, over port 9000): built-in or custom, and a
+// custom one sent from a file or recorded here (the microphone only on a click of Record).
 
 import { t } from './i18n.js';
 import { api, esc, toast, errText } from './core.js';
@@ -21,6 +22,7 @@ export function controlsHtml(c) {
     '<div class="wd-state" data-ctlstate><span class="hint">' + t('cam_controls.asking','Asking the camera…') + '</span></div>' +
     '<div class="cs-ctl-ab" data-ctlab></div>' +
     '<div data-ctlset></div>' +
+    '<div data-ctlsound></div>' +
     '<div class="sec">' + t('cam_controls.actions_next','Actions next to alerts') + '</div>' +
     '<div class="hint">' + t('cam_controls.when_ai','When the AI confirms what you pick below on this camera (not motion alone, not the camera\'s own report alone). Off by default.') + '</div>' +
     sw('data-ct-light', !!k.light_on_detect, t('cam_controls.turn_spotlight','Turn the spotlight on'), t('cam_controls.stays_on','Stays on while it is still seen, then the camera gets its own setting back.')) +
@@ -125,10 +127,151 @@ export function wireControls(d, c) {
     const db = set.querySelector('[data-live-db]');
     if (db) db.onchange = () => { if (db.value) post({ action: 'doorbell_led', state: db.value }, t('cam_controls.doorbell_light_action','Doorbell light')); };
     box.querySelector('[data-ctlredo]').onclick = () => post({ action: 'redetect' }, t('cam_controls.asked_again','Asked again'));
+    if (v.siren && v.may && v.may.settings) sirenSound(d, c);
+    else { const sb = d.querySelector('[data-ctlsound]'); if (sb) sb.innerHTML = ''; }
   }
   async function load() {
     try { paint(await api('/api/cameras/' + c.id + '/controls')); }
     catch (e) { const box = d.querySelector('[data-ctlstate]'); if (box) box.innerHTML = '<span class="hint">' + esc(errText(e)) + '</span>'; }
   }
   load();
+}
+
+// ------------------------------------------------------------------ the siren's sound
+
+const SOUND_MAX_BYTES = 10 * 1024 * 1024;
+const REC_SECS = 5;
+
+// The "Siren sound" part of the section: shown only when the camera takes a sound of its own.
+function sirenSound(d, c) {
+  const box = d.querySelector('[data-ctlsound]');
+  if (!box || box.dataset.wired) return;
+  box.dataset.wired = '1';
+  const url = '/api/cameras/' + c.id + '/siren-sound';
+  // starting: the microphone asked for, not answered yet (a second click does nothing).
+  let st = null, busy = false, pick = null, rec = null, url0 = null, starting = false, readErr = '';
+  // A sound picked or recorded, not sent yet: { blob, name }.
+  const forget = () => { if (url0) URL.revokeObjectURL(url0); url0 = null; pick = null; };
+  // Stop one recording (its own stream and timer; the one running by default).
+  const stopRec = (r = rec) => {
+    if (!r) return;
+    clearInterval(r.timer);
+    try { if (r.mr.state !== 'inactive') r.mr.stop(); } catch (e) { /* stopped */ }
+    r.stream.getTracks().forEach(tr => tr.stop());
+  };
+  const gone = () => !box.isConnected;
+  // sent: the picked sound went to the camera (only then is it forgotten).
+  const busyDo = async (what, f, sent) => {
+    if (busy) return;
+    busy = true; paint();
+    try { st = await f(); toast(t('cam_controls.what_done', '{what}: done', { what }), { kind: 'ok', ms: 2000 }); if (sent) forget(); }
+    catch (e) { toast(t('cam_controls.what_failed', '{what}: {error}', { what, error: errText(e) }), { kind: 'bad', ms: 9000 }); }
+    busy = false; paint();
+  };
+  function paint() {
+    if (gone()) { stopRec(); forget(); return; }
+    // (Asleep, or the camera did not answer on port 9000: said why. A camera that cannot: nothing shown.)
+    const why = readErr || (st && !st.supported && (st.asleep || st.error) ? st.why || st.error : '');
+    if (!st || !st.supported) { box.innerHTML = why ? '<div class="sec">' + t('cam_controls.siren_sound', 'Siren sound') + '</div><div class="hint">' + esc(why) + '</div>' : ''; return; }
+    const using = st.using;
+    const kb = st.custom_bytes ? Math.round(st.custom_bytes / 1024) : 0;
+    const secure = window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder;
+    const dis = busy ? ' disabled' : '';
+    let h = '<div class="sec">' + t('cam_controls.siren_sound', 'Siren sound') + '</div>' +
+      '<div class="hint">' + t('cam_controls.siren_sound_hint', 'What the camera\'s siren plays: its built-in sound or one of your own, up to {secs} seconds. A sound of your own is brought up to full loudness before it is sent.', { secs: (st.max_seconds || 5).toFixed(0) }) + '</div>' +
+      '<div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">' +
+      '<div class="seg sndseg" role="group" aria-label="' + esc(t('cam_controls.siren_sound', 'Siren sound')) + '">' +
+      '<button type="button" data-snd-use="built_in" class="' + (using === 'built_in' ? 'on' : '') + '" aria-pressed="' + (using === 'built_in') + '"' + dis + '>' + t('cam_controls.sound_builtin', 'Built-in') + '</button>' +
+      '<button type="button" data-snd-use="custom" class="' + (using === 'custom' ? 'on' : '') + '" aria-pressed="' + (using === 'custom') + '"' + dis + '>' + t('cam_controls.sound_custom', 'Custom') + '</button></div>' +
+      '<span class="hint" style="margin:0">' + (using === 'unknown' ? t('cam_controls.sound_unknown', 'The camera did not say which it uses.') : kb ? t('cam_controls.sound_stored', 'Custom sound on the camera: {kb} KB.', { kb }) : st.hub ? '' : t('cam_controls.sound_none', 'No custom sound on the camera yet.')) + '</span></div>' +
+      (st.error ? '<div class="hint">' + esc(st.error) + '</div>' : '') +
+      '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px">' +
+      '<button type="button" class="btn" data-snd-file' + dis + '>' + t('cam_controls.sound_upload', 'Upload a sound file') + '</button>' +
+      '<input type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.oga,.opus,.webm,.flac,.caf" data-snd-input hidden>' +
+      (rec ? '<button type="button" class="primary danger" data-snd-recstop>' + t('cam_controls.sound_rec_stop', 'Stop ({n} s)', { n: rec.left }) + '</button>'
+        : '<button type="button" class="btn" data-snd-rec' + (secure && !starting ? '' : ' disabled') + dis + '>' + t('cam_controls.sound_record', 'Record') + '</button>') +
+      '</div>' +
+      (secure ? '' : '<div class="hint">' + t('cam_controls.sound_https', 'Recording here needs the page over HTTPS (or on localhost). You can still upload a sound file.') + '</div>');
+    if (pick) {
+      h += '<div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">' +
+        '<audio controls preload="metadata" src="' + esc(url0) + '" style="max-width:100%;height:36px"></audio>' +
+        '<button type="button" class="primary" data-snd-send' + dis + '>' + (busy ? t('cam_controls.sound_sending', 'Sending…') : t('cam_controls.sound_send', 'Send to camera')) + '</button>' +
+        '<button type="button" class="btn" data-snd-drop' + dis + '>' + t('cam_controls.sound_discard', 'Discard') + '</button></div>' +
+        '<div class="hint">' + t('cam_controls.sound_send_hint', '{name}. Listen first: sending replaces the camera\'s custom sound and switches the siren to it.', { name: esc(pick.name) }) + '</div>';
+    }
+    box.innerHTML = h;
+    const q = (s) => box.querySelector(s);
+    box.querySelectorAll('[data-snd-use]').forEach(b => b.onclick = () => {
+      const use = b.dataset.sndUse;
+      if (use === st.using) return;
+      busyDo(use === 'custom' ? t('cam_controls.sound_to_custom', 'Siren sound: custom') : t('cam_controls.sound_to_builtin', 'Siren sound: built-in'), () => api(url, { method: 'PUT', json: { use } }));
+    });
+    const inp = q('[data-snd-input]');
+    q('[data-snd-file]').onclick = () => inp.click();
+    inp.onchange = () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      if (f.size > SOUND_MAX_BYTES) { toast(t('cam_controls.sound_too_big', 'That file is too big: at most 10 MB.'), { kind: 'bad' }); return; }
+      forget();
+      pick = { blob: f, name: f.name };
+      url0 = URL.createObjectURL(f);
+      paint();
+    };
+    const rb = q('[data-snd-rec]');
+    if (rb) rb.onclick = record;
+    const rs = q('[data-snd-recstop]');
+    if (rs) rs.onclick = () => stopRec();
+    const sb = q('[data-snd-send]');
+    if (sb) sb.onclick = () => {
+      const p = pick;
+      // (The file's own type; a browser that gives none sends it as bytes and the server reads it.)
+      busyDo(t('cam_controls.sound_sent', 'Siren sound sent'), () => api(url, { method: 'POST', headers: { 'Content-Type': p.blob.type || 'application/octet-stream' }, body: p.blob }), true);
+    };
+    const db = q('[data-snd-drop]');
+    if (db) db.onclick = () => { forget(); paint(); };
+  }
+  // Only on a click: the microphone for at most REC_SECS, then off.
+  async function record() {
+    if (rec || busy || starting) return;
+    // (Set before the wait: a click during the permission prompt opens no second stream.)
+    starting = true; paint();
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } }); }
+    catch (e) { starting = false; paint(); toast(t('cam_controls.sound_no_mic', 'The microphone could not be used: {error}', { error: (e && e.message) || String(e) }), { kind: 'bad' }); return; }
+    starting = false;
+    if (gone() || rec) { stream.getTracks().forEach(tr => tr.stop()); return; }
+    const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+    const type = types.find(x => window.MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(x));
+    let mr;
+    try { mr = new MediaRecorder(stream, type ? { mimeType: type } : undefined); }
+    catch (e) { stream.getTracks().forEach(tr => tr.stop()); toast(errText(e), { kind: 'bad' }); paint(); return; }
+    const parts = [];
+    // This recording's own stream and timer: it stops itself, never another.
+    const r = { mr, stream, left: REC_SECS, timer: null };
+    mr.ondataavailable = (ev) => { if (ev.data && ev.data.size) parts.push(ev.data); };
+    mr.onstop = () => {
+      stream.getTracks().forEach(tr => tr.stop());
+      clearInterval(r.timer);
+      if (rec === r) rec = null;
+      if (gone()) return;
+      const blob = new Blob(parts, { type: (mr.mimeType || type || 'audio/webm').split(';')[0] });
+      if (blob.size) { forget(); pick = { blob, name: t('cam_controls.sound_recording', 'Your recording') }; url0 = URL.createObjectURL(blob); }
+      paint();
+    };
+    const until = Date.now() + REC_SECS * 1000;
+    r.timer = setInterval(() => {
+      if (gone()) { stopRec(r); return; }
+      const n = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+      if (n <= 0) { stopRec(r); return; }
+      if (n !== r.left) { r.left = n; const b = box.querySelector('[data-snd-recstop]'); if (b) b.textContent = t('cam_controls.sound_rec_stop', 'Stop ({n} s)', { n }); }
+    }, 200);
+    rec = r;
+    try { mr.start(); }
+    catch (e) { stream.getTracks().forEach(tr => tr.stop()); clearInterval(r.timer); rec = null; toast(errText(e), { kind: 'bad' }); paint(); return; }
+    paint();
+  }
+  (async () => {
+    try { st = await api(url); readErr = ''; } catch (e) { st = null; readErr = t('cam_controls.sound_read_failed', 'Could not read the siren sound: {error}', { error: errText(e) }); }
+    paint();
+  })();
 }
